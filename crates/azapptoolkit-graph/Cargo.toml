@@ -1,0 +1,32 @@
+[package]
+name = "azapptoolkit-graph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Typed Microsoft Graph client for azapptoolkit"
+
+[dependencies]
+azapptoolkit-core = { path = "../azapptoolkit-core" }
+
+tokio = { workspace = true }
+bytes = "1"
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+
+[lints]
+workspace = true

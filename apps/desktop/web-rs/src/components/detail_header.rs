@@ -1,0 +1,67 @@
+//! Shared header strip for a resource detail pane: a type chip, the title, a
+//! copyable appId, an optional middle slot (pairing / foreign-tenant badges),
+//! and a refresh + delete action row. The App Registration and Enterprise
+//! Application detail panes built this identically and differed only in the chip
+//! kind, the middle slot, and the delete-confirm dialog — which the caller still
+//! owns (it just wires `on_delete` to open its own dialog).
+
+use leptos::prelude::*;
+use thaw::{Body1, Button, ButtonAppearance};
+
+use crate::components::icon::IconName;
+use crate::components::type_chip::{AppKind, TypeChip};
+use crate::components::ui::IconButton;
+use crate::util::copy_text;
+
+#[component]
+pub fn DetailHeader(
+    kind: AppKind,
+    #[prop(into)] title: Signal<String>,
+    #[prop(into)] app_id: Signal<String>,
+    #[prop(into)] on_refresh: Callback<()>,
+    /// Refresh busy state (the app-reg pane shows a spinner while its detail
+    /// cache busts + refetches; the enterprise pane has none, so it defaults to
+    /// never-busy).
+    #[prop(optional, into, default = Signal::derive(|| false))]
+    refreshing: Signal<bool>,
+    #[prop(into)] on_delete: Callback<()>,
+    /// Middle slot — pairing link, foreign-tenant badge, etc.
+    #[prop(optional)]
+    children: Option<Children>,
+) -> impl IntoView {
+    view! {
+        <header class="row-between app-detail__header">
+            <div class="detail-header">
+                <TypeChip kind=kind />
+                <div>
+                    <h2 class="app-detail__title">{move || title.get()}</h2>
+                    <span class="row-meta">
+                        <Body1 class="mono">{move || app_id.get()}</Body1>
+                        <IconButton
+                            icon=IconName::Copy
+                            aria_label="Copy app id".to_string()
+                            title="Copy app id".to_string()
+                            on_click=Callback::new(move |_| copy_text(app_id.get()))
+                        />
+                    </span>
+                </div>
+                {children.map(|c| c())}
+            </div>
+            <div class="actions-row">
+                <IconButton
+                    icon=IconName::Refresh
+                    aria_label="Refresh this application".to_string()
+                    title="Refresh".to_string()
+                    busy=refreshing
+                    on_click=Callback::new(move |_| on_refresh.run(()))
+                />
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                    on_click=Box::new(move |_| on_delete.run(()))
+                >
+                    "Delete"
+                </Button>
+            </div>
+        </header>
+    }
+}

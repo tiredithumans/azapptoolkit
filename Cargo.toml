@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/azapptoolkit-core",
+    "crates/azapptoolkit-dto",
+    "crates/azapptoolkit-auth",
+    "crates/azapptoolkit-graph",
+    "crates/azapptoolkit-exchange",
+    "crates/azapptoolkit-permissions",
+    "crates/azapptoolkit-keyvault",
+    "crates/azapptoolkit-arm",
+    "apps/desktop/src-tauri",
+]
+exclude = ["apps/desktop/web-rs"]
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+authors = ["azapptoolkit contributors"]
+repository = "https://github.com/tiredithumans/azapptoolkit"
+# Internal crates: this is a desktop app, not a published library set.
+publish = false
+[workspace.dependencies]
+# Async
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util"] }
+futures = "0.3"
+# HTTP
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "form"] }
+# Auth
+oauth2 = "5"
+keyring = "4"
+keyring-core = { package = "keyring_core", version = "1.0" }
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+# Errors / Logging
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+# Utilities
+url = "2"
+async-trait = "0.1"
+parking_lot = "0.12"
+base64 = "0.22"
+zeroize = "1.8"
+# Testing
+wiremock = "0.6"
+
+# Workspace-wide lints, inherited by each member via `[lints] workspace = true`.
+# This is a security-sensitive tool that handles delegated tokens; forbidding
+# `unsafe` in our own code makes that boundary explicit (CI already enforces
+# `clippy -D warnings`). The WASM frontend (apps/desktop/web-rs) is excluded
+# from the workspace and keeps its own lint posture.
+[workspace.lints.rust]
+unsafe_code = "deny"
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+opt-level = "z"

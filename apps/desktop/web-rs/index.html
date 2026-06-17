@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>azapptoolkit</title>
+    <!-- data-wasm-opt applies to `trunk build --release` too (it overrides
+         Trunk's release default of running wasm-opt), so "0" here was
+         disabling Binaryen for SHIPPED bundles — a free 10-25% size/startup
+         loss. "z" optimizes for size in release; dev builds skip wasm-opt
+         regardless, so iteration speed is unaffected. The enable flags are
+         required because Rust >=1.87 emits bulk-memory / nontrapping-fptoint
+         instructions by default and wasm-opt refuses to validate them
+         otherwise. -->
+    <link
+      data-trunk
+      rel="rust"
+      data-wasm-opt="z"
+      data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int"
+    />
+    <link data-trunk rel="css" href="styles.css" />
+  </head>
+  <body></body>
+</html>

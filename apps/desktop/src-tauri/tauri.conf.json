@@ -1,0 +1,57 @@
+{
+    "$schema": "https://schema.tauri.app/config/2.0.0",
+    "productName": "azapptoolkit",
+    "version": "0.1.0",
+    "identifier": "io.github.tiredithumans.azapptoolkit",
+    "build": {
+        "beforeDevCommand": "just web-serve",
+        "beforeBuildCommand": "just web-build-release",
+        "devUrl": "http://localhost:5173",
+        "frontendDist": "../web-rs/dist"
+    },
+    "app": {
+        "windows": [
+            {
+                "title": "azapptoolkit",
+                "width": 1280,
+                "height": 800,
+                "minWidth": 900,
+                "minHeight": 600,
+                "resizable": true,
+                "fullscreen": false
+            }
+        ],
+        "security": {
+            "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://graph.microsoft.com https://graph.microsoft.us https://dod-graph.microsoft.us https://microsoftgraph.chinacloudapi.cn https://login.microsoftonline.com https://login.microsoftonline.us https://login.partner.microsoftonline.cn https://*.vault.azure.net https://*.vault.usgovcloudapi.net https://*.vault.azure.cn https://management.azure.com https://management.usgovcloudapi.net https://management.chinacloudapi.cn; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": [
+            "msi",
+            "nsis"
+        ],
+        "icon": [
+            "icons/32x32.png",
+            "icons/128x128.png",
+            "icons/icon.ico"
+        ],
+        "windows": {
+            "webviewInstallMode": {
+                "type": "downloadBootstrapper"
+            }
+        }
+    },
+    "plugins": {
+        "updater": {
+            "active": true,
+            "endpoints": [
+                "https://github.com/tiredithumans/azapptoolkit/releases/latest/download/latest.json"
+            ],
+            "windows": {
+                "installMode": "passive"
+            },
+            "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM3RDU2Qzg2OTQzMjc5ODAKUldTQWVUS1VobXpWeDNwOFRCakdvQ1VObmhDOFF2TlI5U0Jnc0RlU3J4cXJoTHY0M3ZHSHNhMkcK"
+        }
+    }
+}

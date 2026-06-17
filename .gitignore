@@ -1,0 +1,64 @@
+# Build output
+output/
+*.nupkg
+
+# IDE and editor files
+.vscode/
+.idea/
+*.code-workspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# PowerShell specific
+*.ps1xml.bak
+
+# Test results
+TestResults.xml
+coverage.xml
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Rust
+target/
+Cargo.lock.bak
+
+# Node / Tauri
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Tauri build artifacts
+apps/desktop/src-tauri/gen/
+
+# Local config
+.env
+.env.local
+
+# Generated output (these are created per-project by `prompt-config generate`)
+.prompt-config.yaml
+.github/agents
+.github/copilot-instructions.md
+.opencode
+
+# Shared agent contract — committed and hand-tailored to this repo (see AGENTS.md).
+# Everything under .claude/ is ignored EXCEPT the shared hooks, skills, and settings;
+# per-user overrides go in .claude/settings.local.json and stay ignored.
+.claude/*
+!.claude/hooks/
+!.claude/skills/
+!.claude/settings.json
+
+# Local multi-agent review scratch artifacts (comprehensive-review skill)
+.full-review/

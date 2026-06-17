@@ -1,0 +1,24 @@
+[package]
+name = "azapptoolkit-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Core domain types, cache, and risk scoring for azapptoolkit"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+# Used by the in-process cache, the BearerProvider trait, and the
+# http_retry helpers (all gated to non-WASM targets in `lib.rs`).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+parking_lot = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true
