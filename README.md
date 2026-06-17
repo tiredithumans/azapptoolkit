@@ -125,8 +125,9 @@ toolkit-owned service principal storing tokens you cannot audit.
 ## Quick start
 
 1. Download the latest Windows installer from the
-   [Releases page](https://github.com/tiredithumans/azapptoolkit/releases)
-   (NSIS or MSI — see [Install](#install) for which to pick).
+   [Releases page](https://github.com/tiredithumans/azapptoolkit/releases).
+   Most users want the **NSIS `-setup.exe`** — see [Install](#install) for
+   when to choose the MSI instead.
 2. Create a single-tenant app registration in your directory. On first
    launch azapptoolkit prompts for its **Application (client) ID** and
    **Tenant ID** and saves them locally (or set `AZAPPTOOLKIT_CLIENT_ID` +
@@ -141,14 +142,19 @@ toolkit-owned service principal storing tokens you cannot audit.
 
 Download the latest installer from the
 [Releases page](https://github.com/tiredithumans/azapptoolkit/releases).
-Two formats are published side-by-side:
+Two formats are published, for two different audiences. **Pick one and
+stick with it** — installing one type and later updating with the other
+leaves two conflicting entries in Windows (see [Updates](#updates)):
 
 - **`azapptoolkit_<version>_x64-setup.exe`** — lightweight NSIS
-  installer. Supports per-user install without admin rights. Best for
-  individual users and testers.
-- **`azapptoolkit_<version>_x64_en-US.msi`** — classic Windows
-  Installer. Best for enterprise rollout via SCCM, Intune, or Group
-  Policy.
+  installer. Per-user install, no admin rights, and **auto-updates
+  silently in place**. The right choice for individual users and
+  testers — pick this one unless you specifically need the MSI.
+- **`azapptoolkit_<version>_x64_en-US.msi`** — classic Windows Installer
+  for **enterprise rollout** via SCCM, Intune, or Group Policy. The
+  in-app auto-updater does **not** manage MSI installs (it ships only the
+  NSIS payload); deploy new versions through your management tooling and
+  **disable auto-update** on these installs (see [Opting out](#opting-out)).
 
 The Edge WebView2 runtime is the only external dependency, and it ships
 with current Windows 10/11 — so on those machines installation and first
@@ -157,21 +163,24 @@ downloads WebView2 from Microsoft during setup. After install, the only
 runtime azapptoolkit depends on is Windows itself plus that WebView2
 runtime.
 
-azapptoolkit checks for signed updates on launch and installs them
-in place. Payloads that fail signature verification are rejected.
-See [Updates](#updates) for how to opt out.
-
 ## Updates
 
-On launch, azapptoolkit checks the configured release endpoint for a
-newer signed build. If one is available, it is downloaded and applied
-**automatically** — there is no prompt; a brief Windows installer
+The in-app auto-updater targets the **NSIS (`-setup.exe`) per-user
+install**. On launch, azapptoolkit checks the configured release endpoint
+for a newer signed build. If one is available, it is downloaded and
+applied **automatically** — there is no prompt; a brief Windows installer
 progress window may appear, and the new version runs the next time the
 app starts. Update payloads are verified against a public key baked
 into the build at release time — a payload that fails signature
 verification is rejected before any bytes touch disk. A failed update
 check or install never blocks the app; it is logged (see
 [Logs](#logs)) and retried on a later launch.
+
+> **MSI installs:** the updater only ever ships the NSIS payload, so
+> letting it run against an MSI install creates a second, conflicting
+> installation. If you deployed the `.msi`, **disable auto-update** (see
+> [Opting out](#opting-out)) and push new versions through your management
+> tooling instead.
 
 ### Opting out
 
