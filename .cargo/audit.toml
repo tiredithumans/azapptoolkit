@@ -1,4 +1,16 @@
 # cargo-audit configuration (read by `just audit` and the rustsec/audit-check
 # CI action). Keep this in sync with the [advisories] ignore list in deny.toml.
 [advisories]
-ignore = []
+ignore = [
+    # RUSTSEC-2024-0429 (GHSA-wrw7-89jp-8q8g): unsound `glib::VariantStrIter`
+    # iterators (null-deref crash). glib 0.18.5 is a transitive dep of Tauri's
+    # GTK3 Linux webview stack (gtk 0.18 -> gdk/webkit2gtk -> wry -> tauri). The
+    # fix lands only in glib 0.20+, which requires GTK4; the `gtk` 0.18 crate is
+    # the last (archived) GTK3 binding and hard-pins `glib = "0.18"`, so glib
+    # cannot advance until Tauri/wry move off GTK3 upstream. GTK/glib is
+    # Linux-only and is never compiled into the shipped Windows (WebView2) or
+    # macOS (WKWebView) builds, so the unsound path is unreachable in released
+    # artifacts. Dismissed on GitHub Dependabot as tolerable risk. Drop this
+    # ignore once Tauri's Linux backend ships on a glib >= 0.20 webview stack.
+    "RUSTSEC-2024-0429",
+]

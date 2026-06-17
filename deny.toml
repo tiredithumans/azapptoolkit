@@ -7,7 +7,13 @@
 # this section lets `cargo deny check advisories` do the same in one tool.
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # glib unsound VariantStrIter — transitive GTK3 (Linux-only) dep with no
+    # upgrade path until Tauri moves off GTK3; unreachable in the shipped
+    # Windows/macOS builds. Kept in sync with .cargo/audit.toml (see there for
+    # the full rationale + drop condition).
+    "RUSTSEC-2024-0429",
+]
 
 [licenses]
 # Allow-list of SPDX license IDs seen across the dependency tree (surveyed via
