@@ -488,6 +488,12 @@ h3 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.shell__version {
+  padding: var(--space-1) var(--space-2) 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-align: center;
+}
 
 .shell__nav-list {
   display: flex;
@@ -2251,6 +2257,8 @@ h3 {
     min-height: 0;
   }
   .shell__user-info { display: none; }
+  /* Text-only metadata with no icon — hide on the icon-only rail, like user-info. */
+  .shell__version { display: none; }
   .nav__item .nav__label { display: none; }
   .nav__item {
     justify-content: center;
