@@ -7,6 +7,14 @@ the project adheres to
 
 ## [Unreleased]
 
+### Documentation
+
+- Clarified in the README that the in-app auto-updater manages only the NSIS
+  (`-setup.exe`) per-user install. MSI/enterprise deployments must disable
+  auto-update and update through their management tooling — installing one
+  installer type and updating with the other leaves two conflicting Windows
+  entries (and a stray Windows Installer "uninstall this product?" prompt).
+
 ## [0.1.1] - 2026-06-17
 
 ### Changed
