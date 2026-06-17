@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-17
+
 ### Changed
 
 - Input fields now show their full placeholder hint — it was being clipped in
