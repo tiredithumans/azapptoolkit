@@ -301,6 +301,7 @@ pub fn SharePointSitesSection(
                                                                 <td class="mono">{p.roles.join(", ")}</td>
                                                                 <td>
                                                                     <Button
+                                                                        class="button--danger"
                                                                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                                         on_click=Box::new(move |_| pending_remove.set(Some(id.clone())))
                                                                         disabled=Signal::derive(move || busy.get())

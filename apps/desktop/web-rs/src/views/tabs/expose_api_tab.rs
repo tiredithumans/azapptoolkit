@@ -435,6 +435,7 @@ fn ExposeApiLoaded(
                                                     <td class="mono">{uri.clone()}</td>
                                                     <td>
                                                         <Button
+                                                            class="button--danger"
                                                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                             on_click=Box::new(move |_| {
                                                                 uri_error.set(None);
@@ -524,6 +525,7 @@ fn ExposeApiLoaded(
                                                                 "Edit"
                                                             </Button>
                                                             <Button
+                                                                class="button--danger"
                                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                                 on_click=Box::new(move |_| {
                                                                     pending_delete_scope.set(Some(delete_id.clone()))
@@ -619,6 +621,7 @@ fn ExposeApiLoaded(
                                                                 "Edit"
                                                             </Button>
                                                             <Button
+                                                                class="button--danger"
                                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                                 on_click=Box::new(move |_| {
                                                                     pending_remove_pre.set(Some(remove_id.clone()))

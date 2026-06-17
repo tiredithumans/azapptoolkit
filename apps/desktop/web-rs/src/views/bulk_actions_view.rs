@@ -358,6 +358,7 @@ pub fn BulkActionsView() -> impl IntoView {
                                     </div>
                                     <div class="actions-row">
                                         <Button
+                                            class="button--danger"
                                             appearance=Signal::derive(|| ButtonAppearance::Primary)
                                             on_click=Box::new(do_remove)
                                             disabled=Signal::derive(move || busy.get() || !remove_ok.get())
@@ -395,6 +396,7 @@ pub fn BulkActionsView() -> impl IntoView {
                                     </div>
                                     <div class="actions-row">
                                         <Button
+                                            class="button--danger"
                                             appearance=Signal::derive(|| ButtonAppearance::Primary)
                                             on_click=Box::new(do_delete)
                                             disabled=Signal::derive(move || busy.get() || !delete_ok.get())

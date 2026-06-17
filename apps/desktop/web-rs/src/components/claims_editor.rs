@@ -584,6 +584,7 @@ fn SchemaRowView(row: SchemaRow, schema: RwSignal<Vec<SchemaRow>>) -> impl IntoV
             <Input value=row.jwt_claim_type placeholder="JWT (token) claim name" />
             <Input value=row.saml_name_form placeholder="SAML name format (optional)" />
             <Button
+                class="button--danger"
                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                 on_click=Box::new(move |_| {
                     schema.update(|rows| rows.retain(|r| r.key != key));
@@ -675,6 +676,7 @@ fn TransformRowView(
                         .collect_view()}
                 </Select>
                 <Button
+                    class="button--danger"
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
                     on_click=Box::new(move |_| {
                         transforms.update(|rows| rows.retain(|r| r.key != key));

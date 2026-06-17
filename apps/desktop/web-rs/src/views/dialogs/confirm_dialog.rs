@@ -51,6 +51,7 @@ pub fn ConfirmDialog(
                             {cancel_label}
                         </Button>
                         <Button
+                            class="button--danger"
                             appearance=Signal::derive(|| ButtonAppearance::Primary)
                             on_click=Box::new(move |_| on_confirm.run(()))
                             disabled=Signal::derive(move || busy.get())

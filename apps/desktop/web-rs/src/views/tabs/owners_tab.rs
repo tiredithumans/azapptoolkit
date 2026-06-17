@@ -245,6 +245,7 @@ pub fn OwnersTab(
                                         <td>{kind}</td>
                                         <td>
                                             <Button
+                                                class="button--danger"
                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                 disabled=Signal::derive(move || {
                                                     removing.with(|r| r.as_deref() == Some(id_disabled.as_str()))
@@ -310,6 +311,7 @@ pub fn OwnersTab(
                                                         <div class="mono small">{upn}</div>
                                                     </div>
                                                     <Button
+                                                        class="button--danger"
                                                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                         on_click=Box::new(move |_| unstage(id.clone()))
                                                     >

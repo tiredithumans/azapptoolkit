@@ -56,6 +56,7 @@ pub fn DetailHeader(
                     on_click=Callback::new(move |_| on_refresh.run(()))
                 />
                 <Button
+                    class="button--danger"
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
                     on_click=Box::new(move |_| on_delete.run(()))
                 >

@@ -70,6 +70,7 @@ fn remove_button(
     let key_label = key_id;
     view! {
         <Button
+            class="button--danger"
             appearance=Signal::derive(|| ButtonAppearance::Subtle)
             disabled=Signal::derive(move || {
                 removing.with(|r| r.as_deref() == Some(key_disabled.as_str()))
@@ -486,6 +487,7 @@ pub fn CredentialsTab(
                                 .then(|| {
                                     view! {
                                         <Button
+                                            class="button--danger"
                                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                             disabled=Signal::derive(move || expiring.get())
                                             on_click=Box::new(move |_| pending_expired.set(true))

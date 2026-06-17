@@ -22,6 +22,7 @@ use crate::components::requires_role::RequiresRole;
 use crate::components::ui::DataTable;
 use crate::state::use_session;
 use crate::util::parse_lines;
+use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 /// How the "scope all mail permissions" grant addresses the principal.
 #[derive(Clone, PartialEq)]
@@ -102,6 +103,9 @@ pub fn ExchangeScopingSection(
     let add_text = RwSignal::new(String::new());
     let group_busy = RwSignal::new(false);
     let group_error: RwSignal<Option<String>> = RwSignal::new(None);
+    // Confirmation gate for removing a mailbox from the scope group — a server
+    // mutation that stops the app from accessing it via the scoped grant.
+    let pending_remove_mailbox: RwSignal<Option<String>> = RwSignal::new(None);
     #[allow(clippy::type_complexity)]
     let group_state: RwSignal<
         Option<Result<exchange::ExchangeScopeGroupDto, azapptoolkit_dto::UiError>>,
@@ -244,6 +248,7 @@ pub fn ExchangeScopingSection(
                     session.toast_success(format!("Removed {mailbox} from {}.", r.group_name));
                     let res = exchange::list_exchange_scope_group(&t.tenant_id, &app).await;
                     group_state.set(Some(res));
+                    pending_remove_mailbox.set(None);
                 }
                 Ok(r) => group_error.set(Some(format!(
                     "Could not remove {mailbox}: {}",
@@ -388,6 +393,23 @@ pub fn ExchangeScopingSection(
 
     view! {
         <section class="detail-section">
+            <ConfirmDialog
+                open=Signal::derive(move || pending_remove_mailbox.with(|p| p.is_some()))
+                title="Remove mailbox from scope group?"
+                body="Removes the mailbox from the toolkit-managed scope group, so the app can no longer reach it via the scoped Exchange grant. Exchange can take up to ~2 hours to apply RBAC changes."
+                confirm_label="Remove"
+                busy=group_busy
+                error=group_error
+                on_confirm=Callback::new(move |()| {
+                    if let Some(mb) = pending_remove_mailbox.get() {
+                        do_remove(mb);
+                    }
+                })
+                on_close=Callback::new(move |()| {
+                    pending_remove_mailbox.set(None);
+                    group_error.set(None);
+                })
+            />
             <header class="row-between">
                 <strong>"Exchange scoping"</strong>
                 <span class="detail-section__controls">
@@ -526,8 +548,12 @@ pub fn ExchangeScopingSection(
                                                                         {label} " " <span class="mono">{smtp}</span>
                                                                     </span>
                                                                     <Button
+                                                                        class="button--danger"
                                                                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                        on_click=Box::new(move |_| do_remove(remove_id.clone()))
+                                                                        on_click=Box::new(move |_| {
+                                                                            pending_remove_mailbox
+                                                                                .set(Some(remove_id.clone()))
+                                                                        })
                                                                         disabled=Signal::derive(move || group_busy.get())
                                                                     >
                                                                         "Remove"

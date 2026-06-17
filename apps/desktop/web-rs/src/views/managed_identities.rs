@@ -31,6 +31,7 @@ use crate::components::saved_views::SavedViews;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::hooks::use_debounced::{use_debounced, LIST_FILTER_DEBOUNCE_MS};
 use crate::state::use_session;
+use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::managed_identity_detail_pane::ManagedIdentityDetailPane;
 
 /// Microsoft Graph's first-party app id — mail/calendar/contacts and
@@ -156,6 +157,9 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
 
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
+    // Confirmation gate for revoking a held app-role grant — a destructive,
+    // irreversible server mutation. Holds (assignment_id, sp_id) while open.
+    let pending_revoke: RwSignal<Option<(String, String)>> = RwSignal::new(None);
     let result: RwSignal<Option<GrantManagedIdentityResult>> = RwSignal::new(None);
     // Bumped after a grant or revoke to refresh the permissions list.
     let reload = RwSignal::new(0_u32);
@@ -553,6 +557,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                 error.set(Some(e.message));
             } else {
                 reload.update(|n| *n += 1);
+                pending_revoke.set(None);
             }
             busy.set(false);
         });
@@ -589,6 +594,23 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
 
     view! {
         <div class="mi-view">
+            <ConfirmDialog
+                open=Signal::derive(move || pending_revoke.with(|p| p.is_some()))
+                title="Revoke permission?"
+                body="Remove this managed identity's held app-role assignment. The identity loses that permission until it's granted again; the live grant is re-checked before removal."
+                confirm_label="Revoke"
+                busy=busy
+                error=error
+                on_confirm=Callback::new(move |()| {
+                    if let Some((aid, sp)) = pending_revoke.get() {
+                        do_revoke(aid, sp);
+                    }
+                })
+                on_close=Callback::new(move |()| {
+                    pending_revoke.set(None);
+                    error.set(None);
+                })
+            />
             <div>
                 <SectionHeader title="Managed Identities".to_string() crumb="Identities".to_string()>
                     <div class="list-header-actions">
@@ -716,7 +738,8 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                             tenant_for_picker=tenant_for_picker
                                             on_grant=do_grant
                                             on_revoke=Callback::new(move |(aid, sp): (String, String)| {
-                                                do_revoke(aid, sp)
+                                                error.set(None);
+                                                pending_revoke.set(Some((aid, sp)))
                                             })
                                             on_refresh=Callback::new(move |()| on_refresh_detail(()))
                                             on_cancel_scope=Callback::new(move |()| cancel_scope(()))

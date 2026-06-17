@@ -102,7 +102,7 @@ pub fn SavedViews(
                                 </button>
                                 <button
                                     type="button"
-                                    class="saved-view-chip__remove"
+                                    class="saved-view-chip__remove button--danger"
                                     title="Remove saved view"
                                     on:click=move |_| {
                                         views.update(|v| v.retain(|x| x.name != removed));

@@ -568,6 +568,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl Int
                                                             "Edit"
                                                         </Button>
                                                         <Button
+                                                            class="button--danger"
                                                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                             on_click=Box::new(move |_| {
                                                                 pending_remove.set(Some((cid.clone(), cname.clone())))

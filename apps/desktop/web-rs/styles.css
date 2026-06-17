@@ -183,6 +183,41 @@ textarea:focus-visible {
   box-shadow: var(--focus-ring);
 }
 
+/* Thaw <Input> renders a `.thaw-input` wrapper span around the inner
+ * `.thaw-input__input`; with no width set, the wrapper collapses to
+ * min-content and clips long placeholder hints. Fill the container so the
+ * full hint shows. */
+.thaw-input {
+  width: 100%;
+}
+
+/* Destructive-action buttons (Delete / Remove / Revoke). Class sits on a Thaw
+ * `.thaw-button` (`.thaw-button.button--danger` out-specificities Thaw's
+ * `.thaw-button--<appearance>` colour rules) so it works on Subtle / Secondary
+ * / Primary alike — red text on a faint red tint, clearly destructive without
+ * painting list-heavy views solid red. Also covers the confirm button inside
+ * ConfirmDialog (the commit / point of no return). */
+.thaw-button.button--danger,
+.ui-icon-btn.button--danger,
+.saved-view-chip__remove.button--danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.thaw-button.button--danger:hover,
+.ui-icon-btn.button--danger:hover,
+.saved-view-chip__remove.button--danger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  filter: brightness(0.94);
+}
+/* Labeled (Thaw) destructive buttons also get a faint red fill so the box reads
+ * clearly destructive; the icon-only Revoke and the chip "×" keep just the red
+ * colour so they don't become heavy red squares. */
+.thaw-button.button--danger,
+.thaw-button.button--danger:hover {
+  background: var(--danger-soft);
+}
+
 h1,
 h2,
 h3 {

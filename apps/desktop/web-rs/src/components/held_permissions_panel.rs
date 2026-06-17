@@ -133,6 +133,7 @@ pub fn HeldPermissionsPanel(
                     icon=IconName::Trash
                     aria_label="Revoke permission".to_string()
                     title="Revoke".to_string()
+                    class="button--danger".to_string()
                     disabled=busy
                     on_click=Callback::new(move |_| cb.run(aid.clone()))
                 />
