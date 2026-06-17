@@ -25,8 +25,8 @@ Key files/docs to read before editing:
 - **Touching caches, list commands, or search?** Read [docs/architecture/caching-and-search.md](docs/architecture/caching-and-search.md).
 - **Touching audit scoring, remediations, or Exchange/SharePoint scoping?** Read [docs/architecture/scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 - **Touching DR backup/restore (tenant export/import)?** Read [docs/architecture/backup-and-restore.md](docs/architecture/backup-and-restore.md), then `crates/azapptoolkit-dto/src/backup.rs` + `src-tauri/src/commands/backup.rs`.
-- **Adding a new dependency?** Check `Cargo.lock` for transitive conflicts (especially `roaring`).
-- **Updating WASM code?** Read `crates/azapptoolkit-auth/src/error.rs` for `#[cfg(not(target_arch = "wasm32"))]` examples.
+- **Adding a new dependency?** Check `Cargo.lock` for transitive conflicts.
+- **Updating WASM code?** Read `crates/azapptoolkit-core/src/lib.rs` for `#[cfg(not(target_arch = "wasm32"))]` examples.
 
 ## What this repo is
 
@@ -90,7 +90,7 @@ docs/architecture/                   # agent/developer deep-dives (auth-consent,
 
 - **Adding a workspace dependency** — add to `[workspace.dependencies]` in root `Cargo.toml`,
   then reference via `"name".workspace = true` in member crates. Check `Cargo.lock` for
-  transitive conflicts before committing (especially `roaring`).
+  transitive conflicts before committing.
 
 - **Adding an audit scoring rule** — implement in `azapptoolkit-core::audit` with a
   table-driven test that cites the legacy PowerShell `file:line` it was ported from.
@@ -168,7 +168,7 @@ builds, bake them via `.env` (see `build.rs` and docs/DEVELOPMENT.md). `.env` is
   `AuditItem` + its remediation/scope subtree) cross IPC **as-is** — both sides share the Rust
   definitions, so renaming a field there is a wire-format change (see `AuditItem`'s rustdoc).
 - **WASM gating.** `web-rs` compiles only to `wasm32-unknown-unknown`. Server-side deps (tokio, reqwest,
-  rustls, keyring, …) must be gated with `#[cfg(not(target_arch = "wasm32"))]` in shared crates, or kept
+  rustls, …) must be gated with `#[cfg(not(target_arch = "wasm32"))]` in shared crates, or kept
   out of `web-rs`'s dependency graph entirely.
 - **Auth: lazy, shared token refresh.** Access tokens refresh lazily (~60s before expiry) behind a shared
   mutex; refresh tokens persist in the OS keyring, access tokens never touch disk. Write scopes are
@@ -261,9 +261,10 @@ builds, bake them via `.env` (see `build.rs` and docs/DEVELOPMENT.md). `.env` is
   RSA elsewhere, use aws-lc-rs, not the `rsa` crate.
 - **Don't double-rename camelCase ↔ snake_case.** Graph domain models use camel (no serde rename). DTOs and
   IPC bindings use snake with `rename_all`. A command can end up serializing twice.
-- **Don't put WASM server deps in `web-rs`.** Server-only crates (tokio, keyring, rusqlite) must be
+- **Don't put WASM server deps in `web-rs`.** Server-only crates (tokio, reqwest, rustls) must be
   gated with `#[cfg(not(target_arch = "wasm32"))]` in shared crates, or kept out of `web-rs`'s
-  dependency graph entirely. Check `crates/azapptoolkit-auth/src/error.rs` for examples.
+  dependency graph entirely (the OS-native keyring stores take the latter route, via
+  `[target.'cfg(...)']` deps in `azapptoolkit-auth`). Check `crates/azapptoolkit-core/src/lib.rs` for examples.
 - **Don't invalidate caches on the error path.** `invalidate_app_lists(...)` drops apps-pairing,
   enterprise, and `sp_index` keys — a failed write must not clear fresh data. Only call it on `Ok`.
 - **Don't forget to reset `audit_cancel`** in new long-running commands. Both Security-audit and
