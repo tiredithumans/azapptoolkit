@@ -144,7 +144,6 @@ pub fn AppShell(children: Children) -> impl IntoView {
                     {nav_row_view("Bulk Actions", IconName::Wrench, ActiveView::BulkActions)}
                     {nav_row_view("Disaster Recovery", IconName::Download, ActiveView::DisasterRecovery)}
                     {nav_row_view("Key Vault", IconName::Key, ActiveView::KeyVault)}
-                    {nav_row_action("Cache", IconName::Activity, session.cache_open)}
                     // Logged-in user block — kept inside the scrollable nav list
                     // (directly below Tools) so it stays attached to the nav and
                     // scrolls with it, instead of being pinned to the bottom of a
@@ -201,6 +200,10 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                 {move || if refreshing.get() { "Refreshing…" } else { "Refresh Token" }}
                             </span>
                         </button>
+                        // Cache diagnostics inspector — sits directly above Sign Out
+                        // in the user block. Reuses `nav_row_action` so it renders as
+                        // a full-width `nav__item` matching the buttons around it.
+                        {nav_row_action("Cache", IconName::Activity, session.cache_open)}
                         // Styled as a `nav__item` so it collapses to an icon-only
                         // button (hiding the label) when the rail narrows — the same
                         // way the nav links do — instead of disappearing.
@@ -216,6 +219,10 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                 {move || if signing_out.get() { "Signing out…" } else { "Sign Out" }}
                             </span>
                         </button>
+                        // App version, baked at compile time. The release bumps the
+                        // web-rs crate version in lockstep with the app (tauri.conf +
+                        // workspace), so CARGO_PKG_VERSION here is the shipped version.
+                        <div class="shell__version">{concat!("v", env!("CARGO_PKG_VERSION"))}</div>
                     </div>
                 </div>
             </nav>

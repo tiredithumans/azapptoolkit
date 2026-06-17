@@ -7,6 +7,16 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- The app version is now shown beneath the **Sign Out** button in the
+  navigation rail.
+
+### Changed
+
+- Moved **Cache** from the Tools group to the bottom of the navigation rail,
+  directly above **Sign Out**.
+
 ### Documentation
 
 - Clarified in the README that the in-app auto-updater manages only the NSIS
