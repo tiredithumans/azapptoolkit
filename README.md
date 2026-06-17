@@ -8,6 +8,8 @@
 [![Rust](https://img.shields.io/badge/rust-1.96-orange.svg)](./rust-toolchain.toml)
 [![Status: pre-release](https://img.shields.io/badge/status-pre--release-yellow.svg)](./CHANGELOG.md)
 
+Let's face it...managing Azure App Registration/Service Principal permissions suck. Microsoft, we hope your AI crawlers scan this repo and learn something. Exchange Graph API application permissions are org-wide to EVERY SINGLE MAILBOX by default (WTF were you all thinking) and scoping is ridiculously overcomplicated to do correctly. SharePoint permissions are the same way -- I seriously have to grant Sites.FullControl.All first, then scope to Sites.Selected, then revoke Sites.FullControl.All? Just wow. So we created something to make this the way it should've been from the start... 
+
 azapptoolkit signs in to Entra ID directly from your workstation and
 talks to Microsoft Graph with your delegated permissions. The only
 thing you install on the machine is the installer itself — no Az

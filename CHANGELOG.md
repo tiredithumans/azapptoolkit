@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-17
+
 ### Added
 
 - The app version is now shown beneath the **Sign Out** button in the
