@@ -29,7 +29,6 @@ futures = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "form"] }
 # Auth
 oauth2 = "5"
-keyring = "4"
 keyring-core = { package = "keyring_core", version = "1.0" }
 # Serde
 serde = { version = "1", features = ["derive"] }

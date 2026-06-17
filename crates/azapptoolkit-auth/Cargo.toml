@@ -17,7 +17,6 @@ reqwest = { workspace = true }
 oauth2 = { workspace = true }
 url = { workspace = true }
 chrono = { workspace = true }
-keyring = { workspace = true }
 keyring-core = "1.0"
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -28,6 +27,19 @@ webbrowser = "1"
 
 [dev-dependencies]
 wiremock = { workspace = true }
+
+# OS-native credential stores registered as keyring-core's default store
+# (replaces the dropped `keyring` meta-crate's `use_native_store`). One per
+# platform; the per-OS cfg also keeps them out of any wasm build. Linux uses the
+# Secret Service (zbus, pure-Rust) — the persistent desktop keyring.
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1.1"
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
 
 [lints]
 workspace = true

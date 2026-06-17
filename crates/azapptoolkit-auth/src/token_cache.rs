@@ -35,11 +35,49 @@ fn ensure_keyring_store() -> Result<()> {
             if keyring_core::get_default_store().is_some() {
                 Ok(())
             } else {
-                keyring::use_native_store(false).map_err(|e| e.to_string())
+                register_native_store()
             }
         })
         .clone()
         .map_err(AuthError::Keyring)
+}
+
+/// Registers the OS-native credential store as `keyring_core`'s default store.
+/// keyring 4.1 moved `use_native_store` behind its `cli` feature (which drags in
+/// `rusqlite`), and its `v1` `Entry` auto-registration runs unconditionally —
+/// it would clobber an already-installed store (e.g. the test mock). So register
+/// the native store directly, mirroring keyring's internal
+/// `v1::set_credential_store`: macOS Keychain, Windows Credential Manager, or
+/// (Linux/BSD) the Secret Service via zbus.
+fn register_native_store() -> std::result::Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let store =
+            apple_native_keyring_store::keychain::Store::new().map_err(|e| e.to_string())?;
+        keyring_core::set_default_store(store);
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let store = windows_native_keyring_store::Store::new().map_err(|e| e.to_string())?;
+        keyring_core::set_default_store(store);
+        Ok(())
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        let store = zbus_secret_service_keyring_store::Store::new().map_err(|e| e.to_string())?;
+        keyring_core::set_default_store(store);
+        Ok(())
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "freebsd",
+    )))]
+    {
+        Err("no OS-native credential store is available on this platform".to_string())
+    }
 }
 
 /// In-memory access token. The bearer string is zeroized on drop so freed
