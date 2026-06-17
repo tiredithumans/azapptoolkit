@@ -1,0 +1,4 @@
+# cargo-audit configuration (read by `just audit` and the rustsec/audit-check
+# CI action). Keep this in sync with the [advisories] ignore list in deny.toml.
+[advisories]
+ignore = []

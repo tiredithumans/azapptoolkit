@@ -1,0 +1,28 @@
+[package]
+name = "azapptoolkit-exchange"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Exchange Online Admin API client (RBAC for Applications) for azapptoolkit"
+
+[dependencies]
+azapptoolkit-core = { path = "../azapptoolkit-core" }
+
+tokio = { workspace = true }
+bytes = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

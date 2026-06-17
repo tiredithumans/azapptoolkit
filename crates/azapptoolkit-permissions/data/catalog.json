@@ -1,0 +1,30 @@
+{
+  "generated": "directory",
+  "version": 2,
+  "resources": [
+    {
+      "appId": "00000003-0000-0000-c000-000000000000",
+      "displayName": "Microsoft Graph"
+    },
+    {
+      "appId": "00000003-0000-0ff1-ce00-000000000000",
+      "displayName": "Office 365 SharePoint Online"
+    },
+    {
+      "appId": "00000002-0000-0ff1-ce00-000000000000",
+      "displayName": "Office 365 Exchange Online"
+    },
+    {
+      "appId": "cfa8b339-82a2-471a-a3c9-0fc0be7a4093",
+      "displayName": "Azure Key Vault"
+    },
+    {
+      "appId": "797f4846-ba00-4fd7-ba43-dac1f8f63013",
+      "displayName": "Windows Azure Service Management API"
+    },
+    {
+      "appId": "00000009-0000-0000-c000-000000000000",
+      "displayName": "Power BI Service"
+    }
+  ]
+}

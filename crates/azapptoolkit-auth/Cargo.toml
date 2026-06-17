@@ -1,0 +1,33 @@
+[package]
+name = "azapptoolkit-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Entra ID authentication (OAuth2 PKCE) for azapptoolkit"
+
+[dependencies]
+azapptoolkit-core = { path = "../azapptoolkit-core" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+oauth2 = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+keyring = { workspace = true }
+keyring-core = "1.0"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+base64 = { workspace = true }
+zeroize = { workspace = true }
+webbrowser = "1"
+
+[dev-dependencies]
+wiremock = { workspace = true }
+
+[lints]
+workspace = true

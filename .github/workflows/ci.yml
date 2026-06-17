@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly RustSec database refresh so we catch advisories filed after merge.
+    - cron: "0 6 * * 1"
+
+# A new push to the same branch/PR supersedes the in-flight run — without this
+# every PR update queues a duplicate full 3-OS matrix.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege token for every job. Declared explicitly so a future change
+# to the repo-level default can't silently re-broaden these workflows.
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust workspace (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # Match the pinned MSRV in rust-toolchain.toml (which rustup honors for the
+      # actual build regardless of this line) so the installed toolchain is not
+      # misleadingly older than what compiles.
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: just
+      - name: Install system deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
+      - name: fmt
+        run: just fmt-check
+      - name: clippy
+        run: just clippy
+      - name: test
+        run: just test
+
+  web:
+    name: Frontend (Leptos/WASM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: apps/desktop/web-rs
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: just,trunk
+      # web-rs is excluded from the root workspace, so the `rust` job's
+      # `cargo fmt --all` does not reach it — format-check it here.
+      - name: fmt
+        run: just web-fmt-check
+      - name: Test frontend
+        run: just web-test
+      - name: Build frontend
+        run: just web-build
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # Workflow-file syntax gate. release.yml sat unparseable for ~7 weeks
+      # (`secrets` context in a step-level `if`) with no signal beyond 0-second
+      # "workflow file issue" runs — actionlint turns that into a failing PR
+      # check. Pinned by version + checksum (no install-action manifest exists).
+      - name: actionlint
+        run: |
+          curl -sSfL -o actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # RustSec advisory scan via the same `just` recipes run locally (ignore
+      # list in .cargo/audit.toml). Covers BOTH lockfiles: the root workspace
+      # and the frontend's own Cargo.lock (web-rs is excluded from the
+      # workspace, so the root scan never sees it).
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: just,cargo-audit
+      - name: audit (workspace)
+        run: just audit
+      - name: audit (web-rs lockfile)
+        run: just web-audit
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # License policy + crate-source gating (see deny.toml). Complements the
+      # advisory-only `audit` job above. Flags live in the `deny`/`web-deny`
+      # justfile recipes; web-deny gates the frontend tree the root check
+      # can't reach.
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: just,cargo-deny
+      - name: deny (workspace)
+        run: just deny
+      - name: deny (web-rs)
+        run: just web-deny

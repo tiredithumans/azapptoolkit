@@ -1,0 +1,1293 @@
+//! Permissions tab. Lists declared `requiredResourceAccess` entries with
+//! human-friendly resource + permission names resolved server-side via the
+//! bundled catalog (`PermissionsCatalog::lookup_permission`). Application vs.
+//! Delegated permissions get distinct chips. Lets you grant admin consent.
+
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use leptos::prelude::*;
+use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
+
+use crate::bindings::applications::ApplicationDetail;
+use crate::bindings::auth;
+use crate::bindings::exchange;
+use crate::bindings::permissions::{self, GrantResult};
+use crate::bindings::sharepoint;
+use crate::bindings::usage;
+use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
+use crate::components::icon::IconName;
+use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
+use crate::components::requires_role::RequiresRole;
+use crate::components::scope_badge::{
+    is_exchange_scopable, is_sharepoint_orgwide, permission_scope_cell,
+};
+use crate::components::scope_panel::{ScopeKind, ScopePanel};
+use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
+use crate::components::sharepoint_sites_section::SharePointSitesSection;
+use crate::components::toast::ToastAction;
+use crate::components::type_chip::{AppKind, TypeChip};
+use crate::components::ui::IconButton;
+use crate::state::{use_session, Session};
+use crate::util::parse_lines;
+use azapptoolkit_core::audit::{downgrade_alternatives, MailPermissionScope};
+use azapptoolkit_dto::permissions::{PermissionKind, ResolvedPermission};
+use azapptoolkit_dto::UiError;
+
+/// An already-granted permission the user chose to restrict after the fact.
+#[derive(Clone)]
+struct PendingRowScope {
+    /// App registration object id — for the Exchange grant (reads the manifest).
+    object_id: String,
+    /// The app's id — for the SharePoint site grant's `grantedToIdentities`.
+    app_id: String,
+    app_display_name: String,
+    /// The app's service-principal object id — receives `Sites.Selected`.
+    sp_object_id: String,
+    permission_value: String,
+    kind: ScopeKind,
+}
+
+/// A held broad application permission the user chose to swap for a documented
+/// narrower alternative. Held until the user picks the target (or cancels) —
+/// the swap is admin-judged, never automatic (the narrower permission only
+/// suffices if the app doesn't use the broader capability).
+#[derive(Clone)]
+struct PendingDowngrade {
+    object_id: String,
+    resource_app_id: String,
+    broad_value: String,
+    /// Documented narrower alternatives, closest tier first.
+    alternatives: Vec<&'static str>,
+}
+
+/// Classifies whether an already-granted Application permission can be restricted
+/// *per row* after the fact. SharePoint org-wide `Sites.*` only (the
+/// convert-to-`Sites.Selected` case). Mail/calendar/contacts are excluded —
+/// Exchange RBAC scoping is **app-wide** (one management scope binds the whole
+/// principal's mail roles), so it's driven solely by the app-wide "Exchange
+/// scoping" section below, never per row.
+fn row_scope_kind(value: &str) -> Option<ScopeKind> {
+    is_sharepoint_orgwide(value).then_some(ScopeKind::SharePoint)
+}
+
+/// New-grant (scope-first) classifier: a freshly-granted permission that can be
+/// confined opens the scope panel immediately. Covers Exchange
+/// mail/calendar/contacts and **any** SharePoint `Sites.*` — `Sites.Selected`
+/// (grant per-site access) or a broad grant (convert to `Sites.Selected`).
+/// Unlike [`row_scope_kind`] it includes `Sites.Selected`, since a brand-new
+/// `Sites.Selected` still needs sites added to be useful.
+fn grant_scope_kind(value: &str) -> Option<ScopeKind> {
+    if is_exchange_scopable(value) {
+        Some(ScopeKind::Exchange)
+    } else if value == "Sites.Selected" || is_sharepoint_orgwide(value) {
+        Some(ScopeKind::SharePoint)
+    } else {
+        None
+    }
+}
+
+/// Runs the admin-consent grant for the app in `detail`, reporting via toasts.
+/// Pulled out of the component so a retryable-error toast can re-invoke it: on
+/// a retryable failure it builds an `Rc<dyn Fn()>` that calls back into this
+/// same function. Every captured handle is `Copy`, so the recursion needs no
+/// `RefCell` self-reference cell.
+fn run_grant(
+    session: Session,
+    detail: Signal<ApplicationDetail>,
+    consenting: RwSignal<bool>,
+    consent_error: RwSignal<Option<String>>,
+    consent_result: RwSignal<Option<GrantResult>>,
+    on_changed: Callback<()>,
+) {
+    if consenting.get_untracked() {
+        return;
+    }
+    consenting.set(true);
+    consent_error.set(None);
+    consent_result.set(None);
+    let tenant = session.active_tenant.get_untracked();
+    let object_id = detail.with_untracked(|d| d.application.id.clone());
+    leptos::task::spawn_local(async move {
+        let Some(t) = tenant else {
+            consenting.set(false);
+            return;
+        };
+        match permissions::grant_admin_consent(&t.tenant_id, &object_id).await {
+            Ok(r) => {
+                session.toast_success(format!(
+                    "Admin consent granted: {} role assignment(s), {} scope grant(s).",
+                    r.role_assignments_created.len(),
+                    r.scope_grants_upserted.len(),
+                ));
+                consent_result.set(Some(r));
+                on_changed.run(());
+            }
+            Err(e) => {
+                // Offer Retry only when the backend says the failure is transient.
+                let retry: Option<ToastAction> = e.retryable.then(|| {
+                    Rc::new(move || {
+                        run_grant(
+                            session,
+                            detail,
+                            consenting,
+                            consent_error,
+                            consent_result,
+                            on_changed,
+                        )
+                    }) as ToastAction
+                });
+                session.toast_error(e.message.clone(), retry);
+                consent_error.set(Some(e.message));
+            }
+        }
+        consenting.set(false);
+    });
+}
+
+/// Fetches effective Exchange mailbox scoping for `object_id` and updates the
+/// signals. On success `mail_scopes` holds the per-permission verdicts and
+/// `scope_unavailable` is cleared; on failure (e.g. a 403 from missing Exchange
+/// RBAC, or `consent_required`) `mail_scopes` is emptied and `scope_unavailable`
+/// carries the actionable reason so the tab can explain it rather than silently
+/// painting every row "Unknown".
+fn load_mail_scopes(
+    tenant_id: String,
+    object_id: String,
+    mail_scopes: RwSignal<HashMap<String, MailPermissionScope>>,
+    scope_unavailable: RwSignal<Option<UiError>>,
+    scopes_loading: RwSignal<bool>,
+) {
+    scopes_loading.set(true);
+    leptos::task::spawn_local(async move {
+        match exchange::get_mail_permission_scopes(&tenant_id, &object_id).await {
+            Ok(entries) => {
+                let map = entries
+                    .into_iter()
+                    .map(|e| (e.graph_permission, e.scope))
+                    .collect();
+                mail_scopes.set(map);
+                scope_unavailable.set(None);
+            }
+            Err(e) => {
+                mail_scopes.set(HashMap::new());
+                scope_unavailable.set(Some(e));
+            }
+        }
+        scopes_loading.set(false);
+    });
+}
+
+/// Runs a mutating async op behind the shared double-submit guard: bails if
+/// `busy` is already set, otherwise sets `busy`, clears `error`, and spawns the
+/// op with the active tenant id. On completion it clears `busy` and either runs
+/// `on_ok` (success) or stores the message in `error` (failure); a no-op (just
+/// clearing `busy`) when no tenant is active. Collapses the boilerplate the
+/// per-row revoke/remove handlers all repeated.
+fn spawn_mutation<T, Fut>(
+    busy: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    tenant_id: Option<String>,
+    on_ok: Callback<()>,
+    op: impl FnOnce(String) -> Fut + 'static,
+) where
+    Fut: std::future::Future<Output = Result<T, UiError>> + 'static,
+{
+    if busy.get() {
+        return;
+    }
+    busy.set(true);
+    error.set(None);
+    leptos::task::spawn_local(async move {
+        let Some(tenant_id) = tenant_id else {
+            busy.set(false);
+            return;
+        };
+        if let Err(e) = op(tenant_id).await {
+            error.set(Some(e.message));
+        } else {
+            on_ok.run(());
+        }
+        busy.set(false);
+    });
+}
+
+#[component]
+pub fn PermissionsTab(
+    #[prop(into)] detail: Signal<ApplicationDetail>,
+    on_changed: Callback<()>,
+) -> impl IntoView {
+    let session = use_session();
+    let consenting = RwSignal::new(false);
+    let consent_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let consent_result: RwSignal<Option<GrantResult>> = RwSignal::new(None);
+    let picker_open = RwSignal::new(false);
+    let busy = RwSignal::new(false);
+    let row_error: RwSignal<Option<String>> = RwSignal::new(None);
+
+    // Inline "restrict an already-granted permission" panel. `pending_scope`
+    // holds the chosen permission until the user supplies a scope (mailbox
+    // groups / site URL) or cancels. `scope_note` reports the outcome.
+    let pending_scope: RwSignal<Option<PendingRowScope>> = RwSignal::new(None);
+    let scope_groups_text = RwSignal::new(String::new());
+    let scope_site_url = RwSignal::new(String::new());
+    let scope_note: RwSignal<Option<String>> = RwSignal::new(None);
+
+    // Application/Delegated filter toggles. Both default on.
+    let show_application = RwSignal::new(true);
+    let show_delegated = RwSignal::new(true);
+
+    // Effective Exchange mailbox scoping per Graph permission value, lazily
+    // resolved when the app declares any scopable mail permission. Empty until
+    // loaded; degrades to `Unknown` entries when the user isn't an Exchange
+    // admin (the backend never hard-errors here).
+    let mail_scopes: RwSignal<HashMap<String, MailPermissionScope>> = RwSignal::new(HashMap::new());
+    // `Some` when the Exchange scoping lookup failed — carries the actionable
+    // reason (and a `consent_required` code) so the tab shows a banner + a
+    // "Grant consent" / "Retry" affordance instead of silent "Unknown" badges.
+    let scope_unavailable: RwSignal<Option<UiError>> = RwSignal::new(None);
+    // True while the Exchange lookup is in flight, so verdict-less rows read
+    // "Resolving…" instead of "Unknown" (which is reserved for a failed lookup).
+    let scopes_loading = RwSignal::new(false);
+    Effect::new(move |_| {
+        let tenant = session.active_tenant.get();
+        let (object_id, has_mail) = detail.with(|d| {
+            let has = d.resolved_permissions.iter().any(|p| {
+                p.permission_value
+                    .as_deref()
+                    .is_some_and(is_exchange_scopable)
+            });
+            (d.application.id.clone(), has)
+        });
+        mail_scopes.set(HashMap::new());
+        scope_unavailable.set(None);
+        let Some(t) = tenant else { return };
+        if !has_mail {
+            return;
+        }
+        load_mail_scopes(
+            t.tenant_id.clone(),
+            object_id,
+            mail_scopes,
+            scope_unavailable,
+            scopes_loading,
+        );
+    });
+
+    // Re-run the scope lookup (after granting consent, or on a Retry click).
+    let reload_scopes = move || {
+        let tenant = session.active_tenant.get_untracked();
+        let object_id = detail.with_untracked(|d| d.application.id.clone());
+        let Some(t) = tenant else { return };
+        load_mail_scopes(
+            t.tenant_id.clone(),
+            object_id,
+            mail_scopes,
+            scope_unavailable,
+            scopes_loading,
+        );
+    };
+    let grant = move |_| {
+        run_grant(
+            session,
+            detail,
+            consenting,
+            consent_error,
+            consent_result,
+            on_changed,
+        )
+    };
+
+    let tenant_for_picker: Signal<Option<String>> =
+        Signal::derive(move || session.active_tenant.get().map(|t| t.tenant_id.clone()));
+
+    let do_grant_one = Callback::new(move |sel: PickerSelection| {
+        if busy.get() {
+            return;
+        }
+        busy.set(true);
+        row_error.set(None);
+        let tenant = session.active_tenant.get();
+        let object_id = detail.with(|d| d.application.id.clone());
+        leptos::task::spawn_local(async move {
+            let Some(t) = tenant else {
+                busy.set(false);
+                return;
+            };
+            match permissions::grant_single_permission(
+                &t.tenant_id,
+                &object_id,
+                &sel.resource_app_id,
+                &sel.permission_id,
+                sel.kind,
+            )
+            .await
+            {
+                Ok(r) => {
+                    on_changed.run(());
+                    if !r.failures.is_empty() {
+                        // The manifest declaration landed but the runtime grant
+                        // didn't (commonly: the signed-in user can't self-consent).
+                        // Say so — the row now shows "Not granted" with a Remove
+                        // (trash) affordance, and admin consent stays available.
+                        let why = r
+                            .failures
+                            .iter()
+                            .map(|f| f.message.clone())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        row_error.set(Some(format!(
+                            "Permission declared, but the grant wasn’t created: {why}. \
+                             Grant admin consent, or remove it.",
+                        )));
+                    } else if let Some(kind) = grant_scope_kind(&sel.permission_value) {
+                        // Scope-first nudge: a freshly-granted scopable permission
+                        // opens the scope panel so the admin can confine it now
+                        // rather than navigating back later. The backend manifest is
+                        // already updated, so the panel's submit reads the new
+                        // permission live; Cancel keeps the (applied) org-wide grant.
+                        let (object_id, app_id, app_display_name, sp_object_id) =
+                            detail.with(|d| {
+                                (
+                                    d.application.id.clone(),
+                                    d.application.app_id.clone(),
+                                    d.application.display_name.clone(),
+                                    d.service_principal.as_ref().map(|sp| sp.id.clone()),
+                                )
+                            });
+                        scope_groups_text.set(String::new());
+                        scope_site_url.set(String::new());
+                        scope_note.set(Some(format!(
+                            "Granted {} — confine it now, or Cancel to keep it org-wide.",
+                            sel.permission_value
+                        )));
+                        pending_scope.set(Some(PendingRowScope {
+                            object_id,
+                            app_id,
+                            app_display_name,
+                            sp_object_id: sp_object_id.unwrap_or_default(),
+                            permission_value: sel.permission_value.clone(),
+                            kind,
+                        }));
+                    }
+                }
+                Err(e) => row_error.set(Some(e.message)),
+            }
+            busy.set(false);
+        });
+    });
+
+    // Open the inline scope panel for an already-granted permission. Reads the
+    // app's ids from `detail`; SharePoint needs the service-principal object id.
+    let open_scope = move |permission_value: String, kind: ScopeKind| {
+        let (object_id, app_id, app_display_name, sp_object_id) = detail.with(|d| {
+            (
+                d.application.id.clone(),
+                d.application.app_id.clone(),
+                d.application.display_name.clone(),
+                d.service_principal.as_ref().map(|sp| sp.id.clone()),
+            )
+        });
+        if kind == ScopeKind::SharePoint && sp_object_id.is_none() {
+            row_error.set(Some(
+                "App has no service principal — grant it first, then scope.".into(),
+            ));
+            return;
+        }
+        scope_groups_text.set(String::new());
+        scope_site_url.set(String::new());
+        row_error.set(None);
+        scope_note.set(None);
+        pending_scope.set(Some(PendingRowScope {
+            object_id,
+            app_id,
+            app_display_name,
+            sp_object_id: sp_object_id.unwrap_or_default(),
+            permission_value,
+            kind,
+        }));
+    };
+
+    let cancel_scope = move |_| {
+        pending_scope.set(None);
+        row_error.set(None);
+        // Clear the scope-first nudge so it doesn't linger after Cancel.
+        scope_note.set(None);
+    };
+
+    // Scope a mail permission to mailbox group(s) via Exchange RBAC.
+    let submit_exchange_scope = move |_| {
+        let Some(p) = pending_scope.get() else {
+            return;
+        };
+        if busy.get() {
+            return;
+        }
+        let groups = parse_lines(&scope_groups_text.get());
+        if groups.is_empty() {
+            row_error.set(Some(
+                "Enter at least one group or mailbox identifier.".into(),
+            ));
+            return;
+        }
+        busy.set(true);
+        row_error.set(None);
+        scope_note.set(None);
+        let tenant = session.active_tenant.get();
+        leptos::task::spawn_local(async move {
+            let Some(t) = tenant else {
+                busy.set(false);
+                return;
+            };
+            match exchange::grant_exchange_mailbox_access(
+                &t.tenant_id,
+                &p.object_id,
+                Some(&[p.permission_value.clone()]),
+                &groups,
+                true,
+            )
+            .await
+            {
+                Ok(r) => {
+                    let mut note = format!(
+                        "Scoped {} via “{}” — {} role(s) assigned, {} org-wide grant(s) removed.",
+                        p.permission_value,
+                        r.scope_name,
+                        r.roles_assigned.len(),
+                        r.removed_entra_grants.len(),
+                    );
+                    if !r.warnings.is_empty() {
+                        note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
+                    }
+                    scope_note.set(Some(note));
+                    pending_scope.set(None);
+                    on_changed.run(());
+                }
+                Err(e) => row_error.set(Some(e.message)),
+            }
+            busy.set(false);
+        });
+    };
+
+    // Convert an org-wide Sites.* grant to Sites.Selected on one site.
+    let submit_sharepoint_scope = move |role: &'static str| {
+        let Some(p) = pending_scope.get() else {
+            return;
+        };
+        if busy.get() {
+            return;
+        }
+        let url = scope_site_url.get().trim().to_string();
+        if url.is_empty() {
+            row_error.set(Some("Enter a SharePoint site URL.".into()));
+            return;
+        }
+        busy.set(true);
+        row_error.set(None);
+        scope_note.set(None);
+        let tenant = session.active_tenant.get();
+        leptos::task::spawn_local(async move {
+            let Some(t) = tenant else {
+                busy.set(false);
+                return;
+            };
+            match sharepoint::convert_site_access_to_selected(
+                &t.tenant_id,
+                &p.sp_object_id,
+                &p.app_id,
+                &p.app_display_name,
+                &[url.clone()],
+                role,
+                true,
+            )
+            .await
+            {
+                Ok(r) => {
+                    let site = r
+                        .sites_granted
+                        .first()
+                        .and_then(|s| s.site_display_name.clone())
+                        .unwrap_or(url.clone());
+                    let mut note = format!("Granted {role} access to {site}.");
+                    if !r.removed_orgwide_grants.is_empty() {
+                        note.push_str(&format!(
+                            " Removed org-wide grant(s): {}.",
+                            r.removed_orgwide_grants.join(", ")
+                        ));
+                    }
+                    if !r.warnings.is_empty() {
+                        note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
+                    }
+                    scope_note.set(Some(note));
+                    pending_scope.set(None);
+                    on_changed.run(());
+                }
+                Err(e) => row_error.set(Some(e.message)),
+            }
+            busy.set(false);
+        });
+    };
+
+    // Inline "swap a broad permission for a narrower one" chooser. Opened from a
+    // row's Downgrade… action; the user picks the target alternative (or cancels).
+    let pending_downgrade: RwSignal<Option<PendingDowngrade>> = RwSignal::new(None);
+
+    let open_downgrade = move |resource_app_id: String, broad_value: String| {
+        let alternatives = downgrade_alternatives(&broad_value);
+        if alternatives.is_empty() {
+            return;
+        }
+        let object_id = detail.with(|d| d.application.id.clone());
+        row_error.set(None);
+        scope_note.set(None);
+        pending_downgrade.set(Some(PendingDowngrade {
+            object_id,
+            resource_app_id,
+            broad_value,
+            alternatives,
+        }));
+    };
+
+    let cancel_downgrade = move |_| {
+        pending_downgrade.set(None);
+        row_error.set(None);
+    };
+
+    let submit_downgrade = move |narrow: &'static str| {
+        let Some(p) = pending_downgrade.get() else {
+            return;
+        };
+        if busy.get() {
+            return;
+        }
+        busy.set(true);
+        row_error.set(None);
+        let tenant = session.active_tenant.get();
+        leptos::task::spawn_local(async move {
+            let Some(t) = tenant else {
+                busy.set(false);
+                return;
+            };
+            match permissions::downgrade_application_permission(
+                &t.tenant_id,
+                &p.object_id,
+                &p.resource_app_id,
+                &p.broad_value,
+                narrow,
+            )
+            .await
+            {
+                Ok(o) => {
+                    let note = if o.broad_revoked || o.declaration_swapped {
+                        format!(
+                            "Downgraded {} → {narrow}{}.",
+                            p.broad_value,
+                            if o.narrow_granted {
+                                ""
+                            } else {
+                                " (narrower permission was already in place)"
+                            }
+                        )
+                    } else {
+                        format!("{} was already gone — nothing to change.", p.broad_value)
+                    };
+                    scope_note.set(Some(note));
+                    pending_downgrade.set(None);
+                    on_changed.run(());
+                }
+                Err(e) => row_error.set(Some(e.message)),
+            }
+            busy.set(false);
+        });
+    };
+
+    let do_revoke_application = move |assignment_id: String| {
+        let Some(sp_id) = detail.with(|d| d.service_principal.as_ref().map(|sp| sp.id.clone()))
+        else {
+            row_error.set(Some(
+                "App has no service principal — nothing to revoke.".into(),
+            ));
+            return;
+        };
+        spawn_mutation(
+            busy,
+            row_error,
+            session.active_tenant.get().map(|t| t.tenant_id),
+            on_changed,
+            move |tenant_id| async move {
+                permissions::revoke_app_role_assignment(&tenant_id, &sp_id, &assignment_id).await
+            },
+        );
+    };
+
+    let do_revoke_delegated = move |grant_id: String, scope_value: String| {
+        spawn_mutation(
+            busy,
+            row_error,
+            session.active_tenant.get().map(|t| t.tenant_id),
+            on_changed,
+            move |tenant_id| async move {
+                permissions::revoke_oauth2_scope(&tenant_id, &grant_id, &scope_value).await
+            },
+        );
+    };
+
+    // Remove a not-granted (declared-only) permission from the manifest. The
+    // Trash icon on a granted row revokes the runtime grant; on a not-granted
+    // row it removes the declaration instead, so every row has a way out.
+    let do_remove_declared =
+        move |resource_app_id: String, permission_id: String, kind: PermissionKind| {
+            let object_id = detail.with(|d| d.application.id.clone());
+            spawn_mutation(
+                busy,
+                row_error,
+                session.active_tenant.get().map(|t| t.tenant_id),
+                on_changed,
+                move |tenant_id| async move {
+                    permissions::remove_declared_permission(
+                        &tenant_id,
+                        &object_id,
+                        &resource_app_id,
+                        &permission_id,
+                        kind,
+                    )
+                    .await
+                },
+            );
+        };
+
+    view! {
+        <div class="permissions-tab">
+            <header class="row-between">
+                <div class="row">
+                    <strong>"Declared permissions"</strong>
+                    <RequiresRole capability_key="admin_consent" />
+                </div>
+                <div class="actions-row">
+                    <Button
+                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                        on_click=Box::new(move |_| picker_open.update(|v| *v = !*v))
+                    >
+                        {move || {
+                            if picker_open.get() {
+                                view! { "Hide picker" }.into_any()
+                            } else {
+                                view! { "Add permission" }.into_any()
+                            }
+                        }}
+                    </Button>
+                    <Button
+                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                        on_click=Box::new(grant)
+                        disabled=Signal::derive(move || consenting.get())
+                    >
+                        {move || {
+                            if consenting.get() {
+                                view! {
+                                    <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                }
+                                    .into_any()
+                            } else {
+                                view! { "Grant admin consent" }.into_any()
+                            }
+                        }}
+                    </Button>
+                </div>
+            </header>
+            {move || {
+                picker_open
+                    .get()
+                    .then(|| {
+                        view! {
+                            <PermissionPicker
+                                tenant_id=tenant_for_picker
+                                mode=PickerMode::AppAndDelegated
+                                on_grant=do_grant_one
+                                busy=Signal::derive(move || busy.get())
+                            />
+                        }
+                    })
+            }}
+            {move || row_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            <div class="permissions-tab__filters">
+                <button
+                    class=move || filter_chip_class(show_application.get())
+                    type="button"
+                    on:click=move |_| show_application.update(|v| *v = !*v)
+                >
+                    "Application"
+                </button>
+                <button
+                    class=move || filter_chip_class(show_delegated.get())
+                    type="button"
+                    on:click=move |_| show_delegated.update(|v| *v = !*v)
+                >
+                    "Delegated"
+                </button>
+            </div>
+            // Shared banner (consent-and-retry handled internally) so the Scope
+            // column's unavailable state matches the MI and enterprise panes.
+            {move || {
+                scope_unavailable.get().map(|e| {
+                    view! { <ScopeUnavailableBanner error=e on_retry=move |_| reload_scopes() /> }
+                })
+            }}
+            {move || {
+                let resolved = detail.with(|d| d.resolved_permissions.clone());
+                if resolved.is_empty() {
+                    return view! {
+                        <Body1>
+                            "No permissions declared. Use the Entra portal or restore from a saved manifest."
+                        </Body1>
+                    }
+                        .into_any();
+                }
+                let show_app = show_application.get();
+                let show_del = show_delegated.get();
+                let filtered: Vec<ResolvedPermission> = resolved
+                    .into_iter()
+                    .filter(|p| match p.permission_kind {
+                        PermissionKind::Application => show_app,
+                        PermissionKind::Delegated => show_del,
+                        // Unknown shows whenever either filter is on so the
+                        // user can still see uncategorized rows.
+                        PermissionKind::Unknown => show_app || show_del,
+                    })
+                    .collect();
+                let revoke_app = do_revoke_application;
+                let revoke_del = do_revoke_delegated;
+                let remove_decl = do_remove_declared;
+                let scope_action = open_scope;
+                let downgrade_action = open_downgrade;
+                let scopes = mail_scopes.get();
+                view! {
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>"Resource"</th>
+                                <th>"Permission"</th>
+                                <th>"Kind"</th>
+                                <th>"Scope"</th>
+                                <th>"Status"</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {filtered
+                                .into_iter()
+                                .map(|p| {
+                                    let scope = p
+                                        .permission_value
+                                        .as_deref()
+                                        .and_then(|v| scopes.get(v).cloned());
+                                    view_resolved_row(
+                                        p,
+                                        scope,
+                                        scopes_loading.get(),
+                                        revoke_app,
+                                        revoke_del,
+                                        remove_decl,
+                                        scope_action,
+                                        downgrade_action,
+                                    )
+                                })
+                                .collect_view()}
+                        </tbody>
+                    </table>
+                }
+                    .into_any()
+            }}
+            {move || {
+                pending_scope
+                    .get()
+                    .map(|p| {
+                        view! {
+                            <ScopePanel
+                                kind=p.kind
+                                permission_value=p.permission_value.clone()
+                                groups_text=scope_groups_text
+                                site_url=scope_site_url
+                                busy=Signal::derive(move || busy.get())
+                                on_submit_exchange=Callback::new(move |()| submit_exchange_scope(()))
+                                on_submit_sharepoint=Callback::new(move |w: bool| {
+                                    submit_sharepoint_scope(if w { "write" } else { "read" })
+                                })
+                                on_cancel=Callback::new(move |()| cancel_scope(()))
+                            />
+                        }
+                    })
+            }}
+            {move || {
+                pending_downgrade
+                    .get()
+                    .map(|p| {
+                        let buttons = p
+                            .alternatives
+                            .iter()
+                            .map(|alt| {
+                                let alt = *alt;
+                                view! {
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                        on_click=Box::new(move |_| submit_downgrade(alt))
+                                    >
+                                        {format!("Downgrade to {alt}")}
+                                    </Button>
+                                }
+                            })
+                            .collect_view();
+                        view! {
+                            <div class="alert alert--warn">
+                                <Body1>
+                                    {format!(
+                                        "Replace {} with a narrower permission. The narrower one is granted first, then {} is removed — only proceed if the app doesn't use the broader capability, because this changes its effective access.",
+                                        p.broad_value,
+                                        p.broad_value,
+                                    )}
+                                </Body1>
+                                <div class="actions-row">
+                                    {buttons}
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                        on_click=Box::new(move |_| cancel_downgrade(()))
+                                    >
+                                        "Cancel"
+                                    </Button>
+                                </div>
+                            </div>
+                        }
+                    })
+            }}
+            {move || scope_note.get().map(|m| view! { <div class="alert alert--ok">{m}</div> })}
+            {move || consent_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || {
+                consent_result
+                    .get()
+                    .map(|r| {
+                        view! {
+                            <div class="alert alert--ok">
+                                {format!(
+                                    "Created {} role assignment(s); {} scope grant(s); {} skipped; {} failure(s).",
+                                    r.role_assignments_created.len(),
+                                    r.scope_grants_upserted.len(),
+                                    r.role_assignments_skipped.len(),
+                                    r.failures.len(),
+                                )}
+                            </div>
+                        }
+                    })
+            }}
+            {move || {
+                let has_mail = detail.with(|d| {
+                    d.resolved_permissions.iter().any(|p| {
+                        p.permission_value
+                            .as_deref()
+                            .is_some_and(is_exchange_scopable)
+                    })
+                });
+                has_mail
+                    .then(|| {
+                        view! {
+                            <ExchangeScopingSection
+                                app_id=Signal::derive(move || {
+                                    detail.with(|d| d.application.app_id.clone())
+                                })
+                                target=Signal::derive(move || ExchangeScopeTarget::Application {
+                                    object_id: detail.with(|d| d.application.id.clone()),
+                                })
+                                on_changed=on_changed
+                            />
+                        }
+                    })
+            }}
+            {move || {
+                let has_sites = detail.with(|d| {
+                    d.resolved_permissions.iter().any(|p| {
+                        p.permission_value
+                            .as_deref()
+                            .is_some_and(|v| v == "Sites.Selected" || is_sharepoint_orgwide(v))
+                    })
+                });
+                has_sites
+                    .then(|| {
+                        view! {
+                            <SharePointSitesSection
+                                app_id=Signal::derive(move || {
+                                    detail.with(|d| d.application.app_id.clone())
+                                })
+                                app_display_name=Signal::derive(move || {
+                                    detail.with(|d| d.application.display_name.clone())
+                                })
+                            />
+                        }
+                    })
+            }}
+            <UsagePanel detail=detail />
+        </div>
+    }
+}
+
+/// "Observed Graph activity" — the granted-vs-used lens. Loads on demand (the
+/// workspace discovery + KQL query cost a few round trips, so it never runs on
+/// tab open): summarizes the app's actual Graph calls over the last 90 days
+/// from MicrosoftGraphActivityLogs, so an admin can compare what the app
+/// *does* against the permissions above (e.g. `Mail.ReadWrite` granted but
+/// only GETs observed → the Downgrade… action applies). Degrades to setup
+/// guidance (`usage_unavailable`) or a consent button — never breaks the tab.
+#[component]
+fn UsagePanel(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl IntoView {
+    let session = use_session();
+    let tenant = session.active_tenant;
+
+    let result: RwSignal<Option<usage::GraphUsageResult>> = RwSignal::new(None);
+    let busy = RwSignal::new(false);
+    let error: RwSignal<Option<String>> = RwSignal::new(None);
+    let consent_needed = RwSignal::new(false);
+    let unavailable = RwSignal::new(false);
+
+    // Stale-usage guard: a different app's detail in the same pane must not
+    // show the previous app's call patterns.
+    Effect::new(move |_| {
+        let _ = detail.with(|d| d.application.app_id.clone());
+        result.set(None);
+        error.set(None);
+        consent_needed.set(false);
+        unavailable.set(false);
+    });
+
+    let do_load = move || {
+        if busy.get() {
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        consent_needed.set(false);
+        unavailable.set(false);
+        let tenant = tenant.get();
+        let app_id = detail.with(|d| d.application.app_id.clone());
+        leptos::task::spawn_local(async move {
+            let Some(t) = tenant else {
+                busy.set(false);
+                return;
+            };
+            match usage::get_app_graph_usage(&t.tenant_id, &app_id, 90).await {
+                Ok(r) => result.set(Some(r)),
+                Err(e) => {
+                    consent_needed.set(e.code == "consent_required");
+                    unavailable.set(e.code == "usage_unavailable");
+                    error.set(Some(e.message));
+                }
+            }
+            busy.set(false);
+        });
+    };
+
+    let grant_consent = move |_| {
+        let Some(t) = tenant.get() else { return };
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            match auth::request_scope_consent(&t.tenant_id, "log_analytics").await {
+                Ok(()) => do_load(),
+                Err(e) => error.set(Some(e.message)),
+            }
+        });
+    };
+
+    view! {
+        <div class="permissions-tab__usage">
+            <h3>"Observed Graph activity"</h3>
+            <Body1>
+                "What this app actually called over the last 90 days (from MicrosoftGraphActivityLogs) — compare against the permissions above to spot unused or over-broad grants."
+            </Body1>
+            <div class="actions-row">
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                    on_click=Box::new(move |_| do_load())
+                >
+                    {move || {
+                        if busy.get() {
+                            "Loading…"
+                        } else if result.with(|r| r.is_some()) {
+                            "Refresh observed usage"
+                        } else {
+                            "Check observed usage (90d)"
+                        }
+                    }}
+                </Button>
+            </div>
+            {move || {
+                error
+                    .get()
+                    .map(|e| {
+                        let class = if unavailable.get() { "alert" } else { "alert alert--warn" };
+                        view! {
+                            <div class=class>
+                                <Body1>{e}</Body1>
+                                {consent_needed
+                                    .get()
+                                    .then(|| {
+                                        view! {
+                                            <div class="actions-row">
+                                                <Button
+                                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                                    on_click=Box::new(grant_consent)
+                                                >
+                                                    "Grant consent & retry"
+                                                </Button>
+                                            </div>
+                                        }
+                                    })}
+                            </div>
+                        }
+                    })
+            }}
+            {move || {
+                result
+                    .get()
+                    .map(|r| {
+                        let summary = format!(
+                            "{} call pattern{} over {} days (workspace: {}){}{}",
+                            r.rows.len(),
+                            if r.rows.len() == 1 { "" } else { "s" },
+                            r.days,
+                            r.workspace_name,
+                            if r.truncated { " — long tail truncated" } else { "" },
+                            if r.rows.is_empty() {
+                                " — no Graph calls observed; if this persists, the app may not need its Graph permissions at all"
+                            } else {
+                                ""
+                            },
+                        );
+                        view! {
+                            <Body1 class="page__summary">{summary}</Body1>
+                            {(!r.rows.is_empty())
+                                .then(|| {
+                                    view! {
+                                        <table class="data-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>"Method"</th>
+                                                    <th>"Path"</th>
+                                                    <th>"Calls"</th>
+                                                    <th>"Last seen"</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {r
+                                                    .rows
+                                                    .into_iter()
+                                                    .map(|row| {
+                                                        view! {
+                                                            <tr>
+                                                                <td class="cell-mid">{row.method}</td>
+                                                                <td class="mono">{row.path}</td>
+                                                                <td class="cell-mid">{row.count}</td>
+                                                                <td class="cell-mid">
+                                                                    {row.last_seen.unwrap_or_default()}
+                                                                </td>
+                                                            </tr>
+                                                        }
+                                                    })
+                                                    .collect_view()}
+                                            </tbody>
+                                        </table>
+                                    }
+                                })}
+                        }
+                    })
+            }}
+        </div>
+    }
+}
+
+fn filter_chip_class(on: bool) -> String {
+    let mut c = String::from("permissions-tab__filter-chip");
+    if on {
+        c.push_str(" permissions-tab__filter-chip--on");
+    }
+    c
+}
+
+fn chip_kind_for_permission(kind: PermissionKind) -> AppKind {
+    match kind {
+        PermissionKind::Application => AppKind::PermissionApplication,
+        PermissionKind::Delegated => AppKind::PermissionDelegated,
+        PermissionKind::Unknown => AppKind::PermissionUnknown,
+    }
+}
+
+fn view_resolved_row<RevApp, RevDel, Remove, Scope, Downgrade>(
+    p: ResolvedPermission,
+    mail_scope: Option<MailPermissionScope>,
+    scope_loading: bool,
+    revoke_application: RevApp,
+    revoke_delegated: RevDel,
+    remove_declared: Remove,
+    scope: Scope,
+    downgrade: Downgrade,
+) -> impl IntoView
+where
+    RevApp: Fn(String) + Send + Sync + Copy + 'static,
+    RevDel: Fn(String, String) + Send + Sync + Copy + 'static,
+    Remove: Fn(String, String, PermissionKind) + Send + Sync + Copy + 'static,
+    Scope: Fn(String, ScopeKind) + Send + Sync + Copy + 'static,
+    Downgrade: Fn(String, String) + Send + Sync + Copy + 'static,
+{
+    let resource_display = p
+        .resource_display_name
+        .clone()
+        .unwrap_or_else(|| p.resource_app_id.clone());
+    let resource_guid = p.resource_app_id.clone();
+    let perm_primary = p
+        .permission_value
+        .clone()
+        .or_else(|| p.permission_display_name.clone())
+        .unwrap_or_else(|| p.permission_id.clone());
+    let perm_secondary = p
+        .permission_display_name
+        .clone()
+        .filter(|d| Some(d) != p.permission_value.as_ref())
+        .unwrap_or_else(|| p.permission_id.clone());
+    let perm_guid_attr = p.permission_id.clone();
+    let perm_guid_body = p.permission_id.clone();
+    let chip_kind = chip_kind_for_permission(p.permission_kind);
+
+    let runtime_assignment_id = p.runtime_assignment_id.clone();
+    let runtime_grant_id = p.runtime_grant_id.clone();
+    let permission_value = p.permission_value.clone();
+    let scope_value = p.permission_value.clone();
+    let permission_kind = p.permission_kind;
+    // Identity of the declared row, for the "remove declaration" (not-granted) path.
+    let remove_resource_app_id = p.resource_app_id.clone();
+    let remove_permission_id = p.permission_id.clone();
+    let granted = runtime_assignment_id.is_some() || runtime_grant_id.is_some();
+    let status_label = if granted { "Granted" } else { "Not granted" };
+    let status_class = if granted { "badge badge--ok" } else { "badge" };
+
+    let trash_button = match (permission_kind, runtime_assignment_id, runtime_grant_id) {
+        (PermissionKind::Application, Some(assignment_id), _) => {
+            let on_click = move |_| revoke_application(assignment_id.clone());
+            view! {
+                <IconButton
+                    icon=IconName::Trash
+                    aria_label="Revoke application permission".to_string()
+                    title="Revoke".to_string()
+                    on_click=Callback::new(on_click)
+                />
+            }
+            .into_any()
+        }
+        (PermissionKind::Delegated, _, Some(grant_id)) => match permission_value {
+            Some(value) => {
+                let on_click = move |_| revoke_delegated(grant_id.clone(), value.clone());
+                view! {
+                    <IconButton
+                        icon=IconName::Trash
+                        aria_label="Revoke delegated permission".to_string()
+                        title="Revoke".to_string()
+                        on_click=Callback::new(on_click)
+                    />
+                }
+                .into_any()
+            }
+            None => view! { <></> }.into_any(),
+        },
+        // Not granted (declared only): the Trash icon removes the declaration
+        // from the manifest rather than revoking a (nonexistent) runtime grant.
+        _ => {
+            let resource_app_id = remove_resource_app_id.clone();
+            let permission_id = remove_permission_id.clone();
+            let on_click = move |_| {
+                remove_declared(
+                    resource_app_id.clone(),
+                    permission_id.clone(),
+                    permission_kind,
+                )
+            };
+            view! {
+                <IconButton
+                    icon=IconName::Trash
+                    aria_label="Remove declared permission".to_string()
+                    title="Remove".to_string()
+                    on_click=Callback::new(on_click)
+                />
+            }
+            .into_any()
+        }
+    };
+
+    // "Scope…" appears only on a granted Application permission that can be
+    // restricted per row after the fact — an org-wide Sites.* (mail scoping is
+    // app-wide, handled by the "Exchange scoping" section, not this button).
+    let scope_button = match (permission_kind, granted, scope_value.as_deref()) {
+        (PermissionKind::Application, true, Some(value)) => row_scope_kind(value).map(|kind| {
+            let value = value.to_string();
+            let on_click = move |_| scope(value.clone(), kind);
+            view! {
+                <IconButton
+                    icon=IconName::Filter
+                    aria_label="Scope this permission".to_string()
+                    title="Scope…".to_string()
+                    on_click=Callback::new(on_click)
+                />
+            }
+        }),
+        _ => None,
+    };
+
+    // "Downgrade…" appears on an Application row whose value has a documented
+    // narrower alternative (granted or declared-only — the backend swaps
+    // whichever halves exist). Opens the chooser; the swap itself is
+    // admin-judged, so this is never a one-click mutation.
+    let downgrade_resource_app_id = p.resource_app_id.clone();
+    let downgrade_button = match (permission_kind, p.permission_value.as_deref()) {
+        (PermissionKind::Application, Some(value)) if !downgrade_alternatives(value).is_empty() => {
+            let value = value.to_string();
+            let on_click = move |_| downgrade(downgrade_resource_app_id.clone(), value.clone());
+            Some(view! {
+                <IconButton
+                    icon=IconName::ChevronDown
+                    aria_label="Downgrade to a narrower permission".to_string()
+                    title="Downgrade…".to_string()
+                    on_click=Callback::new(on_click)
+                />
+            })
+        }
+        _ => None,
+    };
+
+    view! {
+        <tr>
+            <td class="permission-cell">
+                <div class="permissions-cell__primary">{resource_display}</div>
+                <div class="permissions-cell__secondary mono">{resource_guid}</div>
+            </td>
+            <td class="permission-cell" title=perm_guid_attr>
+                <div class="permissions-cell__primary">{perm_primary}</div>
+                <div class="permissions-cell__secondary">{perm_secondary}</div>
+                <div class="permissions-cell__secondary mono">{perm_guid_body}</div>
+            </td>
+            <td class="cell-mid">
+                <TypeChip kind=chip_kind />
+            </td>
+            <td class="cell-mid">
+                {permission_scope_cell(
+                    scope_value.as_deref(),
+                    mail_scope,
+                    permission_kind == PermissionKind::Application,
+                    scope_loading,
+                )}
+            </td>
+            <td class="cell-mid">
+                <span class=status_class>{status_label}</span>
+            </td>
+            <td class="cell-mid">
+                <div class="cell-actions">
+                    {scope_button}
+                    {downgrade_button}
+                    {trash_button}
+                </div>
+            </td>
+        </tr>
+    }
+}

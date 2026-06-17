@@ -1,0 +1,70 @@
+[package]
+name = "desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "azapptoolkit desktop app (Tauri 2)"
+
+[lib]
+name = "desktop_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+azapptoolkit-core = { path = "../../../crates/azapptoolkit-core" }
+azapptoolkit-auth = { path = "../../../crates/azapptoolkit-auth" }
+azapptoolkit-graph = { path = "../../../crates/azapptoolkit-graph" }
+azapptoolkit-exchange = { path = "../../../crates/azapptoolkit-exchange" }
+azapptoolkit-keyvault = { path = "../../../crates/azapptoolkit-keyvault" }
+azapptoolkit-arm = { path = "../../../crates/azapptoolkit-arm" }
+azapptoolkit-permissions = { path = "../../../crates/azapptoolkit-permissions" }
+azapptoolkit-dto = { path = "../../../crates/azapptoolkit-dto", features = ["backend"] }
+
+tauri = { version = "2", features = [] }
+tauri-plugin-updater = "2"
+tauri-plugin-dialog = "2"
+
+tokio = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+futures = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+parking_lot = { workspace = true }
+
+# Self-signed certificate generation (native-only). rcgen generates the RSA-2048
+# key itself on the `aws_lc_rs` backend (Entra client assertions require RSA;
+# `ring` can sign but not generate RSA, whereas aws-lc-rs can). aws-lc-rs is
+# already compiled into the tree via rustls, so this adds no new build toolchain
+# and keeps the `rsa` crate (RUSTSEC-2023-0071) out of the dependency graph.
+rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
+rand = "0.8"
+zeroize = { workspace = true }
+sha2 = "0.10"
+time = "0.3"
+
+[dev-dependencies]
+# `test-util` enables the paused clock (`tokio::time::advance`) the throttle
+# tracker tests drive; dev-only so the shipped binary keeps the lean feature set.
+tokio = { workspace = true, features = ["test-util"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[lints]
+workspace = true

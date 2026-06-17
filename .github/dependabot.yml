@@ -1,0 +1,65 @@
+# Dependabot keeps our pinned dependencies fresh. SHA-pinning GitHub Actions and
+# version-locking Cargo crates freezes them at a known-good commit/checksum — but
+# without automated bumps those pins rot and we silently miss upstream security
+# fixes. Dependabot opens review-gated PRs that advance the pin *and* rewrite the
+# `# vX.Y.Z` comment next to each SHA-pinned action.
+#
+# Commit-message prefixes follow this repo's Conventional Commits (AGENTS.md):
+#   ci   -> GitHub Actions workflow bumps
+#   deps -> Cargo crate bumps
+version: 2
+updates:
+  # GitHub Actions used by .github/workflows/*.yml — all pinned to full commit SHAs.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      # One PR per week for all action bumps instead of one PR per action.
+      actions:
+        patterns:
+          - "*"
+
+  # Cargo workspace (root Cargo.toml + Cargo.lock). Registry crates are pinned by
+  # exact version + checksum in Cargo.lock; Dependabot proposes the upgrades.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 10
+    ignore:
+      # rand 0.9 / sha2 0.11 advance to the rand_core 0.10 / digest 0.11 chain,
+      # which conflicts with rsa 0.9 (rand_core 0.6 / digest 0.10) — the same
+      # chain that blocks the rsa 0.10 upgrade (AGENTS.md "Don't upgrade rsa to
+      # v0.10"). Drop these ignores when rsa can advance.
+      - dependency-name: rand
+        versions: [">=0.9"]
+      - dependency-name: sha2
+        versions: [">=0.11"]
+    groups:
+      # Batch low-risk semver-compatible bumps; majors stay as individual PRs so a
+      # breaking upgrade gets its own review.
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # The WASM frontend crate is EXCLUDED from the root workspace (targets
+  # wasm32-unknown-unknown) and carries its own Cargo.toml + Cargo.lock — including
+  # the git-pinned `tauri-sys` rev — so it needs a separate Dependabot entry.
+  - package-ecosystem: cargo
+    directory: /apps/desktop/web-rs
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch

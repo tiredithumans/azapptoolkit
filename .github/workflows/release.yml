@@ -1,0 +1,188 @@
+name: Release (Windows installers)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Two tags pushed close together (exactly the forward-fix scenario in the
+# "Pulling a bad release" runbook) must not race on runners or on which
+# latest.json the endpoint serves — queue them instead. Never cancel: a
+# half-cancelled release run is worse than a slow one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build-installers:
+    runs-on: windows-latest
+    env:
+      # The `secrets` context is not allowed in a step-level `if` (it made this
+      # whole workflow unparseable — every run failed in 0s with "workflow file
+      # issue"); route the presence check through job env instead.
+      HAS_AUTHENTICODE_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Fail fast (before the long build) if a tag was pushed without bumping the
+      # app version: the installer/updater take their version from
+      # tauri.conf.json, but latest.json takes it from the tag — a mismatch makes
+      # the updater advertise an upgrade that installs the same bytes (a loop).
+      - name: Guard tag matches manifest version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $conf = Get-Content apps/desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          if ($conf.version -ne $tag) {
+            Write-Error "release tag v$tag does not match tauri.conf.json version $($conf.version) — bump the manifest (and the Cargo workspace version) before tagging"
+            exit 1
+          }
+          # The runbook says to bump BOTH versions; enforce both so the binary's
+          # crate version can't drift from the installer/updater version.
+          $cargo = Get-Content Cargo.toml -Raw
+          if ($cargo -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+            Write-Error "could not find the workspace version in Cargo.toml"
+            exit 1
+          }
+          $wsVersion = $Matches[1]
+          if ($wsVersion -ne $tag) {
+            Write-Error "release tag v$tag does not match the Cargo workspace version $wsVersion — bump [workspace.package] version before tagging"
+            exit 1
+          }
+          Write-Host "version $($conf.version) matches tag and workspace — ok"
+
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          targets: x86_64-pc-windows-msvc, wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: just,trunk
+
+      - name: Install Tauri CLI
+        # Pinned to the exact `tauri` runtime version (Cargo.lock) for reproducible
+        # release tooling; bump in lockstep with the crate. --locked pins its deps.
+        run: cargo install tauri-cli --locked --version "=2.11.2"
+
+      - name: Sanity check Rust
+        # --locked: the release path must build exactly the lockfile CI gated,
+        # never a silent re-resolution (same pin as every verify recipe).
+        run: cargo test --locked --workspace --release
+
+      - name: Guard updater pubkey
+        shell: pwsh
+        run: |
+          $conf = Get-Content apps/desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          if ($conf.plugins.updater.active -and $conf.plugins.updater.pubkey -like '*REPLACE_WITH*') {
+            Write-Error "updater.active is true but updater.pubkey is still the placeholder — set a real key before releasing"
+            exit 1
+          }
+
+      - name: Build installers (with updater artifacts)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY_PASSWORD }}
+        run: just build-windows-updater
+
+      - name: Sign installers (optional Authenticode)
+        if: ${{ env.HAS_AUTHENTICODE_CERT == 'true' }}
+        shell: powershell
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $cert = [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+          [System.IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", $cert)
+          $signtool = Resolve-Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" `
+            | Select-Object -Last 1
+          $targets = @(
+            "target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi",
+            "target\x86_64-pc-windows-msvc\release\bundle\nsis\*-setup.exe"
+          )
+          Get-ChildItem -Path $targets | ForEach-Object {
+            & $signtool sign /f "$env:RUNNER_TEMP\cert.pfx" /p "$env:WINDOWS_CERTIFICATE_PASSWORD" `
+              /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+          }
+
+      # The auto-updater target is the NSIS -setup.exe (per-user, no admin —
+      # the MSI needs elevation and is kept only as a manual/enterprise
+      # download). Authenticode signing above rewrites the installer bytes,
+      # which invalidates the updater signature emitted during the build, so
+      # regenerate it over the FINAL artifact. (No-op-safe when no cert is set:
+      # it just re-signs the unchanged binary.)
+      - name: Refresh updater signature (NSIS)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $exe = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe `
+            | Select-Object -First 1
+          cargo tauri signer sign "$($exe.FullName)"
+
+      # cargo tauri build does NOT emit latest.json (that is tauri-action's
+      # job); assemble the one the updater endpoint serves ourselves. signature
+      # is the literal contents of the .sig; url points at the release asset.
+      - name: Generate update manifest (latest.json)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $exe = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe `
+            | Select-Object -First 1
+          $sig = (Get-Content "$($exe.FullName).sig" -Raw).Trim()
+          $url = "https://github.com/${{ github.repository }}/releases/download/$tag/$($exe.Name)"
+          $manifest = [ordered]@{
+            version   = $tag.TrimStart('v')
+            pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{ signature = $sig; url = $url }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path latest.json -Encoding utf8
+          Get-Content latest.json
+
+      # The MSI (the enterprise/SCCM/Intune artifact) carries no integrity
+      # artifact at all when the optional Authenticode cert is absent — publish
+      # hashes so IT can pin what they deploy. Covers every uploaded asset.
+      - name: Generate SHA256SUMS
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $assets = @(
+            Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+            Get-Item latest.json
+          )
+          $assets | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content -Path SHA256SUMS -Encoding utf8
+          Get-Content SHA256SUMS
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          files: |
+            target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe.sig
+            latest.json
+            SHA256SUMS
+          # Draft first, human publishes. Three reasons: (1) a review checkpoint
+          # for the auto-generated notes (paste the CHANGELOG entry) before any
+          # installed app can see the release; (2) drafts are not "latest", so
+          # the floating latest.json endpoint never 404s while assets attach;
+          # (3) a bad build is caught before the silent auto-updater ships it.
+          draft: true
+          generate_release_notes: true
+          # Every glob above is mandatory: a renamed bundle path must fail the
+          # release, not silently publish without the installer/.sig/manifest.
+          fail_on_unmatched_files: true

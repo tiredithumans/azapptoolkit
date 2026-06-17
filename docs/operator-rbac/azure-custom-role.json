@@ -1,0 +1,22 @@
+{
+  "Name": "azapptoolkit Operator (Azure resources)",
+  "IsCustom": true,
+  "Description": "Read managed-identity role assignments (ARM) and manage Key Vault secrets for azapptoolkit. Pairs with the Entra custom directory role and the Exchange Administrator role; see OPERATOR-ROLES.md.",
+  "AssignableScopes": [
+    "/subscriptions/<SUBSCRIPTION_ID>"
+  ],
+  "Actions": [
+    "Microsoft.Resources/subscriptions/read",
+    "Microsoft.Authorization/roleAssignments/read",
+    "Microsoft.Authorization/roleDefinitions/read",
+    "Microsoft.KeyVault/vaults/read"
+  ],
+  "NotActions": [],
+  "DataActions": [
+    "Microsoft.KeyVault/vaults/secrets/readMetadata/action",
+    "Microsoft.KeyVault/vaults/secrets/getSecret/action",
+    "Microsoft.KeyVault/vaults/secrets/setSecret/action",
+    "Microsoft.KeyVault/vaults/secrets/deleteSecret/action"
+  ],
+  "NotDataActions": []
+}

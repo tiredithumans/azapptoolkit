@@ -1,0 +1,14 @@
+[build]
+target = "index.html"
+dist = "dist"
+# Optimization is selected by the caller's `--release` flag (the Tauri
+# `beforeBuildCommand` passes it for packaged builds; `trunk serve` omits it
+# for fast dev rebuilds), so there is no `release` default to set here.
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 5173
+open = false
+
+[watch]
+ignore = ["dist"]
