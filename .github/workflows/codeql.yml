@@ -1,0 +1,78 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly re-scan so new CodeQL query/extractor releases reach old code.
+    # Wednesday, a distinct slot from ci.yml's Monday cron, so the two heavy
+    # workflows don't pile onto the same scheduled tick.
+    - cron: "0 6 * * 3"
+
+# A new push to the same branch/PR supersedes the in-flight run (mirrors ci.yml).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege token, declared explicitly. analyze needs security-events:write
+# to upload SARIF; actions:read lets the action read workflow run metadata.
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze (rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Rust is supported only in build-mode `none`, which still runs build.rs +
+      # macro expansion via rust-analyzer. Database quality therefore hinges on a
+      # correctly-prepared source tree: the pinned toolchain, the wasm32 target
+      # (so the excluded web-rs crate resolves), native deps, a frontend-dist
+      # stub, and pre-fetched dependencies. All of that prep runs BEFORE init.
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: |
+            .
+            apps/desktop/web-rs
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: just
+      - name: Install system deps (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
+      # `tauri::generate_context!` (src-tauri/src/lib.rs) panics at COMPILE time if
+      # apps/desktop/web-rs/dist is absent. The extractor expands that macro, so
+      # without the stub the whole src-tauri crate (every command handler) fails
+      # to extract and its calls get no target. This is the single biggest lever.
+      - name: Stub frontend dist
+        run: just _stub-frontend-dist
+      # Pre-fetch both lockfiles (the root workspace and the workspace-excluded
+      # web-rs, incl. its git-pinned tauri-sys) so the extractor resolves call
+      # targets into dependencies instead of leaving them unresolved.
+      - name: Fetch dependencies
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path apps/desktop/web-rs/Cargo.toml --target wasm32-unknown-unknown
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@c35d1b164463ee62a100735382aaaa525c5d3496 # codeql-bundle-v2.25.6
+        with:
+          languages: rust
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@c35d1b164463ee62a100735382aaaa525c5d3496 # codeql-bundle-v2.25.6
+        with:
+          category: "/language:rust"

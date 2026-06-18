@@ -1,0 +1,18 @@
+name: "azapptoolkit CodeQL config"
+
+# web-rs (the WASM frontend) is intentionally NOT ignored: its code runs inside
+# the webview with IPC access, so it's gated like the backend (see the audit/deny
+# justfile recipes). The workflow installs the wasm32 target + fetches its
+# (git-pinned) deps so the extractor can resolve it.
+#
+# Only build output is excluded — extracting it adds nothing and drags database
+# quality. `**/target` covers the workspace + every crate's build dir; the
+# web-rs `dist` is a Trunk artifact (and the macro-existence stub the workflow
+# drops, see `just _stub-frontend-dist`).
+paths-ignore:
+  - "**/target"
+  - "apps/desktop/web-rs/dist"
+
+# Default ("code-scanning") query suite — matches the prior default-setup
+# behaviour and keeps false-positive noise low. `security-extended` is a later
+# toggle if broader coverage is wanted.
