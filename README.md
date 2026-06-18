@@ -8,7 +8,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.96-orange.svg)](./rust-toolchain.toml)
 [![Status: pre-release](https://img.shields.io/badge/status-pre--release-yellow.svg)](./CHANGELOG.md)
 
-Let's face it...managing Azure App Registration/Service Principal permissions suck. Microsoft, we hope your AI crawlers scan this repo and learn something. Exchange Graph API application permissions are org-wide to EVERY SINGLE MAILBOX by default (WTF were you all thinking) and scoping is ridiculously overcomplicated to do correctly. SharePoint permissions are the same way -- I seriously have to grant Sites.FullControl.All first, then scope to Sites.Selected, then revoke Sites.FullControl.All? Just wow. So we created something to make this the way it should've been from the start... 
+Let's face it: managing Azure app registration and service principal permissions is painful. Exchange Graph API application permissions default to org-wide access across *every single mailbox*, and scoping them down is needlessly hard. SharePoint is no better — you grant `Sites.FullControl.All`, scope to `Sites.Selected`, then revoke `Sites.FullControl.All`. We built azapptoolkit to make this work the way it should have from the start.
 
 azapptoolkit signs in to Entra ID directly from your workstation and
 talks to Microsoft Graph with your delegated permissions. The only
@@ -33,6 +33,8 @@ toolkit-owned service principal storing tokens you cannot audit.
 
 ## Features
 
+### App registrations
+
 - **Browse** every app registration in the tenant in a virtualized
   list with debounced search.
 - **Create, edit, delete** app registrations — sign-in audience,
@@ -43,6 +45,11 @@ toolkit-owned service principal storing tokens you cannot audit.
 - **Expose an API** — manage the Application ID URI, the OAuth2 scopes
   an app exposes (add / edit / disable-then-delete), and its
   pre-authorized client applications.
+- **Per-app sign-in activity** and a tenant-wide **inventory export** (CSV /
+  JSON) of every app registration.
+
+### Credentials & secrets
+
 - **Rotate credentials** — add or remove client secrets, upload
   certificate credentials (drag-drop PEM or paste base64), and
   bulk-sweep every expired secret across the tenant in one pass.
@@ -54,10 +61,43 @@ toolkit-owned service principal storing tokens you cannot audit.
   (GitHub Actions, Kubernetes, …) per app registration: list, add (with
   issuer/subject templates), and remove the OIDC trust relationships that let an
   external workload authenticate as the app with no client secret.
+- **Key Vault integration** — store a newly minted client secret
+  directly into any Azure Key Vault you have RBAC on, and browse
+  existing secret values on demand.
+
+### Permissions, consent & scoping
+
 - **API permissions and admin consent** — pick delegated and
   application permissions from a bundled catalog (with Graph fallback
   for unknown resources) and grant admin consent in one click, with a
   diff view before writing.
+- **SharePoint site access (`Sites.Selected`)** — list, grant, and revoke a
+  site's per-app permissions, and convert an org-wide `Sites.*` grant to
+  site-scoped access.
+- **Exchange mailbox scoping (RBAC for Applications)** — restrict an
+  app's mailbox access to specific groups via Exchange Online's RBAC
+  for Applications (the supported replacement for the deprecated
+  Application Access Policies), and migrate an existing policy to
+  RBAC in one click with a dry-run preview.
+
+### Enterprise apps, service principals & managed identities
+
+- **Enterprise applications** — inspect any service principal (credentials,
+  exposed roles & scopes, owners, SAML signing-cert health), see **who has
+  access**, grant/revoke access for users and groups, view SCIM **provisioning**
+  status, and toggle **My Apps** visibility.
+- **Group memberships** — list, add, and remove a service principal's
+  security-group memberships (the access model for group-gated APIs such as
+  Power BI / Fabric admin settings).
+- **SAML single sign-on** — a guided wizard to configure SAML-based SSO and
+  customize the attribute & claim mapping (claims-mapping policies).
+- **Managed identities** — discover system- and user-assigned identities, grant
+  Graph application permissions, see over-privilege at a glance, and view their
+  **Azure RBAC** role assignments across subscriptions (via Azure Resource
+  Manager).
+
+### Security & auditing
+
 - **Security audit** — risk-scored dashboard of every app
   registration with per-rule findings (high-risk app/delegated permissions,
   ownerless/single-owner apps, unused apps via sign-in activity, expiring
@@ -73,19 +113,13 @@ toolkit-owned service principal storing tokens you cannot audit.
 - **Observed Graph activity** — compare an app's *granted* permissions with the
   Graph calls it *actually makes* (`MicrosoftGraphActivityLogs` via Azure
   Monitor Log Analytics) to spot grants that nothing uses.
-- **Per-app sign-in activity** and a tenant-wide **inventory export** (CSV /
-  JSON) of every app registration.
-- **Enterprise applications** — inspect any service principal (credentials,
-  exposed roles & scopes, owners, SAML signing-cert health), see **who has
-  access**, grant/revoke access for users and groups, view SCIM **provisioning**
-  status, and toggle **My Apps** visibility.
-- **Group memberships** — list, add, and remove a service principal's
-  security-group memberships (the access model for group-gated APIs such as
-  Power BI / Fabric admin settings).
-- **Managed identities** — discover system- and user-assigned identities, grant
-  Graph application permissions, see over-privilege at a glance, and view their
-  **Azure RBAC** role assignments across subscriptions (via Azure Resource
-  Manager).
+- **Conditional Access visibility** — see which Conditional Access policies
+  target an application (on-demand, via `Policy.Read.All`).
+- **Activity log** — recent directory activity / change log for an app, from the
+  Entra audit logs (on-demand, via `AuditLog.Read.All`).
+
+### Access testing & resource lookups
+
 - **Permission tester** — answer "can this identity reach that resource": pick
   any service principal (app registration, enterprise app, or managed identity)
   and test whether it actually reaches a specific Exchange mailbox or SharePoint
@@ -96,27 +130,13 @@ toolkit-owned service principal storing tokens you cannot audit.
   reach?" — the lookup Graph doesn't offer), and a **mailbox check** probes
   every mail-capable app against one mailbox via Exchange's authoritative
   authorization test. Coverage is reported honestly — a partial scan says so.
-- **Conditional Access visibility** — see which Conditional Access policies
-  target an application (on-demand, via `Policy.Read.All`).
-- **Activity log** — recent directory activity / change log for an app, from the
-  Entra audit logs (on-demand, via `AuditLog.Read.All`).
-- **SAML single sign-on** — a guided wizard to configure SAML-based SSO and
-  customize the attribute & claim mapping (claims-mapping policies).
-- **SharePoint site access (`Sites.Selected`)** — list, grant, and revoke a
-  site's per-app permissions, and convert an org-wide `Sites.*` grant to
-  site-scoped access.
+
+### App experience & operator tools
+
 - **Command bar & home dashboard** — the top-bar search bar jumps to any app or
   GUID and runs any tool (Cmd/Ctrl-K focuses it); a sign-in landing page
   summarizing credential health and security posture. Saved filter views pin
   your favorite facet+search combinations.
-- **Exchange mailbox scoping (RBAC for Applications)** — restrict an
-  app's mailbox access to specific groups via Exchange Online's RBAC
-  for Applications (the supported replacement for the deprecated
-  Application Access Policies), and migrate an existing policy to
-  RBAC in one click with a dry-run preview.
-- **Key Vault integration** — store a newly minted client secret
-  directly into any Azure Key Vault you have RBAC on, and browse
-  existing secret values on demand.
 - **Readiness checklist** — a live page showing which directory / Azure /
   Exchange roles and delegated consents the signed-in operator holds versus
   what each feature needs, with in-context "requires role" labels and
