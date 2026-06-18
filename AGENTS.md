@@ -16,12 +16,25 @@ Deep subsystem detail lives in `docs/architecture/` — this file keeps the inva
 | **Verify** | `just verify` (fmt → clippy → test → web-fmt-check → web-test → web-build) |
 | **Workspace** | 9 crates (8 in `crates/` + `src-tauri`); frontend (`web-rs`) excluded, builds via Trunk. |
 
+## Skills
+
+| Skill | Trigger text | What it does |
+|-------|-------------|--------------|
+| **ship** | `"ship"`, `"land this"` | Commit → push → PR → merge → cleanup (already present). |
+| **feature** | `"feature X"`, `"add feature X"` | Scaffold a new branch, backend command stub, frontend binding, and verify. |
+| **review** | `"review"`, `"approve this PR"` | Diff base → head, run verify gates, check conventional-commits & tenant-cache footguns. |
+| **release** | `"release"`, `"bump version"` | Bump version, finalize CHANGELOG.md `[Unreleased]` → `[vX.Y.Z]`, tag and push. |
+| **debug** | `"debug X"` | Diagnose Tauri + Leptos WASM issues — walks backend, frontend, auth layers. |
+
+Skills live in `.claude/skills/`. Load a skill with `skill: <name>`.
+
 Key files/docs to read before editing:
 - **Adding a command?** `src-tauri/src/lib.rs` (handler list) + `web-rs/src/bindings/`.
 - **Auth / token / consent?** [docs/architecture/auth-and-consent.md](docs/architecture/auth-and-consent.md) → `src-tauri/src/state.rs` + `crates/azapptoolkit-auth/src/token_cache.rs`.
 - **Caches, list commands, search?** [docs/architecture/caching-and-search.md](docs/architecture/caching-and-search.md).
 - **Audit scoring, remediations, Exchange/SharePoint?** [docs/architecture/scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 - **DR backup/restore?** [docs/architecture/backup-and-restore.md](docs/architecture/backup-and-restore.md) → `crates/azapptoolkit-dto/src/backup.rs` + `src-tauri/src/commands/backup.rs`.
+- **Debugging?** Use the `debug` skill — walks Rust backend, WASM frontend, and auth layers.
 - **New dependency?** Check `Cargo.lock` for transitive conflicts.
 - **WASM code?** `crates/azapptoolkit-core/src/lib.rs` for `#[cfg(not(target_arch = "wasm32"))]`.
 
