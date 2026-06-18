@@ -38,7 +38,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
         with:
           targets: wasm32-unknown-unknown
-          components: rustfmt, clippy
+          # rust-src + rust-analyzer are what actually drive extraction quality.
+          # The extractor's rust-analyzer defaults proc_macro_server to "sysroot"
+          # — without the `rust-analyzer` component that server binary is absent,
+          # so it resolves to None and proc-macro expansion is off; without
+          # `rust-src` the std sources are missing so even builtin macros don't
+          # expand. Either gap floods the log with "macro expansion failed"
+          # (assert!/format!/serde json!/Leptos view!) and starves call-target
+          # resolution (the 39% metric). clippy/rustfmt aren't used by CodeQL.
+          components: rust-src, rust-analyzer
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: |
@@ -52,9 +60,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
       # `tauri::generate_context!` (src-tauri/src/lib.rs) panics at COMPILE time if
-      # apps/desktop/web-rs/dist is absent. The extractor expands that macro, so
-      # without the stub the whole src-tauri crate (every command handler) fails
-      # to extract and its calls get no target. This is the single biggest lever.
+      # apps/desktop/web-rs/dist is absent. With proc-macro expansion now enabled
+      # (see the rust-analyzer component above) the extractor DOES expand that
+      # proc-macro, so the stub is required or src-tauri's expansion would fail.
       - name: Stub frontend dist
         run: just _stub-frontend-dist
       # Pre-fetch both lockfiles (the root workspace and the workspace-excluded

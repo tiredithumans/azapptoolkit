@@ -307,10 +307,13 @@ exact flags — don't hand-type raw `cargo` invocations that could drift from th
    policy for both trees, config in `deny.toml`).
 6. **CodeQL** *(GitHub-side, not a local `just` gate)* — `.github/workflows/codeql.yml` runs the CodeQL
    advanced setup on every push/PR to `main` + weekly. Rust is **build-mode `none`** only; the workflow
-   prepares the extraction env (pinned 1.96 toolchain, wasm32 target, native deps, `just
-   _stub-frontend-dist` so `generate_context!` expands, `cargo fetch` both lockfiles) so call targets and
-   types resolve. Config: `.github/codeql/codeql-config.yml` (web-rs **included**; only build dirs
-   ignored). Don't re-enable repo-Settings **default setup** — advanced + default can't coexist.
+   prepares the extraction env so call targets/types resolve. The quality lever is the toolchain
+   **`rust-src` + `rust-analyzer` components**: without them the extractor's rust-analyzer has no sysroot
+   proc-macro server (`proc_macro_server: None`) and no std sources, so macro expansion fails wholesale
+   and the "% calls with call target" metric collapses. The `just _stub-frontend-dist` step is required
+   because expansion then reaches `generate_context!` (panics without `dist`). Config:
+   `.github/codeql/codeql-config.yml` (web-rs **included**; only build dirs ignored). Don't re-enable
+   repo-Settings **default setup** — advanced + default can't coexist.
 
 For a behavior change you can't prove with a unit test, run `just dev` and exercise the affected view.
 
