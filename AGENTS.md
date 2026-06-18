@@ -77,7 +77,7 @@ apps/desktop/
 
 docs/DEVELOPMENT.md                  # build, test, package, release, updater keys, CI
 docs/architecture/                   # agent/developer deep-dives (auth-consent, caching-search, scoping-audit)
-.github/workflows/                   # ci.yml (fmt/clippy/test/web/audit/deny), release.yml (Windows MSI+NSIS)
+.github/workflows/                   # ci.yml (fmt/clippy/test/web/audit/deny), release.yml (Windows MSI+NSIS), codeql.yml (CodeQL advanced setup, Rust build-mode none); config in .github/codeql/
 ```
 
 ## Common patterns
@@ -305,6 +305,12 @@ exact flags — don't hand-type raw `cargo` invocations that could drift from th
 5. **Dependency audit** *(optional locally; CI runs it on every PR + weekly)* — `just audit` +
    `just web-audit` (RustSec, both lockfiles) + `just deny` + `just web-deny` (license/source/bans
    policy for both trees, config in `deny.toml`).
+6. **CodeQL** *(GitHub-side, not a local `just` gate)* — `.github/workflows/codeql.yml` runs the CodeQL
+   advanced setup on every push/PR to `main` + weekly. Rust is **build-mode `none`** only; the workflow
+   prepares the extraction env (pinned 1.96 toolchain, wasm32 target, native deps, `just
+   _stub-frontend-dist` so `generate_context!` expands, `cargo fetch` both lockfiles) so call targets and
+   types resolve. Config: `.github/codeql/codeql-config.yml` (web-rs **included**; only build dirs
+   ignored). Don't re-enable repo-Settings **default setup** — advanced + default can't coexist.
 
 For a behavior change you can't prove with a unit test, run `just dev` and exercise the affected view.
 
