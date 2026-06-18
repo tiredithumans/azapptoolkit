@@ -30,11 +30,16 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      # Rust is supported only in build-mode `none`, which still runs build.rs +
-      # macro expansion via rust-analyzer. Database quality therefore hinges on a
-      # correctly-prepared source tree: the pinned toolchain, the wasm32 target
-      # (so the excluded web-rs crate resolves), native deps, a frontend-dist
-      # stub, and pre-fetched dependencies. All of that prep runs BEFORE init.
+      # Rust is supported only in build-mode `none`. The prep below (pinned
+      # toolchain, wasm32 target for the excluded web-rs crate, native deps,
+      # frontend-dist stub, pre-fetched deps) is correct hygiene and future-proofs
+      # extraction, but DOES NOT improve the current quality metric: CodeQL
+      # 2.25.6's Rust extractor does not expand macros — proc OR builtin — for this
+      # codebase regardless of config, so "% calls with call target" sits at ~39%
+      # (a known extractor limit; cf. github/codeql#20643, #20659). Confirmed by
+      # forcing sysroot/proc_macro_server to real paths — byte-identical result.
+      # Revisit when a newer CodeQL bundle ships working Rust macro expansion
+      # (branch ci/codeql-proc-macro-expansion holds the setup to re-apply).
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
         with:
           targets: wasm32-unknown-unknown
@@ -52,9 +57,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
       # `tauri::generate_context!` (src-tauri/src/lib.rs) panics at COMPILE time if
-      # apps/desktop/web-rs/dist is absent. The extractor expands that macro, so
-      # without the stub the whole src-tauri crate (every command handler) fails
-      # to extract and its calls get no target. This is the single biggest lever.
+      # apps/desktop/web-rs/dist is absent. Inert today (2.25.6 doesn't expand the
+      # macro anyway) but kept so extraction stays clean once a CodeQL release does.
       - name: Stub frontend dist
         run: just _stub-frontend-dist
       # Pre-fetch both lockfiles (the root workspace and the workspace-excluded
