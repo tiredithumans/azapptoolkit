@@ -306,11 +306,15 @@ exact flags — don't hand-type raw `cargo` invocations that could drift from th
    `just web-audit` (RustSec, both lockfiles) + `just deny` + `just web-deny` (license/source/bans
    policy for both trees, config in `deny.toml`).
 6. **CodeQL** *(GitHub-side, not a local `just` gate)* — `.github/workflows/codeql.yml` runs the CodeQL
-   advanced setup on every push/PR to `main` + weekly. Rust is **build-mode `none`** only; the workflow
-   prepares the extraction env (pinned 1.96 toolchain, wasm32 target, native deps, `just
-   _stub-frontend-dist` so `generate_context!` expands, `cargo fetch` both lockfiles) so call targets and
-   types resolve. Config: `.github/codeql/codeql-config.yml` (web-rs **included**; only build dirs
-   ignored). Don't re-enable repo-Settings **default setup** — advanced + default can't coexist.
+   advanced setup on every push/PR to `main` + weekly, for its **security queries**. Rust is
+   **build-mode `none`** only. **Known limitation — don't re-chase it:** CodeQL 2.25.6's Rust extractor
+   does not expand macros (proc *or* builtin) for this codebase regardless of config, so the "Low Rust
+   analysis quality" annotation (~39% calls-with-call-target) is expected and unfixable today
+   (github/codeql#20643, #20659). It's a non-failing annotation, not a scan failure, and CodeQL isn't one
+   of the required checks. The env prep (toolchain, wasm32, dist stub, `cargo fetch`) is hygiene/future-
+   proofing, NOT a quality lever — proven inert by forcing sysroot/proc-macro-server to real paths.
+   Re-apply branch `ci/codeql-proc-macro-expansion` once a newer bundle ships working expansion. Config:
+   `.github/codeql/codeql-config.yml` (web-rs **included**). Default setup is `not-configured`, no conflict.
 
 For a behavior change you can't prove with a unit test, run `just dev` and exercise the affected view.
 
