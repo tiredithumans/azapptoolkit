@@ -73,6 +73,27 @@ jobs:
           cargo fetch --locked
           cargo fetch --locked --manifest-path apps/desktop/web-rs/Cargo.toml --target wasm32-unknown-unknown
 
+      # EXPERIMENT: the extractor's rust-analyzer auto-discovery resolved
+      # `sysroot: None, sysroot_src: None, proc_macro_server: None`, so macros
+      # don't expand. config.rs (v2.25.6) reads CODEQL_EXTRACTOR_RUST_* env vars,
+      # so point them at the toolchain sysroot + the rust-analyzer component's
+      # proc-macro server explicitly, bypassing the failing auto-discovery.
+      - name: Point CodeQL's rust-analyzer at the toolchain sysroot
+        run: |
+          SYSROOT=$(rustc --print sysroot)
+          SRV=$(find "$SYSROOT" -name 'rust-analyzer-proc-macro-srv' -type f 2>/dev/null | head -1)
+          echo "sysroot=$SYSROOT"
+          echo "proc-macro-srv=$SRV"
+          {
+            echo "CODEQL_EXTRACTOR_RUST_SYSROOT=$SYSROOT"
+            echo "CODEQL_EXTRACTOR_RUST_SYSROOT_SRC=$SYSROOT/lib/rustlib/src/rust/library"
+          } >> "$GITHUB_ENV"
+          if [ -n "$SRV" ]; then
+            echo "CODEQL_EXTRACTOR_RUST_PROC_MACRO_SERVER=$SRV" >> "$GITHUB_ENV"
+          else
+            echo "::warning::rust-analyzer-proc-macro-srv not found under $SYSROOT"
+          fi
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@c35d1b164463ee62a100735382aaaa525c5d3496 # codeql-bundle-v2.25.6
         with:
