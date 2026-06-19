@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-06-19
+
 ### Added
 
 - Browser-based **GUI functionality tests** for the front-end. Real Leptos views
