@@ -31,6 +31,17 @@ the project adheres to
 
 ### Changed
 
+- **Front-end list-view maintainability refactor** (internal; no behavior change).
+  The App Registration and Enterprise Application lists now share a `ListScaffold`
+  component (header + search + filter drawer chrome) and a `use_filtered_list`
+  hook (the layered search/facet filter memos, per-facet counts, and export
+  snapshot), replacing two near-identical hand-rolled copies. A new `use_command`
+  hook collapses the busy/error/tenant/spawn boilerplate that mutation handlers
+  repeated. The 1.2k-line `audit_view` and 1k-line `managed_identities` views were
+  each split into a module directory, and the IPC bindings' duplicated argument
+  structs were centralized in `bindings/common.rs` alongside shared list constants
+  in `constants.rs`.
+
 - AAD token-endpoint failures now log the request **correlation ID** (the GUID
   Microsoft support needs to trace an issue) alongside the OAuth/AADSTS code,
   while still keeping the raw `error_description` — which can embed tenant/user
