@@ -3,6 +3,7 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, AuthError>;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum AuthError {
     #[error("not signed in")]
     NotSignedIn,
@@ -37,7 +38,7 @@ pub enum AuthError {
     #[error("state mismatch on redirect — possible CSRF")]
     StateMismatch,
 
-    #[error("user cancelled sign-in")]
+    #[error("user cancelled sign-in at the OS/browser level")]
     Cancelled,
 
     #[error("keyring: {0}")]

@@ -880,7 +880,8 @@ async fn score_one(
     // advisory in `issues` for export/detail. Outer `Some` = report available.
     item.sign_in_report_available = last_sign_in.is_some();
     item.last_sign_in = last_sign_in.flatten();
-    if let Some((issue, rec)) = unused_app_advisory(last_sign_in, app.created_date_time, now) {
+    if let Some((issue, rec)) = unused_app_advisory(last_sign_in.into(), app.created_date_time, now)
+    {
         item.unused = true;
         item.issues.push(issue);
         item.recommendations.push(rec);

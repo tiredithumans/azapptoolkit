@@ -37,6 +37,13 @@ impl CacheKind {
         CacheKind::Lists,
     ];
 
+    /// Pins `ALL`'s length so resizing the per-kind bucket array and `ALL`
+    /// remain one deliberate edit. Stable Rust can't count enum variants at
+    /// compile time, so this can't by itself prove `ALL` lists *every* variant —
+    /// the exhaustive `match` in `CacheConfig::ttl_for` (no wildcard) is what
+    /// forces a new variant to be handled.
+    const _ALL_LEN: () = assert!(CacheKind::ALL.len() == 4);
+
     /// Index into the per-kind bucket array (matches enum declaration order).
     fn idx(self) -> usize {
         self as usize

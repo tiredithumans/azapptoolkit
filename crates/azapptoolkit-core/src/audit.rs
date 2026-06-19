@@ -463,17 +463,29 @@ impl ListCredentialStatus {
         certs: &[KeyCredential],
         now: DateTime<Utc>,
     ) -> Self {
-        let days: Vec<i64> = passwords
+        let mut has_any = false;
+        let mut any_active = false;
+        let mut any_expiring = false;
+
+        for cred in passwords
             .iter()
             .filter_map(|c| c.end_date_time)
             .chain(certs.iter().filter_map(|c| c.end_date_time))
-            .map(|d| (d - now).num_days())
-            .collect();
-        if days.is_empty() {
+        {
+            has_any = true;
+            let days = (cred - now).num_days();
+            if days > EXPIRY_WARNING_DAYS {
+                any_active = true;
+            } else if (0..=EXPIRY_WARNING_DAYS).contains(&days) {
+                any_expiring = true;
+            }
+        }
+
+        if !has_any {
             ListCredentialStatus::None
-        } else if days.iter().any(|&d| d > EXPIRY_WARNING_DAYS) {
+        } else if any_active {
             ListCredentialStatus::Active
-        } else if days.iter().any(|&d| (0..=EXPIRY_WARNING_DAYS).contains(&d)) {
+        } else if any_expiring {
             ListCredentialStatus::Expiring
         } else {
             ListCredentialStatus::Expired
@@ -1383,27 +1395,33 @@ fn is_long_lived(c: &CredentialSummary) -> bool {
     }
 }
 
+/// Encodes the three states of sign-in activity report data for unused-app
+/// detection.  Replaces `Option<Option<DateTime<Utc>>>` with a named,
+/// self-documenting type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignInStatus {
+    /// The sign-in report was unavailable (no `AuditLog.Read.All` / no Entra ID
+    /// P1-P2 / call failed). Never flag without data.
+    Unavailable,
+    /// Report available but no sign-in recorded.
+    NoneRecorded,
+    /// Last observed sign-in timestamp.
+    LastSeen(DateTime<Utc>),
+}
+
 /// Advisory (issue, recommendation) when an app appears unused per the sign-in
 /// activity report. Net-new (no PowerShell origin); kept out of
 /// [`score_application`] because the sign-in data is fetched separately and is
 /// optional. Adds no risk score.
-///
-/// `last_sign_in` encodes report availability:
-/// - `None` — the report was unavailable (no `AuditLog.Read.All` / no Entra ID
-///   P1-P2 / call failed). Returns `None`: never flag without data.
-/// - `Some(Some(dt))` — last observed sign-in; flagged when older than
-///   [`UNUSED_APP_DAYS`].
-/// - `Some(None)` — report available but no sign-in recorded; flagged only when
-///   the app is older than [`UNUSED_APP_DAYS`] (so brand-new apps aren't flagged).
 pub fn unused_app_advisory(
-    last_sign_in: Option<Option<DateTime<Utc>>>,
+    sign_in_status: SignInStatus,
     created: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> Option<(String, String)> {
-    let observed = last_sign_in?;
     let rec = "Confirm the application is still needed; disable or delete it if not".to_string();
-    match observed {
-        Some(dt) => {
+    match sign_in_status {
+        SignInStatus::Unavailable => None,
+        SignInStatus::LastSeen(dt) => {
             let days = (now - dt).num_days();
             (days > UNUSED_APP_DAYS).then(|| {
                 (
@@ -1412,7 +1430,7 @@ pub fn unused_app_advisory(
                 )
             })
         }
-        None => {
+        SignInStatus::NoneRecorded => {
             let old_enough = created
                 .map(|c| (now - c).num_days() > UNUSED_APP_DAYS)
                 .unwrap_or(false);
@@ -1422,6 +1440,18 @@ pub fn unused_app_advisory(
                     rec,
                 )
             })
+        }
+    }
+}
+
+/// Convert `Option<Option<DateTime<Utc>>>` into [`SignInStatus`] for callers
+/// that still receive the double-Option from DTOs.
+impl From<Option<Option<DateTime<Utc>>>> for SignInStatus {
+    fn from(value: Option<Option<DateTime<Utc>>>) -> Self {
+        match value {
+            None => SignInStatus::Unavailable,
+            Some(None) => SignInStatus::NoneRecorded,
+            Some(Some(dt)) => SignInStatus::LastSeen(dt),
         }
     }
 }
@@ -1774,21 +1804,39 @@ mod tests {
         let created_old = Some(now() - Duration::days(200));
         let created_new = Some(now() - Duration::days(10));
         // Report unavailable → never flag, regardless of age.
-        assert!(unused_app_advisory(None, created_old, now()).is_none());
+        assert!(unused_app_advisory(SignInStatus::Unavailable, created_old, now()).is_none());
         // Recent sign-in → not flagged.
-        assert!(
-            unused_app_advisory(Some(Some(now() - Duration::days(10))), created_old, now())
-                .is_none()
-        );
+        assert!(unused_app_advisory(
+            SignInStatus::LastSeen(now() - Duration::days(10)),
+            created_old,
+            now()
+        )
+        .is_none());
         // Old sign-in → flagged.
-        let flagged =
-            unused_app_advisory(Some(Some(now() - Duration::days(200))), created_old, now());
+        let flagged = unused_app_advisory(
+            SignInStatus::LastSeen(now() - Duration::days(200)),
+            created_old,
+            now(),
+        );
         assert!(flagged.is_some_and(|(i, _)| i.starts_with("No sign-in for")));
         // No sign-in recorded + old app → flagged.
-        assert!(unused_app_advisory(Some(None), created_old, now())
-            .is_some_and(|(i, _)| i.starts_with("No sign-in activity recorded")));
+        assert!(
+            unused_app_advisory(SignInStatus::NoneRecorded, created_old, now())
+                .is_some_and(|(i, _)| i.starts_with("No sign-in activity recorded"))
+        );
         // No sign-in recorded + new app → not flagged (avoid flagging brand-new).
-        assert!(unused_app_advisory(Some(None), created_new, now()).is_none());
+        assert!(unused_app_advisory(SignInStatus::NoneRecorded, created_new, now()).is_none());
+    }
+
+    #[test]
+    fn sign_in_status_from_double_option() {
+        assert_eq!(SignInStatus::from(None), SignInStatus::Unavailable);
+        assert_eq!(SignInStatus::from(Some(None)), SignInStatus::NoneRecorded);
+        let dt = now() - Duration::days(10);
+        assert_eq!(
+            SignInStatus::from(Some(Some(dt))),
+            SignInStatus::LastSeen(dt)
+        );
     }
 
     #[test]

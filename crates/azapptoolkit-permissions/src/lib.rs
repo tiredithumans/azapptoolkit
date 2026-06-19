@@ -75,7 +75,7 @@ pub struct PermissionsCatalog {
 
 impl PermissionsCatalog {
     pub fn from_root(root: CatalogRoot) -> Self {
-        let ordered = root.resources.clone();
+        let ordered = root.resources;
         let mut by_app_id = HashMap::with_capacity(ordered.len());
         for r in &ordered {
             by_app_id.insert(r.app_id.clone(), r.clone());
@@ -174,5 +174,18 @@ mod tests {
                 "df021288-bdef-4463-88db-98f22de89214"
             )
             .is_none());
+    }
+
+    #[test]
+    fn all_resources_have_non_empty_app_id() {
+        // Regression: ensure every entry has an app_id so the HashMap index is valid.
+        let catalog = PermissionsCatalog::bundled();
+        for entry in catalog.resources() {
+            assert!(
+                !entry.app_id.is_empty(),
+                "resource entry has empty app_id: {:?}",
+                entry.display_name
+            );
+        }
     }
 }

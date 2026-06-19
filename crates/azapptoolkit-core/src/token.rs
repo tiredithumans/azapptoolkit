@@ -27,13 +27,13 @@ pub trait BearerProvider: Send + Sync {
 
 /// Test/harness provider returning a fixed string.
 pub struct StaticTokenProvider {
-    token: Arc<String>,
+    token: String,
 }
 
 impl StaticTokenProvider {
     pub fn new(token: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
-            token: Arc::new(token.into()),
+            token: token.into(),
         })
     }
 }
@@ -41,6 +41,6 @@ impl StaticTokenProvider {
 #[async_trait]
 impl BearerProvider for StaticTokenProvider {
     async fn bearer(&self) -> Result<String, String> {
-        Ok(self.token.as_ref().clone())
+        Ok(self.token.clone())
     }
 }

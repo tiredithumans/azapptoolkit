@@ -71,14 +71,11 @@ impl KeyVaultClient {
 
     pub async fn list_secrets(&self) -> Result<Vec<SecretItem>> {
         let path = "/secrets".to_string();
-        let mut out: Vec<SecretItem> = Vec::new();
-        let mut first: Paged<SecretItem> = self.get_json(&path, true).await?;
-        out.append(&mut first.value);
-        let mut next = first.next_link;
-        while let Some(link) = next.take() {
-            let page: Paged<SecretItem> = self.get_json_absolute(&link).await?;
-            out.extend(page.value);
-            next = page.next_link;
+        let mut paged: Paged<SecretItem> = self.get_json(&path, true).await?;
+        let mut out = paged.value;
+        while let Some(link) = paged.next_link.take() {
+            paged = self.get_json_absolute(&link).await?;
+            out.extend(paged.value);
         }
         Ok(out)
     }

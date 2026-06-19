@@ -87,6 +87,11 @@ struct TokenErrorBody {
     error: String,
     #[serde(default)]
     error_description: Option<String>,
+    // AAD's request-tracing GUID. Safe for operator logs (it identifies the
+    // request, not the user) and the one field Microsoft support asks for —
+    // unlike `error_description`, which embeds tenant/user GUIDs and client IPs.
+    #[serde(default)]
+    correlation_id: Option<String>,
 }
 
 impl EntraAuthService {
@@ -334,15 +339,15 @@ impl EntraAuthService {
         let bytes = resp.bytes().await?;
         if !status.is_success() {
             if let Ok(err_body) = serde_json::from_slice::<TokenErrorBody>(&bytes) {
-                // Log the full AAD payload (description + correlation id +
-                // anything else) for operators, but never surface it: AAD
-                // error_description routinely embeds tenant/user GUIDs,
-                // correlation IDs, and client IPs that should not flow into
-                // the UI or audit log.
+                // Log the OAuth error code, the AADSTS numeric code, and the
+                // correlation id for operators, but never the raw
+                // error_description: it routinely embeds tenant/user GUIDs and
+                // client IPs that should not flow into the UI or audit log.
                 tracing::warn!(
                     target: "auth",
                     aad_error = %err_body.error,
-                    aad_description = err_body.error_description.as_deref().unwrap_or(""),
+                    aad_description = redacted_aad_error(&err_body),
+                    correlation_id = err_body.correlation_id.as_deref().unwrap_or(""),
                     "AAD token endpoint rejected request"
                 );
                 return Err(classify_token_error(&err_body));
@@ -407,6 +412,7 @@ fn redacted_aad_error(body: &TokenErrorBody) -> String {
 fn extract_aadsts_code(description: &str) -> Option<String> {
     let idx = description.find("AADSTS")?;
     let tail = &description[idx + "AADSTS".len()..];
+    // A non-digit right after "AADSTS" yields no digits below → `None`.
     let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
         None
@@ -431,10 +437,17 @@ mod aad_redaction_tests {
     }
 
     #[test]
+    fn rejects_non_digit_after_aadsts() {
+        // "AADSTS" present but immediately followed by a non-digit → no code.
+        assert!(extract_aadsts_code("AADSTS: malformed, no number").is_none());
+    }
+
+    #[test]
     fn redacted_combines_oauth_and_aadsts() {
         let body = TokenErrorBody {
             error: "invalid_grant".into(),
             error_description: Some("AADSTS70008: The refresh token has expired...".into()),
+            correlation_id: None,
         };
         assert_eq!(redacted_aad_error(&body), "invalid_grant (AADSTS70008)");
     }
@@ -444,6 +457,7 @@ mod aad_redaction_tests {
         let body = TokenErrorBody {
             error: "invalid_client".into(),
             error_description: None,
+            correlation_id: None,
         };
         assert_eq!(redacted_aad_error(&body), "invalid_client");
     }
@@ -458,6 +472,7 @@ mod aad_redaction_tests {
                 "AADSTS65001: The user or administrator has not consented to use the application."
                     .into(),
             ),
+            correlation_id: None,
         };
         assert!(matches!(
             classify_token_error(&body),
@@ -469,6 +484,7 @@ mod aad_redaction_tests {
         let declined = TokenErrorBody {
             error: "invalid_grant".into(),
             error_description: Some("AADSTS65004: User declined to consent...".into()),
+            correlation_id: None,
         };
         assert!(matches!(
             classify_token_error(&declined),
@@ -477,6 +493,7 @@ mod aad_redaction_tests {
         let explicit = TokenErrorBody {
             error: "consent_required".into(),
             error_description: None,
+            correlation_id: None,
         };
         assert!(matches!(
             classify_token_error(&explicit),
@@ -491,6 +508,7 @@ mod aad_redaction_tests {
         let body = TokenErrorBody {
             error: "invalid_grant".into(),
             error_description: Some("AADSTS70008: The refresh token has expired...".into()),
+            correlation_id: None,
         };
         assert!(matches!(
             classify_token_error(&body),
@@ -503,11 +521,43 @@ mod aad_redaction_tests {
         let body = TokenErrorBody {
             error: "invalid_client".into(),
             error_description: Some("AADSTS7000215: Invalid client secret...".into()),
+            correlation_id: None,
         };
         assert!(matches!(
             classify_token_error(&body),
             AuthError::TokenExchange(_)
         ));
+    }
+}
+
+/// Parse space-delimited scope strings from a token response. When the response
+/// omits `scope` entirely (`None`), fall back to `fallback` — the scopes we
+/// requested — so a refresh that doesn't echo the grant still records what the
+/// token covers. A present-but-empty `scope` stays empty (the server said so).
+fn parse_scopes(raw: Option<&str>, fallback: &[String]) -> Vec<String> {
+    match raw {
+        Some(s) => s.split_whitespace().map(str::to_string).collect(),
+        None => fallback.to_vec(),
+    }
+}
+
+#[cfg(test)]
+mod parse_scopes_tests {
+    use super::parse_scopes;
+
+    #[test]
+    fn splits_present_scope() {
+        let fallback = vec!["req".to_string()];
+        assert_eq!(parse_scopes(Some("a b a"), &fallback), ["a", "b", "a"]);
+    }
+
+    #[test]
+    fn falls_back_only_when_scope_absent() {
+        let fallback = vec!["req".to_string()];
+        // Absent → requested scopes (a refresh that omits `scope`).
+        assert_eq!(parse_scopes(None, &fallback), ["req"]);
+        // Present-but-empty → empty (the server explicitly returned none).
+        assert!(parse_scopes(Some("   "), &fallback).is_empty());
     }
 }
 
@@ -630,11 +680,9 @@ impl EntraAuthService {
             .ok_or_else(|| AuthError::TokenExchange("id token missing oid".into()))?;
 
         let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
-        let scopes = token
-            .scope
-            .as_deref()
-            .map(|s| s.split_whitespace().map(str::to_string).collect::<Vec<_>>())
-            .unwrap_or_default();
+        // Initial sign-in: no requested-scope fallback (matches the original
+        // `unwrap_or_default`); the grant response always echoes `scope` here.
+        let scopes = parse_scopes(token.scope.as_deref(), &[]);
 
         let tenant = TenantContext {
             tenant_id: tenant_id.clone(),
@@ -709,11 +757,7 @@ impl EntraAuthService {
         }
 
         let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
-        let issued_scopes = token
-            .scope
-            .as_deref()
-            .map(|s| s.split_whitespace().map(str::to_string).collect::<Vec<_>>())
-            .unwrap_or_else(|| scopes.to_vec());
+        let issued_scopes = parse_scopes(token.scope.as_deref(), scopes);
 
         if let Some(refresh) = token.refresh_token {
             save_refresh_token(&tenant.tenant_id, &tenant.account_oid, &refresh)?;
@@ -860,11 +904,7 @@ impl EntraAuthService {
         };
 
         let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
-        let issued_scopes = token
-            .scope
-            .as_deref()
-            .map(|s| s.split_whitespace().map(str::to_string).collect::<Vec<_>>())
-            .unwrap_or_else(|| scopes.to_vec());
+        let issued_scopes = parse_scopes(token.scope.as_deref(), scopes);
 
         if let Some(refresh) = token.refresh_token {
             // Blocking keyring write — off the async worker (see the read above).

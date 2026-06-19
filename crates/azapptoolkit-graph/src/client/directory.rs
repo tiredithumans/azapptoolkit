@@ -81,37 +81,22 @@ impl GraphClient {
     /// silently truncating an already-partial result, so the caller never
     /// mistakes "lost auth mid-scan" for "no policies".
     pub async fn list_conditional_access_policies(&self) -> Result<Vec<ConditionalAccessPolicy>> {
-        // A small directory still has very few CA policies; this cap exists only
-        // to bound a pathological/cyclic nextLink, never legitimate paging.
-        const MAX_PAGES: usize = 200;
-
         let token = self.policy_token()?;
         let url = format!("{}/identity/conditionalAccess/policies", self.base_url);
 
-        let mut page: Paged<ConditionalAccessPolicy> = match self.scoped_get(token, &url).await {
-            Ok(p) => p,
-            Err(GraphError::NotFound(_)) => return Ok(Vec::new()),
-            Err(e) => return Err(e),
-        };
-        let mut out = Vec::new();
-        out.append(&mut page.items);
-        let mut pages = 1;
-        while let Some(next) = page.next_link.take() {
-            if !same_origin(&self.base_url, &next) {
-                return Err(GraphError::Protocol(
-                    "refusing to follow nextLink to a different origin".into(),
-                ));
-            }
-            if pages >= MAX_PAGES {
-                return Err(GraphError::Protocol(
-                    "conditional-access paging exceeded the page limit".into(),
-                ));
-            }
-            page = self.scoped_get(token, &next).await?;
-            out.append(&mut page.items);
-            pages += 1;
+        match self.scoped_get(token, &url).await {
+            Ok(page) => self
+                .collect_pages_from(page, |u| async move { self.scoped_get(token, &u).await })
+                .await
+                .map_err(|e| match e {
+                    GraphError::NotFound(_) => {
+                        GraphError::NotFound("conditional-access policies".into())
+                    }
+                    _ => e,
+                }),
+            Err(GraphError::NotFound(_)) => Ok(Vec::new()),
+            Err(e) => Err(e),
         }
-        Ok(out)
     }
 
     /// The signed-in user's **active** directory-role display names (e.g.
@@ -253,19 +238,17 @@ impl GraphClient {
     pub async fn list_service_principal_sign_in_activities(
         &self,
     ) -> Result<Vec<ServicePrincipalSignInActivity>> {
-        // Bounds a pathological/cyclic nextLink; the report is far smaller in practice.
-        const MAX_PAGES: usize = 200;
-
         let token = self.audit_log_token()?;
+
+        const MAX_PAGES: usize = 200;
         let mut url = format!(
             "{}/reports/servicePrincipalSignInActivities?$select=appId,lastSignInActivity",
             self.beta_base()
         );
         let mut out = Vec::new();
         let mut pages = 0usize;
+
         loop {
-            // Never send the AuditLog bearer to a host other than the Graph origin
-            // (the beta endpoint shares it), and never spin unbounded on a cyclic link.
             if !same_origin(&self.base_url, &url) {
                 return Err(GraphError::Protocol(
                     "refusing to follow nextLink to a different origin".into(),
@@ -276,8 +259,6 @@ impl GraphClient {
                     "sign-in activity paging exceeded the page limit".into(),
                 ));
             }
-            // Single-shot scoped GET (no retry, like the rest of this report
-            // path): an optional report whose failure is handled, not retried.
             let page: Paged<ServicePrincipalSignInActivity> = self.scoped_get(token, &url).await?;
             out.extend(page.items);
             pages += 1;
