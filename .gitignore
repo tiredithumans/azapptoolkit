@@ -33,6 +33,11 @@ coverage.xml
 target/
 Cargo.lock.bak
 
+# wasm-bindgen-test browser config for `just web-itest` — per-developer and holds
+# an absolute browser path, so it is never committed. CI uses the runner's Chrome
+# on $PATH and needs no such file.
+apps/desktop/web-rs/webdriver.json
+
 # Node / Tauri
 node_modules/
 dist/

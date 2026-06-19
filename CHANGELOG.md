@@ -19,7 +19,8 @@ the project adheres to
   command paths), the readiness checklist, the App Registration detail pane, the
   Key Vault secret browser, the streamed-progress event plumbing, and mount-smoke
   for the bulk-actions, disaster-recovery, resource-access, and permission-tester
-  views.
+  views. `just setup` now installs `wasm-pack` and flags the browser + WebDriver
+  prerequisite this gate needs.
 
 ## [0.1.2] - 2026-06-17
 
