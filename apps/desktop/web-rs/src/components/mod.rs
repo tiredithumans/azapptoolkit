@@ -11,6 +11,7 @@ pub mod global_search;
 pub mod group_autocomplete;
 pub mod held_permissions_panel;
 pub mod icon;
+pub mod list_scaffold;
 pub mod modal_shell;
 pub mod permission_picker;
 pub mod requires_role;

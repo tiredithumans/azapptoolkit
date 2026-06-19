@@ -4,12 +4,6 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
-/// Shared debounce for in-memory list/table filters (App Reg, Enterprise, MI,
-/// Audit). One value so the heaviest table (Audit, which holds every app in the
-/// tenant) isn't the most aggressive — these all filter cached rows in memory,
-/// so the delay only smooths re-render, not network traffic.
-pub const LIST_FILTER_DEBOUNCE_MS: i32 = 300;
-
 /// Returns a `Signal<String>` that lags `source` by `delay_ms`. Each new value
 /// cancels the pending timeout and starts a fresh one.
 pub fn use_debounced(source: Signal<String>, delay_ms: i32) -> Signal<String> {
