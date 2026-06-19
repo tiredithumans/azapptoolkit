@@ -17,29 +17,14 @@ impl GraphClient {
     /// truncate (the sweep, the permission tester, and the Sites.Selected
     /// conversion all count on the full set).
     pub async fn list_site_permissions(&self, site_id: &str) -> Result<Vec<SitePermission>> {
-        const MAX_PAGES: usize = 200;
         let token = self.sharepoint_token()?;
         let url = format!("{}/sites/{site_id}/permissions", self.base_url);
-        let mut page: Paged<SitePermission> = self.scoped_get_retried(token, &url).await?;
-        let mut out = Vec::new();
-        out.append(&mut page.items);
-        let mut pages = 1;
-        while let Some(next) = page.next_link.take() {
-            if !same_origin(&self.base_url, &next) {
-                return Err(GraphError::Protocol(
-                    "refusing to follow nextLink to a different origin".into(),
-                ));
-            }
-            if pages >= MAX_PAGES {
-                return Err(GraphError::Protocol(
-                    "site-permission paging exceeded the page limit".into(),
-                ));
-            }
-            page = self.scoped_get_retried(token, &next).await?;
-            out.append(&mut page.items);
-            pages += 1;
-        }
-        Ok(out)
+        let page: Paged<SitePermission> = self.scoped_get_retried(token, &url).await?;
+        self.collect_pages_from(
+            page,
+            |u| async move { self.scoped_get_retried(token, &u).await },
+        )
+        .await
     }
 
     /// Enumerates the tenant's SharePoint sites via `GET /sites?search=*`,
@@ -52,8 +37,6 @@ impl GraphClient {
     /// and `/sites/getAllSites` (which is) is application-permission-only, so
     /// it is out of reach by design for this delegated-only app.
     pub async fn list_all_sites(&self, max: usize) -> Result<Vec<Site>> {
-        // Runaway-pagination backstop, same value the directory listings use.
-        const MAX_PAGES: usize = 200;
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/sites?search=*&$select=id,displayName,webUrl&$top=200",
@@ -62,11 +45,14 @@ impl GraphClient {
         let mut page: Paged<Site> = self.scoped_get_retried(token, &url).await?;
         let mut out = Vec::new();
         out.append(&mut page.items);
-        let mut pages = 1;
-        while let Some(next) = page.next_link.take() {
-            if out.len() >= max {
+
+        const MAX_PAGES: usize = 200;
+        let mut pages = 1usize;
+
+        while out.len() < max {
+            let Some(next) = page.next_link.take() else {
                 break;
-            }
+            };
             if !same_origin(&self.base_url, &next) {
                 return Err(GraphError::Protocol(
                     "refusing to follow nextLink to a different origin".into(),

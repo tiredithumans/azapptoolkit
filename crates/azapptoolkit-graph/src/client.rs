@@ -611,6 +611,43 @@ impl GraphClient {
         Ok((out, truncated))
     }
 
+    /// Collects all pages from a scoped FETCH closure, following `@odata.nextLink`
+    /// until exhausted or the page cap is hit. Each nextLink is origin-checked
+    /// before being passed to `fetch_page`, so the bearer token never leaves the
+    /// trusted Graph origin.
+    async fn collect_pages_from<F, T, Fut>(
+        &self,
+        mut first_page: Paged<T>,
+        mut fetch_page: F,
+    ) -> Result<Vec<T>>
+    where
+        F: FnMut(String) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<Paged<T>>> + Send,
+        T: DeserializeOwned + Send,
+    {
+        const MAX_PAGES: usize = 200;
+        let mut out = Vec::new();
+        out.append(&mut first_page.items);
+        let mut page: Paged<T> = first_page;
+        let mut pages = 1usize;
+        while let Some(next) = page.next_link.take() {
+            if !same_origin(&self.base_url, &next) {
+                return Err(GraphError::Protocol(
+                    "refusing to follow nextLink to a different origin".into(),
+                ));
+            }
+            if pages >= MAX_PAGES {
+                return Err(GraphError::Protocol(
+                    "paging exceeded the page limit".into(),
+                ));
+            }
+            page = fetch_page(next).await?;
+            out.append(&mut page.items);
+            pages += 1;
+        }
+        Ok(out)
+    }
+
     /// Issues a GET against an absolute URL (e.g. an `@odata.nextLink`) and
     /// decodes the response body. All retry + throttle-observer behavior
     /// applies identically to path-relative requests.
@@ -645,9 +682,7 @@ impl GraphClient {
     /// scope wasn't wired — surfaced as `Forbidden` so the SharePoint UI can
     /// degrade rather than panic.
     fn sharepoint_token(&self) -> Result<&Arc<dyn BearerProvider>> {
-        self.sharepoint_token.as_ref().ok_or_else(|| {
-            GraphError::Forbidden("Sites.FullControl.All token not configured".into())
-        })
+        self.require_token(self.sharepoint_token.as_ref(), "Sites.FullControl.All")
     }
 
     /// The `GroupMember.ReadWrite.All` token the group-membership writes ride
@@ -655,18 +690,17 @@ impl GraphClient {
     /// wasn't wired — surfaced as `Forbidden` so the UI degrades rather than
     /// panics.
     fn group_member_token(&self) -> Result<&Arc<dyn BearerProvider>> {
-        self.group_member_token.as_ref().ok_or_else(|| {
-            GraphError::Forbidden("GroupMember.ReadWrite.All token not configured".into())
-        })
+        self.require_token(
+            self.group_member_token.as_ref(),
+            "GroupMember.ReadWrite.All",
+        )
     }
 
     /// The `Synchronization.Read.All` token the SCIM provisioning reads ride
     /// (see [`Self::with_sync_token`]). `None` means the optional scope wasn't
     /// wired — surfaced as `Forbidden` so the UI degrades rather than panics.
     fn sync_token(&self) -> Result<&Arc<dyn BearerProvider>> {
-        self.sync_token.as_ref().ok_or_else(|| {
-            GraphError::Forbidden("Synchronization.Read.All token not configured".into())
-        })
+        self.require_token(self.sync_token.as_ref(), "Synchronization.Read.All")
     }
 
     /// The `AuditLog.Read.All` token the directory-audit and sign-in-activity
@@ -674,18 +708,14 @@ impl GraphClient {
     /// scope wasn't wired — surfaced as `Forbidden` so the UI degrades rather
     /// than panics.
     fn audit_log_token(&self) -> Result<&Arc<dyn BearerProvider>> {
-        self.audit_log_token
-            .as_ref()
-            .ok_or_else(|| GraphError::Forbidden("AuditLog.Read.All token not configured".into()))
+        self.require_token(self.audit_log_token.as_ref(), "AuditLog.Read.All")
     }
 
     /// The `Policy.Read.All` token the Conditional Access read rides (see
     /// [`Self::with_policy_token`]). `None` means the optional scope wasn't wired
     /// — surfaced as `Forbidden` so the UI degrades rather than panics.
     fn policy_token(&self) -> Result<&Arc<dyn BearerProvider>> {
-        self.policy_token
-            .as_ref()
-            .ok_or_else(|| GraphError::Forbidden("Policy.Read.All token not configured".into()))
+        self.require_token(self.policy_token.as_ref(), "Policy.Read.All")
     }
 
     /// The `Policy.ReadWrite.ApplicationConfiguration` token the claims-mapping
@@ -693,11 +723,20 @@ impl GraphClient {
     /// the optional scope wasn't wired — surfaced as `Forbidden` so the UI
     /// degrades rather than panics.
     fn policy_write_token(&self) -> Result<&Arc<dyn BearerProvider>> {
-        self.policy_write_token.as_ref().ok_or_else(|| {
-            GraphError::Forbidden(
-                "Policy.ReadWrite.ApplicationConfiguration token not configured".into(),
-            )
-        })
+        self.require_token(
+            self.policy_write_token.as_ref(),
+            "Policy.ReadWrite.ApplicationConfiguration",
+        )
+    }
+
+    /// Unwrap an `Option<&Arc<dyn BearerProvider>>` into a typed error, or return
+    /// the inner reference so callers can chain usage.
+    fn require_token<'a>(
+        &self,
+        token: Option<&'a Arc<dyn BearerProvider>>,
+        scope_name: &str,
+    ) -> Result<&'a Arc<dyn BearerProvider>> {
+        token.ok_or_else(|| GraphError::Forbidden(format!("{scope_name} token not configured")))
     }
 
     /// Beta `reports/servicePrincipalSignInActivities` endpoint, derived from
