@@ -11,7 +11,7 @@ use azapptoolkit_web_rs::views::key_vault_view::KeyVaultView;
 wasm_bindgen_test_configure!(run_in_browser);
 
 const VAULT_INPUT: &str = "input[placeholder=\"myvault\"]";
-const LIST_BTN: &str = ".actions-row button";
+const LIST_BTN: &str = ".row button";
 
 #[wasm_bindgen_test]
 async fn lists_secrets_for_named_vault() {
