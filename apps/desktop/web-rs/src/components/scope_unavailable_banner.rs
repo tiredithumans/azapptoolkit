@@ -11,7 +11,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::bindings::auth;
-use crate::state::use_session;
+use crate::hooks::use_command::use_command;
 
 #[component]
 pub fn ScopeUnavailableBanner(
@@ -22,29 +22,17 @@ pub fn ScopeUnavailableBanner(
     #[prop(into)]
     on_retry: Callback<()>,
 ) -> impl IntoView {
-    let session = use_session();
-    let tenant = session.active_tenant;
-    let consenting = RwSignal::new(false);
-    let consent_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let cmd = use_command();
     let needs_consent = error.code == "consent_required";
     let message = error.message.clone();
 
     let on_consent = move |_| {
-        if consenting.get() {
-            return;
-        }
-        let Some(t) = tenant.get() else {
-            return;
-        };
-        consenting.set(true);
-        consent_error.set(None);
-        leptos::task::spawn_local(async move {
-            match auth::request_scope_consent(&t.tenant_id, "exchange").await {
-                Ok(()) => on_retry.run(()),
-                Err(e) => consent_error.set(Some(e.message)),
-            }
-            consenting.set(false);
-        });
+        cmd.run(
+            move |()| on_retry.run(()),
+            move |tenant_id| async move {
+                auth::request_scope_consent(&tenant_id, "exchange").await
+            },
+        );
     };
     let on_retry_click = move |_| on_retry.run(());
 
@@ -62,7 +50,7 @@ pub fn ScopeUnavailableBanner(
                             <Button
                                 appearance=Signal::derive(|| ButtonAppearance::Primary)
                                 on_click=Box::new(on_consent)
-                                disabled=Signal::derive(move || consenting.get())
+                                disabled=Signal::derive(move || cmd.busy.get())
                             >
                                 "Grant consent & retry"
                             </Button>
@@ -76,7 +64,7 @@ pub fn ScopeUnavailableBanner(
                 </Button>
             </div>
             {move || {
-                consent_error.get().map(|m| view! { <Body1 class="form-error">{m}</Body1> })
+                cmd.error.get().map(|m| view! { <Body1 class="form-error">{m}</Body1> })
             }}
         </div>
     }

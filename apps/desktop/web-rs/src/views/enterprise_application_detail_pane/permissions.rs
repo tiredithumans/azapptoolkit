@@ -9,6 +9,7 @@ use crate::components::scope_badge::{is_exchange_scopable, is_sharepoint_orgwide
 use crate::components::scope_panel::{ScopeKind, ScopePanel};
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
+use crate::hooks::use_command::use_command;
 use crate::util::parse_lines;
 use azapptoolkit_core::audit::MailPermissionScope;
 use std::collections::HashMap;
@@ -22,8 +23,7 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
 
     // Bumped after a revoke (or a consent/retry on the scope banner) to refresh.
     let reload = RwSignal::new(0_u32);
-    let revoke_error: RwSignal<Option<String>> = RwSignal::new(None);
-    let revoking = RwSignal::new(false);
+    let revoke_cmd = use_command();
 
     // What the service principal has been **granted** (the permissions it
     // HOLDS), fetched live. This is the same held-permission view the app-reg
@@ -81,26 +81,14 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
     // view uses (an enterprise app's SP is a service principal too). On success
     // re-fetch the list.
     let do_revoke = Callback::new(move |assignment_id: String| {
-        if revoking.get() {
-            return;
-        }
-        let Some(t) = tenant.get() else { return };
         let id = sp_id.get();
-        revoking.set(true);
-        revoke_error.set(None);
-        leptos::task::spawn_local(async move {
-            match permissions_bindings::revoke_app_role_assignment(
-                &t.tenant_id,
-                &id,
-                &assignment_id,
-            )
-            .await
-            {
-                Ok(()) => reload.update(|n| *n += 1),
-                Err(e) => revoke_error.set(Some(e.message)),
-            }
-            revoking.set(false);
-        });
+        revoke_cmd.run(
+            move |()| reload.update(|n| *n += 1),
+            move |tenant_id| async move {
+                permissions_bindings::revoke_app_role_assignment(&tenant_id, &id, &assignment_id)
+                    .await
+            },
+        );
     });
 
     // In-place "Scope…" for an already-held org-wide permission. The enterprise
@@ -114,8 +102,7 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
     let pending_scope: RwSignal<Option<(String, ScopeKind)>> = RwSignal::new(None);
     let scope_groups_text = RwSignal::new(String::new());
     let scope_site_url = RwSignal::new(String::new());
-    let scope_busy = RwSignal::new(false);
-    let scope_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let scope_cmd = use_command();
     let scope_note: RwSignal<Option<String>> = RwSignal::new(None);
 
     let on_scope = Callback::new(move |value: String| {
@@ -127,7 +114,7 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
         if let Some(kind) = kind {
             scope_groups_text.set(String::new());
             scope_site_url.set(String::new());
-            scope_error.set(None);
+            scope_cmd.error.set(None);
             scope_note.set(None);
             pending_scope.set(Some((value, kind)));
         }
@@ -135,7 +122,7 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
 
     let cancel_scope = move || {
         pending_scope.set(None);
-        scope_error.set(None);
+        scope_cmd.error.set(None);
     };
 
     // Retained only to satisfy the shared `ScopePanel`'s mandatory Exchange
@@ -146,97 +133,91 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
         let Some((value, _)) = pending_scope.get() else {
             return;
         };
-        if scope_busy.get() {
+        if scope_cmd.busy.get() {
             return;
         }
         let groups = parse_lines(&scope_groups_text.get());
         if groups.is_empty() {
-            scope_error.set(Some(
+            scope_cmd.error.set(Some(
                 "Enter at least one group or mailbox identifier.".into(),
             ));
             return;
         }
-        let Some(t) = tenant.get() else { return };
-        scope_busy.set(true);
-        scope_error.set(None);
         scope_note.set(None);
         let (sp, app, name) = (sp_id.get(), app_id.get(), display_name.get());
-        leptos::task::spawn_local(async move {
-            match exchange_bindings::grant_managed_identity_scoped_exchange_access(
-                &t.tenant_id,
-                &sp,
-                &app,
-                &name,
-                &[value.clone()],
-                &groups,
-                true,
-            )
-            .await
-            {
-                Ok(r) => {
-                    scope_note.set(Some(format!(
-                        "Scoped {} via “{}” — {} role(s) assigned, {} org-wide grant(s) removed.",
-                        value,
-                        r.scope_name,
-                        r.roles_assigned.len(),
-                        r.removed_entra_grants.len(),
-                    )));
-                    pending_scope.set(None);
-                    reload.update(|n| *n += 1);
-                }
-                Err(e) => scope_error.set(Some(e.message)),
-            }
-            scope_busy.set(false);
-        });
+        let value_for_op = value.clone();
+        scope_cmd.run(
+            move |r: exchange_bindings::ExchangeAccessResult| {
+                scope_note.set(Some(format!(
+                    "Scoped {} via “{}” — {} role(s) assigned, {} org-wide grant(s) removed.",
+                    value,
+                    r.scope_name,
+                    r.roles_assigned.len(),
+                    r.removed_entra_grants.len(),
+                )));
+                pending_scope.set(None);
+                reload.update(|n| *n += 1);
+            },
+            move |tenant_id| async move {
+                exchange_bindings::grant_managed_identity_scoped_exchange_access(
+                    &tenant_id,
+                    &sp,
+                    &app,
+                    &name,
+                    &[value_for_op],
+                    &groups,
+                    true,
+                )
+                .await
+            },
+        );
     };
 
     let submit_sharepoint = move |role: &'static str| {
-        if pending_scope.get().is_none() || scope_busy.get() {
+        if pending_scope.get().is_none() || scope_cmd.busy.get() {
             return;
         }
         let url = scope_site_url.get().trim().to_string();
         if url.is_empty() {
-            scope_error.set(Some("Enter a SharePoint site URL.".into()));
+            scope_cmd
+                .error
+                .set(Some("Enter a SharePoint site URL.".into()));
             return;
         }
-        let Some(t) = tenant.get() else { return };
-        scope_busy.set(true);
-        scope_error.set(None);
         scope_note.set(None);
         let (sp, app, name) = (sp_id.get(), app_id.get(), display_name.get());
-        leptos::task::spawn_local(async move {
-            match sharepoint::convert_site_access_to_selected(
-                &t.tenant_id,
-                &sp,
-                &app,
-                &name,
-                &[url.clone()],
-                role,
-                true,
-            )
-            .await
-            {
-                Ok(r) => {
-                    let site = r
-                        .sites_granted
-                        .first()
-                        .and_then(|s| s.site_display_name.clone())
-                        .unwrap_or(url.clone());
-                    let mut note = format!("Granted {role} access to {site}.");
-                    if !r.removed_orgwide_grants.is_empty() {
-                        note.push_str(&format!(
-                            " Removed org-wide grant(s): {}.",
-                            r.removed_orgwide_grants.join(", ")
-                        ));
-                    }
-                    scope_note.set(Some(note));
-                    pending_scope.set(None);
-                    reload.update(|n| *n += 1);
+        let url_for_op = url.clone();
+        scope_cmd.run(
+            move |r: sharepoint::SiteScopeResult| {
+                let site = r
+                    .sites_granted
+                    .first()
+                    .and_then(|s| s.site_display_name.clone())
+                    .unwrap_or(url);
+                let mut note = format!("Granted {role} access to {site}.");
+                if !r.removed_orgwide_grants.is_empty() {
+                    note.push_str(&format!(
+                        " Removed org-wide grant(s): {}.",
+                        r.removed_orgwide_grants.join(", ")
+                    ));
                 }
-                Err(e) => scope_error.set(Some(e.message)),
-            }
-            scope_busy.set(false);
-        });
+                scope_note.set(Some(note));
+                pending_scope.set(None);
+                reload.update(|n| *n += 1);
+            },
+            move |tenant_id| async move {
+                sharepoint::convert_site_access_to_selected(
+                    &tenant_id,
+                    &sp,
+                    &app,
+                    &name,
+                    &[url_for_op],
+                    role,
+                    true,
+                )
+                .await
+            },
+        );
     };
 
     let app_roles = signal.with(|d| d.service_principal.app_roles.clone());
@@ -368,7 +349,7 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
                                     show_scope_column=true
                                     on_revoke=do_revoke
                                     on_scope=on_scope
-                                    busy=Signal::derive(move || revoking.get())
+                                    busy=Signal::derive(move || revoke_cmd.busy.get())
                                 />
                                 {exchange_section}
                                 {sharepoint_section}
@@ -379,7 +360,7 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
                 })}
             </Suspense>
             {move || {
-                revoke_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                revoke_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
             }}
             {move || {
                 pending_scope
@@ -391,7 +372,7 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
                                 permission_value=value
                                 groups_text=scope_groups_text
                                 site_url=scope_site_url
-                                busy=Signal::derive(move || scope_busy.get())
+                                busy=Signal::derive(move || scope_cmd.busy.get())
                                 on_submit_exchange=Callback::new(move |()| submit_exchange())
                                 on_submit_sharepoint=Callback::new(move |w: bool| {
                                     submit_sharepoint(if w { "write" } else { "read" })
@@ -402,7 +383,7 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
                     })
             }}
             {move || scope_note.get().map(|m| view! { <div class="alert alert--ok">{m}</div> })}
-            {move || scope_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || scope_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
             <h4>"App roles exposed"</h4>
             <p class="muted">
                 "Roles this app publishes for others to consent to — not permissions it holds."

@@ -28,6 +28,7 @@ use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::components::toast::ToastAction;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::IconButton;
+use crate::hooks::use_command::use_command;
 use crate::state::{use_session, Session};
 use crate::util::parse_lines;
 use azapptoolkit_core::audit::{downgrade_alternatives, MailPermissionScope};
@@ -178,40 +179,6 @@ fn load_mail_scopes(
     });
 }
 
-/// Runs a mutating async op behind the shared double-submit guard: bails if
-/// `busy` is already set, otherwise sets `busy`, clears `error`, and spawns the
-/// op with the active tenant id. On completion it clears `busy` and either runs
-/// `on_ok` (success) or stores the message in `error` (failure); a no-op (just
-/// clearing `busy`) when no tenant is active. Collapses the boilerplate the
-/// per-row revoke/remove handlers all repeated.
-fn spawn_mutation<T, Fut>(
-    busy: RwSignal<bool>,
-    error: RwSignal<Option<String>>,
-    tenant_id: Option<String>,
-    on_ok: Callback<()>,
-    op: impl FnOnce(String) -> Fut + 'static,
-) where
-    Fut: std::future::Future<Output = Result<T, UiError>> + 'static,
-{
-    if busy.get() {
-        return;
-    }
-    busy.set(true);
-    error.set(None);
-    leptos::task::spawn_local(async move {
-        let Some(tenant_id) = tenant_id else {
-            busy.set(false);
-            return;
-        };
-        if let Err(e) = op(tenant_id).await {
-            error.set(Some(e.message));
-        } else {
-            on_ok.run(());
-        }
-        busy.set(false);
-    });
-}
-
 #[component]
 pub fn PermissionsTab(
     #[prop(into)] detail: Signal<ApplicationDetail>,
@@ -222,8 +189,10 @@ pub fn PermissionsTab(
     let consent_error: RwSignal<Option<String>> = RwSignal::new(None);
     let consent_result: RwSignal<Option<GrantResult>> = RwSignal::new(None);
     let picker_open = RwSignal::new(false);
-    let busy = RwSignal::new(false);
-    let row_error: RwSignal<Option<String>> = RwSignal::new(None);
+    // One shared runner for every grant/revoke/scope/downgrade mutation in this
+    // tab — they share a single busy + error (`cmd.error` is the row-level error
+    // surface, formerly `row_error`).
+    let cmd = use_command();
 
     // Inline "restrict an already-granted permission" panel. `pending_scope`
     // holds the chosen permission until the user supplies a scope (mailbox
@@ -302,79 +271,71 @@ pub fn PermissionsTab(
         Signal::derive(move || session.active_tenant.get().map(|t| t.tenant_id.clone()));
 
     let do_grant_one = Callback::new(move |sel: PickerSelection| {
-        if busy.get() {
+        if cmd.busy.get() {
             return;
         }
-        busy.set(true);
-        row_error.set(None);
-        let tenant = session.active_tenant.get();
         let object_id = detail.with(|d| d.application.id.clone());
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            match permissions::grant_single_permission(
-                &t.tenant_id,
-                &object_id,
-                &sel.resource_app_id,
-                &sel.permission_id,
-                sel.kind,
-            )
-            .await
-            {
-                Ok(r) => {
-                    on_changed.run(());
-                    if !r.failures.is_empty() {
-                        // The manifest declaration landed but the runtime grant
-                        // didn't (commonly: the signed-in user can't self-consent).
-                        // Say so — the row now shows "Not granted" with a Remove
-                        // (trash) affordance, and admin consent stays available.
-                        let why = r
-                            .failures
-                            .iter()
-                            .map(|f| f.message.clone())
-                            .collect::<Vec<_>>()
-                            .join("; ");
-                        row_error.set(Some(format!(
-                            "Permission declared, but the grant wasn’t created: {why}. \
-                             Grant admin consent, or remove it.",
-                        )));
-                    } else if let Some(kind) = grant_scope_kind(&sel.permission_value) {
-                        // Scope-first nudge: a freshly-granted scopable permission
-                        // opens the scope panel so the admin can confine it now
-                        // rather than navigating back later. The backend manifest is
-                        // already updated, so the panel's submit reads the new
-                        // permission live; Cancel keeps the (applied) org-wide grant.
-                        let (object_id, app_id, app_display_name, sp_object_id) =
-                            detail.with(|d| {
-                                (
-                                    d.application.id.clone(),
-                                    d.application.app_id.clone(),
-                                    d.application.display_name.clone(),
-                                    d.service_principal.as_ref().map(|sp| sp.id.clone()),
-                                )
-                            });
-                        scope_groups_text.set(String::new());
-                        scope_site_url.set(String::new());
-                        scope_note.set(Some(format!(
-                            "Granted {} — confine it now, or Cancel to keep it org-wide.",
-                            sel.permission_value
-                        )));
-                        pending_scope.set(Some(PendingRowScope {
-                            object_id,
-                            app_id,
-                            app_display_name,
-                            sp_object_id: sp_object_id.unwrap_or_default(),
-                            permission_value: sel.permission_value.clone(),
-                            kind,
-                        }));
-                    }
+        // `sel` feeds the op; its permission value is also read in the success
+        // arm, so pull that out before `sel` moves into the op.
+        let permission_value = sel.permission_value.clone();
+        cmd.run(
+            move |r: GrantResult| {
+                on_changed.run(());
+                if !r.failures.is_empty() {
+                    // The manifest declaration landed but the runtime grant
+                    // didn't (commonly: the signed-in user can't self-consent).
+                    // Say so — the row now shows "Not granted" with a Remove
+                    // (trash) affordance, and admin consent stays available.
+                    let why = r
+                        .failures
+                        .iter()
+                        .map(|f| f.message.clone())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    cmd.error.set(Some(format!(
+                        "Permission declared, but the grant wasn’t created: {why}. \
+                         Grant admin consent, or remove it.",
+                    )));
+                } else if let Some(kind) = grant_scope_kind(&permission_value) {
+                    // Scope-first nudge: a freshly-granted scopable permission
+                    // opens the scope panel so the admin can confine it now
+                    // rather than navigating back later. The backend manifest is
+                    // already updated, so the panel's submit reads the new
+                    // permission live; Cancel keeps the (applied) org-wide grant.
+                    let (object_id, app_id, app_display_name, sp_object_id) = detail.with(|d| {
+                        (
+                            d.application.id.clone(),
+                            d.application.app_id.clone(),
+                            d.application.display_name.clone(),
+                            d.service_principal.as_ref().map(|sp| sp.id.clone()),
+                        )
+                    });
+                    scope_groups_text.set(String::new());
+                    scope_site_url.set(String::new());
+                    scope_note.set(Some(format!(
+                        "Granted {permission_value} — confine it now, or Cancel to keep it org-wide.",
+                    )));
+                    pending_scope.set(Some(PendingRowScope {
+                        object_id,
+                        app_id,
+                        app_display_name,
+                        sp_object_id: sp_object_id.unwrap_or_default(),
+                        permission_value,
+                        kind,
+                    }));
                 }
-                Err(e) => row_error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+            },
+            move |tenant_id| async move {
+                permissions::grant_single_permission(
+                    &tenant_id,
+                    &object_id,
+                    &sel.resource_app_id,
+                    &sel.permission_id,
+                    sel.kind,
+                )
+                .await
+            },
+        );
     });
 
     // Open the inline scope panel for an already-granted permission. Reads the
@@ -389,14 +350,14 @@ pub fn PermissionsTab(
             )
         });
         if kind == ScopeKind::SharePoint && sp_object_id.is_none() {
-            row_error.set(Some(
+            cmd.error.set(Some(
                 "App has no service principal — grant it first, then scope.".into(),
             ));
             return;
         }
         scope_groups_text.set(String::new());
         scope_site_url.set(String::new());
-        row_error.set(None);
+        cmd.error.set(None);
         scope_note.set(None);
         pending_scope.set(Some(PendingRowScope {
             object_id,
@@ -410,7 +371,7 @@ pub fn PermissionsTab(
 
     let cancel_scope = move |_| {
         pending_scope.set(None);
-        row_error.set(None);
+        cmd.error.set(None);
         // Clear the scope-first nudge so it doesn't linger after Cancel.
         scope_note.set(None);
     };
@@ -420,53 +381,45 @@ pub fn PermissionsTab(
         let Some(p) = pending_scope.get() else {
             return;
         };
-        if busy.get() {
+        if cmd.busy.get() {
             return;
         }
         let groups = parse_lines(&scope_groups_text.get());
         if groups.is_empty() {
-            row_error.set(Some(
+            cmd.error.set(Some(
                 "Enter at least one group or mailbox identifier.".into(),
             ));
             return;
         }
-        busy.set(true);
-        row_error.set(None);
         scope_note.set(None);
-        let tenant = session.active_tenant.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            match exchange::grant_exchange_mailbox_access(
-                &t.tenant_id,
-                &p.object_id,
-                Some(&[p.permission_value.clone()]),
-                &groups,
-                true,
-            )
-            .await
-            {
-                Ok(r) => {
-                    let mut note = format!(
-                        "Scoped {} via “{}” — {} role(s) assigned, {} org-wide grant(s) removed.",
-                        p.permission_value,
-                        r.scope_name,
-                        r.roles_assigned.len(),
-                        r.removed_entra_grants.len(),
-                    );
-                    if !r.warnings.is_empty() {
-                        note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
-                    }
-                    scope_note.set(Some(note));
-                    pending_scope.set(None);
-                    on_changed.run(());
+        let perm_value = p.permission_value.clone();
+        cmd.run(
+            move |r: exchange::ExchangeAccessResult| {
+                let mut note = format!(
+                    "Scoped {} via “{}” — {} role(s) assigned, {} org-wide grant(s) removed.",
+                    perm_value,
+                    r.scope_name,
+                    r.roles_assigned.len(),
+                    r.removed_entra_grants.len(),
+                );
+                if !r.warnings.is_empty() {
+                    note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
                 }
-                Err(e) => row_error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+                scope_note.set(Some(note));
+                pending_scope.set(None);
+                on_changed.run(());
+            },
+            move |tenant_id| async move {
+                exchange::grant_exchange_mailbox_access(
+                    &tenant_id,
+                    &p.object_id,
+                    Some(&[p.permission_value.clone()]),
+                    &groups,
+                    true,
+                )
+                .await
+            },
+        );
     };
 
     // Convert an org-wide Sites.* grant to Sites.Selected on one site.
@@ -474,58 +427,50 @@ pub fn PermissionsTab(
         let Some(p) = pending_scope.get() else {
             return;
         };
-        if busy.get() {
+        if cmd.busy.get() {
             return;
         }
         let url = scope_site_url.get().trim().to_string();
         if url.is_empty() {
-            row_error.set(Some("Enter a SharePoint site URL.".into()));
+            cmd.error.set(Some("Enter a SharePoint site URL.".into()));
             return;
         }
-        busy.set(true);
-        row_error.set(None);
         scope_note.set(None);
-        let tenant = session.active_tenant.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            match sharepoint::convert_site_access_to_selected(
-                &t.tenant_id,
-                &p.sp_object_id,
-                &p.app_id,
-                &p.app_display_name,
-                &[url.clone()],
-                role,
-                true,
-            )
-            .await
-            {
-                Ok(r) => {
-                    let site = r
-                        .sites_granted
-                        .first()
-                        .and_then(|s| s.site_display_name.clone())
-                        .unwrap_or(url.clone());
-                    let mut note = format!("Granted {role} access to {site}.");
-                    if !r.removed_orgwide_grants.is_empty() {
-                        note.push_str(&format!(
-                            " Removed org-wide grant(s): {}.",
-                            r.removed_orgwide_grants.join(", ")
-                        ));
-                    }
-                    if !r.warnings.is_empty() {
-                        note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
-                    }
-                    scope_note.set(Some(note));
-                    pending_scope.set(None);
-                    on_changed.run(());
+        let url_op = url.clone();
+        cmd.run(
+            move |r: sharepoint::SiteScopeResult| {
+                let site = r
+                    .sites_granted
+                    .first()
+                    .and_then(|s| s.site_display_name.clone())
+                    .unwrap_or(url);
+                let mut note = format!("Granted {role} access to {site}.");
+                if !r.removed_orgwide_grants.is_empty() {
+                    note.push_str(&format!(
+                        " Removed org-wide grant(s): {}.",
+                        r.removed_orgwide_grants.join(", ")
+                    ));
                 }
-                Err(e) => row_error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+                if !r.warnings.is_empty() {
+                    note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
+                }
+                scope_note.set(Some(note));
+                pending_scope.set(None);
+                on_changed.run(());
+            },
+            move |tenant_id| async move {
+                sharepoint::convert_site_access_to_selected(
+                    &tenant_id,
+                    &p.sp_object_id,
+                    &p.app_id,
+                    &p.app_display_name,
+                    &[url_op],
+                    role,
+                    true,
+                )
+                .await
+            },
+        );
     };
 
     // Inline "swap a broad permission for a narrower one" chooser. Opened from a
@@ -538,7 +483,7 @@ pub fn PermissionsTab(
             return;
         }
         let object_id = detail.with(|d| d.application.id.clone());
-        row_error.set(None);
+        cmd.error.set(None);
         scope_note.set(None);
         pending_downgrade.set(Some(PendingDowngrade {
             object_id,
@@ -550,70 +495,59 @@ pub fn PermissionsTab(
 
     let cancel_downgrade = move |_| {
         pending_downgrade.set(None);
-        row_error.set(None);
+        cmd.error.set(None);
     };
 
     let submit_downgrade = move |narrow: &'static str| {
         let Some(p) = pending_downgrade.get() else {
             return;
         };
-        if busy.get() {
+        if cmd.busy.get() {
             return;
         }
-        busy.set(true);
-        row_error.set(None);
-        let tenant = session.active_tenant.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            match permissions::downgrade_application_permission(
-                &t.tenant_id,
-                &p.object_id,
-                &p.resource_app_id,
-                &p.broad_value,
-                narrow,
-            )
-            .await
-            {
-                Ok(o) => {
-                    let note = if o.broad_revoked || o.declaration_swapped {
-                        format!(
-                            "Downgraded {} → {narrow}{}.",
-                            p.broad_value,
-                            if o.narrow_granted {
-                                ""
-                            } else {
-                                " (narrower permission was already in place)"
-                            }
-                        )
-                    } else {
-                        format!("{} was already gone — nothing to change.", p.broad_value)
-                    };
-                    scope_note.set(Some(note));
-                    pending_downgrade.set(None);
-                    on_changed.run(());
-                }
-                Err(e) => row_error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+        let broad_value = p.broad_value.clone();
+        cmd.run(
+            move |o: permissions::DowngradeOutcome| {
+                let note = if o.broad_revoked || o.declaration_swapped {
+                    format!(
+                        "Downgraded {} → {narrow}{}.",
+                        broad_value,
+                        if o.narrow_granted {
+                            ""
+                        } else {
+                            " (narrower permission was already in place)"
+                        }
+                    )
+                } else {
+                    format!("{broad_value} was already gone — nothing to change.")
+                };
+                scope_note.set(Some(note));
+                pending_downgrade.set(None);
+                on_changed.run(());
+            },
+            move |tenant_id| async move {
+                permissions::downgrade_application_permission(
+                    &tenant_id,
+                    &p.object_id,
+                    &p.resource_app_id,
+                    &p.broad_value,
+                    narrow,
+                )
+                .await
+            },
+        );
     };
 
     let do_revoke_application = move |assignment_id: String| {
         let Some(sp_id) = detail.with(|d| d.service_principal.as_ref().map(|sp| sp.id.clone()))
         else {
-            row_error.set(Some(
+            cmd.error.set(Some(
                 "App has no service principal — nothing to revoke.".into(),
             ));
             return;
         };
-        spawn_mutation(
-            busy,
-            row_error,
-            session.active_tenant.get().map(|t| t.tenant_id),
-            on_changed,
+        cmd.run(
+            move |()| on_changed.run(()),
             move |tenant_id| async move {
                 permissions::revoke_app_role_assignment(&tenant_id, &sp_id, &assignment_id).await
             },
@@ -621,11 +555,8 @@ pub fn PermissionsTab(
     };
 
     let do_revoke_delegated = move |grant_id: String, scope_value: String| {
-        spawn_mutation(
-            busy,
-            row_error,
-            session.active_tenant.get().map(|t| t.tenant_id),
-            on_changed,
+        cmd.run(
+            move |_| on_changed.run(()),
             move |tenant_id| async move {
                 permissions::revoke_oauth2_scope(&tenant_id, &grant_id, &scope_value).await
             },
@@ -638,11 +569,8 @@ pub fn PermissionsTab(
     let do_remove_declared =
         move |resource_app_id: String, permission_id: String, kind: PermissionKind| {
             let object_id = detail.with(|d| d.application.id.clone());
-            spawn_mutation(
-                busy,
-                row_error,
-                session.active_tenant.get().map(|t| t.tenant_id),
-                on_changed,
+            cmd.run(
+                move |()| on_changed.run(()),
                 move |tenant_id| async move {
                     permissions::remove_declared_permission(
                         &tenant_id,
@@ -703,12 +631,12 @@ pub fn PermissionsTab(
                                 tenant_id=tenant_for_picker
                                 mode=PickerMode::AppAndDelegated
                                 on_grant=do_grant_one
-                                busy=Signal::derive(move || busy.get())
+                                busy=Signal::derive(move || cmd.busy.get())
                             />
                         }
                     })
             }}
-            {move || row_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
             <div class="permissions-tab__filters">
                 <button
                     class=move || filter_chip_class(show_application.get())
@@ -807,7 +735,7 @@ pub fn PermissionsTab(
                                 permission_value=p.permission_value.clone()
                                 groups_text=scope_groups_text
                                 site_url=scope_site_url
-                                busy=Signal::derive(move || busy.get())
+                                busy=Signal::derive(move || cmd.busy.get())
                                 on_submit_exchange=Callback::new(move |()| submit_exchange_scope(()))
                                 on_submit_sharepoint=Callback::new(move |w: bool| {
                                     submit_sharepoint_scope(if w { "write" } else { "read" })

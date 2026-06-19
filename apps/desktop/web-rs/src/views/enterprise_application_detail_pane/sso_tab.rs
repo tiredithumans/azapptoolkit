@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::hooks::use_command::use_command;
+
 /// SSO configuration for the enterprise app — view/edit the SAML or OIDC setup
 /// and surface the app-owner output summary. Reads `get_sso_config`; edits go
 /// through the per-field SSO commands and bump a local `reload`.
@@ -77,7 +79,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
     // Attributes & claims editor state, seeded from the assigned policy.
     let claims_state = ClaimsEditorState::from_dto(&cfg.claims_policy.clone().unwrap_or_default());
 
-    let busy = RwSignal::new(false);
+    let cmd = use_command();
     let needs_consent = RwSignal::new(false);
 
     // App-owner summary (read-only), recomputed on reload.
@@ -88,148 +90,113 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
         async move { sso::get_sso_summary(&tenant_id, &sp_id, protocol).await }
     });
 
-    // ---- save handlers (capture only Copy state → stay `Fn`) ----
+    // ---- save handlers (capture only Copy state → stay `Fn`). Errors surface
+    // as toasts (no inline error signal), so these use `run_toast_err`; the
+    // claims write branches on `consent_required`, so it uses `run_with`. ----
     let save_saml_urls = move |_| {
-        if busy.get_untracked() {
-            return;
-        }
-        busy.set(true);
-        let tenant_id = tenant_id.get_value();
-        let object_id = object_id.get_value();
-        let logout = {
-            let l = logout_url.get_untracked().trim().to_string();
-            (!l.is_empty()).then_some(l)
-        };
-        let entity = entity_id.get_untracked().trim().to_string();
-        let reply = reply_url.get_untracked().trim().to_string();
-        leptos::task::spawn_local(async move {
-            match sso::set_saml_urls(&tenant_id, &object_id, &entity, &reply, logout.as_deref())
-                .await
-            {
-                Ok(()) => {
-                    session.toast_success("SAML URLs saved.");
-                    reload.update(|n| *n = n.wrapping_add(1));
+        cmd.run_toast_err(
+            move |()| {
+                session.toast_success("SAML URLs saved.");
+                reload.update(|n| *n = n.wrapping_add(1));
+            },
+            move |tenant_id| {
+                let object_id = object_id.get_value();
+                let logout = {
+                    let l = logout_url.get_untracked().trim().to_string();
+                    (!l.is_empty()).then_some(l)
+                };
+                let entity = entity_id.get_untracked().trim().to_string();
+                let reply = reply_url.get_untracked().trim().to_string();
+                async move {
+                    sso::set_saml_urls(&tenant_id, &object_id, &entity, &reply, logout.as_deref())
+                        .await
                 }
-                Err(e) => {
-                    session.toast_error(e.message, None);
-                }
-            }
-            busy.set(false);
-        });
+            },
+        );
     };
 
     let save_oidc_uris = move |_| {
-        if busy.get_untracked() {
-            return;
-        }
-        busy.set(true);
-        let tenant_id = tenant_id.get_value();
-        let object_id = object_id.get_value();
-        let web = split_lines(&redirect_uris.get_untracked());
-        let spa = split_lines(&spa_uris.get_untracked());
-        leptos::task::spawn_local(async move {
-            match sso::set_oidc_redirect_uris(&tenant_id, &object_id, &web, &spa).await {
-                Ok(()) => {
-                    session.toast_success("Redirect URIs saved.");
-                    reload.update(|n| *n = n.wrapping_add(1));
-                }
-                Err(e) => {
-                    session.toast_error(e.message, None);
-                }
-            }
-            busy.set(false);
-        });
+        cmd.run_toast_err(
+            move |()| {
+                session.toast_success("Redirect URIs saved.");
+                reload.update(|n| *n = n.wrapping_add(1));
+            },
+            move |tenant_id| {
+                let object_id = object_id.get_value();
+                let web = split_lines(&redirect_uris.get_untracked());
+                let spa = split_lines(&spa_uris.get_untracked());
+                async move { sso::set_oidc_redirect_uris(&tenant_id, &object_id, &web, &spa).await }
+            },
+        );
     };
 
     let rotate_cert = move |_| {
-        if busy.get_untracked() {
-            return;
-        }
-        busy.set(true);
-        let tenant_id = tenant_id.get_value();
-        let sp_id = sp_id.get_value();
-        let subject = cert_subject.get_untracked().trim().to_string();
-        leptos::task::spawn_local(async move {
-            match sso::rotate_saml_signing_certificate(&tenant_id, &sp_id, &subject, None).await {
-                Ok(cert) => {
-                    session.toast_success(format!("New signing certificate: {}", cert.thumbprint));
-                    rotated_cert.set(cert.base64);
-                    reload.update(|n| *n = n.wrapping_add(1));
+        cmd.run_toast_err(
+            move |cert: sso::SsoCertResult| {
+                session.toast_success(format!("New signing certificate: {}", cert.thumbprint));
+                rotated_cert.set(cert.base64);
+                reload.update(|n| *n = n.wrapping_add(1));
+            },
+            move |tenant_id| {
+                let sp_id = sp_id.get_value();
+                let subject = cert_subject.get_untracked().trim().to_string();
+                async move {
+                    sso::rotate_saml_signing_certificate(&tenant_id, &sp_id, &subject, None).await
                 }
-                Err(e) => {
-                    session.toast_error(e.message, None);
-                }
-            }
-            busy.set(false);
-        });
+            },
+        );
     };
 
     // Save the SAML cert-expiry notification recipients (separate SP write — no
     // claims-write consent needed).
     let save_notification_emails = move |_| {
-        if busy.get_untracked() {
-            return;
-        }
-        busy.set(true);
-        let tenant_id = tenant_id.get_value();
-        let sp_id = sp_id.get_value();
-        let emails = split_lines(&notification_emails.get_untracked());
-        leptos::task::spawn_local(async move {
-            match sso::set_notification_emails(&tenant_id, &sp_id, &emails).await {
-                Ok(()) => {
-                    // Deliberately do NOT bump `reload` here: the textarea
-                    // already shows the saved value, and reloading would tear
-                    // down the Suspense subtree and discard any in-progress edits
-                    // in the sibling claims editor.
-                    session.toast_success("Notification emails saved.");
-                }
-                Err(e) => {
-                    session.toast_error(e.message, None);
-                }
-            }
-            busy.set(false);
-        });
+        cmd.run_toast_err(
+            move |()| {
+                // Deliberately do NOT bump `reload` here: the textarea already
+                // shows the saved value, and reloading would tear down the
+                // Suspense subtree and discard any in-progress edits in the
+                // sibling claims editor.
+                session.toast_success("Notification emails saved.");
+            },
+            move |tenant_id| {
+                let sp_id = sp_id.get_value();
+                let emails = split_lines(&notification_emails.get_untracked());
+                async move { sso::set_notification_emails(&tenant_id, &sp_id, &emails).await }
+            },
+        );
     };
     let save_claims = move || {
-        if busy.get_untracked() {
-            return;
-        }
-        busy.set(true);
         needs_consent.set(false);
-        let tenant_id = tenant_id.get_value();
-        let sp_id = sp_id.get_value();
         let policy = claims_state.to_dto();
-        leptos::task::spawn_local(async move {
-            match sso::set_claims_mapping(&tenant_id, &sp_id, "Custom claims", &policy).await {
-                Ok(_) => {
-                    session.toast_success("Attributes & claims saved.");
-                    reload.update(|n| *n = n.wrapping_add(1));
+        cmd.run_with(
+            move |_saved: Option<String>| {
+                session.toast_success("Attributes & claims saved.");
+                reload.update(|n| *n = n.wrapping_add(1));
+            },
+            move |e| {
+                if e.code == "consent_required" {
+                    needs_consent.set(true);
                 }
-                Err(e) => {
-                    if e.code == "consent_required" {
-                        needs_consent.set(true);
-                    }
-                    session.toast_error(e.message, None);
+                session.toast_error(e.message, None);
+            },
+            move |tenant_id| {
+                let sp_id = sp_id.get_value();
+                async move {
+                    sso::set_claims_mapping(&tenant_id, &sp_id, "Custom claims", &policy).await
                 }
-            }
-            busy.set(false);
-        });
+            },
+        );
     };
     let grant_consent = move |_| {
-        let tenant_id = tenant_id.get_value();
-        busy.set(true);
-        leptos::task::spawn_local(async move {
-            match crate::bindings::auth::request_scope_consent(&tenant_id, "policy_write").await {
-                Ok(()) => {
-                    needs_consent.set(false);
-                    session.toast_success("Consent granted. Save again to apply your claims.");
-                }
-                Err(e) => {
-                    session.toast_error(e.message, None);
-                }
-            }
-            busy.set(false);
-        });
+        cmd.run_toast_err(
+            move |()| {
+                needs_consent.set(false);
+                session.toast_success("Consent granted. Save again to apply your claims.");
+            },
+            move |tenant_id| async move {
+                crate::bindings::auth::request_scope_consent(&tenant_id, "policy_write").await
+            },
+        );
     };
 
     let mode_label = cfg
@@ -259,7 +226,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(save_saml_urls)
-                    disabled=Signal::derive(move || busy.get())
+                    disabled=Signal::derive(move || cmd.busy.get())
                 >
                     "Save URLs"
                 </Button>
@@ -271,7 +238,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                     on_click=Box::new(rotate_cert)
-                    disabled=Signal::derive(move || busy.get())
+                    disabled=Signal::derive(move || cmd.busy.get())
                 >
                     "Generate new signing certificate"
                 </Button>
@@ -295,7 +262,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(save_notification_emails)
-                    disabled=Signal::derive(move || busy.get())
+                    disabled=Signal::derive(move || cmd.busy.get())
                 >
                     "Save notification emails"
                 </Button>
@@ -305,7 +272,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(move |_| save_claims())
-                    disabled=Signal::derive(move || busy.get())
+                    disabled=Signal::derive(move || cmd.busy.get())
                 >
                     "Save claims"
                 </Button>
@@ -319,7 +286,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                                         on_click=Box::new(grant_consent)
-                                        disabled=Signal::derive(move || busy.get())
+                                        disabled=Signal::derive(move || cmd.busy.get())
                                     >
                                         "Grant admin consent"
                                     </Button>
@@ -339,7 +306,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(save_oidc_uris)
-                    disabled=Signal::derive(move || busy.get())
+                    disabled=Signal::derive(move || cmd.busy.get())
                 >
                     "Save redirect URIs"
                 </Button>

@@ -8,9 +8,9 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::bindings::applications::{self, AddCertificateInput};
+use crate::hooks::use_command::use_command;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
-use crate::state::use_session;
 use crate::util::cert_payload_from_bytes;
 
 #[component]
@@ -20,15 +20,13 @@ pub fn UploadCertificateDialog(
     #[prop(into)] on_close: Callback<()>,
     #[prop(into)] on_uploaded: Callback<()>,
 ) -> impl IntoView {
-    let session = use_session();
+    let cmd = use_command();
     let display_name = RwSignal::new(String::new());
     let pem = RwSignal::new(String::new());
     let file_name: RwSignal<Option<String>> = RwSignal::new(None);
-    let busy = RwSignal::new(false);
-    let error: RwSignal<Option<String>> = RwSignal::new(None);
 
     use_escape(
-        move || open.get_untracked() && !busy.get_untracked(),
+        move || open.get_untracked() && !cmd.busy.get_untracked(),
         move || on_close.run(()),
     );
     let modal_ref: NodeRef<html::Div> = NodeRef::new();
@@ -58,47 +56,38 @@ pub fn UploadCertificateDialog(
                         display_name.set(stem.to_string());
                     }
                     file_name.set(Some(name));
-                    error.set(None);
+                    cmd.error.set(None);
                 }
-                Err(_) => error.set(Some("Could not read the selected file.".to_string())),
+                Err(_) => cmd
+                    .error
+                    .set(Some("Could not read the selected file.".to_string())),
             }
         });
     };
 
     let upload = move |_| {
-        if busy.get() {
-            return;
-        }
-        busy.set(true);
-        error.set(None);
-        let tenant = session.active_tenant.get();
         let id = object_id.get();
         let dn = display_name.get();
         let body = pem.get();
-        let on_close_cb = on_close;
-        let on_uploaded_cb = on_uploaded;
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            let input = AddCertificateInput {
-                display_name: dn.trim().to_string(),
-                pem_or_base64: body,
-                end_date_time: None,
-            };
-            match applications::add_certificate_credential(&t.tenant_id, &id, &input).await {
-                Ok(()) => {
-                    display_name.set(String::new());
-                    pem.set(String::new());
-                    file_name.set(None);
-                    on_uploaded_cb.run(());
-                    on_close_cb.run(());
+        cmd.run(
+            move |()| {
+                display_name.set(String::new());
+                pem.set(String::new());
+                file_name.set(None);
+                on_uploaded.run(());
+                on_close.run(());
+            },
+            move |tenant_id| {
+                let input = AddCertificateInput {
+                    display_name: dn.trim().to_string(),
+                    pem_or_base64: body,
+                    end_date_time: None,
+                };
+                async move {
+                    applications::add_certificate_credential(&tenant_id, &id, &input).await
                 }
-                Err(e) => error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+            },
+        );
     };
 
     view! {
@@ -133,22 +122,24 @@ pub fn UploadCertificateDialog(
                     <Field label="…or paste PEM / base64">
                         <Textarea value=pem />
                     </Field>
-                    {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                    {move || {
+                        cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                    }}
                     <div class="actions-row">
                         <Button
                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
                             on_click=Box::new(move |_| on_close.run(()))
-                            disabled=Signal::derive(move || busy.get())
+                            disabled=Signal::derive(move || cmd.busy.get())
                         >
                             "Cancel"
                         </Button>
                         <Button
                             appearance=Signal::derive(|| ButtonAppearance::Primary)
                             on_click=Box::new(upload)
-                            disabled=Signal::derive(move || busy.get())
+                            disabled=Signal::derive(move || cmd.busy.get())
                         >
                             {move || {
-                                if busy.get() {
+                                if cmd.busy.get() {
                                     view! {
                                         <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
                                     }

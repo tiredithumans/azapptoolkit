@@ -7,9 +7,9 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
 
 use crate::bindings::applications::{self, CreateApplicationInput};
+use crate::hooks::use_command::use_command;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
-use crate::state::use_session;
 
 #[component]
 pub fn CreateAppDialog(
@@ -17,61 +17,46 @@ pub fn CreateAppDialog(
     #[prop(into)] on_close: Callback<()>,
     #[prop(into)] on_created: Callback<()>,
 ) -> impl IntoView {
-    let session = use_session();
+    let cmd = use_command();
     let display_name = RwSignal::new(String::new());
     let audience = RwSignal::new("AzureADMyOrg".to_string());
     let description = RwSignal::new(String::new());
     let create_sp = RwSignal::new(true);
-    let busy = RwSignal::new(false);
-    let error: RwSignal<Option<String>> = RwSignal::new(None);
 
     use_escape(
-        move || open.get_untracked() && !busy.get_untracked(),
+        move || open.get_untracked() && !cmd.busy.get_untracked(),
         move || on_close.run(()),
     );
     let modal_ref: NodeRef<html::Div> = NodeRef::new();
     use_focus_trap(modal_ref, open);
 
     let create = move |_| {
-        if busy.get() {
-            return;
-        }
-        busy.set(true);
-        error.set(None);
-        let tenant = session.active_tenant.get();
         let dn = display_name.get();
         let aud = audience.get();
         let desc = description.get();
         let csp = create_sp.get();
-        let on_close_cb = on_close;
-        let on_created_cb = on_created;
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            let input = CreateApplicationInput {
-                display_name: dn.trim().to_string(),
-                sign_in_audience: Some(aud),
-                description: if desc.trim().is_empty() {
-                    None
-                } else {
-                    Some(desc.trim().to_string())
-                },
-                create_service_principal: csp,
-                ..Default::default()
-            };
-            match applications::create_application(&t.tenant_id, &input).await {
-                Ok(_) => {
-                    display_name.set(String::new());
-                    description.set(String::new());
-                    on_created_cb.run(());
-                    on_close_cb.run(());
-                }
-                Err(e) => error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+        cmd.run(
+            move |_| {
+                display_name.set(String::new());
+                description.set(String::new());
+                on_created.run(());
+                on_close.run(());
+            },
+            move |tenant_id| {
+                let input = CreateApplicationInput {
+                    display_name: dn.trim().to_string(),
+                    sign_in_audience: Some(aud),
+                    description: if desc.trim().is_empty() {
+                        None
+                    } else {
+                        Some(desc.trim().to_string())
+                    },
+                    create_service_principal: csp,
+                    ..Default::default()
+                };
+                async move { applications::create_application(&tenant_id, &input).await }
+            },
+        );
     };
 
     view! {
@@ -126,12 +111,14 @@ pub fn CreateAppDialog(
                         />
                         " Provision an enterprise application (service principal) in this tenant"
                     </label>
-                    {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                    {move || {
+                        cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                    }}
                     <div class="actions-row">
                         <Button
                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
                             on_click=Box::new(move |_| on_close.run(()))
-                            disabled=Signal::derive(move || busy.get())
+                            disabled=Signal::derive(move || cmd.busy.get())
                         >
                             "Cancel"
                         </Button>
@@ -139,11 +126,11 @@ pub fn CreateAppDialog(
                             appearance=Signal::derive(|| ButtonAppearance::Primary)
                             on_click=Box::new(create)
                             disabled=Signal::derive(move || {
-                                busy.get() || display_name.with(|d| d.trim().is_empty())
+                                cmd.busy.get() || display_name.with(|d| d.trim().is_empty())
                             })
                         >
                             {move || {
-                                if busy.get() {
+                                if cmd.busy.get() {
                                     view! {
                                         <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
                                     }

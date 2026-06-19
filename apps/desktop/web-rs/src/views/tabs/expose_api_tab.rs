@@ -17,6 +17,7 @@ use crate::bindings::expose_api::{
     self, ExposeApiDto, SetPreAuthorizedAppInput, UpsertApiScopeInput,
 };
 use crate::components::modal_shell::ModalShell;
+use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
@@ -106,60 +107,51 @@ fn ExposeApiLoaded(
     } else {
         String::new()
     });
-    let uri_busy = RwSignal::new(false);
-    let uri_error: RwSignal<Option<String>> = RwSignal::new(None);
+    // Add-URI (dialog) and remove-URI (confirm) are distinct surfaces with their
+    // own busy/error: one cmd each.
+    let uri_add_cmd = use_command();
+    let uri_remove_cmd = use_command();
     let pending_remove_uri: RwSignal<Option<String>> = RwSignal::new(None);
-    let uri_removing = RwSignal::new(false);
-
-    let save_uris = move |new_uris: Vec<String>, busy: RwSignal<bool>, done: Callback<()>| {
-        if busy.get() {
-            return;
-        }
-        busy.set(true);
-        uri_error.set(None);
-        let tenant = session.active_tenant.get();
-        let id = object_id.get_value();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            match expose_api::set_identifier_uris(&t.tenant_id, &id, &new_uris).await {
-                Ok(()) => {
-                    busy.set(false);
-                    session.toast_success("Application ID URIs updated.");
-                    done.run(());
-                    on_saved.run(());
-                }
-                Err(e) => {
-                    busy.set(false);
-                    uri_error.set(Some(e.message));
-                }
-            }
-        });
-    };
 
     let add_uri = move |_| {
         let v = uri_value.get().trim().to_string();
         if v.is_empty() {
-            uri_error.set(Some("Enter a URI.".into()));
+            uri_add_cmd.error.set(Some("Enter a URI.".into()));
             return;
         }
         let mut list = uris.get_value();
         if list.iter().any(|u| u.eq_ignore_ascii_case(&v)) {
-            uri_error.set(Some("That URI is already set.".into()));
+            uri_add_cmd
+                .error
+                .set(Some("That URI is already set.".into()));
             return;
         }
         list.push(v);
-        save_uris(list, uri_busy, Callback::new(move |()| uri_open.set(false)));
+        uri_add_cmd.run(
+            move |()| {
+                session.toast_success("Application ID URIs updated.");
+                uri_open.set(false);
+                on_saved.run(());
+            },
+            move |tenant_id| {
+                let id = object_id.get_value();
+                async move { expose_api::set_identifier_uris(&tenant_id, &id, &list).await }
+            },
+        );
     };
 
     let remove_uri = move |uri: String| {
         let list: Vec<String> = uris.get_value().into_iter().filter(|u| u != &uri).collect();
-        save_uris(
-            list,
-            uri_removing,
-            Callback::new(move |()| pending_remove_uri.set(None)),
+        uri_remove_cmd.run(
+            move |()| {
+                session.toast_success("Application ID URIs updated.");
+                pending_remove_uri.set(None);
+                on_saved.run(());
+            },
+            move |tenant_id| {
+                let id = object_id.get_value();
+                async move { expose_api::set_identifier_uris(&tenant_id, &id, &list).await }
+            },
         );
     };
 
@@ -173,10 +165,9 @@ fn ExposeApiLoaded(
     let user_dn = RwSignal::new(String::new());
     let user_desc = RwSignal::new(String::new());
     let scope_enabled = RwSignal::new(true);
-    let scope_busy = RwSignal::new(false);
-    let scope_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let scope_cmd = use_command();
+    let scope_delete_cmd = use_command();
     let pending_delete_scope: RwSignal<Option<String>> = RwSignal::new(None);
-    let deleting_scope = RwSignal::new(false);
 
     let open_add_scope = move || {
         scope_editing_id.set(None);
@@ -187,7 +178,7 @@ fn ExposeApiLoaded(
         user_dn.set(String::new());
         user_desc.set(String::new());
         scope_enabled.set(true);
-        scope_error.set(None);
+        scope_cmd.error.set(None);
         scope_open.set(true);
     };
 
@@ -200,27 +191,20 @@ fn ExposeApiLoaded(
         user_dn.set(s.user_consent_display_name.unwrap_or_default());
         user_desc.set(s.user_consent_description.unwrap_or_default());
         scope_enabled.set(s.is_enabled.unwrap_or(true));
-        scope_error.set(None);
+        scope_cmd.error.set(None);
         scope_open.set(true);
     };
 
     let save_scope = move |_| {
-        if scope_busy.get() {
-            return;
-        }
         let value = scope_value.get().trim().to_string();
         let dn = admin_dn.get().trim().to_string();
         let desc = admin_desc.get().trim().to_string();
         if value.is_empty() || dn.is_empty() || desc.is_empty() {
-            scope_error.set(Some(
+            scope_cmd.error.set(Some(
                 "Scope name, admin consent display name and description are required.".into(),
             ));
             return;
         }
-        scope_busy.set(true);
-        scope_error.set(None);
-        let tenant = session.active_tenant.get();
-        let id = object_id.get_value();
         let opt = |sig: RwSignal<String>| {
             let v = sig.get().trim().to_string();
             (!v.is_empty()).then_some(v)
@@ -236,56 +220,41 @@ fn ExposeApiLoaded(
             is_enabled: scope_enabled.get(),
         };
         let created = input.id.is_none();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                scope_busy.set(false);
-                return;
-            };
-            match expose_api::upsert_api_scope(&t.tenant_id, &id, &input).await {
-                Ok(()) => {
-                    scope_busy.set(false);
-                    scope_open.set(false);
-                    session.toast_success(if created {
-                        "Scope added."
-                    } else {
-                        "Scope updated."
-                    });
-                    on_saved.run(());
-                }
-                Err(e) => {
-                    scope_busy.set(false);
-                    scope_error.set(Some(e.message));
-                }
-            }
-        });
+        scope_cmd.run(
+            move |()| {
+                scope_open.set(false);
+                session.toast_success(if created {
+                    "Scope added."
+                } else {
+                    "Scope updated."
+                });
+                on_saved.run(());
+            },
+            move |tenant_id| {
+                let id = object_id.get_value();
+                async move { expose_api::upsert_api_scope(&tenant_id, &id, &input).await }
+            },
+        );
     };
 
     let delete_scope = move |scope_id: String| {
-        if deleting_scope.get() {
-            return;
-        }
-        deleting_scope.set(true);
-        let tenant = session.active_tenant.get();
-        let id = object_id.get_value();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                deleting_scope.set(false);
-                return;
-            };
-            match expose_api::delete_api_scope(&t.tenant_id, &id, &scope_id).await {
-                Ok(()) => {
-                    deleting_scope.set(false);
-                    pending_delete_scope.set(None);
-                    session.toast_success("Scope deleted.");
-                    on_saved.run(());
-                }
-                Err(e) => {
-                    deleting_scope.set(false);
-                    pending_delete_scope.set(None);
-                    session.toast_error(e.message, None);
-                }
-            }
-        });
+        // Original cleared the pending id on both Ok and Err, so close the
+        // confirm dialog in both paths (run_with, not run_toast_err).
+        scope_delete_cmd.run_with(
+            move |()| {
+                pending_delete_scope.set(None);
+                session.toast_success("Scope deleted.");
+                on_saved.run(());
+            },
+            move |e| {
+                pending_delete_scope.set(None);
+                session.toast_error(e.message, None);
+            },
+            move |tenant_id| {
+                let id = object_id.get_value();
+                async move { expose_api::delete_api_scope(&tenant_id, &id, &scope_id).await }
+            },
+        );
     };
 
     // ---- Pre-authorized client applications ----
@@ -293,16 +262,15 @@ fn ExposeApiLoaded(
     let pre_editing = RwSignal::new(false);
     let pre_client_id = RwSignal::new(String::new());
     let pre_selected: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
-    let pre_busy = RwSignal::new(false);
-    let pre_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let pre_cmd = use_command();
+    let pre_remove_cmd = use_command();
     let pending_remove_pre: RwSignal<Option<String>> = RwSignal::new(None);
-    let removing_pre = RwSignal::new(false);
 
     let open_add_pre = move || {
         pre_editing.set(false);
         pre_client_id.set(String::new());
         pre_selected.set(Vec::new());
-        pre_error.set(None);
+        pre_cmd.error.set(None);
         pre_open.set(true);
     };
 
@@ -310,78 +278,60 @@ fn ExposeApiLoaded(
         pre_editing.set(true);
         pre_client_id.set(client_app_id);
         pre_selected.set(scope_ids);
-        pre_error.set(None);
+        pre_cmd.error.set(None);
         pre_open.set(true);
     };
 
     let save_pre = move |_| {
-        if pre_busy.get() {
-            return;
-        }
         let client_app_id = pre_client_id.get().trim().to_string();
         let scope_ids = pre_selected.get();
         if client_app_id.is_empty() {
-            pre_error.set(Some("Client ID is required.".into()));
+            pre_cmd.error.set(Some("Client ID is required.".into()));
             return;
         }
         if scope_ids.is_empty() {
-            pre_error.set(Some("Select at least one scope to authorize.".into()));
+            pre_cmd
+                .error
+                .set(Some("Select at least one scope to authorize.".into()));
             return;
         }
-        pre_busy.set(true);
-        pre_error.set(None);
-        let tenant = session.active_tenant.get();
-        let id = object_id.get_value();
         let input = SetPreAuthorizedAppInput {
             client_app_id,
             scope_ids,
         };
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                pre_busy.set(false);
-                return;
-            };
-            match expose_api::set_pre_authorized_app(&t.tenant_id, &id, &input).await {
-                Ok(()) => {
-                    pre_busy.set(false);
-                    pre_open.set(false);
-                    session.toast_success("Authorized client application saved.");
-                    on_saved.run(());
-                }
-                Err(e) => {
-                    pre_busy.set(false);
-                    pre_error.set(Some(e.message));
-                }
-            }
-        });
+        pre_cmd.run(
+            move |()| {
+                pre_open.set(false);
+                session.toast_success("Authorized client application saved.");
+                on_saved.run(());
+            },
+            move |tenant_id| {
+                let id = object_id.get_value();
+                async move { expose_api::set_pre_authorized_app(&tenant_id, &id, &input).await }
+            },
+        );
     };
 
     let remove_pre = move |client_app_id: String| {
-        if removing_pre.get() {
-            return;
-        }
-        removing_pre.set(true);
-        let tenant = session.active_tenant.get();
-        let id = object_id.get_value();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                removing_pre.set(false);
-                return;
-            };
-            match expose_api::remove_pre_authorized_app(&t.tenant_id, &id, &client_app_id).await {
-                Ok(()) => {
-                    removing_pre.set(false);
-                    pending_remove_pre.set(None);
-                    session.toast_success("Authorized client application removed.");
-                    on_saved.run(());
+        // Original cleared the pending id on both Ok and Err, so close the
+        // confirm dialog in both paths (run_with, not run_toast_err).
+        pre_remove_cmd.run_with(
+            move |()| {
+                pending_remove_pre.set(None);
+                session.toast_success("Authorized client application removed.");
+                on_saved.run(());
+            },
+            move |e| {
+                pending_remove_pre.set(None);
+                session.toast_error(e.message, None);
+            },
+            move |tenant_id| {
+                let id = object_id.get_value();
+                async move {
+                    expose_api::remove_pre_authorized_app(&tenant_id, &id, &client_app_id).await
                 }
-                Err(e) => {
-                    removing_pre.set(false);
-                    pending_remove_pre.set(None);
-                    session.toast_error(e.message, None);
-                }
-            }
-        });
+            },
+        );
     };
 
     let first_uri = dto.identifier_uris.first().cloned();
@@ -397,7 +347,7 @@ fn ExposeApiLoaded(
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                         on_click=Box::new(move |_| {
-                            uri_error.set(None);
+                            uri_add_cmd.error.set(None);
                             uri_open.set(true);
                         })
                     >
@@ -438,7 +388,7 @@ fn ExposeApiLoaded(
                                                             class="button--danger"
                                                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                             on_click=Box::new(move |_| {
-                                                                uri_error.set(None);
+                                                                uri_remove_cmd.error.set(None);
                                                                 pending_remove_uri.set(Some(uri_click.clone()))
                                                             })
                                                         >
@@ -647,7 +597,7 @@ fn ExposeApiLoaded(
             <ModalShell
                 open=Signal::derive(move || uri_open.get())
                 title="Add an Application ID URI"
-                busy=Signal::derive(move || uri_busy.get())
+                busy=Signal::derive(move || uri_add_cmd.busy.get())
                 on_close=Callback::new(move |()| uri_open.set(false))
             >
                 <Body1 class="hint">
@@ -657,23 +607,23 @@ fn ExposeApiLoaded(
                     <Input value=uri_value />
                 </Field>
                 {move || {
-                    uri_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                    uri_add_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
                 }}
                 <div class="actions-row">
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                         on_click=Box::new(move |_| uri_open.set(false))
-                        disabled=Signal::derive(move || uri_busy.get())
+                        disabled=Signal::derive(move || uri_add_cmd.busy.get())
                     >
                         "Cancel"
                     </Button>
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                         on_click=Box::new(add_uri)
-                        disabled=Signal::derive(move || uri_busy.get())
+                        disabled=Signal::derive(move || uri_add_cmd.busy.get())
                     >
                         {move || {
-                            if uri_busy.get() {
+                            if uri_add_cmd.busy.get() {
                                 view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
                                     .into_any()
                             } else {
@@ -694,7 +644,7 @@ fn ExposeApiLoaded(
                         "Add a scope".to_string()
                     }
                 })
-                busy=Signal::derive(move || scope_busy.get())
+                busy=Signal::derive(move || scope_cmd.busy.get())
                 on_close=Callback::new(move |()| scope_open.set(false))
                 wide=true
             >
@@ -736,23 +686,23 @@ fn ExposeApiLoaded(
                     " Enabled — clients can request this scope"
                 </label>
                 {move || {
-                    scope_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                    scope_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
                 }}
                 <div class="actions-row">
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                         on_click=Box::new(move |_| scope_open.set(false))
-                        disabled=Signal::derive(move || scope_busy.get())
+                        disabled=Signal::derive(move || scope_cmd.busy.get())
                     >
                         "Cancel"
                     </Button>
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                         on_click=Box::new(save_scope)
-                        disabled=Signal::derive(move || scope_busy.get())
+                        disabled=Signal::derive(move || scope_cmd.busy.get())
                     >
                         {move || {
-                            if scope_busy.get() {
+                            if scope_cmd.busy.get() {
                                 view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
                                     .into_any()
                             } else {
@@ -773,7 +723,7 @@ fn ExposeApiLoaded(
                         "Add an authorized client application".to_string()
                     }
                 })
-                busy=Signal::derive(move || pre_busy.get())
+                busy=Signal::derive(move || pre_cmd.busy.get())
                 on_close=Callback::new(move |()| pre_open.set(false))
             >
                 {move || {
@@ -828,23 +778,23 @@ fn ExposeApiLoaded(
                     })
                     .collect_view()}
                 {move || {
-                    pre_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                    pre_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
                 }}
                 <div class="actions-row">
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                         on_click=Box::new(move |_| pre_open.set(false))
-                        disabled=Signal::derive(move || pre_busy.get())
+                        disabled=Signal::derive(move || pre_cmd.busy.get())
                     >
                         "Cancel"
                     </Button>
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                         on_click=Box::new(save_pre)
-                        disabled=Signal::derive(move || pre_busy.get())
+                        disabled=Signal::derive(move || pre_cmd.busy.get())
                     >
                         {move || {
-                            if pre_busy.get() {
+                            if pre_cmd.busy.get() {
                                 view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
                                     .into_any()
                             } else {
@@ -860,8 +810,8 @@ fn ExposeApiLoaded(
                 title="Remove this Application ID URI?"
                 body="Clients requesting tokens with this URI as the audience will start failing immediately."
                 confirm_label="Remove"
-                busy=Signal::derive(move || uri_removing.get())
-                error=Signal::derive(move || uri_error.get())
+                busy=Signal::derive(move || uri_remove_cmd.busy.get())
+                error=Signal::derive(move || uri_remove_cmd.error.get())
                 on_confirm=Callback::new(move |()| {
                     if let Some(uri) = pending_remove_uri.get() {
                         remove_uri(uri);
@@ -874,7 +824,7 @@ fn ExposeApiLoaded(
                 title="Delete this scope?"
                 body="Any client or consent grant using this scope breaks immediately. The scope is disabled first, then removed, and it is stripped from authorized client applications. This cannot be undone."
                 confirm_label="Delete"
-                busy=Signal::derive(move || deleting_scope.get())
+                busy=Signal::derive(move || scope_delete_cmd.busy.get())
                 on_confirm=Callback::new(move |()| {
                     if let Some(id) = pending_delete_scope.get() {
                         delete_scope(id);
@@ -887,7 +837,7 @@ fn ExposeApiLoaded(
                 title="Remove this authorized client application?"
                 body="The client can still request these scopes, but users will be prompted to consent again."
                 confirm_label="Remove"
-                busy=Signal::derive(move || removing_pre.get())
+                busy=Signal::derive(move || pre_remove_cmd.busy.get())
                 on_confirm=Callback::new(move |()| {
                     if let Some(id) = pending_remove_pre.get() {
                         remove_pre(id);

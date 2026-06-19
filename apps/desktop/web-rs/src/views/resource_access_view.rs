@@ -25,7 +25,8 @@ use crate::bindings::permission_tester::{
 };
 use crate::bindings::sharepoint::{self, SiteAppGrantRow, SiteSweepProgress, SiteSweepResult};
 use crate::components::ui::{SearchInput, SectionHeader};
-use crate::hooks::use_debounced::{use_debounced, LIST_FILTER_DEBOUNCE_MS};
+use crate::constants::*;
+use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::use_session;
 
@@ -33,7 +34,6 @@ use crate::state::use_session;
 /// this many at a time with a "Show more" control, so a large sweep (≤5k site
 /// grants) or mailbox probe keeps the DOM bounded — same pattern as the audit
 /// table.
-const RENDER_PAGE: usize = 200;
 
 #[component]
 pub fn ResourceAccessView() -> impl IntoView {

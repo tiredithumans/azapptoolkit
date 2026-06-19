@@ -3,12 +3,13 @@
 //! `apps/desktop/web/src/views/ApplicationDetailPane.tsx`.
 
 use leptos::prelude::*;
-use thaw::{Body1, Card, Tab, TabList};
+use thaw::{Card, Tab, TabList};
 
 use crate::bindings::applications;
 use crate::components::detail_header::DetailHeader;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::DetailSkeleton;
+use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::pairing::jump_to_paired_enterprise;
@@ -16,23 +17,8 @@ use crate::views::tabs::{
     activity_tab::ActivityTab, authentication_tab::AuthenticationTab,
     conditional_access_tab::ConditionalAccessTab, credentials_tab::CredentialsTab,
     expose_api_tab::ExposeApiTab, overview_tab::OverviewTab, owners_tab::OwnersTab,
-    permissions_tab::PermissionsTab,
+    permissions_tab::PermissionsTab, AppTab,
 };
-
-/// Clamps stale persisted/deep-linked tab values from merged or removed tabs
-/// so they don't fall through to the "Unknown tab" arm: Federated →
-/// Credentials, the former merged "Insights" tab → Conditional Access
-/// (Activity is its own tab again, so it stays as-is), and the former
-/// Exchange/SharePoint access tabs → Permissions (now sections below the
-/// permissions table).
-fn normalize_app_tab(tab: &str) -> &str {
-    match tab {
-        "federated" => "credentials",
-        "insights" => "conditionalAccess",
-        "exchange" | "sharepoint" => "permissions",
-        other => other,
-    }
-}
 
 #[component]
 pub fn ApplicationDetailPane(#[prop(into)] object_id: Signal<String>) -> impl IntoView {
@@ -89,38 +75,30 @@ pub fn ApplicationDetailPane(#[prop(into)] object_id: Signal<String>) -> impl In
         .get_untracked()
         .unwrap_or_else(|| session.last_app_tab.get_untracked());
     session.pending_app_tab.set(None);
-    let initial_tab = normalize_app_tab(&initial_tab).to_string();
-    let active_tab = RwSignal::new(initial_tab);
+    // Thaw's `TabList` is string-keyed and two-way bound, so the active tab stays
+    // a `String`; `AppTab` is only the bridge that clamps stale values and drives
+    // the exhaustive match below.
+    let active_tab = RwSignal::new(AppTab::from_str(&initial_tab).value().to_string());
     // Persist the active tab for the next app opened.
     Effect::new(move |_| session.last_app_tab.set(active_tab.get()));
 
     let delete_open = RwSignal::new(false);
-    let deleting = RwSignal::new(false);
-    let delete_error: RwSignal<Option<String>> = RwSignal::new(None);
+    // `use_command` owns the busy/error signals and the double-submit guard,
+    // tenant resolution, and spawn boilerplate this handler used to inline.
+    let delete_cmd = use_command();
 
     let do_delete = move || {
-        if deleting.get() {
-            return;
-        }
-        deleting.set(true);
-        delete_error.set(None);
-        let tenant = session.active_tenant.get();
-        let id = object_id.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                deleting.set(false);
-                return;
-            };
-            match applications::delete_application(&t.tenant_id, &id).await {
-                Ok(()) => {
-                    delete_open.set(false);
-                    session.set_selected_app(None);
-                    session.toast_success("Application deleted.");
-                }
-                Err(e) => delete_error.set(Some(e.message)),
-            }
-            deleting.set(false);
-        });
+        delete_cmd.run(
+            move |()| {
+                delete_open.set(false);
+                session.set_selected_app(None);
+                session.toast_success("Application deleted.");
+            },
+            move |tenant_id| {
+                let id = object_id.get();
+                async move { applications::delete_application(&tenant_id, &id).await }
+            },
+        );
     };
 
     view! {
@@ -168,66 +146,60 @@ pub fn ApplicationDetailPane(#[prop(into)] object_id: Signal<String>) -> impl In
                                         }}
                                     </DetailHeader>
                                     <TabList selected_value=active_tab>
-                                        <Tab value="overview">"Overview"</Tab>
-                                        <Tab value="credentials">"Credentials"</Tab>
-                                        <Tab value="authentication">"Authentication"</Tab>
-                                        <Tab value="owners">"Owners"</Tab>
-                                        <Tab value="permissions">"Permissions"</Tab>
-                                        <Tab value="exposeApi">"Expose an API"</Tab>
-                                        <Tab value="conditionalAccess">"Conditional Access"</Tab>
-                                        <Tab value="activity">"Activity"</Tab>
+                                        {AppTab::ALL
+                                            .iter()
+                                            .map(|tab| {
+                                                view! { <Tab value=tab.value()>{tab.label()}</Tab> }
+                                            })
+                                            .collect::<Vec<_>>()}
                                     </TabList>
                                     <div class="app-detail__pane">
-                                        {move || match active_tab.get().as_str() {
-                                            "overview" => {
+                                        {move || match AppTab::from_str(&active_tab.get()) {
+                                            AppTab::Overview => {
                                                 view! {
                                                     <OverviewTab detail=detail_signal on_changed=bump_reload />
                                                 }
                                                     .into_any()
                                             }
-                                            "credentials" => {
+                                            AppTab::Credentials => {
                                                 view! {
                                                     <CredentialsTab detail=detail_signal on_changed=bump_reload />
                                                 }
                                                     .into_any()
                                             }
-                                            "authentication" => {
+                                            AppTab::Authentication => {
                                                 view! {
                                                     <AuthenticationTab detail=detail_signal on_changed=bump_reload />
                                                 }
                                                     .into_any()
                                             }
-                                            "owners" => {
+                                            AppTab::Owners => {
                                                 view! {
                                                     <OwnersTab detail=detail_signal on_changed=bump_reload />
                                                 }
                                                     .into_any()
                                             }
-                                            "permissions" => {
+                                            AppTab::Permissions => {
                                                 view! {
                                                     <PermissionsTab detail=detail_signal on_changed=bump_reload />
                                                 }
                                                     .into_any()
                                             }
-                                            "exposeApi" => {
+                                            AppTab::ExposeApi => {
                                                 view! {
                                                     <ExposeApiTab detail=detail_signal on_changed=bump_reload />
                                                 }
                                                     .into_any()
                                             }
-                                            "conditionalAccess" => {
+                                            AppTab::ConditionalAccess => {
                                                 view! {
                                                     <ConditionalAccessTab detail=detail_signal />
                                                 }
                                                     .into_any()
                                             }
-                                            "activity" => {
-                                                view! {
-                                                    <ActivityTab detail=detail_signal />
-                                                }
-                                                    .into_any()
+                                            AppTab::Activity => {
+                                                view! { <ActivityTab detail=detail_signal /> }.into_any()
                                             }
-                                            _ => view! { <Body1>"Unknown tab"</Body1> }.into_any(),
                                         }}
                                     </div>
                                     <ConfirmDialog
@@ -235,8 +207,8 @@ pub fn ApplicationDetailPane(#[prop(into)] object_id: Signal<String>) -> impl In
                                         title="Delete this app registration?"
                                         body="This removes the application. Permission grants on the service principal are revoked; any credentials become invalid immediately. Deletion can be undone from the Entra admin center within 30 days."
                                         confirm_label="Delete"
-                                        busy=Signal::derive(move || deleting.get())
-                                        error=Signal::derive(move || delete_error.get())
+                                        busy=Signal::derive(move || delete_cmd.busy.get())
+                                        error=Signal::derive(move || delete_cmd.error.get())
                                         on_confirm=Callback::new(move |()| do_delete())
                                         on_close=Callback::new(move |()| delete_open.set(false))
                                     />
@@ -246,9 +218,11 @@ pub fn ApplicationDetailPane(#[prop(into)] object_id: Signal<String>) -> impl In
                         }
                         Err(err) => {
                             view! {
-                                <Body1 class="app-detail__error">
-                                    {format!("error [{}]: {}", err.code, err.message)}
-                                </Body1>
+                                <div class="app-detail__body">
+                                    <span style="color: var(--tauri-accent-color);">
+                                        {format!("error [{}]: {}", err.code, err.message)}
+                                    </span>
+                                </div>
                             }
                                 .into_any()
                         }
@@ -256,26 +230,5 @@ pub fn ApplicationDetailPane(#[prop(into)] object_id: Signal<String>) -> impl In
                 })}
             </Suspense>
         </Card>
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::normalize_app_tab;
-
-    #[test]
-    fn normalize_app_tab_clamps_stale_values_to_live_tabs() {
-        // (persisted/deep-linked value, tab it must land on)
-        let cases = [
-            ("federated", "credentials"),
-            ("insights", "conditionalAccess"),
-            ("exchange", "permissions"),
-            ("sharepoint", "permissions"),
-            ("permissions", "permissions"),
-            ("overview", "overview"),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(normalize_app_tab(input), expected, "for input {input:?}");
-        }
     }
 }

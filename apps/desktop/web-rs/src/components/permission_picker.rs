@@ -20,7 +20,8 @@ use crate::bindings::permissions::{
 use crate::components::scope_badge::app_permission_risk_badge;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{Card, TabBar, TabBarItem};
-use crate::hooks::use_debounced::{use_debounced, LIST_FILTER_DEBOUNCE_MS};
+use crate::constants::*;
+use crate::hooks::use_debounced::use_debounced;
 
 /// Microsoft Graph's first-party app id — the natural default for both
 /// the App Registration and Managed Identity grant flows.
