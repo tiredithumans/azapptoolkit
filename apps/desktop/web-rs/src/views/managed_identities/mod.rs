@@ -2,6 +2,12 @@
 //! application permissions (the RBAC equivalent of `Grant-AzManagedIdentityPermission`).
 //! Master list on the left, selected-identity properties + grant form on the right.
 
+mod row;
+mod scoping;
+
+pub(crate) use row::chip_kind_for;
+pub(crate) use scoping::{existing_scope_kind_for, PendingScope};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -12,8 +18,7 @@ use azapptoolkit_core::audit::MailPermissionScope;
 
 use crate::components::icon::IconName;
 use crate::components::permission_picker::PickerSelection;
-use crate::components::scope_badge::{is_exchange_scopable, is_sharepoint_orgwide};
-use crate::components::scope_panel::ScopeKind;
+use crate::components::scope_badge::is_exchange_scopable;
 use crate::components::ui::{EmptyState, IconButton, SearchInput, SectionHeader, SkeletonList};
 use crate::components::virtual_list::VirtualList;
 use crate::util::parse_lines;
@@ -28,108 +33,27 @@ use crate::bindings::permissions as permissions_bindings;
 use crate::bindings::sharepoint;
 use crate::components::filter_chip::FilterChip;
 use crate::components::saved_views::SavedViews;
-use crate::components::type_chip::{AppKind, TypeChip};
-use crate::hooks::use_debounced::{use_debounced, LIST_FILTER_DEBOUNCE_MS};
+use crate::constants::*;
+use crate::hooks::use_command::use_command;
+use crate::hooks::use_debounced::use_debounced;
+use crate::hooks::use_filtered_list::{use_filtered_list, Facet, FilteredListSpec};
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::managed_identity_detail_pane::ManagedIdentityDetailPane;
+
+use row::render_row;
+use scoping::scope_kind_for;
 
 /// Microsoft Graph's first-party app id — mail/calendar/contacts and
 /// `Sites.Selected` application permissions live on this resource, so scoping
 /// only applies when the picked permission's resource matches.
 pub(crate) const MICROSOFT_GRAPH_APP_ID: &str = "00000003-0000-0000-c000-000000000000";
 
-/// Fixed MI row height (px) + overscan for the virtualized list. Matches the
-/// App Registration / Enterprise Application lists so all three look alike and
-/// the managed-identity list no longer renders every row for large fleets.
-const MI_ROW_HEIGHT: f64 = 52.0;
-const MI_OVERSCAN: usize = 8;
-
-/// A permission the user picked that can be scoped to a resource before being
-/// granted to the managed identity. Captured when the picker emits a scopable
-/// selection so the inline panel can collect the resource (groups / site URL).
-#[derive(Clone)]
-pub(crate) struct PendingScope {
-    /// The managed identity's service-principal object id (assignment target).
-    pub(crate) sp_object_id: String,
-    /// The managed identity's app id (Exchange SP pointer / site permission).
-    pub(crate) app_id: String,
-    pub(crate) display_name: String,
-    pub(crate) resource_app_id: String,
-    pub(crate) permission_value: String,
-    pub(crate) kind: ScopeKind,
-}
-
-/// Classifies whether a picked Graph permission can be resource-scoped.
-fn scope_kind_for(resource_app_id: &str, permission_value: &str) -> Option<ScopeKind> {
-    if resource_app_id != MICROSOFT_GRAPH_APP_ID {
-        return None;
-    }
-    if is_exchange_scopable(permission_value) {
-        Some(ScopeKind::Exchange)
-    } else if permission_value == "Sites.Selected" {
-        Some(ScopeKind::SharePoint)
-    } else {
-        None
-    }
-}
-
-/// Classifies whether an **already-held** permission can be restricted *per row*
-/// after the fact: a broad `Sites.*` grant is SharePoint-scopable — the convert-to-
-/// `Sites.Selected` case. Mail/calendar/contacts are excluded — Exchange RBAC
-/// scoping is **app-wide** (one management scope binds the whole principal's mail
-/// roles), so it's driven by the app-wide "Exchange scoping" section, not a per-row
-/// button. Unlike [`scope_kind_for`] (the new-grant picker path) this still treats
-/// a broad `Sites.*` as scopable. `app_role_value` is only populated for Microsoft
-/// Graph permissions, so a `Some(value)` already implies the Graph resource.
-pub(crate) fn existing_scope_kind_for(permission_value: &str) -> Option<ScopeKind> {
-    is_sharepoint_orgwide(permission_value).then_some(ScopeKind::SharePoint)
-}
-
-pub(crate) fn chip_kind_for(subtype: MiSubtype) -> AppKind {
-    match subtype {
-        MiSubtype::SystemAssigned => AppKind::ManagedIdentitySystem,
-        MiSubtype::UserAssigned => AppKind::ManagedIdentityUser,
-        MiSubtype::Unknown => AppKind::ManagedIdentityUnknown,
-    }
-}
-
 use crate::util::no_tenant;
 
-/// Per-facet counts over the loaded managed identities, powering the filter
-/// chips (subtype + account-enabled state).
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct MiCounts {
-    system: usize,
-    user: usize,
-    enabled: usize,
-    disabled: usize,
-}
-
-fn mi_counts(items: &[ManagedIdentityDto]) -> MiCounts {
-    let mut c = MiCounts {
-        system: 0,
-        user: 0,
-        enabled: 0,
-        disabled: 0,
-    };
-    for mi in items {
-        match mi.mi_subtype {
-            MiSubtype::SystemAssigned => c.system += 1,
-            MiSubtype::UserAssigned => c.user += 1,
-            MiSubtype::Unknown => {}
-        }
-        match mi.account_enabled {
-            Some(true) => c.enabled += 1,
-            Some(false) => c.disabled += 1,
-            None => {}
-        }
-    }
-    c
-}
-
 /// Whether a managed identity matches the active facet chip. `all` (and any
-/// unknown value) matches everything.
+/// unknown value) matches everything. Drives the `use_filtered_list` facet
+/// predicates (per-facet counts come from the hook).
 fn matches_mi_facet(mi: &ManagedIdentityDto, facet: &str) -> bool {
     match facet {
         "system" => matches!(mi.mi_subtype, MiSubtype::SystemAssigned),
@@ -155,8 +79,10 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
     // Facet chip over the loaded list: all | system | user | enabled | disabled.
     let mi_filter = RwSignal::new(String::from("all"));
 
-    let busy = RwSignal::new(false);
-    let error: RwSignal<Option<String>> = RwSignal::new(None);
+    // One shared command runner for every grant/revoke/scope mutation below —
+    // they share a single busy + error (only one runs at a time; one error
+    // surface). `cmd.busy`/`cmd.error` flow to the detail pane and confirm dialog.
+    let cmd = use_command();
     // Confirmation gate for revoking a held app-role grant — a destructive,
     // irreversible server mutation. Holds (assignment_id, sp_id) while open.
     let pending_revoke: RwSignal<Option<(String, String)>> = RwSignal::new(None);
@@ -314,13 +240,13 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
     });
 
     let do_grant = Callback::new(move |sel: PickerSelection| {
-        if busy.get() {
+        if cmd.busy.get() {
             return;
         }
         let Some(id) = selected_id.get() else {
             return;
         };
-        error.set(None);
+        cmd.error.set(None);
         result.set(None);
         scope_note.set(None);
 
@@ -349,35 +275,27 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
             // Couldn't resolve the MI — fall through to an org-wide grant.
         }
 
-        busy.set(true);
-        let tenant = tenant.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            match managed_identity::grant_managed_identity_permission(
-                &t.tenant_id,
-                &id,
-                &sel.resource_app_id,
-                &[sel.permission_value.clone()],
-            )
-            .await
-            {
-                Ok(r) => {
-                    result.set(Some(r));
-                    reload.update(|n| *n += 1);
-                }
-                Err(e) => error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+        cmd.run(
+            move |r| {
+                result.set(Some(r));
+                reload.update(|n| *n += 1);
+            },
+            move |tenant_id| async move {
+                managed_identity::grant_managed_identity_permission(
+                    &tenant_id,
+                    &id,
+                    &sel.resource_app_id,
+                    &[sel.permission_value.clone()],
+                )
+                .await
+            },
+        );
     });
 
     // Cancel the pending scope panel without granting.
     let cancel_scope = move |_| {
         pending_scope.set(None);
-        error.set(None);
+        cmd.error.set(None);
     };
 
     // Grant the pending permission org-wide (the panel's fallback button).
@@ -385,34 +303,22 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
         let Some(p) = pending_scope.get() else {
             return;
         };
-        if busy.get() {
-            return;
-        }
-        busy.set(true);
-        error.set(None);
-        let tenant = tenant.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            match managed_identity::grant_managed_identity_permission(
-                &t.tenant_id,
-                &p.sp_object_id,
-                &p.resource_app_id,
-                &[p.permission_value.clone()],
-            )
-            .await
-            {
-                Ok(r) => {
-                    result.set(Some(r));
-                    pending_scope.set(None);
-                    reload.update(|n| *n += 1);
-                }
-                Err(e) => error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+        cmd.run(
+            move |r| {
+                result.set(Some(r));
+                pending_scope.set(None);
+                reload.update(|n| *n += 1);
+            },
+            move |tenant_id| async move {
+                managed_identity::grant_managed_identity_permission(
+                    &tenant_id,
+                    &p.sp_object_id,
+                    &p.resource_app_id,
+                    &[p.permission_value.clone()],
+                )
+                .await
+            },
+        );
     };
 
     // Grant the pending mail permission scoped to mailbox group(s) via RBAC.
@@ -420,55 +326,49 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
         let Some(p) = pending_scope.get() else {
             return;
         };
-        if busy.get() {
+        if cmd.busy.get() {
             return;
         }
         let groups = parse_lines(&scope_groups_text.get());
         if groups.is_empty() {
-            error.set(Some(
+            cmd.error.set(Some(
                 "Enter at least one group or mailbox identifier.".into(),
             ));
             return;
         }
-        busy.set(true);
-        error.set(None);
         scope_note.set(None);
-        let tenant = tenant.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            match exchange_bindings::grant_managed_identity_scoped_exchange_access(
-                &t.tenant_id,
-                &p.sp_object_id,
-                &p.app_id,
-                &p.display_name,
-                &[p.permission_value.clone()],
-                &groups,
-                true,
-            )
-            .await
-            {
-                Ok(r) => {
-                    let mut note = format!(
-                        "Scoped {} via “{}” — {} role(s) assigned, {} org-wide grant(s) removed.",
-                        p.permission_value,
-                        r.scope_name,
-                        r.roles_assigned.len(),
-                        r.removed_entra_grants.len(),
-                    );
-                    if !r.warnings.is_empty() {
-                        note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
-                    }
-                    scope_note.set(Some(note));
-                    pending_scope.set(None);
-                    reload.update(|n| *n += 1);
+        // `p` feeds both the op (sp/app/name) and the success note (its
+        // permission value), so pull the note's part out before `p` moves.
+        let perm_value = p.permission_value.clone();
+        cmd.run(
+            move |r: exchange_bindings::ExchangeAccessResult| {
+                let mut note = format!(
+                    "Scoped {} via “{}” — {} role(s) assigned, {} org-wide grant(s) removed.",
+                    perm_value,
+                    r.scope_name,
+                    r.roles_assigned.len(),
+                    r.removed_entra_grants.len(),
+                );
+                if !r.warnings.is_empty() {
+                    note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
                 }
-                Err(e) => error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+                scope_note.set(Some(note));
+                pending_scope.set(None);
+                reload.update(|n| *n += 1);
+            },
+            move |tenant_id| async move {
+                exchange_bindings::grant_managed_identity_scoped_exchange_access(
+                    &tenant_id,
+                    &p.sp_object_id,
+                    &p.app_id,
+                    &p.display_name,
+                    &[p.permission_value.clone()],
+                    &groups,
+                    true,
+                )
+                .await
+            },
+        );
     };
 
     // Restrict SharePoint access to one site via the Sites.Selected model.
@@ -481,86 +381,63 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
         let Some(p) = pending_scope.get() else {
             return;
         };
-        if busy.get() {
+        if cmd.busy.get() {
             return;
         }
         let url = scope_site_url.get().trim().to_string();
         if url.is_empty() {
-            error.set(Some("Enter a SharePoint site URL.".into()));
+            cmd.error.set(Some("Enter a SharePoint site URL.".into()));
             return;
         }
-        busy.set(true);
-        error.set(None);
         scope_note.set(None);
-        let tenant = tenant.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            match sharepoint::convert_site_access_to_selected(
-                &t.tenant_id,
-                &p.sp_object_id,
-                &p.app_id,
-                &p.display_name,
-                &[url.clone()],
-                role,
-                true,
-            )
-            .await
-            {
-                Ok(r) => {
-                    let site = r
-                        .sites_granted
-                        .first()
-                        .and_then(|s| s.site_display_name.clone())
-                        .unwrap_or(url.clone());
-                    let mut note = format!("Granted {role} access to {site}.");
-                    if !r.removed_orgwide_grants.is_empty() {
-                        note.push_str(&format!(
-                            " Removed org-wide grant(s): {}.",
-                            r.removed_orgwide_grants.join(", ")
-                        ));
-                    }
-                    if !r.warnings.is_empty() {
-                        note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
-                    }
-                    scope_note.set(Some(note));
-                    pending_scope.set(None);
-                    reload.update(|n| *n += 1);
+        let url_op = url.clone();
+        cmd.run(
+            move |r: sharepoint::SiteScopeResult| {
+                let site = r
+                    .sites_granted
+                    .first()
+                    .and_then(|s| s.site_display_name.clone())
+                    .unwrap_or(url);
+                let mut note = format!("Granted {role} access to {site}.");
+                if !r.removed_orgwide_grants.is_empty() {
+                    note.push_str(&format!(
+                        " Removed org-wide grant(s): {}.",
+                        r.removed_orgwide_grants.join(", ")
+                    ));
                 }
-                Err(e) => error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+                if !r.warnings.is_empty() {
+                    note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
+                }
+                scope_note.set(Some(note));
+                pending_scope.set(None);
+                reload.update(|n| *n += 1);
+            },
+            move |tenant_id| async move {
+                sharepoint::convert_site_access_to_selected(
+                    &tenant_id,
+                    &p.sp_object_id,
+                    &p.app_id,
+                    &p.display_name,
+                    &[url_op],
+                    role,
+                    true,
+                )
+                .await
+            },
+        );
     };
 
     let do_revoke = move |assignment_id: String, sp_id: String| {
-        if busy.get() {
-            return;
-        }
-        busy.set(true);
-        error.set(None);
-        let tenant = tenant.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            if let Err(e) = permissions_bindings::revoke_app_role_assignment(
-                &t.tenant_id,
-                &sp_id,
-                &assignment_id,
-            )
-            .await
-            {
-                error.set(Some(e.message));
-            } else {
+        cmd.run(
+            move |()| {
                 reload.update(|n| *n += 1);
                 pending_revoke.set(None);
-            }
-            busy.set(false);
-        });
+            },
+            move |tenant_id| async move {
+                permissions_bindings::revoke_app_role_assignment(&tenant_id, &sp_id, &assignment_id)
+                    .await
+            },
+        );
     };
 
     // Detail-pane Refresh for the selected identity. Permissions and Azure-role
@@ -599,8 +476,8 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                 title="Revoke permission?"
                 body="Remove this managed identity's held app-role assignment. The identity loses that permission until it's granted again; the live grant is re-checked before removal."
                 confirm_label="Revoke"
-                busy=busy
-                error=error
+                busy=cmd.busy
+                error=cmd.error
                 on_confirm=Callback::new(move |()| {
                     if let Some((aid, sp)) = pending_revoke.get() {
                         do_revoke(aid, sp);
@@ -608,7 +485,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                 })
                 on_close=Callback::new(move |()| {
                     pending_revoke.set(None);
-                    error.set(None);
+                    cmd.error.set(None);
                 })
             />
             <div>
@@ -670,7 +547,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                                 export_rows=export_rows
                                                 selected_id=selected_id
                                                 result=result
-                                                error=error
+                                                error=cmd.error
                                             />
                                         }
                                             .into_any()
@@ -721,8 +598,8 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                             permissions=permissions
                                             mail_scopes=mail_scopes
                                             azure_roles=azure_roles
-                                            busy=busy
-                                            error=error
+                                            busy=cmd.busy
+                                            error=cmd.error
                                             result=result
                                             refreshing=refreshing
                                             pending_scope=pending_scope
@@ -738,7 +615,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                             tenant_for_picker=tenant_for_picker
                                             on_grant=do_grant
                                             on_revoke=Callback::new(move |(aid, sp): (String, String)| {
-                                                error.set(None);
+                                                cmd.error.set(None);
                                                 pending_revoke.set(Some((aid, sp)))
                                             })
                                             on_refresh=Callback::new(move |()| on_refresh_detail(()))
@@ -774,64 +651,63 @@ fn LoadedManagedIdentities(
     result: RwSignal<Option<GrantManagedIdentityResult>>,
     error: RwSignal<Option<String>>,
 ) -> impl IntoView {
-    let all = Arc::new(list);
-
-    // Name defines the base set; the facet chips partition it (counts are
-    // over the base).
-    let base = Memo::new(move |_| {
-        let needle = search.with(|s| s.trim().to_lowercase());
-        if needle.is_empty() {
-            return Arc::clone(&all);
-        }
-        Arc::new(
-            all.iter()
-                .filter(|mi| mi.display_name.to_lowercase().contains(&needle))
-                .cloned()
-                .collect::<Vec<_>>(),
-        )
-    });
-    let counts = Memo::new(move |_| mi_counts(&base.get()));
-    let filtered = Memo::new(move |_| {
-        let kind = mi_filter.get();
-        let base = base.get();
-        if kind == "all" {
-            return base;
-        }
-        Arc::new(
-            base.iter()
-                .filter(|mi| matches_mi_facet(mi, &kind))
-                .cloned()
-                .collect::<Vec<_>>(),
-        )
+    let list = use_filtered_list(FilteredListSpec {
+        items: list,
+        search,
+        search_match: |mi: &ManagedIdentityDto, needle: &str| {
+            mi.display_name.to_lowercase().contains(needle)
+        },
+        // No date range or other extra filter on this list — search only.
+        extra_active: Signal::derive(|| false),
+        extra: |_mi: &ManagedIdentityDto| true,
+        facet: mi_filter,
+        facet_any: "all",
+        facets: vec![
+            Facet::new("System", "system", |mi: &ManagedIdentityDto| {
+                matches_mi_facet(mi, "system")
+            }),
+            Facet::new("User", "user", |mi: &ManagedIdentityDto| {
+                matches_mi_facet(mi, "user")
+            }),
+            Facet::new("Enabled", "enabled", |mi: &ManagedIdentityDto| {
+                matches_mi_facet(mi, "enabled")
+            }),
+            Facet::new("Disabled", "disabled", |mi: &ManagedIdentityDto| {
+                matches_mi_facet(mi, "disabled")
+            }),
+        ],
+        export_rows: Some(export_rows),
     });
 
-    // Keep the export snapshot in step with what's shown (a pointer copy).
-    Effect::new(move |_| export_rows.set_value(filtered.get()));
+    let filtered = list.shown;
+    let base_total = list.base_total();
+    let system = list.count_of("system");
+    let user = list.count_of("user");
+    let enabled = list.count_of("enabled");
+    let disabled = list.count_of("disabled");
 
     view! {
         {move || {
-            let counts = counts.get();
-            let base_total = base.with(|b| b.len());
             view! {
                 <div class="filter-chips">
-                    <FilterChip label="All" value="all" count=base_total facet=mi_filter />
+                    <FilterChip label="All" value="all" count=base_total.get() facet=mi_filter />
                     <FilterChip
                         label="System"
                         value="system"
-                        count=counts.system
+                        count=system.get()
                         facet=mi_filter
                     />
-                    <FilterChip label="User" value="user" count=counts.user facet=mi_filter />
+                    <FilterChip label="User" value="user" count=user.get() facet=mi_filter />
                     <FilterChip
                         label="Enabled"
                         value="enabled"
-                        count=counts.enabled
+                        count=enabled.get()
                         facet=mi_filter
                     />
                     <FilterChip
                         label="Disabled"
                         value="disabled"
-                        count=counts.disabled
+                        count=disabled.get()
                         facet=mi_filter
                     />
                 </div>
@@ -851,8 +727,8 @@ fn LoadedManagedIdentities(
         >
             <VirtualList
                 items=filtered
-                row_height=MI_ROW_HEIGHT
-                overscan=MI_OVERSCAN
+                row_height=ROW_HEIGHT
+                overscan=OVERSCAN
                 scroller_class="app-list__scroller"
                 sizer_class="app-list__sizer"
                 key=|mi: &ManagedIdentityDto| mi.id.clone()
@@ -861,62 +737,6 @@ fn LoadedManagedIdentities(
                 }
             />
         </Show>
-    }
-}
-
-// Reuses the shared `app-list__*` row classes (and the VirtualList scroller)
-// so the managed-identity list matches the App Registration / Enterprise
-// Application lists exactly. Rows are absolutely positioned inside the sizer.
-fn render_row(
-    idx: usize,
-    mi: ManagedIdentityDto,
-    selected_id: RwSignal<Option<String>>,
-    result: RwSignal<Option<GrantManagedIdentityResult>>,
-    error: RwSignal<Option<String>>,
-) -> impl IntoView {
-    let session = use_session();
-    // One shared allocation for the row id; the per-handler captures below are
-    // refcount bumps instead of String clones.
-    let id: Arc<str> = mi.id.into();
-    let id_for_click = Arc::clone(&id);
-    let row_class = move || {
-        let mut c = String::from("app-list__row");
-        if selected_id.with(|s| s.as_deref() == Some(&*id)) {
-            c.push_str(" app-list__row--selected");
-        }
-        c
-    };
-    let chip_kind = chip_kind_for(mi.mi_subtype);
-    let top = idx as f64 * MI_ROW_HEIGHT;
-    let display_name = if mi.display_name.is_empty() {
-        mi.app_id.clone()
-    } else {
-        mi.display_name
-    };
-    let title_name = display_name.clone();
-    let app_id = mi.app_id;
-    view! {
-        <div
-            class=row_class
-            style:top=format!("{top}px")
-            style:height=format!("{MI_ROW_HEIGHT}px")
-        >
-            <button
-                class="app-list__row-btn"
-                type="button"
-                on:click=move |_| {
-                    session.set_selected_managed_identity(Some(id_for_click.to_string()));
-                    result.set(None);
-                    error.set(None);
-                }
-            >
-                <span class="row-meta">
-                    <TypeChip kind=chip_kind compact=true />
-                    <span class="app-list__row-title" title=title_name>{display_name}</span>
-                </span>
-                <span class="app-list__row-appid">{app_id}</span>
-            </button>
-        </div>
     }
 }
 
@@ -932,69 +752,6 @@ mod tests {
             account_enabled: enabled,
             mi_subtype: subtype,
         }
-    }
-
-    #[test]
-    fn scope_kind_for_only_classifies_graph_scopable_grants() {
-        assert_eq!(
-            scope_kind_for(MICROSOFT_GRAPH_APP_ID, "Mail.Read"),
-            Some(ScopeKind::Exchange)
-        );
-        assert_eq!(
-            scope_kind_for(MICROSOFT_GRAPH_APP_ID, "Sites.Selected"),
-            Some(ScopeKind::SharePoint)
-        );
-        assert_eq!(scope_kind_for(MICROSOFT_GRAPH_APP_ID, "User.Read"), None);
-        // A non-Graph resource is never Exchange/SharePoint-scopable here.
-        assert_eq!(
-            scope_kind_for("00000002-0000-0ff1-ce00-000000000000", "Mail.Read"),
-            None
-        );
-    }
-
-    #[test]
-    fn existing_scope_kind_for_is_sharepoint_orgwide_only() {
-        // Mail/calendar/contacts no longer offer a per-row Scope… — Exchange RBAC
-        // scoping is app-wide, driven by the "Exchange scoping" section.
-        assert_eq!(existing_scope_kind_for("Mail.Read"), None);
-        assert_eq!(
-            existing_scope_kind_for("Sites.Read.All"),
-            Some(ScopeKind::SharePoint)
-        );
-        // Sites.Selected is already per-site, so it can't be *re*-scoped.
-        assert_eq!(existing_scope_kind_for("Sites.Selected"), None);
-        assert_eq!(existing_scope_kind_for("User.Read"), None);
-    }
-
-    #[test]
-    fn chip_kind_for_maps_each_subtype() {
-        assert_eq!(
-            chip_kind_for(MiSubtype::SystemAssigned),
-            AppKind::ManagedIdentitySystem
-        );
-        assert_eq!(
-            chip_kind_for(MiSubtype::UserAssigned),
-            AppKind::ManagedIdentityUser
-        );
-        assert_eq!(
-            chip_kind_for(MiSubtype::Unknown),
-            AppKind::ManagedIdentityUnknown
-        );
-    }
-
-    #[test]
-    fn mi_counts_tallies_subtype_and_enabled_state() {
-        let items = vec![
-            mk_mi(MiSubtype::SystemAssigned, Some(true)),
-            mk_mi(MiSubtype::UserAssigned, Some(true)),
-            mk_mi(MiSubtype::UserAssigned, Some(false)),
-            mk_mi(MiSubtype::Unknown, None),
-        ];
-        let c = mi_counts(&items);
-        assert_eq!(c.system, 1);
-        assert_eq!(c.user, 2);
-        assert_eq!(c.enabled, 2);
-        assert_eq!(c.disabled, 1);
     }
 
     #[test]
