@@ -25,15 +25,27 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 base64 = "0.22"
-web-sys = { version = "0.3", features = ["MediaQueryList", "Window", "Document", "HtmlElement", "Element", "Node", "NodeList", "Clipboard", "Navigator", "ResizeObserver", "ResizeObserverEntry", "Storage", "File", "FileList", "Blob", "HtmlInputElement"] }
+web-sys = { version = "0.3", features = ["MediaQueryList", "Window", "Document", "HtmlElement", "Element", "Node", "NodeList", "Clipboard", "Navigator", "ResizeObserver", "ResizeObserverEntry", "Storage", "File", "FileList", "Blob", "HtmlInputElement", "Event"] }
 console_error_panic_hook = "0.1"
 futures = "0.3"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Only used by the `test-support` harness to build/read mock IPC payloads. Pinned
+# to the version tauri-sys deserializes with so fixtures round-trip identically.
+serde-wasm-bindgen = { version = "0.6.5", optional = true }
 
 chrono = { version = "0.4", features = ["serde", "wasmbind"] }
 tracing = "0.1"
+
+[features]
+# Compiles the `test_support` browser-test harness (mock IPC + view mounting).
+# Off by default so it never enters the shipped Trunk bundle; enabled by
+# `just web-itest`.
+test-support = ["dep:serde-wasm-bindgen"]
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
 
 [profile.release]
 opt-level = "z"

@@ -39,6 +39,20 @@ web-build-release:
 web-build:
     trunk build --locked
 
+# GUI functionality tests: mount real Leptos views in a headless browser with
+# the Tauri IPC bridge mocked (no tenant, no backend), then assert on rendered
+# DOM + recorded commands. Needs Chrome + a chromedriver. Pass the driver path
+# via ARGS to pin it — CI passes the runner's `$CHROMEWEBDRIVER/chromedriver`,
+# which GitHub keeps version-matched to the installed Chrome, so wasm-pack does
+# not download a copy that mismatches it. With no ARGS, wasm-pack uses a
+# `chromedriver` on `$PATH` or downloads one (swap `--chrome`/`--chromedriver`
+# for `--firefox`/`--geckodriver` to use Firefox instead). Deliberately NOT in
+# `verify`: that gate must run on any dev box, and this one needs a browser. The
+# `test-support` feature compiles the harness (off in the shipped Trunk build).
+[working-directory('apps/desktop/web-rs')]
+web-itest *ARGS:
+    wasm-pack test --headless --chrome {{ARGS}} -- --features test-support
+
 # --- Verify (CI gates, in the order CI runs them) ---------------------------
 
 # Auto-format the whole workspace.
@@ -221,6 +235,25 @@ setup:
       ok "trunk installed"
     fi
 
+    info "Checking wasm-pack (frontend GUI test runner for 'just web-itest')"
+    if need_cmd wasm-pack; then
+      ok "$(wasm-pack --version)"
+    else
+      warn "wasm-pack not installed — installing now (may take several minutes)"
+      cargo install wasm-pack --locked
+      ok "wasm-pack installed"
+    fi
+    # `just web-itest` runs the Leptos views in a real headless browser, so it
+    # needs a browser + a matching WebDriver on $PATH (CI uses Chrome). It is not
+    # part of `just verify`, so this is a soft prerequisite — warn, don't fail.
+    if need_cmd chromedriver || need_cmd geckodriver; then
+      ok "WebDriver present (for 'just web-itest' browser GUI tests)"
+    else
+      warn "No chromedriver/geckodriver found — 'just web-itest' (browser GUI tests) needs one:"
+      warn "  macOS:  brew install --cask google-chrome chromedriver   (versions must match)"
+      warn "  Linux:  apt-get install chromium-driver   (or firefox + geckodriver)"
+    fi
+
     info "cargo check --workspace"
     cargo check --workspace
     ok "Rust workspace compiles"
@@ -315,6 +348,23 @@ setup:
         Write-WarnMsg "trunk not installed — installing now (may take several minutes)"
         cargo install trunk --locked
         Write-Ok "trunk installed"
+    }
+
+    Write-Info "Checking wasm-pack (frontend GUI test runner for 'just web-itest')"
+    if (Get-Command wasm-pack -ErrorAction SilentlyContinue) {
+        Write-Ok (wasm-pack --version)
+    } else {
+        Write-WarnMsg "wasm-pack not installed — installing now (may take several minutes)"
+        cargo install wasm-pack --locked
+        Write-Ok "wasm-pack installed"
+    }
+    # 'just web-itest' runs the Leptos views in a real headless browser, so it
+    # needs a browser + a matching WebDriver on PATH (CI uses Chrome). Not part
+    # of 'just verify', so this is a soft prerequisite — warn, don't fail.
+    if (Get-Command chromedriver -ErrorAction SilentlyContinue) {
+        Write-Ok "chromedriver present (for 'just web-itest' browser GUI tests)"
+    } else {
+        Write-WarnMsg "No chromedriver found — 'just web-itest' (browser GUI tests) needs Chrome + a matching chromedriver on PATH."
     }
 
     Write-Info "cargo check --workspace"

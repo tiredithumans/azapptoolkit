@@ -101,6 +101,10 @@ just dev            # daily loop (= cargo tauri dev)
 just verify          # fmt-check → clippy → test → web-fmt-check → web-test → web-build
 just fmt-check | clippy | test | web-fmt-check | web-test | web-build  # individual gates
 
+# Frontend GUI tests (browser-gated, NOT in `verify`):
+just web-itest       # real Leptos views in a headless browser, Tauri IPC mocked
+                     # (no tenant/backend). Needs a browser + driver; CI uses Chrome.
+
 # Dependency policy (CI also runs these):
 just audit          # RustSec advisories (root workspace)
 just web-audit      # RustSec (web-rs lockfile, separate from root)
@@ -175,7 +179,8 @@ Run the same gates CI runs before declaring a change done. `just verify` is the 
 2. **Lint** — `just clippy` (`-D warnings`)
 3. **Test** — `just test` (workspace)
 4. **Frontend** — `just web-fmt-check` + `web-test` + `web-build`
-5. **Dependency audit** *(optional locally)* — `just audit` + `web-audit` (RustSec) + `deny` + `web-deny`
+5. **Frontend GUI tests** *(browser-gated, not in `verify`)* — `just web-itest`: real Leptos views in a headless browser with the Tauri IPC mocked (no tenant/backend). New view-behavior changes get a `tests/<view>.rs` case; the harness (mock IPC + `mount_view` + DOM helpers + fixtures) lives in `web-rs/src/test_support/` behind the `test-support` feature.
+6. **Dependency audit** *(optional locally)* — `just audit` + `web-audit` (RustSec) + `deny` + `web-deny`
 6. **CodeQL** *(GitHub-side)* — security queries, Rust build-mode `none`. Known limitation: CodeQL 2.25.6 doesn't expand macros for this codebase (~39% calls-with-call-target), which is expected and non-failing. Config: `.github/codeql/codeql-config.yml`.
 
 For behavior changes not provable by unit test, run `just dev` and exercise the view.
