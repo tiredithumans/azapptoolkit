@@ -66,7 +66,7 @@ jobs:
           workspaces: apps/desktop/web-rs
       - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
-          tool: just,trunk
+          tool: just,trunk,wasm-pack
       # web-rs is excluded from the root workspace, so the `rust` job's
       # `cargo fmt --all` does not reach it — format-check it here.
       - name: fmt
@@ -75,6 +75,13 @@ jobs:
         run: just web-test
       - name: Build frontend
         run: just web-build
+      # GUI functionality tests in a headless browser (mocked Tauri IPC, no
+      # tenant). The ubuntu runner ships Chrome + chromedriver; put the driver
+      # on PATH so wasm-pack finds it instead of downloading a mismatched one.
+      - name: GUI tests (headless Chrome)
+        run: |
+          export PATH="$CHROMEWEBDRIVER:$PATH"
+          just web-itest
 
   actionlint:
     name: actionlint

@@ -39,6 +39,17 @@ web-build-release:
 web-build:
     trunk build --locked
 
+# GUI functionality tests: mount real Leptos views in a headless browser with
+# the Tauri IPC bridge mocked (no tenant, no backend), then assert on rendered
+# DOM + recorded commands. Needs a browser + driver — CI uses Chrome on its
+# ubuntu runner; locally install one (e.g. Firefox + geckodriver, then swap
+# `--chrome` for `--firefox`). Deliberately NOT in `verify`: that gate must run
+# on any dev box, and this one needs a browser. The `test-support` feature
+# compiles the harness (off in the shipped Trunk build).
+[working-directory('apps/desktop/web-rs')]
+web-itest:
+    wasm-pack test --headless --chrome -- --features test-support
+
 # --- Verify (CI gates, in the order CI runs them) ---------------------------
 
 # Auto-format the whole workspace.
