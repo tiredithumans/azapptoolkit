@@ -145,6 +145,7 @@ mod backend_conv {
                 AuthError::Url(_) => ("url", false),
                 AuthError::Serde(_) => ("serde", false),
                 AuthError::Io(_) => ("io", true),
+                _ => ("unknown_auth", false),
             };
             UiError {
                 code: code.to_string(),
