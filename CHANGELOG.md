@@ -22,6 +22,13 @@ the project adheres to
   views. `just setup` now installs `wasm-pack` and flags the browser + WebDriver
   prerequisite this gate needs.
 
+### Fixed
+
+- Directory and organization reads no longer fail to parse when Microsoft Graph
+  returns an explicit `null` (or omits) `id` on a directory object or
+  `verifiedDomains` on the organization — both now tolerate null/missing and
+  fall back to a default instead of erroring the whole response.
+
 ## [0.1.2] - 2026-06-17
 
 ### Added

@@ -391,6 +391,7 @@ pub struct OAuth2PermissionGrant {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryObject {
+    #[serde(default, deserialize_with = "null_to_default")]
     pub id: String,
     #[serde(default)]
     pub display_name: Option<String>,
@@ -627,7 +628,7 @@ pub struct CaGrantControls {
 pub struct Organization {
     pub id: String,
     pub display_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub verified_domains: Vec<VerifiedDomain>,
 }
 
