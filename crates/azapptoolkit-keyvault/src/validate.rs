@@ -10,6 +10,11 @@ use crate::error::{KeyVaultError, Result};
 /// Azure Key Vault name rules: 3–24 chars, ASCII alphanumeric and hyphens
 /// only, must start with a letter, end with a letter or digit, no consecutive
 /// hyphens.
+///
+/// This validation is intentionally stricter than Azure's actual rules for
+/// SSRF protection — the name becomes part of the request host, so rejecting
+/// even theoretically-valid-but-edge cases (e.g. IDs that could be confused
+/// with IP addresses) is the safer choice.
 pub fn validate_vault_name(name: &str) -> Result<()> {
     let ok = (3..=24).contains(&name.len())
         && name.starts_with(|c: char| c.is_ascii_alphabetic())
