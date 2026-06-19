@@ -161,11 +161,12 @@ mod tests {
         }
     }
     fn tempdir() -> TempDir {
+        // pid disambiguates across parallel test binaries; the atomic counter
+        // disambiguates across this binary's threads — together guaranteeing a
+        // unique path without relying on clock resolution (tests run in parallel).
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut p = std::env::temp_dir();
-        let n: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
         p.push(format!(
             "azapptoolkit-settings-test-{}-{}",
             std::process::id(),
