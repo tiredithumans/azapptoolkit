@@ -5,6 +5,7 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 
+use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::sharepoint::*;
 
 #[derive(Serialize)]
@@ -17,6 +18,7 @@ struct GrantArgs<'a> {
     roles: &'a [String],
 }
 
+/// Grants a service principal access to a SharePoint site.
 pub async fn grant_site_access(
     tenant_id: &str,
     app_id: &str,
@@ -37,16 +39,10 @@ pub async fn grant_site_access(
     .await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TenantArgs<'a> {
-    tenant_id: &'a str,
-}
-
 /// Runs the tenant-wide site-permission sweep (long-running; progress arrives
 /// via the `site-sweep-progress` event stream — see `bindings::events`).
 pub async fn sweep_site_permissions(tenant_id: &str) -> Result<SiteSweepResult, UiError> {
-    invoke_result("sweep_site_permissions", TenantArgs { tenant_id }).await
+    invoke_result("sweep_site_permissions", TenantArg { tenant_id }).await
 }
 
 /// Signals the in-progress resource sweep/probe (site sweep or mailbox probe)
@@ -57,7 +53,7 @@ pub async fn cancel_resource_sweep() -> Result<(), UiError> {
 
 /// The cached sweep for this tenant, if one completed within the cache TTL.
 pub async fn get_cached_site_sweep(tenant_id: &str) -> Result<Option<SiteSweepResult>, UiError> {
-    invoke_result("get_cached_site_sweep", TenantArgs { tenant_id }).await
+    invoke_result("get_cached_site_sweep", TenantArg { tenant_id }).await
 }
 
 #[derive(Serialize)]

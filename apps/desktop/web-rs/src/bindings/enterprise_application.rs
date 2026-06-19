@@ -4,18 +4,13 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 
+use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::enterprise_application::*;
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TenantArgs<'a> {
-    tenant_id: &'a str,
-}
 
 pub async fn list_enterprise_applications(
     tenant_id: &str,
 ) -> Result<Vec<EnterpriseApplicationDto>, UiError> {
-    invoke_result("list_enterprise_applications", TenantArgs { tenant_id }).await
+    invoke_result("list_enterprise_applications", TenantArg { tenant_id }).await
 }
 
 #[derive(Serialize)]

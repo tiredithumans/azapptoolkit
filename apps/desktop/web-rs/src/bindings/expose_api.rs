@@ -5,14 +5,8 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 
+use crate::bindings::ObjectIdArgs;
 pub use azapptoolkit_dto::expose_api::*;
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ObjectIdArgs<'a> {
-    tenant_id: &'a str,
-    object_id: &'a str,
-}
 
 /// Live read of the app's Expose-an-API state (these fields aren't on the
 /// cached list shape).

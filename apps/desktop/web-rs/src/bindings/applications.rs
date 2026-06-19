@@ -8,15 +8,10 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 
+use crate::bindings::{KeyIdArgs, ObjectIdArgs, TenantArg};
 pub use azapptoolkit_dto::applications::*;
 
 // ---------------- Reads ----------------
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TenantArg<'a> {
-    tenant_id: &'a str,
-}
 
 pub async fn get_organization(tenant_id: &str) -> Result<Organization, UiError> {
     invoke_result("get_organization", TenantArg { tenant_id }).await
@@ -54,13 +49,6 @@ pub async fn list_applications_with_pairing(
     tenant_id: &str,
 ) -> Result<Vec<ApplicationListRowDto>, UiError> {
     invoke_result("list_applications_with_pairing", TenantArg { tenant_id }).await
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ObjectIdArgs<'a> {
-    tenant_id: &'a str,
-    object_id: &'a str,
 }
 
 pub async fn get_application_detail(
@@ -270,14 +258,6 @@ pub async fn add_password(
         },
     )
     .await
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct KeyIdArgs<'a> {
-    tenant_id: &'a str,
-    object_id: &'a str,
-    key_id: &'a str,
 }
 
 pub async fn remove_password(

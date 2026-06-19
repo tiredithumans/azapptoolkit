@@ -20,6 +20,7 @@ pub mod audit;
 pub mod auth;
 pub mod backup;
 pub mod bulk;
+mod common;
 pub mod conditional_access;
 pub mod config;
 pub mod consent;
@@ -44,3 +45,6 @@ pub mod usage;
 // Identity types are shared via azapptoolkit-core (the frontend can't depend on
 // the auth crate, which pulls in tokio/reqwest).
 pub use azapptoolkit_core::identity::{SignInOutcome, TenantContext};
+
+// Re-exported so callers can use them without a relative import path.
+pub use common::{KeyIdArgs, ObjectIdArgs, TenantArg};

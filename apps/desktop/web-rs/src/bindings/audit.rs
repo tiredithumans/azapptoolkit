@@ -6,13 +6,8 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::{invoke, invoke_result};
 
+use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::audit::{AuditProgress, AuditRunResult};
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TenantArg<'a> {
-    tenant_id: &'a str,
-}
 
 /// Runs a full security audit. Exchange mailbox-scoping is resolved as part of
 /// every run (best-effort — it degrades to unscoped scoring when the signed-in

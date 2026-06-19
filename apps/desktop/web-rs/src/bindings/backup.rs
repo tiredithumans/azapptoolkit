@@ -8,13 +8,8 @@ use tauri_sys::core::invoke_result;
 
 // Re-export the manifest types (`TenantBackup`, …) for the DR view, and bring
 // them into scope for the signatures below.
+use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::backup::*;
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TenantArg<'a> {
-    tenant_id: &'a str,
-}
 
 /// Captures a full, portable backup of the tenant's app estate. Long-running
 /// (a per-app fan-out); subscribe to `events::backup_progress` for progress and
