@@ -7,6 +7,20 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- Browser-based **GUI functionality tests** for the front-end. Real Leptos views
+  mount in a headless browser with the Tauri IPC bridge mocked (no tenant, no
+  backend) and assert on rendered DOM + recorded commands. New `just web-itest`
+  recipe (the CI `web` job runs it on headless Chrome); the harness lives behind
+  a `test-support` cargo feature, so it never enters the shipped Trunk bundle.
+  Coverage spans the App Registrations / Enterprise Applications / Managed
+  Identities lists (load, filter, error, empty, and Refresh → invalidate-cache
+  command paths), the readiness checklist, the App Registration detail pane, the
+  Key Vault secret browser, the streamed-progress event plumbing, and mount-smoke
+  for the bulk-actions, disaster-recovery, resource-access, and permission-tester
+  views.
+
 ## [0.1.2] - 2026-06-17
 
 ### Added
