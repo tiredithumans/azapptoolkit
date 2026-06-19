@@ -41,14 +41,17 @@ web-build:
 
 # GUI functionality tests: mount real Leptos views in a headless browser with
 # the Tauri IPC bridge mocked (no tenant, no backend), then assert on rendered
-# DOM + recorded commands. Needs a browser + driver — CI uses Chrome on its
-# ubuntu runner; locally install one (e.g. Firefox + geckodriver, then swap
-# `--chrome` for `--firefox`). Deliberately NOT in `verify`: that gate must run
-# on any dev box, and this one needs a browser. The `test-support` feature
-# compiles the harness (off in the shipped Trunk build).
+# DOM + recorded commands. Needs Chrome + a chromedriver. Pass the driver path
+# via ARGS to pin it — CI passes the runner's `$CHROMEWEBDRIVER/chromedriver`,
+# which GitHub keeps version-matched to the installed Chrome, so wasm-pack does
+# not download a copy that mismatches it. With no ARGS, wasm-pack uses a
+# `chromedriver` on `$PATH` or downloads one (swap `--chrome`/`--chromedriver`
+# for `--firefox`/`--geckodriver` to use Firefox instead). Deliberately NOT in
+# `verify`: that gate must run on any dev box, and this one needs a browser. The
+# `test-support` feature compiles the harness (off in the shipped Trunk build).
 [working-directory('apps/desktop/web-rs')]
-web-itest:
-    wasm-pack test --headless --chrome -- --features test-support
+web-itest *ARGS:
+    wasm-pack test --headless --chrome {{ARGS}} -- --features test-support
 
 # --- Verify (CI gates, in the order CI runs them) ---------------------------
 

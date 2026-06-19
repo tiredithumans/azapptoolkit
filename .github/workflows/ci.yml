@@ -76,12 +76,11 @@ jobs:
       - name: Build frontend
         run: just web-build
       # GUI functionality tests in a headless browser (mocked Tauri IPC, no
-      # tenant). The ubuntu runner ships Chrome + chromedriver; put the driver
-      # on PATH so wasm-pack finds it instead of downloading a mismatched one.
+      # tenant). Pin the runner's chromedriver — GitHub keeps it version-matched
+      # to the installed Chrome — so wasm-pack uses it instead of downloading a
+      # copy that may mismatch and fail to start a session.
       - name: GUI tests (headless Chrome)
-        run: |
-          export PATH="$CHROMEWEBDRIVER:$PATH"
-          just web-itest
+        run: just web-itest --chromedriver "$CHROMEWEBDRIVER/chromedriver"
 
   actionlint:
     name: actionlint
