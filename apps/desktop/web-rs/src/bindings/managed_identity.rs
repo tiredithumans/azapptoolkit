@@ -6,16 +6,11 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 
+use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::managed_identity::*;
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TenantArgs<'a> {
-    tenant_id: &'a str,
-}
-
 pub async fn list_managed_identities(tenant_id: &str) -> Result<Vec<ManagedIdentityDto>, UiError> {
-    invoke_result("list_managed_identities", TenantArgs { tenant_id }).await
+    invoke_result("list_managed_identities", TenantArg { tenant_id }).await
 }
 
 #[derive(Serialize)]

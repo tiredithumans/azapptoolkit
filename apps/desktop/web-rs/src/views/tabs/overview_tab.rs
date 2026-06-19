@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
 
 use crate::bindings::applications::{self, ApplicationDetail, UpdateApplicationInput};
-use crate::state::use_session;
+use crate::hooks::use_command::use_command;
 
 const SIGN_IN_AUDIENCES: &[(&str, &str)] = &[
     ("AzureADMyOrg", "Single tenant (this directory only)"),
@@ -39,10 +39,8 @@ pub fn OverviewTab(
     #[prop(into)] detail: Signal<ApplicationDetail>,
     #[prop(into)] on_changed: Callback<()>,
 ) -> impl IntoView {
-    let session = use_session();
     let editing = RwSignal::new(false);
-    let busy = RwSignal::new(false);
-    let error: RwSignal<Option<String>> = RwSignal::new(None);
+    let cmd = use_command();
 
     let initial_app = detail.with_untracked(|d| d.application.clone());
     let display_name = RwSignal::new(initial_app.display_name.clone());
@@ -67,53 +65,42 @@ pub fn OverviewTab(
     });
 
     let save = move |_| {
-        if busy.get() {
-            return;
-        }
-        busy.set(true);
-        error.set(None);
         let app = detail.with(|d| d.application.clone());
         let dn = display_name.get();
         let aud = audience.get();
         let desc = description.get();
-        let tenant = session.active_tenant.get();
         let on_changed_cb = on_changed;
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            let mut patch = UpdateApplicationInput::default();
-            let dn_t = dn.trim();
-            if dn_t != app.display_name {
-                patch.display_name = Some(dn_t.to_string());
-            }
-            if aud != app.sign_in_audience.clone().unwrap_or_default() {
-                patch.sign_in_audience = Some(aud);
-            }
-            let desc_t = desc.trim();
-            let desc_opt = if desc_t.is_empty() {
-                None
-            } else {
-                Some(desc_t.to_string())
-            };
-            if desc_opt != app.description {
-                patch.description = desc_opt;
-            }
-            match applications::update_application(&t.tenant_id, &app.id, &patch).await {
-                Ok(()) => {
-                    editing.set(false);
-                    on_changed_cb.run(());
+        cmd.run(
+            move |()| {
+                editing.set(false);
+                on_changed_cb.run(());
+            },
+            move |tenant_id| {
+                let mut patch = UpdateApplicationInput::default();
+                let dn_t = dn.trim();
+                if dn_t != app.display_name {
+                    patch.display_name = Some(dn_t.to_string());
                 }
-                Err(e) => error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+                if aud != app.sign_in_audience.clone().unwrap_or_default() {
+                    patch.sign_in_audience = Some(aud);
+                }
+                let desc_t = desc.trim();
+                let desc_opt = if desc_t.is_empty() {
+                    None
+                } else {
+                    Some(desc_t.to_string())
+                };
+                if desc_opt != app.description {
+                    patch.description = desc_opt;
+                }
+                async move { applications::update_application(&tenant_id, &app.id, &patch).await }
+            },
+        );
     };
 
     let cancel = move |_| {
         editing.set(false);
-        error.set(None);
+        cmd.error.set(None);
     };
     let start_edit = move |_| editing.set(true);
 
@@ -143,7 +130,7 @@ pub fn OverviewTab(
                                 <Textarea value=description />
                             </Field>
                             {move || {
-                                error
+                                cmd.error
                                     .get()
                                     .map(|e| {
                                         view! { <Body1 class="form-error">{e}</Body1> }
@@ -153,10 +140,10 @@ pub fn OverviewTab(
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                                     on_click=Box::new(save)
-                                    disabled=Signal::derive(move || busy.get())
+                                    disabled=Signal::derive(move || cmd.busy.get())
                                 >
                                     {move || {
-                                        if busy.get() {
+                                        if cmd.busy.get() {
                                             view! {
                                                 <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
                                             }
@@ -169,7 +156,7 @@ pub fn OverviewTab(
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                     on_click=Box::new(cancel)
-                                    disabled=Signal::derive(move || busy.get())
+                                    disabled=Signal::derive(move || cmd.busy.get())
                                 >
                                     "Cancel"
                                 </Button>

@@ -13,6 +13,7 @@ use crate::bindings::applications::{
 };
 use crate::bindings::managed_identity;
 use crate::components::ui::DataTable;
+use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::tabs::federated_scenarios::{
@@ -49,8 +50,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl Int
 
     let reload = RwSignal::new(0_u32);
     let add_open = RwSignal::new(false);
-    let busy = RwSignal::new(false);
-    let error: RwSignal<Option<String>> = RwSignal::new(None);
+    let cmd = use_command();
     let pending_remove: RwSignal<Option<(String, String)>> = RwSignal::new(None);
 
     // ---- Add form state ----
@@ -148,12 +148,9 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl Int
     });
 
     let submit = move |_| {
-        if busy.get() {
-            return;
-        }
         let n = name.get().trim().to_string();
         if n.is_empty() {
-            error.set(Some(
+            cmd.error.set(Some(
                 "Name is required (it cannot be changed later).".into(),
             ));
             return;
@@ -169,7 +166,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl Int
                 }
                 _ => "Issuer and subject identifier are required.",
             };
-            error.set(Some(msg.into()));
+            cmd.error.set(Some(msg.into()));
             return;
         }
         // Only the Other-issuer scenario may override the audience; the
@@ -178,44 +175,36 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl Int
         let audiences = (scenario.get() == "other" && !aud.is_empty() && aud != DEFAULT_AUDIENCE)
             .then(|| vec![aud]);
         let desc = description.get().trim().to_string();
-        busy.set(true);
-        error.set(None);
-        let tenant = session.active_tenant.get();
         let id = object_id.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            let input = AddFederatedCredentialInput {
-                name: n,
-                issuer: iss,
-                subject: sub,
-                description: (!desc.is_empty()).then_some(desc),
-                audiences,
-            };
-            match applications::add_federated_credential(&t.tenant_id, &id, &input).await {
-                Ok(_) => {
-                    name.set(String::new());
-                    description.set(String::new());
-                    gh_org.set(String::new());
-                    gh_repo.set(String::new());
-                    gh_value.set(String::new());
-                    k8s_issuer.set(String::new());
-                    k8s_namespace.set(String::new());
-                    k8s_sa.set(String::new());
-                    mi_selected.set(String::new());
-                    other_issuer.set(String::new());
-                    other_subject.set(String::new());
-                    other_audience.set(DEFAULT_AUDIENCE.to_string());
-                    add_open.set(false);
-                    session.toast_success("Federated credential added.");
-                    reload.update(|n| *n += 1);
-                }
-                Err(e) => error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+        cmd.run(
+            move |_| {
+                name.set(String::new());
+                description.set(String::new());
+                gh_org.set(String::new());
+                gh_repo.set(String::new());
+                gh_value.set(String::new());
+                k8s_issuer.set(String::new());
+                k8s_namespace.set(String::new());
+                k8s_sa.set(String::new());
+                mi_selected.set(String::new());
+                other_issuer.set(String::new());
+                other_subject.set(String::new());
+                other_audience.set(DEFAULT_AUDIENCE.to_string());
+                add_open.set(false);
+                session.toast_success("Federated credential added.");
+                reload.update(|n| *n += 1);
+            },
+            move |tenant_id| {
+                let input = AddFederatedCredentialInput {
+                    name: n,
+                    issuer: iss,
+                    subject: sub,
+                    description: (!desc.is_empty()).then_some(desc),
+                    audiences,
+                };
+                async move { applications::add_federated_credential(&tenant_id, &id, &input).await }
+            },
+        );
     };
 
     let start_edit = move |c: FederatedCredentialDto| {
@@ -230,77 +219,56 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl Int
         );
         editing.set(Some(c));
         add_open.set(false);
-        error.set(None);
+        cmd.error.set(None);
     };
 
     let submit_edit = move |_| {
-        if busy.get() {
-            return;
-        }
         let Some(cred) = editing.get() else {
             return;
         };
         let iss = edit_issuer.get().trim().to_string();
         let sub = edit_subject.get().trim().to_string();
         if iss.is_empty() || sub.is_empty() {
-            error.set(Some("Issuer and subject are both required.".into()));
+            cmd.error
+                .set(Some("Issuer and subject are both required.".into()));
             return;
         }
         let aud = edit_audience.get().trim().to_string();
         let audiences = (!aud.is_empty()).then(|| vec![aud]);
         let desc = edit_description.get().trim().to_string();
-        busy.set(true);
-        error.set(None);
-        let tenant = session.active_tenant.get();
         let id = object_id.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            let input = UpdateFederatedCredentialInput {
-                issuer: iss,
-                subject: sub,
-                description: (!desc.is_empty()).then_some(desc),
-                audiences,
-            };
-            match applications::update_federated_credential(&t.tenant_id, &id, &cred.id, &input)
-                .await
-            {
-                Ok(()) => {
-                    editing.set(None);
-                    session.toast_success("Federated credential updated.");
-                    reload.update(|n| *n += 1);
+        cmd.run(
+            move |()| {
+                editing.set(None);
+                session.toast_success("Federated credential updated.");
+                reload.update(|n| *n += 1);
+            },
+            move |tenant_id| {
+                let input = UpdateFederatedCredentialInput {
+                    issuer: iss,
+                    subject: sub,
+                    description: (!desc.is_empty()).then_some(desc),
+                    audiences,
+                };
+                async move {
+                    applications::update_federated_credential(&tenant_id, &id, &cred.id, &input)
+                        .await
                 }
-                Err(e) => error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+            },
+        );
     };
 
     let do_remove = move |credential_id: String| {
-        if busy.get() {
-            return;
-        }
-        busy.set(true);
-        error.set(None);
-        let tenant = session.active_tenant.get();
         let id = object_id.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            match applications::remove_federated_credential(&t.tenant_id, &id, &credential_id).await
-            {
-                Ok(()) => {
-                    session.toast_success("Federated credential removed.");
-                    reload.update(|n| *n += 1);
-                }
-                Err(e) => error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+        cmd.run(
+            move |()| {
+                session.toast_success("Federated credential removed.");
+                reload.update(|n| *n += 1);
+            },
+            move |tenant_id| async move {
+                applications::remove_federated_credential(&tenant_id, &id, &credential_id).await
+            },
+        );
     };
 
     let preview_line = move |label: &'static str, value: String| {
@@ -469,10 +437,10 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl Int
                         <Button
                             appearance=Signal::derive(|| ButtonAppearance::Primary)
                             on_click=Box::new(submit)
-                            disabled=Signal::derive(move || busy.get())
+                            disabled=Signal::derive(move || cmd.busy.get())
                         >
                             {move || {
-                                if busy.get() {
+                                if cmd.busy.get() {
                                     view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
                                         .into_any()
                                 } else {
@@ -513,17 +481,17 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl Int
                         <Button
                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
                             on_click=Box::new(move |_| editing.set(None))
-                            disabled=Signal::derive(move || busy.get())
+                            disabled=Signal::derive(move || cmd.busy.get())
                         >
                             "Cancel"
                         </Button>
                         <Button
                             appearance=Signal::derive(|| ButtonAppearance::Primary)
                             on_click=Box::new(submit_edit)
-                            disabled=Signal::derive(move || busy.get())
+                            disabled=Signal::derive(move || cmd.busy.get())
                         >
                             {move || {
-                                if busy.get() {
+                                if cmd.busy.get() {
                                     view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
                                         .into_any()
                                 } else {
@@ -535,7 +503,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl Int
                 </section>
             </Show>
 
-            {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
 
             <Suspense fallback=move || {
                 view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" /> }
@@ -598,7 +566,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl Int
                 title="Remove this federated credential?"
                 body="Any workload using this issuer/subject will stop being able to authenticate as the app. This cannot be undone."
                 confirm_label="Remove"
-                busy=Signal::derive(move || busy.get())
+                busy=Signal::derive(move || cmd.busy.get())
                 on_confirm=Callback::new(move |()| {
                     if let Some((id, _)) = pending_remove.get() {
                         pending_remove.set(None);

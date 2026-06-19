@@ -20,6 +20,7 @@ use crate::bindings::auth;
 use crate::bindings::exchange::{self, AapMigrationReport};
 use crate::components::requires_role::RequiresRole;
 use crate::components::ui::DataTable;
+use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::parse_lines;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -96,13 +97,13 @@ pub fn ExchangeScopingSection(
     });
 
     let groups_text = RwSignal::new(String::new());
-    let busy = RwSignal::new(false);
-    let error: RwSignal<Option<String>> = RwSignal::new(None);
+    // Drives the shared-core grant flow (`run_grant`).
+    let grant_cmd = use_command();
 
     // Managed scope group (`azapptoolkit_<appId>`) membership panel state.
     let add_text = RwSignal::new(String::new());
-    let group_busy = RwSignal::new(false);
-    let group_error: RwSignal<Option<String>> = RwSignal::new(None);
+    // Drives the membership mutations (`do_add` / `do_remove`).
+    let group_cmd = use_command();
     // Confirmation gate for removing a mailbox from the scope group — a server
     // mutation that stops the app from accessing it via the scoped grant.
     let pending_remove_mailbox: RwSignal<Option<String>> = RwSignal::new(None);
@@ -111,8 +112,8 @@ pub fn ExchangeScopingSection(
         Option<Result<exchange::ExchangeScopeGroupDto, azapptoolkit_dto::UiError>>,
     > = RwSignal::new(None);
 
-    let mig_busy = RwSignal::new(false);
-    let mig_error: RwSignal<Option<String>> = RwSignal::new(None);
+    // Drives the legacy Application Access Policy migration (`do_migrate`).
+    let mig_cmd = use_command();
     let mig_result: RwSignal<Option<AapMigrationReport>> = RwSignal::new(None);
 
     // Bumped to refresh the assignments list (consent retry / manual refresh).
@@ -163,11 +164,11 @@ pub fn ExchangeScopingSection(
             return;
         };
         let app = app_id.get();
-        group_busy.set(true);
+        group_cmd.busy.set(true);
         leptos::task::spawn_local(async move {
             let res = exchange::list_exchange_scope_group(&t.tenant_id, &app).await;
             group_state.set(Some(res));
-            group_busy.set(false);
+            group_cmd.busy.set(false);
         });
     };
 
@@ -180,159 +181,132 @@ pub fn ExchangeScopingSection(
     });
 
     let do_add = move || {
-        if group_busy.get() {
-            return;
-        }
         let mailboxes = parse_lines(&add_text.get());
         if mailboxes.is_empty() {
-            group_error.set(Some("Enter at least one mailbox (one per line).".into()));
+            group_cmd
+                .error
+                .set(Some("Enter at least one mailbox (one per line).".into()));
             return;
         }
-        let Some(t) = session.active_tenant.get() else {
-            return;
-        };
         let app = app_id.get();
-        group_busy.set(true);
-        group_error.set(None);
-        leptos::task::spawn_local(async move {
-            match exchange::add_exchange_scope_group_members(&t.tenant_id, &app, &mailboxes).await {
-                Ok(r) => {
-                    add_text.set(String::new());
-                    let mut msg = format!(
-                        "Added {} mailbox(es) to {}.",
-                        r.succeeded.len(),
-                        r.group_name
-                    );
-                    if r.group_created {
-                        msg.push_str(" Group created.");
-                    }
-                    session.toast_success(msg);
-                    if !r.failed.is_empty() {
-                        group_error.set(Some(format!(
-                            "{} mailbox(es) could not be added: {}",
-                            r.failed.len(),
-                            r.failed
-                                .iter()
-                                .map(|f| format!("{} ({})", f.mailbox, f.reason))
-                                .collect::<Vec<_>>()
-                                .join("; "),
-                        )));
-                    }
-                    // Membership changed but the scope verdict didn't, so no
-                    // cache bust — just refresh the live member list.
-                    let res = exchange::list_exchange_scope_group(&t.tenant_id, &app).await;
-                    group_state.set(Some(res));
+        group_cmd.run(
+            move |r: exchange::ExchangeMemberMutationResult| {
+                add_text.set(String::new());
+                let mut msg = format!(
+                    "Added {} mailbox(es) to {}.",
+                    r.succeeded.len(),
+                    r.group_name
+                );
+                if r.group_created {
+                    msg.push_str(" Group created.");
                 }
-                Err(e) => group_error.set(Some(e.message)),
-            }
-            group_busy.set(false);
-        });
+                session.toast_success(msg);
+                if !r.failed.is_empty() {
+                    group_cmd.error.set(Some(format!(
+                        "{} mailbox(es) could not be added: {}",
+                        r.failed.len(),
+                        r.failed
+                            .iter()
+                            .map(|f| format!("{} ({})", f.mailbox, f.reason))
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    )));
+                }
+                // Membership changed but the scope verdict didn't, so no
+                // cache bust — just refresh the live member list.
+                load_group();
+            },
+            move |tenant_id| async move {
+                exchange::add_exchange_scope_group_members(&tenant_id, &app, &mailboxes).await
+            },
+        );
     };
 
     let do_remove = move |mailbox: String| {
-        if group_busy.get() {
-            return;
-        }
-        let Some(t) = session.active_tenant.get() else {
-            return;
-        };
         let app = app_id.get();
-        group_busy.set(true);
-        group_error.set(None);
-        leptos::task::spawn_local(async move {
-            let mailboxes = vec![mailbox.clone()];
-            match exchange::remove_exchange_scope_group_members(&t.tenant_id, &app, &mailboxes)
-                .await
-            {
-                Ok(r) if r.failed.is_empty() => {
+        let mailboxes = vec![mailbox.clone()];
+        group_cmd.run(
+            move |r: exchange::ExchangeMemberMutationResult| {
+                if r.failed.is_empty() {
                     session.toast_success(format!("Removed {mailbox} from {}.", r.group_name));
-                    let res = exchange::list_exchange_scope_group(&t.tenant_id, &app).await;
-                    group_state.set(Some(res));
+                    load_group();
                     pending_remove_mailbox.set(None);
+                } else {
+                    group_cmd.error.set(Some(format!(
+                        "Could not remove {mailbox}: {}",
+                        r.failed
+                            .iter()
+                            .map(|f| f.reason.clone())
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    )));
                 }
-                Ok(r) => group_error.set(Some(format!(
-                    "Could not remove {mailbox}: {}",
-                    r.failed
-                        .iter()
-                        .map(|f| f.reason.clone())
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                ))),
-                Err(e) => group_error.set(Some(e.message)),
-            }
-            group_busy.set(false);
-        });
+            },
+            move |tenant_id| async move {
+                exchange::remove_exchange_scope_group_members(&tenant_id, &app, &mailboxes).await
+            },
+        );
     };
 
     // Shared grant core: scope the principal to `groups` (the managed group, or
     // the free-text advanced groups), assigning the mail roles and — when
     // `remove_unscoped` — stripping the org-wide Entra grant so scoping bites.
     let run_grant = move |groups: Vec<String>, remove_unscoped: bool| {
-        if busy.get() {
-            return;
-        }
         if groups.is_empty() {
-            error.set(Some(
+            grant_cmd.error.set(Some(
                 "Add at least one mailbox to the managed group, or enter a group below.".into(),
             ));
             return;
         }
-        let Some(t) = session.active_tenant.get() else {
-            return;
-        };
-        busy.set(true);
-        error.set(None);
         let target = target.get();
         let app = app_id.get();
-        leptos::task::spawn_local(async move {
-            let res = match &target {
-                ExchangeScopeTarget::Application { object_id } => {
-                    exchange::grant_exchange_mailbox_access(
-                        &t.tenant_id,
-                        object_id,
-                        None,
-                        &groups,
-                        remove_unscoped,
-                    )
-                    .await
+        grant_cmd.run(
+            move |r: exchange::ExchangeAccessResult| {
+                let mut summary = format!(
+                    "Scope “{}”: assigned {} role(s), skipped {}, removed {} org-wide grant(s).",
+                    r.scope_name,
+                    r.roles_assigned.len(),
+                    r.roles_skipped.len(),
+                    r.removed_entra_grants.len(),
+                );
+                if !r.warnings.is_empty() {
+                    summary.push_str(&format!(" {} warning(s).", r.warnings.len()));
                 }
-                ExchangeScopeTarget::ServicePrincipal {
-                    sp_object_id,
-                    display_name,
-                    mail_permissions,
-                    ..
-                } => {
-                    exchange::grant_managed_identity_scoped_exchange_access(
-                        &t.tenant_id,
+                session.toast_success(summary);
+                on_changed.run(());
+            },
+            move |tenant_id| async move {
+                match &target {
+                    ExchangeScopeTarget::Application { object_id } => {
+                        exchange::grant_exchange_mailbox_access(
+                            &tenant_id,
+                            object_id,
+                            None,
+                            &groups,
+                            remove_unscoped,
+                        )
+                        .await
+                    }
+                    ExchangeScopeTarget::ServicePrincipal {
                         sp_object_id,
-                        &app,
                         display_name,
                         mail_permissions,
-                        &groups,
-                        remove_unscoped,
-                    )
-                    .await
-                }
-            };
-            match res {
-                Ok(r) => {
-                    let mut summary = format!(
-                        "Scope “{}”: assigned {} role(s), skipped {}, removed {} org-wide grant(s).",
-                        r.scope_name,
-                        r.roles_assigned.len(),
-                        r.roles_skipped.len(),
-                        r.removed_entra_grants.len(),
-                    );
-                    if !r.warnings.is_empty() {
-                        summary.push_str(&format!(" {} warning(s).", r.warnings.len()));
+                        ..
+                    } => {
+                        exchange::grant_managed_identity_scoped_exchange_access(
+                            &tenant_id,
+                            sp_object_id,
+                            &app,
+                            display_name,
+                            mail_permissions,
+                            &groups,
+                            remove_unscoped,
+                        )
+                        .await
                     }
-                    session.toast_success(summary);
-                    on_changed.run(());
                 }
-                Err(e) => error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+            },
+        );
     };
 
     // Advanced path: scope to the free-text groups the user typed.
@@ -349,46 +323,36 @@ pub fn ExchangeScopingSection(
                 .unwrap_or_else(|| g.group_name.clone());
             run_grant(vec![identifier], remove_unscoped);
         }
-        _ => error.set(Some(
+        _ => grant_cmd.error.set(Some(
             "Add at least one mailbox first — that creates the managed group to scope to.".into(),
         )),
     };
 
     let do_migrate = move |dry_run: bool| {
-        if mig_busy.get() {
+        if mig_cmd.busy.get_untracked() {
             return;
         }
-        mig_busy.set(true);
-        mig_error.set(None);
         mig_result.set(None);
-        let tenant = session.active_tenant.get();
         let app_id = app_id.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                mig_busy.set(false);
-                return;
-            };
-            match exchange::migrate_application_access_policies(
-                &t.tenant_id,
-                Some(&app_id),
-                dry_run,
-            )
-            .await
-            {
+        mig_cmd.run(
+            move |r: AapMigrationReport| {
                 // Dry run mutated nothing — show the plan inline. A clean
                 // execute reloads the caller (which rebuilds this section), so
                 // the summary rides a toast instead. A partial failure keeps
                 // the report inline (no reload) so the failure lines survive;
                 // Refresh picks up whatever did land.
-                Ok(r) if dry_run || !r.failures.is_empty() => mig_result.set(Some(r)),
-                Ok(r) => {
+                if dry_run || !r.failures.is_empty() {
+                    mig_result.set(Some(r));
+                } else {
                     session.toast_success(format!("Migrated {} policy(ies).", r.items.len()));
                     on_changed.run(());
                 }
-                Err(e) => mig_error.set(Some(e.message)),
-            }
-            mig_busy.set(false);
-        });
+            },
+            move |tenant_id| async move {
+                exchange::migrate_application_access_policies(&tenant_id, Some(&app_id), dry_run)
+                    .await
+            },
+        );
     };
 
     view! {
@@ -398,8 +362,8 @@ pub fn ExchangeScopingSection(
                 title="Remove mailbox from scope group?"
                 body="Removes the mailbox from the toolkit-managed scope group, so the app can no longer reach it via the scoped Exchange grant. Exchange can take up to ~2 hours to apply RBAC changes."
                 confirm_label="Remove"
-                busy=group_busy
-                error=group_error
+                busy=group_cmd.busy
+                error=group_cmd.error
                 on_confirm=Callback::new(move |()| {
                     if let Some(mb) = pending_remove_mailbox.get() {
                         do_remove(mb);
@@ -407,7 +371,7 @@ pub fn ExchangeScopingSection(
                 })
                 on_close=Callback::new(move |()| {
                     pending_remove_mailbox.set(None);
-                    group_error.set(None);
+                    group_cmd.error.set(None);
                 })
             />
             <header class="row-between">
@@ -460,10 +424,10 @@ pub fn ExchangeScopingSection(
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                                         on_click=Box::new(move |_| do_add())
-                                        disabled=Signal::derive(move || group_busy.get())
+                                        disabled=Signal::derive(move || group_cmd.busy.get())
                                     >
                                         {move || {
-                                            if group_busy.get() {
+                                            if group_cmd.busy.get() {
                                                 view! {
                                                     <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
                                                 }
@@ -475,7 +439,8 @@ pub fn ExchangeScopingSection(
                                     </Button>
                                 </div>
                                 {move || {
-                                    group_error
+                                    group_cmd
+                                        .error
                                         .get()
                                         .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
                                 }}
@@ -554,7 +519,7 @@ pub fn ExchangeScopingSection(
                                                                             pending_remove_mailbox
                                                                                 .set(Some(remove_id.clone()))
                                                                         })
-                                                                        disabled=Signal::derive(move || group_busy.get())
+                                                                        disabled=Signal::derive(move || group_cmd.busy.get())
                                                                     >
                                                                         "Remove"
                                                                     </Button>
@@ -572,10 +537,10 @@ pub fn ExchangeScopingSection(
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                                         on_click=Box::new(move |_| do_grant_managed(true))
-                                        disabled=Signal::derive(move || busy.get())
+                                        disabled=Signal::derive(move || grant_cmd.busy.get())
                                     >
                                         {move || {
-                                            if busy.get() {
+                                            if grant_cmd.busy.get() {
                                                 view! {
                                                     <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
                                                 }
@@ -588,7 +553,7 @@ pub fn ExchangeScopingSection(
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                         on_click=Box::new(move |_| do_grant_managed(false))
-                                        disabled=Signal::derive(move || busy.get())
+                                        disabled=Signal::derive(move || grant_cmd.busy.get())
                                     >
                                         "Grant, keep org-wide grants"
                                     </Button>
@@ -615,20 +580,23 @@ pub fn ExchangeScopingSection(
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                     on_click=Box::new(move |_| do_grant(true))
-                                    disabled=Signal::derive(move || busy.get())
+                                    disabled=Signal::derive(move || grant_cmd.busy.get())
                                 >
                                     "Grant scoped (remove org-wide)"
                                 </Button>
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                     on_click=Box::new(move |_| do_grant(false))
-                                    disabled=Signal::derive(move || busy.get())
+                                    disabled=Signal::derive(move || grant_cmd.busy.get())
                                 >
                                     "Grant, keep org-wide grants"
                                 </Button>
                             </div>
                             {move || {
-                                error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                grant_cmd
+                                    .error
+                                    .get()
+                                    .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
                             }}
 
                             <hr />
@@ -718,17 +686,17 @@ pub fn ExchangeScopingSection(
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                     on_click=Box::new(move |_| do_migrate(true))
-                                    disabled=Signal::derive(move || mig_busy.get())
+                                    disabled=Signal::derive(move || mig_cmd.busy.get())
                                 >
                                     "Preview migration"
                                 </Button>
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                                     on_click=Box::new(move |_| do_migrate(false))
-                                    disabled=Signal::derive(move || mig_busy.get())
+                                    disabled=Signal::derive(move || mig_cmd.busy.get())
                                 >
                                     {move || {
-                                        if mig_busy.get() {
+                                        if mig_cmd.busy.get() {
                                             view! {
                                                 <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
                                             }
@@ -740,7 +708,8 @@ pub fn ExchangeScopingSection(
                                 </Button>
                             </div>
                             {move || {
-                                mig_error
+                                mig_cmd
+                                    .error
                                     .get()
                                     .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
                             }}

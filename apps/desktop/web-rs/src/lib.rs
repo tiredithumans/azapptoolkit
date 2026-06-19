@@ -17,6 +17,7 @@ use thaw::{ConfigProvider, Theme};
 
 pub mod bindings;
 pub mod components;
+pub mod constants;
 pub mod hooks;
 pub mod state;
 pub mod util;

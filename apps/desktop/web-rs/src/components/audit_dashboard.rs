@@ -16,16 +16,10 @@ use thaw::{Body1, Button, ButtonAppearance, Input, Tab, TabList};
 
 use crate::components::saved_views::SavedViews;
 use crate::components::ui::{SectionHeader, SkeletonList};
+use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::use_session;
-
-/// How many rows the shared lens tables draw per render page. Like the audit
-/// table, they window to this many at a time with a "Show more" control so a
-/// tenant-scale lens (every consent grant / credential / app-permission grant)
-/// can't materialize thousands of `<tr>`s — or re-clone+re-render them per
-/// keystroke — at once.
-const RENDER_PAGE: usize = 200;
 
 /// A generic tenant-wide audit table. See the module docs for the split between
 /// the shared scaffold (here) and the per-view props.

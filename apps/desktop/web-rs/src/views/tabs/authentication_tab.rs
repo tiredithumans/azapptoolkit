@@ -15,6 +15,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, 
 use crate::bindings::applications::{
     self, ApplicationAuthenticationDto, ApplicationDetail, SetApplicationAuthenticationInput,
 };
+use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 
 /// Splits a redirect-URI textarea into trimmed, non-empty entries. Unlike the
@@ -89,8 +90,7 @@ fn AuthenticationForm(
     #[prop(into)] on_saved: Callback<()>,
 ) -> impl IntoView {
     let session = use_session();
-    let busy = RwSignal::new(false);
-    let error: RwSignal<Option<String>> = RwSignal::new(None);
+    let cmd = use_command();
 
     // Seed the editable fields from the loaded settings (one URI per line).
     let web = RwSignal::new(dto.web_redirect_uris.join("\n"));
@@ -102,44 +102,32 @@ fn AuthenticationForm(
     let id_token = RwSignal::new(dto.enable_id_token_issuance);
 
     let save = move |_| {
-        if busy.get() {
-            return;
-        }
-        busy.set(true);
-        error.set(None);
-        let tenant = session.active_tenant.get();
         let object_id = object_id.clone();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            let logout_url = {
-                let l = logout.get().trim().to_string();
-                (!l.is_empty()).then_some(l)
-            };
-            let input = SetApplicationAuthenticationInput {
-                web_redirect_uris: lines_to_uris(&web.get()),
-                spa_redirect_uris: lines_to_uris(&spa.get()),
-                public_client_redirect_uris: lines_to_uris(&public_client.get()),
-                logout_url,
-                is_fallback_public_client: fallback.get(),
-                enable_access_token_issuance: access_token.get(),
-                enable_id_token_issuance: id_token.get(),
-            };
-            let result =
-                applications::set_application_authentication(&t.tenant_id, &object_id, &input)
-                    .await;
-            // Clear busy before on_saved (which re-renders / disposes this form).
-            busy.set(false);
-            match result {
-                Ok(()) => {
-                    session.toast_success("Authentication settings saved.");
-                    on_saved.run(());
+        cmd.run(
+            move |()| {
+                session.toast_success("Authentication settings saved.");
+                on_saved.run(());
+            },
+            move |tenant_id| {
+                let logout_url = {
+                    let l = logout.get().trim().to_string();
+                    (!l.is_empty()).then_some(l)
+                };
+                let input = SetApplicationAuthenticationInput {
+                    web_redirect_uris: lines_to_uris(&web.get()),
+                    spa_redirect_uris: lines_to_uris(&spa.get()),
+                    public_client_redirect_uris: lines_to_uris(&public_client.get()),
+                    logout_url,
+                    is_fallback_public_client: fallback.get(),
+                    enable_access_token_issuance: access_token.get(),
+                    enable_id_token_issuance: id_token.get(),
+                };
+                async move {
+                    applications::set_application_authentication(&tenant_id, &object_id, &input)
+                        .await
                 }
-                Err(e) => error.set(Some(e.message)),
-            }
-        });
+            },
+        );
     };
 
     view! {
@@ -184,15 +172,15 @@ fn AuthenticationForm(
                 />
                 " Issue ID tokens from the authorization endpoint"
             </label>
-            {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
             <div class="actions-row">
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(save)
-                    disabled=Signal::derive(move || busy.get())
+                    disabled=Signal::derive(move || cmd.busy.get())
                 >
                     {move || {
-                        if busy.get() {
+                        if cmd.busy.get() {
                             view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }.into_any()
                         } else {
                             view! { "Save" }.into_any()

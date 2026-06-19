@@ -17,6 +17,7 @@ use crate::bindings::sharepoint::GrantSiteAccessResult;
 use crate::bindings::{auth, sharepoint};
 use crate::components::requires_role::RequiresRole;
 use crate::components::ui::DataTable;
+use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
@@ -33,8 +34,8 @@ pub fn SharePointSitesSection(
     let open = RwSignal::new(false);
 
     let site_url = RwSignal::new(String::new());
-    let busy = RwSignal::new(false);
-    let error: RwSignal<Option<String>> = RwSignal::new(None);
+    // Drives the consent / grant / remove mutations, which share one busy+error.
+    let cmd = use_command();
     let result: RwSignal<Option<GrantSiteAccessResult>> = RwSignal::new(None);
     // The site whose permissions are currently listed; set after grant/list.
     let listed_url = RwSignal::new(String::new());
@@ -69,113 +70,86 @@ pub fn SharePointSitesSection(
     // Grants the SharePoint consent, then re-runs the listing (which also
     // clears the prompt on success). Grant/revoke can be re-clicked afterwards.
     let grant_consent = move |_| {
-        if busy.get() {
-            return;
-        }
-        let Some(t) = session.active_tenant.get() else {
-            return;
-        };
-        busy.set(true);
-        error.set(None);
-        leptos::task::spawn_local(async move {
-            match auth::request_scope_consent(&t.tenant_id, "sharepoint").await {
-                Ok(()) => {
-                    needs_consent.set(false);
-                    reload.update(|n| *n += 1);
-                }
-                Err(e) => error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+        cmd.run(
+            move |()| {
+                needs_consent.set(false);
+                reload.update(|n| *n += 1);
+            },
+            move |tenant_id| async move {
+                auth::request_scope_consent(&tenant_id, "sharepoint").await
+            },
+        );
     };
 
     let do_grant = move |role: &'static str| {
-        if busy.get() {
-            return;
-        }
         let url = site_url.get().trim().to_string();
         if url.is_empty() {
-            error.set(Some("Enter a SharePoint site URL.".into()));
+            cmd.error.set(Some("Enter a SharePoint site URL.".into()));
             return;
         }
-        busy.set(true);
-        error.set(None);
+        cmd.error.set(None);
         result.set(None);
-        let tenant = session.active_tenant.get();
         let app_id = app_id.get();
         let app_name = app_display_name.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            match sharepoint::grant_site_access(
-                &t.tenant_id,
-                &app_id,
-                &app_name,
-                &url,
-                &[role.to_string()],
-            )
-            .await
-            {
-                Ok(r) => {
-                    needs_consent.set(false);
-                    result.set(Some(r));
-                    listed_url.set(url);
-                    reload.update(|n| *n += 1);
+        let listed = url.clone();
+        cmd.run_with(
+            move |r| {
+                needs_consent.set(false);
+                result.set(Some(r));
+                listed_url.set(listed);
+                reload.update(|n| *n += 1);
+            },
+            move |e| {
+                if e.code == "consent_required" {
+                    needs_consent.set(true);
                 }
-                Err(e) => {
-                    if e.code == "consent_required" {
-                        needs_consent.set(true);
-                    }
-                    error.set(Some(e.message));
-                }
-            }
-            busy.set(false);
-        });
+                cmd.error.set(Some(e.message));
+            },
+            move |tenant_id| async move {
+                sharepoint::grant_site_access(
+                    &tenant_id,
+                    &app_id,
+                    &app_name,
+                    &url,
+                    &[role.to_string()],
+                )
+                .await
+            },
+        );
     };
 
     let do_list = move |_| {
         let url = site_url.get().trim().to_string();
         if url.is_empty() {
-            error.set(Some("Enter a SharePoint site URL.".into()));
+            cmd.error.set(Some("Enter a SharePoint site URL.".into()));
             return;
         }
-        error.set(None);
+        cmd.error.set(None);
         listed_url.set(url);
         reload.update(|n| *n += 1);
     };
 
     let do_remove = move |perm_id: String| {
-        if busy.get() {
-            return;
-        }
         let url = listed_url.get();
         if url.trim().is_empty() {
             return;
         }
-        busy.set(true);
-        error.set(None);
-        let tenant = session.active_tenant.get();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            match sharepoint::remove_site_permission(&t.tenant_id, &url, &perm_id).await {
-                Ok(()) => {
-                    needs_consent.set(false);
-                    reload.update(|n| *n += 1);
+        cmd.error.set(None);
+        cmd.run_with(
+            move |()| {
+                needs_consent.set(false);
+                reload.update(|n| *n += 1);
+            },
+            move |e| {
+                if e.code == "consent_required" {
+                    needs_consent.set(true);
                 }
-                Err(e) => {
-                    if e.code == "consent_required" {
-                        needs_consent.set(true);
-                    }
-                    error.set(Some(e.message));
-                }
-            }
-            busy.set(false);
-        });
+                cmd.error.set(Some(e.message));
+            },
+            move |tenant_id| async move {
+                sharepoint::remove_site_permission(&tenant_id, &url, &perm_id).await
+            },
+        );
     };
 
     view! {
@@ -209,26 +183,26 @@ pub fn SharePointSitesSection(
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                                     on_click=Box::new(move |_| do_grant("read"))
-                                    disabled=Signal::derive(move || busy.get())
+                                    disabled=Signal::derive(move || cmd.busy.get())
                                 >
                                     "Grant read"
                                 </Button>
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                                     on_click=Box::new(move |_| do_grant("write"))
-                                    disabled=Signal::derive(move || busy.get())
+                                    disabled=Signal::derive(move || cmd.busy.get())
                                 >
                                     "Grant write"
                                 </Button>
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                     on_click=Box::new(do_list)
-                                    disabled=Signal::derive(move || busy.get())
+                                    disabled=Signal::derive(move || cmd.busy.get())
                                 >
                                     "List site permissions"
                                 </Button>
                                 {move || {
-                                    busy
+                                    cmd.busy
                                         .get()
                                         .then(|| {
                                             view! {
@@ -239,7 +213,7 @@ pub fn SharePointSitesSection(
                             </div>
 
                             {move || {
-                                error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
                             }}
                             {move || {
                                 needs_consent
@@ -252,7 +226,7 @@ pub fn SharePointSitesSection(
                                                     <Button
                                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                                                         on_click=Box::new(grant_consent)
-                                                        disabled=Signal::derive(move || busy.get())
+                                                        disabled=Signal::derive(move || cmd.busy.get())
                                                     >
                                                         "Grant consent"
                                                     </Button>
@@ -304,7 +278,7 @@ pub fn SharePointSitesSection(
                                                                         class="button--danger"
                                                                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                                         on_click=Box::new(move |_| pending_remove.set(Some(id.clone())))
-                                                                        disabled=Signal::derive(move || busy.get())
+                                                                        disabled=Signal::derive(move || cmd.busy.get())
                                                                     >
                                                                         "Remove"
                                                                     </Button>
@@ -332,7 +306,7 @@ pub fn SharePointSitesSection(
                                 title="Revoke this site permission?"
                                 body="This app immediately loses access to the SharePoint site. The grant can be re-added from this section."
                                 confirm_label="Revoke"
-                                busy=Signal::derive(move || busy.get())
+                                busy=cmd.busy
                                 on_confirm=Callback::new(move |()| {
                                     if let Some(id) = pending_remove.get() {
                                         pending_remove.set(None);

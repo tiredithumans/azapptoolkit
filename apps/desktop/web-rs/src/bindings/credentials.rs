@@ -4,13 +4,8 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 
+use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::credentials::CredentialRowDto;
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TenantArg<'a> {
-    tenant_id: &'a str,
-}
 
 /// Lists every app-registration credential in the tenant, soonest-to-expire
 /// first. Always fetched fresh (no cache) so a just-rotated credential isn't

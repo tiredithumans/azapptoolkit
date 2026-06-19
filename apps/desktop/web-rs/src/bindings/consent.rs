@@ -4,13 +4,8 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 
+use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TenantArg<'a> {
-    tenant_id: &'a str,
-}
 
 /// Lists every delegated permission grant in the tenant, risk-classified and
 /// sorted risky-first. Always fetched fresh.

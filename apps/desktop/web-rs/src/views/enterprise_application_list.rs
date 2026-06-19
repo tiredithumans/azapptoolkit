@@ -1,9 +1,10 @@
 //! Virtualized list of Enterprise Application service principals — every SP
 //! in the tenant that is **not** a managed identity. Mirrors the App
 //! Registration list's pattern: search + virtualized rows, with a type chip,
-//! foreign-tenant pill, and pairing arrow per row. Filtering runs through
-//! layered memos over the loaded rows, so a keystroke or chip click never
-//! rebuilds the loaded subtree.
+//! foreign-tenant pill, and pairing arrow per row. Filtering runs through the
+//! shared [`use_filtered_list`] memos over the loaded rows, so a keystroke or
+//! chip click never rebuilds the loaded subtree. The chrome (header, search,
+//! filter drawer) is the shared [`ListScaffold`].
 
 use std::sync::Arc;
 
@@ -16,26 +17,22 @@ use crate::bindings::diagnostics::{self, ListCacheKindDto};
 use crate::bindings::enterprise_application::{self, EnterpriseApplicationDto};
 use crate::components::date_range_filter::DateRangeFilter;
 use crate::components::filter_chip::FilterChip;
-use crate::components::filter_toggle::FilterToggle;
 use crate::components::icon::IconName;
-use crate::components::saved_views::SavedViews;
+use crate::components::list_scaffold::ListScaffold;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{EmptyState, IconButton, SearchInput, SkeletonList};
+use crate::components::ui::{EmptyState, IconButton, SkeletonList};
 use crate::components::virtual_list::VirtualList;
-use crate::hooks::use_debounced::{use_debounced, LIST_FILTER_DEBOUNCE_MS};
+use crate::constants::*;
+use crate::hooks::use_debounced::use_debounced;
+use crate::hooks::use_filtered_list::{use_filtered_list, Facet, FilteredListSpec};
 use crate::state::use_session;
 use crate::util::created_in_range;
 use crate::views::pairing::jump_to_paired_app;
-
-const ROW_HEIGHT: f64 = 52.0;
-
-const OVERSCAN: usize = 8;
 
 #[component]
 pub fn EnterpriseApplicationList() -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
-    let _selected_enterprise_app_id = session.selected_enterprise_app_id;
 
     // "Filter this list" query, lifted to the session so the top-bar Global
     // Search can seed it (picking an Enterprise Application there lands the user
@@ -43,9 +40,9 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
     let raw_search = session.enterprise_search;
     let search = use_debounced(raw_search.into(), LIST_FILTER_DEBOUNCE_MS);
 
-    // Client-side facet over the loaded page: all | enabled | disabled | foreign
-    // | assignment (assignment-required). Credential status is the App
-    // Registration lens, not the enterprise-app lens, so it's not offered here.
+    // Client-side facet over the loaded page: all | enabled | disabled | foreign.
+    // Credential status is the App Registration lens, not the enterprise-app
+    // lens, so it's not offered here.
     let ent_filter = RwSignal::new("all".to_string());
     // Unset date picker (None) leaves that side of the creation-date range open;
     // together they bound creation date to an inclusive window.
@@ -69,8 +66,9 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
     let refreshing = RwSignal::new(false);
 
     // Rows currently shown (after every filter) — captured for the inventory
-    // export so "what you see is what you export". Kept in step by an Effect
-    // in `LoadedEnterpriseApps`; the `Arc` makes each snapshot a pointer copy.
+    // export so "what you see is what you export". Kept in step by the
+    // `use_filtered_list` export hook; the `Arc` makes each snapshot a pointer
+    // copy.
     let export_rows: StoredValue<Arc<Vec<EnterpriseApplicationDto>>> =
         StoredValue::new(Arc::new(Vec::new()));
     let exporting = RwSignal::new(false);
@@ -134,10 +132,16 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
     };
 
     view! {
-        <section class="app-list">
-            <header class="app-list__header">
-                <strong>"Enterprise Applications"</strong>
-                <div class="list-header-actions">
+        <ListScaffold
+            title="Enterprise Applications"
+            search=raw_search
+            search_placeholder="Filter Enterprise Apps…"
+            saved_view_key="enterprise"
+            facet=ent_filter
+            filters_open=filters_open
+            active_filters=active_filters
+            actions=move || {
+                view! {
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
                         disabled=Signal::derive(move || exporting.get())
@@ -159,18 +163,18 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
                         on_click=Callback::new(on_refresh)
                         busy=Signal::derive(move || refreshing.get())
                     />
-                </div>
-            </header>
-            <SearchInput value=raw_search placeholder="Filter Enterprise Apps…" />
-            <FilterToggle open=filters_open active_count=active_filters />
-            <Show when=move || filters_open.get()>
-                <SavedViews view_key="enterprise" facet=ent_filter search=raw_search />
-                <DateRangeFilter
-                    after=created_after
-                    before=created_before
-                    noun="enterprise applications"
-                />
-            </Show>
+                }
+            }
+            drawer=move || {
+                view! {
+                    <DateRangeFilter
+                        after=created_after
+                        before=created_before
+                        noun="enterprise applications"
+                    />
+                }
+            }
+        >
             <Suspense fallback=move || view! { <SkeletonList rows=8 /> }>
                 {move || {
                     // Re-runs only on an actual refetch; the filters are read
@@ -203,11 +207,11 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
                     })
                 }}
             </Suspense>
-        </section>
+        </ListScaffold>
     }
 }
 
-/// The loaded-list body: layered filter memos feeding the facet chips, the
+/// The loaded-list body: the shared filter memos feeding the facet chips, the
 /// result count, and the virtualized rows.
 #[component]
 fn LoadedEnterpriseApps(
@@ -221,83 +225,87 @@ fn LoadedEnterpriseApps(
     filters_open: RwSignal<bool>,
     export_rows: StoredValue<Arc<Vec<EnterpriseApplicationDto>>>,
 ) -> impl IntoView {
-    // Count before filtering (for the "N of M" footer).
-    let total = items.len();
-    let all = Arc::new(items);
-
-    // Name + creation-date range define the base set; the facet chips partition
-    // that base (their counts are over it).
-    let base = Memo::new(move |_| {
-        let needle = search.with(|s| s.trim().to_lowercase());
-        let after = created_after.get();
-        let before = created_before.get();
-        if needle.is_empty() && after.is_none() && before.is_none() {
-            return Arc::clone(&all);
-        }
-        Arc::new(
-            all.iter()
-                .filter(|sp| {
-                    let name_ok =
-                        needle.is_empty() || sp.display_name.to_lowercase().contains(&needle);
-                    name_ok && created_in_range(sp.created_date_time, after, before)
-                })
-                .cloned()
-                .collect::<Vec<_>>(),
-        )
-    });
-    let counts = Memo::new(move |_| ent_counts(&base.get()));
-    let shown = Memo::new(move |_| {
-        let facet = ent_filter.get();
-        let base = base.get();
-        if facet == "all" {
-            return base;
-        }
-        Arc::new(
-            base.iter()
-                .filter(|sp| matches_ent_facet(sp, &facet))
-                .cloned()
-                .collect::<Vec<_>>(),
-        )
+    let list = use_filtered_list(FilteredListSpec {
+        items,
+        search,
+        search_match: |sp: &EnterpriseApplicationDto, needle: &str| {
+            sp.display_name.to_lowercase().contains(needle)
+        },
+        extra_active: Signal::derive(move || {
+            created_after.get().is_some() || created_before.get().is_some()
+        }),
+        extra: move |sp: &EnterpriseApplicationDto| {
+            created_in_range(
+                sp.created_date_time,
+                created_after.get(),
+                created_before.get(),
+            )
+        },
+        facet: ent_filter,
+        facet_any: "all",
+        // No assignment-required facet: the shared SP list index doesn't
+        // `$select` `appRoleAssignmentRequired`, so it's only known on the
+        // detail pane.
+        facets: vec![
+            Facet::new("Enabled", "enabled", |sp: &EnterpriseApplicationDto| {
+                sp.account_enabled == Some(true)
+            }),
+            Facet::new("Disabled", "disabled", |sp: &EnterpriseApplicationDto| {
+                sp.account_enabled == Some(false)
+            }),
+            Facet::new("Foreign", "foreign", |sp: &EnterpriseApplicationDto| {
+                sp.is_foreign_tenant
+            }),
+        ],
+        export_rows: Some(export_rows),
     });
 
-    // Keep the export snapshot in step with what's shown (a pointer copy).
-    Effect::new(move |_| export_rows.set_value(shown.get()));
+    let total = list.total;
+    let shown = list.shown;
+    let base_total = list.base_total();
+    let enabled = list.count_of("enabled");
+    let disabled = list.count_of("disabled");
+    let foreign = list.count_of("foreign");
+    let shown_total = list.shown_total();
 
     // No bulk-selection bar: there is no SP-targeted bulk operation (the bulk
     // dialog acts on app registrations), so the list shows only the result
     // count, not a select-all / Bulk-actions control that would act on nothing.
     view! {
         <Show when=move || filters_open.get()>
-        {move || {
-            let counts = counts.get();
-            let base_total = base.with(|b| b.len());
-            view! {
-                <div class="filter-chips">
-                    <FilterChip label="All" value="all" count=base_total facet=ent_filter />
-                    <FilterChip
-                        label="Enabled"
-                        value="enabled"
-                        count=counts.enabled
-                        facet=ent_filter
-                    />
-                    <FilterChip
-                        label="Disabled"
-                        value="disabled"
-                        count=counts.disabled
-                        facet=ent_filter
-                    />
-                    <FilterChip
-                        label="Foreign"
-                        value="foreign"
-                        count=counts.foreign
-                        facet=ent_filter
-                    />
-                </div>
-            }
-        }}
+            {move || {
+                view! {
+                    <div class="filter-chips">
+                        <FilterChip
+                            label="All"
+                            value="all"
+                            count=base_total.get()
+                            facet=ent_filter
+                        />
+                        <FilterChip
+                            label="Enabled"
+                            value="enabled"
+                            count=enabled.get()
+                            facet=ent_filter
+                        />
+                        <FilterChip
+                            label="Disabled"
+                            value="disabled"
+                            count=disabled.get()
+                            facet=ent_filter
+                        />
+                        <FilterChip
+                            label="Foreign"
+                            value="foreign"
+                            count=foreign.get()
+                            facet=ent_filter
+                        />
+                    </div>
+                }
+            }}
         </Show>
         {move || {
-            let shown_n = shown.with(|s| s.len());
+            let shown_n = shown_total.get();
             let count_label = if shown_n == total {
                 format!("{total} enterprise applications")
             } else {
@@ -310,46 +318,6 @@ fn LoadedEnterpriseApps(
             }
         }}
         <VirtualRows items=shown />
-    }
-}
-
-/// Per-facet counts over the loaded rows, powering the filter chips. (No
-/// assignment-required facet: the shared SP list index doesn't `$select`
-/// `appRoleAssignmentRequired`, so it's only known on the detail pane.)
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct EntCounts {
-    enabled: usize,
-    disabled: usize,
-    foreign: usize,
-}
-
-fn ent_counts(items: &[EnterpriseApplicationDto]) -> EntCounts {
-    let mut c = EntCounts {
-        enabled: 0,
-        disabled: 0,
-        foreign: 0,
-    };
-    for sp in items {
-        match sp.account_enabled {
-            Some(true) => c.enabled += 1,
-            Some(false) => c.disabled += 1,
-            None => {}
-        }
-        if sp.is_foreign_tenant {
-            c.foreign += 1;
-        }
-    }
-    c
-}
-
-/// Whether a service principal matches the active facet chip. `all` (and any
-/// unknown value) matches everything.
-fn matches_ent_facet(sp: &EnterpriseApplicationDto, facet: &str) -> bool {
-    match facet {
-        "enabled" => sp.account_enabled == Some(true),
-        "disabled" => sp.account_enabled == Some(false),
-        "foreign" => sp.is_foreign_tenant,
-        _ => true,
     }
 }
 

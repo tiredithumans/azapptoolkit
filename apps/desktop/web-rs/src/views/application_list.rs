@@ -3,12 +3,13 @@
 //! windowing replaces `@tanstack/react-virtual` (no Rust port exists).
 //!
 //! All filtering (search, creation-date range, credential facet) runs **in
-//! memory** over the loaded rows through layered memos — a keystroke or chip
-//! click re-filters the cached list without refetching or rebuilding the subtree.
+//! memory** over the loaded rows through the shared [`use_filtered_list`] memos
+//! — a keystroke or chip click re-filters the cached list without refetching or
+//! rebuilding the subtree. The chrome (header, search, filter drawer) is the
+//! shared [`ListScaffold`].
 
 use std::sync::Arc;
 
-use azapptoolkit_core::audit::ListCredentialStatus;
 use chrono::NaiveDate;
 use leptos::ev;
 use leptos::prelude::*;
@@ -18,24 +19,18 @@ use crate::bindings::applications::{self, ApplicationListRowDto};
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
 use crate::components::date_range_filter::DateRangeFilter;
 use crate::components::filter_chip::FilterChip;
-use crate::components::filter_toggle::FilterToggle;
 use crate::components::icon::IconName;
-use crate::components::saved_views::SavedViews;
+use crate::components::list_scaffold::ListScaffold;
 use crate::components::select_all_bar::SelectAllBar;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{EmptyState, IconButton, SearchInput, SkeletonList};
+use crate::components::ui::{EmptyState, IconButton, SkeletonList};
 use crate::components::virtual_list::VirtualList;
-use crate::hooks::use_debounced::{use_debounced, LIST_FILTER_DEBOUNCE_MS};
+use crate::constants::*;
+use crate::hooks::use_debounced::use_debounced;
+use crate::hooks::use_filtered_list::{use_filtered_list, Facet, FilteredListSpec};
 use crate::state::use_session;
 use crate::util::created_in_range;
 use crate::views::pairing::jump_to_paired_enterprise;
-
-const ROW_HEIGHT: f64 = 52.0;
-const OVERSCAN: usize = 8;
-/// Backend safety cap on apps materialized for this list (see `APPS_MAX` in
-/// `commands/applications.rs`). Only when the tenant exceeds this do we show a
-/// truncation notice — real tenants stay well under it.
-const APPS_HARD_CAP: usize = 10_000;
 
 #[component]
 pub fn ApplicationList() -> impl IntoView {
@@ -77,9 +72,9 @@ pub fn ApplicationList() -> impl IntoView {
     let refreshing = RwSignal::new(false);
 
     // Rows currently shown (after every filter) — captured for the inventory
-    // export so "what you see is what you export". Kept in step by an Effect
-    // in `LoadedApps`; the `Arc` makes each snapshot a pointer copy, not a
-    // row-by-row clone of the filtered list.
+    // export so "what you see is what you export". Kept in step by the
+    // `use_filtered_list` export hook; the `Arc` makes each snapshot a pointer
+    // copy, not a row-by-row clone of the filtered list.
     let export_rows: StoredValue<Arc<Vec<ApplicationListRowDto>>> =
         StoredValue::new(Arc::new(Vec::new()));
     let exporting = RwSignal::new(false);
@@ -139,10 +134,16 @@ pub fn ApplicationList() -> impl IntoView {
     };
 
     view! {
-        <section class="app-list">
-            <header class="app-list__header">
-                <strong>"App Registrations"</strong>
-                <div class="list-header-actions">
+        <ListScaffold
+            title="App Registrations"
+            search=raw_search
+            search_placeholder="Filter App Registrations…"
+            saved_view_key="apps"
+            facet=cred_filter
+            filters_open=filters_open
+            active_filters=active_filters
+            actions=move || {
+                view! {
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
                         disabled=Signal::derive(move || exporting.get())
@@ -164,14 +165,12 @@ pub fn ApplicationList() -> impl IntoView {
                         on_click=Callback::new(on_refresh)
                         busy=Signal::derive(move || refreshing.get())
                     />
-                </div>
-            </header>
-            <SearchInput value=raw_search placeholder="Filter App Registrations…" />
-            <FilterToggle open=filters_open active_count=active_filters />
-            <Show when=move || filters_open.get()>
-                <SavedViews view_key="apps" facet=cred_filter search=raw_search />
-                <DateRangeFilter after=created_after before=created_before noun="apps" />
-            </Show>
+                }
+            }
+            drawer=move || {
+                view! { <DateRangeFilter after=created_after before=created_before noun="apps" /> }
+            }
+        >
             <Suspense fallback=move || view! { <SkeletonList rows=8 /> }>
                 {move || {
                     // Re-runs only on an actual refetch (tenant switch / reload
@@ -196,22 +195,22 @@ pub fn ApplicationList() -> impl IntoView {
                                     .into_any()
                             }
                             Err(err) => {
-                            view! {
-                                <Body1 class="app-list__error">
-                                    {format!("Failed to load: {}", err.message)}
-                                </Body1>
-                            }
-                                .into_any()
+                                view! {
+                                    <Body1 class="app-list__error">
+                                        {format!("Failed to load: {}", err.message)}
+                                    </Body1>
+                                }
+                                    .into_any()
                             }
                         }
                     })
                 }}
             </Suspense>
-        </section>
+        </ListScaffold>
     }
 }
 
-/// The loaded-list body: layered filter memos feeding the chips, the select
+/// The loaded-list body: the shared filter memos feeding the chips, the select
 /// bar, and the virtualized rows. Built once per fetch; every filter
 /// interaction flows through the memos, so each stage rescans only when its
 /// own inputs change and downstream subtrees update independently.
@@ -229,86 +228,94 @@ fn LoadedApps(
     selected: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let session = use_session();
+
+    let list = use_filtered_list(FilteredListSpec {
+        items,
+        search,
+        search_match: |row: &ApplicationListRowDto, needle: &str| {
+            row.display_name.to_lowercase().contains(needle)
+        },
+        extra_active: Signal::derive(move || {
+            created_after.get().is_some() || created_before.get().is_some()
+        }),
+        extra: move |row: &ApplicationListRowDto| {
+            created_in_range(
+                row.created_date_time,
+                created_after.get(),
+                created_before.get(),
+            )
+        },
+        facet: cred_filter,
+        facet_any: "any",
+        // The credential chips partition the base set; each chip's predicate is
+        // the same `as_facet` test the count and the partition share, so a
+        // chip's count always agrees with what clicking it shows.
+        facets: vec![
+            Facet::new("Active", "active", |row: &ApplicationListRowDto| {
+                row.credential_status.as_facet() == "active"
+            }),
+            Facet::new("Expiring", "expiring", |row: &ApplicationListRowDto| {
+                row.credential_status.as_facet() == "expiring"
+            }),
+            Facet::new("Expired", "expired", |row: &ApplicationListRowDto| {
+                row.credential_status.as_facet() == "expired"
+            }),
+            Facet::new("No creds", "none", |row: &ApplicationListRowDto| {
+                row.credential_status.as_facet() == "none"
+            }),
+        ],
+        export_rows: Some(export_rows),
+    });
+
     // The backend paginates to completion (bounded by APPS_HARD_CAP). `total`
     // is the full tenant count, taken before client-side filters shrink the view.
-    let total = items.len();
+    let total = list.total;
     let capped = total >= APPS_HARD_CAP;
-    let all = Arc::new(items);
-
-    // The search + creation-date range define the base set; the credential
-    // chips partition that base, so each chip's count agrees with what
-    // clicking it shows.
-    let base = Memo::new(move |_| {
-        let needle = search.with(|s| s.trim().to_lowercase());
-        let after = created_after.get();
-        let before = created_before.get();
-        if needle.is_empty() && after.is_none() && before.is_none() {
-            return Arc::clone(&all);
-        }
-        Arc::new(
-            all.iter()
-                .filter(|row| {
-                    let name_ok =
-                        needle.is_empty() || row.display_name.to_lowercase().contains(&needle);
-                    name_ok && created_in_range(row.created_date_time, after, before)
-                })
-                .cloned()
-                .collect::<Vec<_>>(),
-        )
-    });
-    let counts = Memo::new(move |_| cred_counts(&base.get()));
-    let shown = Memo::new(move |_| {
-        let facet = cred_filter.get();
-        let base = base.get();
-        if facet == "any" {
-            return base;
-        }
-        Arc::new(
-            base.iter()
-                .filter(|row| row.credential_status.as_facet() == facet)
-                .cloned()
-                .collect::<Vec<_>>(),
-        )
-    });
-
-    // Keep the export snapshot in step with what's shown (a pointer copy).
-    Effect::new(move |_| export_rows.set_value(shown.get()));
+    let shown = list.shown;
+    let base_total = list.base_total();
+    let active = list.count_of("active");
+    let expiring = list.count_of("expiring");
+    let expired = list.count_of("expired");
+    let none = list.count_of("none");
 
     view! {
         <Show when=move || filters_open.get()>
-        {move || {
-            let counts = counts.get();
-            let base_total = base.with(|b| b.len());
-            view! {
-                <div class="filter-chips">
-                    <FilterChip label="All" value="any" count=base_total facet=cred_filter />
-                    <FilterChip
-                        label="Active"
-                        value="active"
-                        count=counts.active
-                        facet=cred_filter
-                    />
-                    <FilterChip
-                        label="Expiring"
-                        value="expiring"
-                        count=counts.expiring
-                        facet=cred_filter
-                    />
-                    <FilterChip
-                        label="Expired"
-                        value="expired"
-                        count=counts.expired
-                        facet=cred_filter
-                    />
-                    <FilterChip
-                        label="No creds"
-                        value="none"
-                        count=counts.none
-                        facet=cred_filter
-                    />
-                </div>
-            }
-        }}
+            {move || {
+                view! {
+                    <div class="filter-chips">
+                        <FilterChip
+                            label="All"
+                            value="any"
+                            count=base_total.get()
+                            facet=cred_filter
+                        />
+                        <FilterChip
+                            label="Active"
+                            value="active"
+                            count=active.get()
+                            facet=cred_filter
+                        />
+                        <FilterChip
+                            label="Expiring"
+                            value="expiring"
+                            count=expiring.get()
+                            facet=cred_filter
+                        />
+                        <FilterChip
+                            label="Expired"
+                            value="expired"
+                            count=expired.get()
+                            facet=cred_filter
+                        />
+                        <FilterChip
+                            label="No creds"
+                            value="none"
+                            count=none.get()
+                            facet=cred_filter
+                        />
+                    </div>
+                }
+            }}
         </Show>
         {move || {
             let items = shown.get();
@@ -339,35 +346,6 @@ fn LoadedApps(
             })}
         <VirtualRows items=shown selected=selected />
     }
-}
-
-/// Per-credential-status counts over the loaded rows, powering the filter
-/// chips. Mirrors the four backend-classified buckets the credential filter
-/// keys off.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct CredCounts {
-    active: usize,
-    expiring: usize,
-    expired: usize,
-    none: usize,
-}
-
-fn cred_counts(items: &[ApplicationListRowDto]) -> CredCounts {
-    let mut c = CredCounts {
-        active: 0,
-        expiring: 0,
-        expired: 0,
-        none: 0,
-    };
-    for row in items {
-        match row.credential_status {
-            ListCredentialStatus::Active => c.active += 1,
-            ListCredentialStatus::Expiring => c.expiring += 1,
-            ListCredentialStatus::Expired => c.expired += 1,
-            ListCredentialStatus::None => c.none += 1,
-        }
-    }
-    c
 }
 
 /// Reactive wrapper around the shared `VirtualList`: the empty state when

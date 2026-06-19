@@ -5,16 +5,11 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 
+use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::permissions::*;
 
 pub async fn list_catalog_resources() -> Result<Vec<CatalogResourceSummary>, UiError> {
     invoke_result("list_catalog_resources", ()).await
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TenantArg<'a> {
-    tenant_id: &'a str,
 }
 
 /// Live permission counts per resource, used to enrich the dropdown labels.

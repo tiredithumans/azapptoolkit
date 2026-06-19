@@ -16,6 +16,7 @@ use crate::bindings::applications::{
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
 use crate::components::ui::CopyableId;
+use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::dialogs::secret_reveal_dialog::SecretRevealDialog;
@@ -197,13 +198,19 @@ pub fn CredentialsTab(
     let custom_start: RwSignal<Option<NaiveDate>> = RwSignal::new(Some(today));
     let custom_end: RwSignal<Option<NaiveDate>> =
         RwSignal::new(Some(today + chrono::Duration::days(180)));
-    let busy = RwSignal::new(false);
+    // One inline `error` signal shared by every credential mutation (rendered
+    // once below). Each command keeps its own `bool` busy guard, so it gets a
+    // dedicated `use_command` handle whose errors route into this shared signal
+    // via `run_with`. The per-row `removing`/`removing_cert` handlers track an
+    // in-flight key id (`Option<String>`), which doesn't fit `CommandState`'s
+    // `bool` busy, so they stay hand-rolled.
+    let cmd_create = use_command();
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let revealed: RwSignal<Option<String>> = RwSignal::new(None);
     let removing: RwSignal<Option<String>> = RwSignal::new(None);
     let cert_open = RwSignal::new(false);
     let removing_cert: RwSignal<Option<String>> = RwSignal::new(None);
-    let expiring = RwSignal::new(false);
+    let cmd_expire = use_command();
     let expired_result: RwSignal<Option<RemoveExpiredResult>> = RwSignal::new(None);
     let pending_secret: RwSignal<Option<String>> = RwSignal::new(None);
     let pending_cert: RwSignal<Option<String>> = RwSignal::new(None);
@@ -213,7 +220,7 @@ pub fn CredentialsTab(
     let rotate_vault = RwSignal::new(String::new());
     let rotate_secret_name = RwSignal::new(String::new());
     let rotate_lifetime = RwSignal::new("180".to_string());
-    let rotating = RwSignal::new(false);
+    let cmd_rotate = use_command();
     let rotate_result: RwSignal<Option<RotateCredentialResult>> = RwSignal::new(None);
 
     let app_name = Signal::derive(move || detail.with(|d| d.application.display_name.clone()));
@@ -241,7 +248,7 @@ pub fn CredentialsTab(
     let gencert_open = RwSignal::new(false);
     let gencert_subject = RwSignal::new(detail.with(|d| d.application.display_name.clone()));
     let gencert_validity = RwSignal::new("365".to_string());
-    let generating = RwSignal::new(false);
+    let cmd_gencert = use_command();
     let gencert_result: RwSignal<Option<GeneratedCertificateResult>> = RwSignal::new(None);
 
     let expired_count = Signal::derive(move || {
@@ -253,12 +260,9 @@ pub fn CredentialsTab(
     });
 
     let create_secret = move |_| {
-        if busy.get() {
-            return;
-        }
-        busy.set(true);
+        // Pre-submit validation mirrors the backend; on failure surface the
+        // message in the shared `error` signal and don't dispatch the command.
         error.set(None);
-        let tenant = session.active_tenant.get();
         let id = object_id.get();
         let dn = display_name.get();
         let (lifetime_days, start_date_time, end_date_time) = match resolve_expiry_fields(
@@ -270,38 +274,33 @@ pub fn CredentialsTab(
             Ok(fields) => fields,
             Err(msg) => {
                 error.set(Some(msg));
-                busy.set(false);
                 return;
             }
         };
         let on_changed_cb = on_changed;
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                busy.set(false);
-                return;
-            };
-            let input = AddPasswordInput {
-                display_name: dn.trim().to_string(),
-                lifetime_days,
-                start_date_time,
-                end_date_time,
-            };
-            match applications::add_password(&t.tenant_id, &id, &input).await {
-                Ok(cred) => {
-                    add_open.set(false);
-                    // Defer the detail reload until the reveal dialog is dismissed: the
-                    // reload re-runs the resource this whole subtree (incl. our local
-                    // `revealed` signal) is built from, which would tear the dialog down
-                    // before the user can copy the one-time secret value.
-                    match cred.secret_text {
-                        Some(text) => revealed.set(Some(text)),
-                        None => on_changed_cb.run(()),
-                    }
+        cmd_create.run_with(
+            move |cred: azapptoolkit_core::models::PasswordCredential| {
+                add_open.set(false);
+                // Defer the detail reload until the reveal dialog is dismissed: the
+                // reload re-runs the resource this whole subtree (incl. our local
+                // `revealed` signal) is built from, which would tear the dialog down
+                // before the user can copy the one-time secret value.
+                match cred.secret_text {
+                    Some(text) => revealed.set(Some(text)),
+                    None => on_changed_cb.run(()),
                 }
-                Err(e) => error.set(Some(e.message)),
-            }
-            busy.set(false);
-        });
+            },
+            move |e| error.set(Some(e.message)),
+            move |tenant_id| {
+                let input = AddPasswordInput {
+                    display_name: dn.trim().to_string(),
+                    lifetime_days,
+                    start_date_time,
+                    end_date_time,
+                };
+                async move { applications::add_password(&tenant_id, &id, &input).await }
+            },
+        );
     };
 
     let remove_secret = move |key_id: String| {
@@ -355,41 +354,33 @@ pub fn CredentialsTab(
     };
 
     let remove_expired = move |_| {
-        if expiring.get() {
-            return;
-        }
-        expiring.set(true);
         error.set(None);
-        let tenant = session.active_tenant.get();
         let id = object_id.get();
         let on_changed_cb = on_changed;
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                expiring.set(false);
-                return;
-            };
-            match applications::remove_expired_passwords(&t.tenant_id, &id).await {
-                Ok(r) => {
-                    expired_result.set(Some(r));
-                    on_changed_cb.run(());
-                }
-                Err(e) => error.set(Some(e.message)),
-            }
-            expiring.set(false);
-        });
+        cmd_expire.run_with(
+            move |r| {
+                expired_result.set(Some(r));
+                on_changed_cb.run(());
+            },
+            move |e| error.set(Some(e.message)),
+            move |tenant_id| async move {
+                applications::remove_expired_passwords(&tenant_id, &id).await
+            },
+        );
     };
 
     let do_rotate = move |remove_existing: bool| {
-        if rotating.get() {
-            return;
-        }
-        rotating.set(true);
         error.set(None);
         rotate_result.set(None);
-        let tenant = session.active_tenant.get();
         let id = object_id.get();
         let vault = rotate_vault.get().trim().to_string();
         let secret_name = rotate_secret_name.get().trim().to_string();
+        // Required-field validation runs before dispatch (was inside the spawn);
+        // surface it in the shared `error` signal and don't dispatch.
+        if vault.is_empty() || secret_name.is_empty() {
+            error.set(Some("Vault name and secret name are required.".into()));
+            return;
+        }
         let days = rotate_lifetime
             .get()
             .parse::<u32>()
@@ -401,78 +392,65 @@ pub fn CredentialsTab(
             Vec::new()
         };
         let on_changed_cb = on_changed;
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                rotating.set(false);
-                return;
-            };
-            if vault.is_empty() || secret_name.is_empty() {
-                error.set(Some("Vault name and secret name are required.".into()));
-                rotating.set(false);
-                return;
-            }
-            let input = RotateCredentialInput {
-                object_id: id,
-                vault_name: vault,
-                secret_name,
-                lifetime_days: Some(days),
-                remove_key_ids,
-            };
-            match keyvault::rotate_app_credential(&t.tenant_id, &input).await {
-                Ok(r) => {
-                    rotate_open.set(false);
-                    // Remember the vault (tenant-scoped) so the next rotation in
-                    // this tenant prefills it.
+        cmd_rotate.run_with(
+            move |r: RotateCredentialResult| {
+                rotate_open.set(false);
+                // Remember the vault (tenant-scoped) so the next rotation in
+                // this tenant prefills it.
+                if let Some(t) = session.active_tenant.get_untracked() {
                     ls_set(&last_vault_key(&t.tenant_id), &r.vault_name);
-                    rotate_result.set(Some(r));
-                    on_changed_cb.run(());
                 }
-                Err(e) => error.set(Some(e.message)),
-            }
-            rotating.set(false);
-        });
+                rotate_result.set(Some(r));
+                on_changed_cb.run(());
+            },
+            move |e| error.set(Some(e.message)),
+            move |tenant_id| {
+                let input = RotateCredentialInput {
+                    object_id: id,
+                    vault_name: vault,
+                    secret_name,
+                    lifetime_days: Some(days),
+                    remove_key_ids,
+                };
+                async move { keyvault::rotate_app_credential(&tenant_id, &input).await }
+            },
+        );
     };
 
     let do_generate_cert = move |_| {
-        if generating.get() {
-            return;
-        }
-        generating.set(true);
         error.set(None);
-        let tenant = session.active_tenant.get();
         let id = object_id.get();
         let subject = gencert_subject.get().trim().to_string();
+        // Required-field validation runs before dispatch (was inside the spawn);
+        // surface it in the shared `error` signal and don't dispatch.
+        if subject.is_empty() {
+            error.set(Some("Subject (common name) is required.".into()));
+            return;
+        }
         let days = gencert_validity
             .get()
             .parse::<u32>()
             .unwrap_or(365)
             .clamp(1, 1095);
         let on_changed_cb = on_changed;
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                generating.set(false);
-                return;
-            };
-            if subject.is_empty() {
-                error.set(Some("Subject (common name) is required.".into()));
-                generating.set(false);
-                return;
-            }
-            let input = GenerateCertificateInput {
-                object_id: id,
-                subject,
-                validity_days: Some(days),
-            };
-            match applications::generate_self_signed_certificate(&t.tenant_id, &input).await {
-                Ok(r) => {
-                    gencert_open.set(false);
-                    gencert_result.set(Some(r));
-                    on_changed_cb.run(());
+        cmd_gencert.run_with(
+            move |r| {
+                gencert_open.set(false);
+                gencert_result.set(Some(r));
+                on_changed_cb.run(());
+            },
+            move |e| error.set(Some(e.message)),
+            move |tenant_id| {
+                let input = GenerateCertificateInput {
+                    object_id: id,
+                    subject,
+                    validity_days: Some(days),
+                };
+                async move {
+                    applications::generate_self_signed_certificate(&tenant_id, &input).await
                 }
-                Err(e) => error.set(Some(e.message)),
-            }
-            generating.set(false);
-        });
+            },
+        );
     };
 
     view! {
@@ -489,11 +467,11 @@ pub fn CredentialsTab(
                                         <Button
                                             class="button--danger"
                                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                            disabled=Signal::derive(move || expiring.get())
+                                            disabled=Signal::derive(move || cmd_expire.busy.get())
                                             on_click=Box::new(move |_| pending_expired.set(true))
                                         >
                                             {move || {
-                                                if expiring.get() {
+                                                if cmd_expire.busy.get() {
                                                     view! {
                                                         <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
                                                     }
@@ -741,7 +719,7 @@ pub fn CredentialsTab(
             <ModalShell
                 open=Signal::derive(move || add_open.get())
                 title="New client secret"
-                busy=Signal::derive(move || busy.get())
+                busy=Signal::derive(move || cmd_create.busy.get())
                 on_close=Callback::new(move |()| add_open.set(false))
             >
                 <Body1 class="hint">
@@ -779,17 +757,17 @@ pub fn CredentialsTab(
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                         on_click=Box::new(move |_| add_open.set(false))
-                        disabled=Signal::derive(move || busy.get())
+                        disabled=Signal::derive(move || cmd_create.busy.get())
                     >
                         "Cancel"
                     </Button>
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                         on_click=Box::new(create_secret)
-                        disabled=Signal::derive(move || busy.get())
+                        disabled=Signal::derive(move || cmd_create.busy.get())
                     >
                         {move || {
-                            if busy.get() {
+                            if cmd_create.busy.get() {
                                 view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
                                     .into_any()
                             } else {
@@ -817,7 +795,7 @@ pub fn CredentialsTab(
             <ModalShell
                 open=Signal::derive(move || gencert_open.get())
                 title="Generate self-signed certificate"
-                busy=Signal::derive(move || generating.get())
+                busy=Signal::derive(move || cmd_gencert.busy.get())
                 on_close=Callback::new(move |()| gencert_open.set(false))
             >
                 <Body1>
@@ -833,17 +811,17 @@ pub fn CredentialsTab(
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                         on_click=Box::new(move |_| gencert_open.set(false))
-                        disabled=Signal::derive(move || generating.get())
+                        disabled=Signal::derive(move || cmd_gencert.busy.get())
                     >
                         "Cancel"
                     </Button>
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                         on_click=Box::new(do_generate_cert)
-                        disabled=Signal::derive(move || generating.get())
+                        disabled=Signal::derive(move || cmd_gencert.busy.get())
                     >
                         {move || {
-                            if generating.get() {
+                            if cmd_gencert.busy.get() {
                                 view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
                                     .into_any()
                             } else {
@@ -906,7 +884,7 @@ pub fn CredentialsTab(
             <ModalShell
                 open=Signal::derive(move || rotate_open.get())
                 title="Rotate secret into Key Vault"
-                busy=Signal::derive(move || rotating.get())
+                busy=Signal::derive(move || cmd_rotate.busy.get())
                 on_close=Callback::new(move |()| rotate_open.set(false))
             >
                 <Body1>
@@ -925,24 +903,24 @@ pub fn CredentialsTab(
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                         on_click=Box::new(move |_| rotate_open.set(false))
-                        disabled=Signal::derive(move || rotating.get())
+                        disabled=Signal::derive(move || cmd_rotate.busy.get())
                     >
                         "Cancel"
                     </Button>
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                         on_click=Box::new(move |_| do_rotate(false))
-                        disabled=Signal::derive(move || rotating.get())
+                        disabled=Signal::derive(move || cmd_rotate.busy.get())
                     >
                         "Rotate (keep old)"
                     </Button>
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                         on_click=Box::new(move |_| do_rotate(true))
-                        disabled=Signal::derive(move || rotating.get())
+                        disabled=Signal::derive(move || cmd_rotate.busy.get())
                     >
                         {move || {
-                            if rotating.get() {
+                            if cmd_rotate.busy.get() {
                                 view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
                                     .into_any()
                             } else {
@@ -985,7 +963,7 @@ pub fn CredentialsTab(
                 title="Remove all expired secrets?"
                 body="Sweeps every expired client secret from this application. Active secrets are not touched."
                 confirm_label="Remove expired"
-                busy=Signal::derive(move || expiring.get())
+                busy=Signal::derive(move || cmd_expire.busy.get())
                 on_confirm=Callback::new(move |()| {
                     pending_expired.set(false);
                     remove_expired(());
