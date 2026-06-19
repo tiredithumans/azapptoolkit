@@ -29,6 +29,13 @@ the project adheres to
   `verifiedDomains` on the organization — both now tolerate null/missing and
   fall back to a default instead of erroring the whole response.
 
+### Changed
+
+- AAD token-endpoint failures now log the request **correlation ID** (the GUID
+  Microsoft support needs to trace an issue) alongside the OAuth/AADSTS code,
+  while still keeping the raw `error_description` — which can embed tenant/user
+  GUIDs and client IPs — out of logs, the UI, and the audit log.
+
 ## [0.1.2] - 2026-06-17
 
 ### Added
