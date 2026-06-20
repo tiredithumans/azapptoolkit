@@ -7,6 +7,28 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Enterprise Application management parity.** The enterprise-app detail pane
+  gained the core lifecycle controls it was missing relative to the Microsoft
+  Entra admin center:
+  - **SSO tab** — a single sign-on **method selector** (SAML / OIDC / Disabled)
+    that sets `preferredSingleSignOnMode`, so you can now enable or switch an
+    existing app's SSO mode (previously the tab always showed the SAML editor for
+    any non-OIDC value and could not turn SSO on). The SAML editor now accepts
+    **multiple identifiers (Entity IDs) and reply URLs (ACS)**, and apps that
+    aren't configured for SAML/OIDC (e.g. password-based) get a clear prompt
+    instead of a misleading SAML form.
+  - **Overview tab** — toggles for **"Enabled for sign-in"** (`accountEnabled`)
+    and **"Assignment required"** (`appRoleAssignmentRequired`), plus an editable
+    free-text **Notes** field.
+  - **Owners tab** — **add/remove owners** (users only — groups can't own a
+    service principal), replacing the previous read-only list.
+  New backend commands (`set_sso_mode`, `set_enterprise_app_account_enabled`,
+  `set_enterprise_app_assignment_required`, `set_enterprise_app_notes`,
+  `add_enterprise_app_owner`, `remove_enterprise_app_owner`) with typed frontend
+  stubs; `set_saml_urls` now takes lists of identifiers/reply URLs.
+
 ## [0.1.3] - 2026-06-19
 
 ### Added
