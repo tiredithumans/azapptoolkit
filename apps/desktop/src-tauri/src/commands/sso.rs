@@ -681,18 +681,21 @@ pub async fn get_sso_config(
     // Resolve the paired application object id, then read its SSO web fields.
     // Web `redirectUris` double as the SAML reply URLs and the OIDC redirect
     // URIs on a custom app, so they populate both fields.
-    let (object_id, entity_id, web_redirects, logout_url, spa_redirect_uris) =
+    let (object_id, identifier_uris, web_redirects, logout_url, spa_redirect_uris) =
         match client.find_application_by_app_id(&app_id).await? {
             Some(app) => {
                 let app_sso = client.get_application_sso_fields(&app.id).await?;
-                let (entity, redirects, logout, spa) = app_sso
+                let (ids, redirects, logout, spa) = app_sso
                     .as_ref()
                     .map(extract_app_sso_fields)
                     .unwrap_or_default();
-                (app.id, entity, redirects, logout, spa)
+                (app.id, ids, redirects, logout, spa)
             }
-            None => (String::new(), None, Vec::new(), None, Vec::new()),
+            None => (String::new(), Vec::new(), Vec::new(), None, Vec::new()),
         };
+    // `entity_id` keeps the first identifier for the app-owner summary; the
+    // editor uses the full `identifier_uris` list.
+    let entity_id = identifier_uris.first().cloned();
     let reply_urls = web_redirects.clone();
     let redirect_uris = web_redirects;
 
@@ -724,6 +727,7 @@ pub async fn get_sso_config(
         app_id,
         sso_mode,
         entity_id,
+        identifier_uris,
         reply_urls,
         logout_url,
         redirect_uris,
@@ -738,16 +742,11 @@ pub async fn get_sso_config(
 
 /// Pulls `identifierUris` / `web.redirectUris` / `web.logoutUrl` /
 /// `spa.redirectUris` out of the raw application JSON. Returns
-/// `(entity_id, web_redirect_uris, logout_url, spa_redirect_uris)`.
+/// `(identifier_uris, web_redirect_uris, logout_url, spa_redirect_uris)` — all
+/// identifiers and reply URLs, so the SSO tab can edit several of each.
 fn extract_app_sso_fields(
     app: &serde_json::Value,
-) -> (Option<String>, Vec<String>, Option<String>, Vec<String>) {
-    let entity_id = app
-        .get("identifierUris")
-        .and_then(|v| v.as_array())
-        .and_then(|a| a.first())
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+) -> (Vec<String>, Vec<String>, Option<String>, Vec<String>) {
     let str_vec = |v: Option<&serde_json::Value>| -> Vec<String> {
         v.and_then(|x| x.as_array())
             .map(|a| {
@@ -757,6 +756,7 @@ fn extract_app_sso_fields(
             })
             .unwrap_or_default()
     };
+    let identifier_uris = str_vec(app.get("identifierUris"));
     let web_redirects = str_vec(app.get("web").and_then(|w| w.get("redirectUris")));
     let logout_url = app
         .get("web")
@@ -765,25 +765,83 @@ fn extract_app_sso_fields(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     let spa_redirect_uris = str_vec(app.get("spa").and_then(|s| s.get("redirectUris")));
-    (entity_id, web_redirects, logout_url, spa_redirect_uris)
+    (
+        identifier_uris,
+        web_redirects,
+        logout_url,
+        spa_redirect_uris,
+    )
 }
 
-/// Updates the SAML Entity ID / reply URL / logout URL on an existing app.
+/// Sets a service principal's `preferredSingleSignOnMode`. `mode` is `"saml"` or
+/// `"oidc"`; any other value (e.g. `""`, `"disabled"`, `"none"`) clears it to
+/// `null` (SSO disabled). Password-based and linked SSO aren't settable here —
+/// they require portal-only configuration — so the UI only offers SAML/OIDC/off.
+/// No cache bust: the mode is read live on the (uncached) SSO tab and is on no
+/// cached list/audit payload.
+#[tauri::command]
+pub async fn set_sso_mode(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    service_principal_id: String,
+    mode: String,
+) -> Result<(), UiError> {
+    let value = match mode.as_str() {
+        "saml" => serde_json::Value::String("saml".into()),
+        "oidc" => serde_json::Value::String("oidc".into()),
+        // Anything else disables SSO (clears the preference).
+        _ => serde_json::Value::Null,
+    };
+    let client = state.graph_for(&tenant_id);
+    let body = serde_json::json!({ "preferredSingleSignOnMode": value });
+    client
+        .patch_service_principal(&service_principal_id, &body)
+        .await?;
+    Ok(())
+}
+
+/// Updates the SAML identifiers (Entity IDs), reply URLs (ACS), and logout URL on
+/// an existing app. Supports multiple identifiers and reply URLs (the portal's
+/// "Basic SAML Configuration" allows several of each). Every reply URL is
+/// validated (no wildcards / insecure schemes); at least one identifier and one
+/// reply URL are required.
 #[tauri::command]
 pub async fn set_saml_urls(
     state: State<'_, AppState>,
     tenant_id: String,
     object_id: String,
-    entity_id: String,
-    reply_url: String,
+    identifier_uris: Vec<String>,
+    reply_urls: Vec<String>,
     logout_url: Option<String>,
 ) -> Result<(), UiError> {
-    azapptoolkit_core::redirect::validate_redirect_uri(&reply_url).map_err(invalid_redirect_uri)?;
+    let identifiers: Vec<String> = identifier_uris
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let replies: Vec<String> = reply_urls
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if identifiers.is_empty() {
+        return Err(UiError::validation(
+            "invalid_saml_config",
+            "Enter at least one identifier (Entity ID).",
+        ));
+    }
+    if replies.is_empty() {
+        return Err(UiError::validation(
+            "invalid_saml_config",
+            "Enter at least one reply URL (ACS).",
+        ));
+    }
+    azapptoolkit_core::redirect::validate_redirect_uris(&replies).map_err(invalid_redirect_uri)?;
     let client = state.graph_for(&tenant_id);
     let body = ApplicationSsoPatch {
-        identifier_uris: Some(vec![entity_id]),
+        identifier_uris: Some(identifiers),
         web: Some(ApplicationWebPatch {
-            redirect_uris: Some(vec![reply_url]),
+            redirect_uris: Some(replies),
             logout_url: logout_url.filter(|s| !s.is_empty()),
             implicit_grant_settings: None,
         }),
@@ -1270,13 +1328,26 @@ mod tests {
     #[test]
     fn extract_app_sso_fields_reads_uris() {
         let app = serde_json::json!({
-            "identifierUris": ["https://app/saml"],
-            "web": { "redirectUris": ["https://app/acs"], "logoutUrl": "https://app/logout" },
+            "identifierUris": ["https://app/saml", "https://app/saml2"],
+            "web": { "redirectUris": ["https://app/acs", "https://app/acs2"], "logoutUrl": "https://app/logout" },
             "spa": { "redirectUris": ["https://app/spa"] }
         });
-        let (entity, web_redirects, logout, spa) = extract_app_sso_fields(&app);
-        assert_eq!(entity.as_deref(), Some("https://app/saml"));
-        assert_eq!(web_redirects, vec!["https://app/acs".to_string()]);
+        let (identifiers, web_redirects, logout, spa) = extract_app_sso_fields(&app);
+        // All identifiers and reply URLs are returned (multi-value support).
+        assert_eq!(
+            identifiers,
+            vec![
+                "https://app/saml".to_string(),
+                "https://app/saml2".to_string()
+            ]
+        );
+        assert_eq!(
+            web_redirects,
+            vec![
+                "https://app/acs".to_string(),
+                "https://app/acs2".to_string()
+            ]
+        );
         assert_eq!(logout.as_deref(), Some("https://app/logout"));
         assert_eq!(spa, vec!["https://app/spa".to_string()]);
     }

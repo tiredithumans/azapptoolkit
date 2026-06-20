@@ -254,8 +254,12 @@ pub struct SsoConfigDto {
     pub app_id: String,
     /// `preferredSingleSignOnMode`: `saml`, `oidc`, `password`, … or `None`.
     pub sso_mode: Option<String>,
-    /// `identifierUris[0]` (SAML Entity ID), if any.
+    /// `identifierUris[0]` (SAML Entity ID), if any. Kept for the app-owner
+    /// summary; the SSO tab edits the full [`Self::identifier_uris`] list.
     pub entity_id: Option<String>,
+    /// All SAML identifiers (`identifierUris`) — the portal allows several.
+    #[serde(default)]
+    pub identifier_uris: Vec<String>,
     #[serde(default)]
     pub reply_urls: Vec<String>,
     pub logout_url: Option<String>,
