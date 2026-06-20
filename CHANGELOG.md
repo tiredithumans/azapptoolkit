@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-06-20
+
 ### Added
 
 - **Enterprise Application management parity.** The enterprise-app detail pane
