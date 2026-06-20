@@ -259,101 +259,110 @@ workstation reuses the same client id and tenant id.
      the port.)
 2. On the Authentication blade, set **Allow public client flows** to
    **Yes**.
-3. Under **API permissions → Add a permission**, add the delegated permissions
-   in the table below, then have an admin click **Grant admin consent** for the
-   tenant. Only `Directory.Read.All` is requested at sign-in; every other scope
-   is consented **incrementally** the first time you use the feature that needs
-   it. So a browse-only session never carries write or premium scopes, and a
-   tenant that hasn't consented to an optional permission can still sign in and
-   use everything else — that feature just shows an "unavailable" notice with a
-   one-click **Grant consent** prompt.
+3. Under **API permissions → Add a permission**, add the delegated
+   permissions from the [Permissions](#permissions) table below, then have an
+   admin click **Grant admin consent** for the tenant.
+4. Copy the **Application (client) ID** and **Tenant ID** and hand them to
+   azapptoolkit — see
+   [Providing the client and tenant IDs](#providing-the-client-and-tenant-ids).
 
-   | Permission | What it unlocks | Required? |
-   |---|---|---|
-   | Graph · `Directory.Read.All` | Every read in the app — app registrations, enterprise apps, managed identities, owners, app-role & OAuth2 grants, org info, user/group search (the only read-only Graph scope that can read `/oauth2PermissionGrants`) | **Required** — at sign-in |
-   | Graph · `Application.ReadWrite.All` | Create / edit / delete app registrations & service principals; manage credentials and owners | **Required for edits** — on first write |
-   | Graph · `AppRoleAssignment.ReadWrite.All` | Grant / revoke application permissions and user/group access assignments | **Required for edits** — on first write |
-   | Graph · `DelegatedPermissionGrant.ReadWrite.All` | Grant / revoke delegated (OAuth2) permission grants | **Required for edits** — on first write |
-   | Graph · `AuditLog.Read.All` | **Activity** tab (directory change log) and **unused-app** detection in the security audit (the sign-in report also needs Entra ID **P1/P2**) | Optional |
-   | Graph · `Policy.Read.All` | **Conditional Access** tab — which CA policies target an app (an Entra ID **P1/P2** feature) | Optional |
-   | Graph · `Policy.ReadWrite.ApplicationConfiguration` | **Claims-mapping** policies — SAML attribute & claim customization in the SSO wizard | Optional |
-   | Graph · `GroupMember.ReadWrite.All` | **Group memberships** — add/remove a service principal in security groups (the access model for group-gated APIs like Power BI / Fabric) | Optional |
-   | Graph · `Synchronization.Read.All` | SCIM **provisioning** job status on enterprise apps (needs Entra ID **P1/P2**) | Optional |
-   | Graph · `Sites.FullControl.All` | SharePoint **Sites.Selected** — list / grant / revoke a site's per-app permissions (SharePoint site access section on the Permissions tab) | Optional |
-   | Office 365 Exchange Online · `Exchange.Manage` | **Exchange mailbox scoping** (RBAC for Applications) — confine an app's mailbox access to specific groups | Optional |
-   | Azure Key Vault · `user_impersonation` | Store a new client secret into, or browse secrets from, an Azure **Key Vault** | Optional |
-   | Azure Service Management · `user_impersonation` | View a managed identity's **Azure RBAC** role assignments across subscriptions | Optional |
-   | Log Analytics API · `Data.Read` | **Observed Graph activity** — granted-vs-used analysis from `MicrosoftGraphActivityLogs` (also needs Entra diagnostic settings exporting to a Log Analytics workspace, and Log Analytics Reader on it) | Optional |
+On first launch, azapptoolkit opens a loopback listener, pops your default
+browser for the Entra sign-in, and persists the resulting refresh token in the
+OS keyring (Windows Credential Manager / macOS Keychain / libsecret). Access
+tokens are refreshed lazily and never written to disk.
 
-   Everything marked *Optional* needs **admin consent** but is acquired only on
-   first use, never at sign-in. The Key Vault, Azure Service Management, and
-   Log Analytics tokens are requested at runtime as `…/.default` (whatever
-   delegated permission you've consented to for that resource) — you still add
-   `user_impersonation` / `Data.Read` under *API permissions*.
+### Permissions
 
-   The sign-in flow also requests the OpenID Connect protocol scopes
-   `openid`, `profile`, and `offline_access` (for the ID token and a
-   refresh token). These are built-in v2.0 endpoint scopes, not
-   resource permissions — you do **not** need to add them under
-   *API permissions*, and there's no corresponding configuration on
-   the Enterprise Application side. The admin-consent click on the
-   Graph permissions above covers them automatically.
+Only `Directory.Read.All` is requested at sign-in; every other scope is
+consented **incrementally** the first time you use the feature that needs it.
+So a browse-only session never carries write or premium scopes, and a tenant
+that hasn't consented to an optional permission can still sign in and use
+everything else — that feature just shows an "unavailable" notice with a
+one-click **Grant consent** prompt.
 
-   **A few features also need the signed-in *user* to hold a role** — their own
-   rights, separate from the app-registration permissions above:
-   - **Key Vault** — `Key Vault Secrets User` or `Key Vault Secrets Officer` RBAC
-     on the target vaults (the vaults must be in RBAC permission mode).
-   - **Exchange mailbox scoping** — an Exchange Online **Role Management** RBAC
-     role (held by the **Organization Management** role group; the Entra
-     **Exchange Administrator** role grants it, but only once **active** — not
-     merely PIM-*eligible* — and after it propagates to Exchange). A
-     not-yet-effective role shows as a *"forbidden (403)"* banner or a Scope
-     column stuck on **Unknown**; see the troubleshooting note in
-     [`docs/operator-rbac/OPERATOR-ROLES.md`](docs/operator-rbac/OPERATOR-ROLES.md#3-exchange-online--built-in-exchange-administrator).
-   - **Managed-identity Azure RBAC** — at least one readable Azure subscription
-     to *view* role assignments; *assigning* a role to a managed identity
-     additionally needs a higher Azure role such as **User Access Administrator**.
-4. From the registration's Overview page, copy the **Application
-   (client) ID**. From Azure → Microsoft Entra ID → Overview, copy
-   the **Tenant ID**. Then give them to azapptoolkit one of three ways:
+| Permission | What it unlocks | Required? |
+|---|---|---|
+| Graph · `Directory.Read.All` | Every read in the app — app registrations, enterprise apps, managed identities, owners, app-role & OAuth2 grants, org info, user/group search (the only read-only Graph scope that can read `/oauth2PermissionGrants`) | **Required** — at sign-in |
+| Graph · `Application.ReadWrite.All` | Create / edit / delete app registrations & service principals; manage credentials and owners | **Required for edits** — on first write |
+| Graph · `AppRoleAssignment.ReadWrite.All` | Grant / revoke application permissions and user/group access assignments | **Required for edits** — on first write |
+| Graph · `DelegatedPermissionGrant.ReadWrite.All` | Grant / revoke delegated (OAuth2) permission grants | **Required for edits** — on first write |
+| Graph · `AuditLog.Read.All` | **Activity** tab (directory change log) and **unused-app** detection in the security audit (the sign-in report also needs Entra ID **P1/P2**) | Optional |
+| Graph · `Policy.Read.All` | **Conditional Access** tab — which CA policies target an app (an Entra ID **P1/P2** feature) | Optional |
+| Graph · `Policy.ReadWrite.ApplicationConfiguration` | **Claims-mapping** policies — SAML attribute & claim customization in the SSO wizard | Optional |
+| Graph · `GroupMember.ReadWrite.All` | **Group memberships** — add/remove a service principal in security groups (the access model for group-gated APIs like Power BI / Fabric) | Optional |
+| Graph · `Synchronization.Read.All` | SCIM **provisioning** job status on enterprise apps (needs Entra ID **P1/P2**) | Optional |
+| Graph · `Sites.FullControl.All` | SharePoint **Sites.Selected** — list / grant / revoke a site's per-app permissions (SharePoint site access section on the Permissions tab) | Optional |
+| Office 365 Exchange Online · `Exchange.Manage` | **Exchange mailbox scoping** (RBAC for Applications) — confine an app's mailbox access to specific groups | Optional |
+| Azure Key Vault · `user_impersonation` | Store a new client secret into, or browse secrets from, an Azure **Key Vault** | Optional |
+| Azure Service Management · `user_impersonation` | View a managed identity's **Azure RBAC** role assignments across subscriptions | Optional |
+| Log Analytics API · `Data.Read` | **Observed Graph activity** — granted-vs-used analysis from `MicrosoftGraphActivityLogs` (also needs Entra diagnostic settings exporting to a Log Analytics workspace, and Log Analytics Reader on it) | Optional |
 
-   - **In-app (simplest — recommended for a downloaded release).** Launch
-     azapptoolkit. On first run, before any sign-in, it shows a **Configure
-     your tenant** screen: paste the two IDs and select **Save & restart**.
-     They're stored in your per-user `settings.json` (see [Logs](#logs) for the
-     folder) and reused on every later launch — no environment variables
-     needed.
-   - **Environment variables.** Set both before launching (useful for MDM /
-     automation; these override the saved values):
+Everything marked *Optional* needs **admin consent** but is acquired only on
+first use, never at sign-in. The Key Vault, Azure Service Management, and
+Log Analytics tokens are requested at runtime as `…/.default` (whatever
+delegated permission you've consented to for that resource) — you still add
+`user_impersonation` / `Data.Read` under *API permissions*.
 
-     ```powershell
-     [Environment]::SetEnvironmentVariable('AZAPPTOOLKIT_CLIENT_ID','<client-guid>','User')
-     [Environment]::SetEnvironmentVariable('AZAPPTOOLKIT_TENANT_ID','<tenant-guid>','User')
-     ```
-   - **Baked into a team build.** If you're an admin packaging a build for a
-     whole team, copy `.env.example` to `.env` at the repo root, fill in the
-     two GUIDs, and run `cargo tauri build`. The values are baked into the
-     installer at compile time (see `apps/desktop/src-tauri/build.rs`), so
-     recipients install and launch with no per-workstation configuration (the
-     setup screen is skipped). See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md).
+The sign-in flow also requests the OpenID Connect protocol scopes
+`openid`, `profile`, and `offline_access` (for the ID token and a
+refresh token). These are built-in v2.0 endpoint scopes, not
+resource permissions — you do **not** need to add them under
+*API permissions*, and there's no corresponding configuration on
+the Enterprise Application side. The admin-consent click on the
+Graph permissions above covers them automatically.
 
-   The resolution order is **environment variable → in-app `settings.json` →
-   baked-in value → unset**; while unset, sign-in can't succeed and the
-   configuration screen is shown.
+**A few features also need the signed-in *user* to hold a role** — their own
+rights, separate from the app-registration permissions above:
+- **Key Vault** — `Key Vault Secrets User` or `Key Vault Secrets Officer` RBAC
+  on the target vaults (the vaults must be in RBAC permission mode).
+- **Exchange mailbox scoping** — an Exchange Online **Role Management** RBAC
+  role (held by the **Organization Management** role group; the Entra
+  **Exchange Administrator** role grants it, but only once **active** — not
+  merely PIM-*eligible* — and after it propagates to Exchange). A
+  not-yet-effective role shows as a *"forbidden (403)"* banner or a Scope
+  column stuck on **Unknown**; see the troubleshooting note in
+  [`docs/operator-rbac/OPERATOR-ROLES.md`](docs/operator-rbac/OPERATOR-ROLES.md#3-exchange-online--built-in-exchange-administrator).
+- **Managed-identity Azure RBAC** — at least one readable Azure subscription
+  to *view* role assignments; *assigning* a role to a managed identity
+  additionally needs a higher Azure role such as **User Access Administrator**.
 
-   **Sovereign / national clouds.** The app targets the commercial cloud by
-   default. To use a tenant in US Gov (GCC High), US Gov DoD, or Azure China
-   (21Vianet), set `AZAPPTOOLKIT_CLOUD` to `usgov`, `usgovdod`, or `china`
-   respectively (unset or `commercial` for the global cloud). This switches the
-   Entra login, Microsoft Graph, Exchange Online, Key Vault, and ARM endpoints to
-   that cloud's hosts. The app registration must be created in the matching
-   national-cloud admin center.
+### Providing the client and tenant IDs
 
-On first launch, azapptoolkit opens a loopback listener, pops your
-default browser for the Entra sign-in, and persists the resulting
-refresh token in the OS keyring (Windows Credential Manager / macOS
-Keychain / libsecret). Access tokens are refreshed lazily and never
-written to disk.
+From the registration's Overview page, copy the **Application (client) ID**.
+From Azure → Microsoft Entra ID → Overview, copy the **Tenant ID**. Then give
+them to azapptoolkit one of three ways:
+
+- **In-app (simplest — recommended for a downloaded release).** Launch
+  azapptoolkit. On first run, before any sign-in, it shows a **Configure
+  your tenant** screen: paste the two IDs and select **Save & restart**.
+  They're stored in your per-user `settings.json` (see [Logs](#logs) for the
+  folder) and reused on every later launch — no environment variables
+  needed.
+- **Environment variables.** Set both before launching (useful for MDM /
+  automation; these override the saved values):
+
+  ```powershell
+  [Environment]::SetEnvironmentVariable('AZAPPTOOLKIT_CLIENT_ID','<client-guid>','User')
+  [Environment]::SetEnvironmentVariable('AZAPPTOOLKIT_TENANT_ID','<tenant-guid>','User')
+  ```
+- **Baked into a team build.** If you're an admin packaging a build for a
+  whole team, copy `.env.example` to `.env` at the repo root, fill in the
+  two GUIDs, and run `cargo tauri build`. The values are baked into the
+  installer at compile time (see `apps/desktop/src-tauri/build.rs`), so
+  recipients install and launch with no per-workstation configuration (the
+  setup screen is skipped). See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md).
+
+The resolution order is **environment variable → in-app `settings.json` →
+baked-in value → unset**; while unset, sign-in can't succeed and the
+configuration screen is shown.
+
+**Sovereign / national clouds.** The app targets the commercial cloud by
+default. To use a tenant in US Gov (GCC High), US Gov DoD, or Azure China
+(21Vianet), set `AZAPPTOOLKIT_CLOUD` to `usgov`, `usgovdod`, or `china`
+respectively (unset or `commercial` for the global cloud). This switches the
+Entra login, Microsoft Graph, Exchange Online, Key Vault, and ARM endpoints to
+that cloud's hosts. The app registration must be created in the matching
+national-cloud admin center.
 
 ## Logs
 
