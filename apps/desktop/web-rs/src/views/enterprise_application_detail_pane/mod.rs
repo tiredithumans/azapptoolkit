@@ -21,6 +21,7 @@ use crate::components::requires_role::RequiresRole;
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{DataTable, DetailSkeleton};
+use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -249,7 +250,10 @@ fn EnterpriseAppPanel(
                     "overview" => view! { <OverviewContent signal=ro_signal /> }.into_any(),
                     "sso" => view! { <SsoContent signal=ro_signal /> }.into_any(),
                     "credentials" => view! { <CredentialsContent signal=ro_signal /> }.into_any(),
-                    "owners" => view! { <OwnersContent signal=ro_signal /> }.into_any(),
+                    "owners" => {
+                        view! { <OwnersContent signal=ro_signal on_refresh=on_refresh /> }
+                            .into_any()
+                    }
                     "permissions" => view! { <PermissionsContent signal=ro_signal /> }.into_any(),
                     "access" => view! { <AccessContent signal=ro_signal /> }.into_any(),
                     "provisioning" => {
@@ -334,18 +338,89 @@ fn OverviewContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoView
         });
     };
 
-    let (status_label, status_class) = match sp.account_enabled {
-        Some(true) => ("Enabled", "badge badge--ok"),
-        Some(false) => ("Disabled", "badge badge--danger"),
-        None => ("Unknown", "badge"),
+    // ---- "Enabled for users to sign in?" toggle (accountEnabled). Optimistic
+    // local override (like the My Apps visibility toggle); the backend busts the
+    // list caches so the list reflects it on next load. ----
+    let initial_enabled = sp.account_enabled;
+    let enabled_override: RwSignal<Option<bool>> = RwSignal::new(None);
+    let enabled_cmd = use_command();
+    let sp_id_enabled = StoredValue::new(sp.id.clone());
+    let toggle_enabled = move |_| {
+        let next = !enabled_override
+            .get_untracked()
+            .or(initial_enabled)
+            .unwrap_or(true);
+        enabled_cmd.run_toast_err(
+            move |()| {
+                enabled_override.set(Some(next));
+                session.toast_success(if next {
+                    "Users can sign in to this application."
+                } else {
+                    "Sign-in disabled — no tokens will be issued for this application."
+                });
+            },
+            move |tenant_id| {
+                let id = sp_id_enabled.get_value();
+                async move {
+                    enterprise_application::set_enterprise_app_account_enabled(
+                        &tenant_id, &id, next,
+                    )
+                    .await
+                }
+            },
+        );
     };
-    // `appRoleAssignmentRequired` governs whether users must be explicitly
-    // assigned before the app is usable / visible on My Apps.
-    let (assign_label, assign_class) = match sp.app_role_assignment_required {
-        Some(true) => ("Required", "badge badge--ok"),
-        Some(false) => ("Not required", "badge badge--warning"),
-        None => ("Unknown", "badge"),
+
+    // ---- "Assignment required?" toggle (appRoleAssignmentRequired). ----
+    let initial_assign = sp.app_role_assignment_required;
+    let assign_override: RwSignal<Option<bool>> = RwSignal::new(None);
+    let assign_cmd = use_command();
+    let sp_id_assign = StoredValue::new(sp.id.clone());
+    let toggle_assign = move |_| {
+        let next = !assign_override
+            .get_untracked()
+            .or(initial_assign)
+            .unwrap_or(false);
+        assign_cmd.run_toast_err(
+            move |()| {
+                assign_override.set(Some(next));
+                session.toast_success(if next {
+                    "Assignment now required — only assigned users/services can get a token."
+                } else {
+                    "Assignment no longer required."
+                });
+            },
+            move |tenant_id| {
+                let id = sp_id_assign.get_value();
+                async move {
+                    enterprise_application::set_enterprise_app_assignment_required(
+                        &tenant_id, &id, next,
+                    )
+                    .await
+                }
+            },
+        );
     };
+
+    // ---- Free-text management notes editor. ----
+    let notes_text = RwSignal::new(sp.notes.clone().unwrap_or_default());
+    let notes_cmd = use_command();
+    let sp_id_notes = StoredValue::new(sp.id.clone());
+    let save_notes = move |_| {
+        notes_cmd.run_toast_err(
+            move |()| {
+                session.toast_success("Notes saved.");
+            },
+            move |tenant_id| {
+                let id = sp_id_notes.get_value();
+                let n = notes_text.get_untracked();
+                async move {
+                    enterprise_application::set_enterprise_app_notes(&tenant_id, &id, &n).await
+                }
+            },
+        );
+    };
+
     let sp_type = sp
         .service_principal_type
         .clone()
@@ -364,13 +439,55 @@ fn OverviewContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoView
             <dd class="mono">{sp.app_id.clone()}</dd>
             <dt>"Type"</dt>
             <dd>{sp_type}</dd>
-            <dt>"Status"</dt>
-            <dd>
-                <span class=status_class>{status_label}</span>
+            <dt>"Enabled for sign-in"</dt>
+            <dd class="row-meta">
+                {move || {
+                    let eff = enabled_override.get().or(initial_enabled);
+                    let (label, cls) = match eff {
+                        Some(true) => ("Enabled", "badge badge--ok"),
+                        Some(false) => ("Disabled", "badge badge--danger"),
+                        None => ("Unknown", "badge"),
+                    };
+                    view! { <span class=cls>{label}</span> }
+                }}
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                    disabled=Signal::derive(move || enabled_cmd.busy.get())
+                    on_click=Box::new(toggle_enabled)
+                >
+                    {move || {
+                        if enabled_override.get().or(initial_enabled).unwrap_or(true) {
+                            "Disable sign-in"
+                        } else {
+                            "Enable sign-in"
+                        }
+                    }}
+                </Button>
             </dd>
-            <dt>"User assignment"</dt>
-            <dd>
-                <span class=assign_class>{assign_label}</span>
+            <dt>"Assignment required"</dt>
+            <dd class="row-meta">
+                {move || {
+                    let eff = assign_override.get().or(initial_assign);
+                    let (label, cls) = match eff {
+                        Some(true) => ("Required", "badge badge--ok"),
+                        Some(false) => ("Not required", "badge badge--warning"),
+                        None => ("Unknown", "badge"),
+                    };
+                    view! { <span class=cls>{label}</span> }
+                }}
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                    disabled=Signal::derive(move || assign_cmd.busy.get())
+                    on_click=Box::new(toggle_assign)
+                >
+                    {move || {
+                        if assign_override.get().or(initial_assign).unwrap_or(false) {
+                            "Make optional"
+                        } else {
+                            "Require assignment"
+                        }
+                    }}
+                </Button>
             </dd>
             <dt>"Created"</dt>
             <dd>{created}</dd>
@@ -402,6 +519,17 @@ fn OverviewContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoView
                 </Button>
             </dd>
         </dl>
+        <h4>"Notes"</h4>
+        <Field label="Management notes (max 1024 characters)">
+            <Textarea value=notes_text />
+        </Field>
+        <Button
+            appearance=Signal::derive(|| ButtonAppearance::Primary)
+            disabled=Signal::derive(move || notes_cmd.busy.get())
+            on_click=Box::new(save_notes)
+        >
+            "Save notes"
+        </Button>
     }
 }
 
@@ -467,35 +595,240 @@ fn CredentialsContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoV
     .into_any()
 }
 
+/// Owners tab — lists current owners and lets you add/remove them. Only **users**
+/// can own a service principal (Graph rejects groups), so the search targets
+/// users only. An owner can manage this app's SSO, provisioning, and user
+/// assignments. Mutations bump the detail `on_refresh` so the owners list
+/// refetches.
 #[component]
-fn OwnersContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoView {
-    let owners = signal.with(|d| d.owners.clone());
-    if owners.is_empty() {
-        view! {
-            <div class="alert alert--warn">
-                "No owners assigned — no one is accountable for this enterprise application."
-            </div>
+fn OwnersContent(
+    signal: Signal<EnterpriseApplicationDetail>,
+    #[prop(into)] on_refresh: Callback<()>,
+) -> impl IntoView {
+    let session = use_session();
+    let tenant = session.active_tenant;
+    let sp_id = Signal::derive(move || signal.with(|d| d.service_principal.id.clone()));
+
+    // The principal id currently being added/removed (drives per-row disabling).
+    let busy: RwSignal<Option<String>> = RwSignal::new(None);
+    let error: RwSignal<Option<String>> = RwSignal::new(None);
+    let raw_query = RwSignal::new(String::new());
+    let query = use_debounced(raw_query.into(), 300);
+    let pending_remove: RwSignal<Option<String>> = RwSignal::new(None);
+
+    let candidates = LocalResource::new(move || {
+        let q = query.get();
+        let tenant = tenant.get();
+        async move {
+            let q = q.trim().to_string();
+            if q.len() < 2 {
+                return Ok::<Vec<DirectoryObject>, String>(Vec::new());
+            }
+            let Some(t) = tenant else {
+                return Ok(Vec::new());
+            };
+            applications::search_users(&t.tenant_id, &q)
+                .await
+                .map_err(|e| e.message)
         }
-        .into_any()
-    } else {
-        view! {
-            <ul class="owner-list">
-                {owners
-                    .into_iter()
-                    .map(|o| {
-                        let name = o.display_name.clone().unwrap_or_else(|| o.id.clone());
-                        let upn = o.user_principal_name.clone();
+    });
+
+    let mutate = move |add: bool, principal_id: String| {
+        if busy.get().is_some() {
+            return;
+        }
+        busy.set(Some(principal_id.clone()));
+        error.set(None);
+        let tenant = tenant.get();
+        let sp = sp_id.get();
+        leptos::task::spawn_local(async move {
+            let Some(t) = tenant else {
+                busy.set(None);
+                return;
+            };
+            let result = if add {
+                enterprise_application::add_enterprise_app_owner(&t.tenant_id, &sp, &principal_id)
+                    .await
+            } else {
+                enterprise_application::remove_enterprise_app_owner(
+                    &t.tenant_id,
+                    &sp,
+                    &principal_id,
+                )
+                .await
+            };
+            match result {
+                Ok(()) => {
+                    session.toast_success(if add {
+                        "Owner added."
+                    } else {
+                        "Owner removed."
+                    });
+                    // Reloads the detail (refetches owners) and tears this
+                    // component down — do it last and skip resetting `busy`.
+                    on_refresh.run(());
+                }
+                Err(e) => {
+                    error.set(Some(e.message));
+                    busy.set(None);
+                }
+            }
+        });
+    };
+
+    view! {
+        <div class="ent-owners">
+            {move || {
+                let owners = signal.with(|d| d.owners.clone());
+                let empty = owners.is_empty();
+                view! {
+                    <h4>"Owners (" {owners.len()} ")"</h4>
+                    {empty
+                        .then(|| {
+                            view! {
+                                <div class="alert alert--warn">
+                                    "No owners assigned — no one is accountable for this enterprise application. Only Application Administrators can manage it."
+                                </div>
+                            }
+                        })}
+                    <ul class="candidates">
+                        {owners
+                            .into_iter()
+                            .map(|o| {
+                                let name = o.display_name.clone().unwrap_or_else(|| o.id.clone());
+                                let sub = o
+                                    .user_principal_name
+                                    .clone()
+                                    .unwrap_or_else(|| o.id.clone());
+                                let id_click = o.id.clone();
+                                let id_busy = o.id.clone();
+                                view! {
+                                    <li>
+                                        <div>
+                                            <div>{name}</div>
+                                            <div class="mono small">{sub}</div>
+                                        </div>
+                                        <Button
+                                            class="button--danger"
+                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                            disabled=Signal::derive(move || {
+                                                busy.with(|b| b.as_deref() == Some(id_busy.as_str()))
+                                            })
+                                            on_click=Box::new(move |_| {
+                                                pending_remove.set(Some(id_click.clone()))
+                                            })
+                                        >
+                                            "Remove"
+                                        </Button>
+                                    </li>
+                                }
+                            })
+                            .collect_view()}
+                    </ul>
+                }
+            }}
+
+            <h4>"Add an owner"</h4>
+            <p class="muted">
+                "Only users can own a service principal. An owner can manage this app's single sign-on, provisioning, and user assignments."
+            </p>
+            <Field label="Search users by name or UPN (2+ chars)">
+                <Input value=raw_query placeholder="alice@contoso.com" />
+            </Field>
+            {move || {
+                if raw_query.get().trim().len() < 2 {
+                    return ().into_any();
+                }
+                view! {
+                    <Suspense fallback=move || {
                         view! {
-                            <li>
-                                <span>{name}</span>
-                                {upn.map(|u| view! { <span class="row-meta mono">{u}</span> })}
-                            </li>
+                            <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Searching…" />
                         }
-                    })
-                    .collect_view()}
-            </ul>
-        }
-        .into_any()
+                    }>
+                        {move || Suspend::new(async move {
+                            match candidates.await {
+                                Err(msg) => {
+                                    view! {
+                                        <Body1 class="app-detail__error">
+                                            {format!("Search failed: {msg}")}
+                                        </Body1>
+                                    }
+                                        .into_any()
+                                }
+                                Ok(users) => {
+                                    let existing: std::collections::HashSet<String> = signal
+                                        .with_untracked(|d| {
+                                            d.owners.iter().map(|o| o.id.clone()).collect()
+                                        });
+                                    let filtered: Vec<DirectoryObject> = users
+                                        .into_iter()
+                                        .filter(|u| !existing.contains(&u.id))
+                                        .collect();
+                                    if filtered.is_empty() {
+                                        return view! { <Body1>"No matches."</Body1> }.into_any();
+                                    }
+                                    view! {
+                                        <ul class="candidates">
+                                            {filtered
+                                                .into_iter()
+                                                .map(|u| {
+                                                    let id_click = u.id.clone();
+                                                    let id_busy = u.id.clone();
+                                                    let display = u
+                                                        .display_name
+                                                        .clone()
+                                                        .unwrap_or_else(|| u.id.clone());
+                                                    let upn = u
+                                                        .user_principal_name
+                                                        .clone()
+                                                        .unwrap_or_else(|| u.id.clone());
+                                                    view! {
+                                                        <li>
+                                                            <div>
+                                                                <div>{display}</div>
+                                                                <div class="mono small">{upn}</div>
+                                                            </div>
+                                                            <Button
+                                                                appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                                                disabled=Signal::derive(move || {
+                                                                    busy.with(|b| b.as_deref() == Some(id_busy.as_str()))
+                                                                })
+                                                                on_click=Box::new(move |_| {
+                                                                    mutate(true, id_click.clone())
+                                                                })
+                                                            >
+                                                                "Add"
+                                                            </Button>
+                                                        </li>
+                                                    }
+                                                })
+                                                .collect_view()}
+                                        </ul>
+                                    }
+                                        .into_any()
+                                }
+                            }
+                        })}
+                    </Suspense>
+                }
+                    .into_any()
+            }}
+            {move || error.get().map(|e| view! { <Body1 class="app-detail__error">{e}</Body1> })}
+            <ConfirmDialog
+                open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
+                title="Remove this owner?"
+                body="The owner loses the ability to manage this enterprise application. You can re-add them later."
+                confirm_label="Remove"
+                busy=Signal::derive(move || busy.with(|b| b.is_some()))
+                on_confirm=Callback::new(move |()| {
+                    if let Some(id) = pending_remove.get() {
+                        pending_remove.set(None);
+                        mutate(false, id);
+                    }
+                })
+                on_close=Callback::new(move |()| pending_remove.set(None))
+            />
+        </div>
     }
 }
 

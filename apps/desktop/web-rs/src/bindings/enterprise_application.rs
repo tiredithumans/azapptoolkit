@@ -221,6 +221,123 @@ pub async fn set_enterprise_app_visibility(
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AccountEnabledArgs<'a> {
+    tenant_id: &'a str,
+    service_principal_id: &'a str,
+    enabled: bool,
+}
+
+/// Enables/disables user sign-in for the app (`accountEnabled`).
+pub async fn set_enterprise_app_account_enabled(
+    tenant_id: &str,
+    service_principal_id: &str,
+    enabled: bool,
+) -> Result<(), UiError> {
+    invoke_result(
+        "set_enterprise_app_account_enabled",
+        AccountEnabledArgs {
+            tenant_id,
+            service_principal_id,
+            enabled,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssignmentRequiredArgs<'a> {
+    tenant_id: &'a str,
+    service_principal_id: &'a str,
+    required: bool,
+}
+
+/// Sets whether user assignment is required (`appRoleAssignmentRequired`).
+pub async fn set_enterprise_app_assignment_required(
+    tenant_id: &str,
+    service_principal_id: &str,
+    required: bool,
+) -> Result<(), UiError> {
+    invoke_result(
+        "set_enterprise_app_assignment_required",
+        AssignmentRequiredArgs {
+            tenant_id,
+            service_principal_id,
+            required,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NotesArgs<'a> {
+    tenant_id: &'a str,
+    service_principal_id: &'a str,
+    notes: &'a str,
+}
+
+/// Sets the free-text management `notes` (empty string clears it).
+pub async fn set_enterprise_app_notes(
+    tenant_id: &str,
+    service_principal_id: &str,
+    notes: &str,
+) -> Result<(), UiError> {
+    invoke_result(
+        "set_enterprise_app_notes",
+        NotesArgs {
+            tenant_id,
+            service_principal_id,
+            notes,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OwnerArgs<'a> {
+    tenant_id: &'a str,
+    service_principal_id: &'a str,
+    principal_id: &'a str,
+}
+
+/// Adds a user as an owner of the enterprise application's service principal.
+pub async fn add_enterprise_app_owner(
+    tenant_id: &str,
+    service_principal_id: &str,
+    principal_id: &str,
+) -> Result<(), UiError> {
+    invoke_result(
+        "add_enterprise_app_owner",
+        OwnerArgs {
+            tenant_id,
+            service_principal_id,
+            principal_id,
+        },
+    )
+    .await
+}
+
+/// Removes an owner from the enterprise application's service principal.
+pub async fn remove_enterprise_app_owner(
+    tenant_id: &str,
+    service_principal_id: &str,
+    principal_id: &str,
+) -> Result<(), UiError> {
+    invoke_result(
+        "remove_enterprise_app_owner",
+        OwnerArgs {
+            tenant_id,
+            service_principal_id,
+            principal_id,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SaveEnterpriseArgs<'a> {
     rows: &'a [EnterpriseApplicationDto],
     format: &'a str,

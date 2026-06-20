@@ -65,19 +65,45 @@ pub async fn get_sso_config(
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SetSsoModeArgs<'a> {
+    tenant_id: &'a str,
+    service_principal_id: &'a str,
+    mode: &'a str,
+}
+
+/// Sets `preferredSingleSignOnMode`: `"saml"`, `"oidc"`, or anything else
+/// (e.g. `""`) to disable SSO.
+pub async fn set_sso_mode(
+    tenant_id: &str,
+    service_principal_id: &str,
+    mode: &str,
+) -> Result<(), UiError> {
+    invoke_result(
+        "set_sso_mode",
+        SetSsoModeArgs {
+            tenant_id,
+            service_principal_id,
+            mode,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SetSamlUrlsArgs<'a> {
     tenant_id: &'a str,
     object_id: &'a str,
-    entity_id: &'a str,
-    reply_url: &'a str,
+    identifier_uris: &'a [String],
+    reply_urls: &'a [String],
     logout_url: Option<&'a str>,
 }
 
 pub async fn set_saml_urls(
     tenant_id: &str,
     object_id: &str,
-    entity_id: &str,
-    reply_url: &str,
+    identifier_uris: &[String],
+    reply_urls: &[String],
     logout_url: Option<&str>,
 ) -> Result<(), UiError> {
     invoke_result(
@@ -85,8 +111,8 @@ pub async fn set_saml_urls(
         SetSamlUrlsArgs {
             tenant_id,
             object_id,
-            entity_id,
-            reply_url,
+            identifier_uris,
+            reply_urls,
             logout_url,
         },
     )

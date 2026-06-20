@@ -39,6 +39,10 @@ pub struct EnterpriseApplicationDto {
     /// populated on the detail (the list index doesn't `$select` tags).
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Free-text management notes (max 1024 chars). Only populated on the detail
+    /// (the list index doesn't `$select` it); the Overview tab edits it.
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

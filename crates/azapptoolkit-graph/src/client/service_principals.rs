@@ -215,6 +215,35 @@ impl GraphClient {
         self.collect_all_pages(page).await
     }
 
+    /// Adds an owner to a service principal (`POST /servicePrincipals/{id}/owners/$ref`).
+    /// Mirrors [`add_owner`](Self::add_owner) but targets the SP. Only users can
+    /// own a service principal — Graph rejects a group principal here.
+    pub async fn add_service_principal_owner(
+        &self,
+        sp_object_id: &str,
+        principal_id: &str,
+    ) -> Result<()> {
+        let odata_id = format!(
+            "{}/directoryObjects/{principal_id}",
+            self.base_url.trim_end_matches('/')
+        );
+        let body = serde_json::json!({ "@odata.id": odata_id });
+        let path = format!("/servicePrincipals/{sp_object_id}/owners/$ref");
+        self.send_no_content(Method::POST, &path, Some(&body)).await
+    }
+
+    /// Removes an owner from a service principal
+    /// (`DELETE /servicePrincipals/{id}/owners/{principal_id}/$ref`).
+    pub async fn remove_service_principal_owner(
+        &self,
+        sp_object_id: &str,
+        principal_id: &str,
+    ) -> Result<()> {
+        let path = format!("/servicePrincipals/{sp_object_id}/owners/{principal_id}/$ref");
+        self.send_no_content::<()>(Method::DELETE, &path, None)
+            .await
+    }
+
     /// Creates a service principal for `app_id` if one does not exist, and
     /// invalidates the cached lookup so the next read sees the fresh SP.
     pub async fn ensure_service_principal(&self, app_id: &str) -> Result<ServicePrincipal> {

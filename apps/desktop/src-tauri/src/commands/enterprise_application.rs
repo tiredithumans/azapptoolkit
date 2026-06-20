@@ -55,6 +55,7 @@ fn sp_to_enterprise_dto(
         oauth2_permission_scopes: sp.oauth2_permission_scopes,
         created_date_time: sp.created_date_time,
         tags: sp.tags,
+        notes: sp.notes,
     }
 }
 
@@ -367,6 +368,109 @@ pub async fn set_enterprise_app_visibility(
     Ok(())
 }
 
+/// Enables or disables user sign-in for the enterprise application by setting
+/// `accountEnabled` on its service principal. Disabling stops all token issuance
+/// for the app (the portal's "Enabled for users to sign in?" toggle). Busts the
+/// list caches on success — `accountEnabled` is on the enterprise list DTO and
+/// the shared SP index it derives from.
+#[tauri::command]
+pub async fn set_enterprise_app_account_enabled(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    service_principal_id: String,
+    enabled: bool,
+) -> Result<(), UiError> {
+    let client = state.graph_for(&tenant_id);
+    let body = serde_json::json!({ "accountEnabled": enabled });
+    client
+        .patch_service_principal(&service_principal_id, &body)
+        .await?;
+    invalidate_app_lists(&state.cache, &tenant_id);
+    Ok(())
+}
+
+/// Sets `appRoleAssignmentRequired` on the service principal (the portal's
+/// "Assignment required?" toggle). When `true`, only assigned users/services can
+/// obtain a token for the app. Busts the list caches on success — the flag is on
+/// the enterprise list DTO and the shared SP index.
+#[tauri::command]
+pub async fn set_enterprise_app_assignment_required(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    service_principal_id: String,
+    required: bool,
+) -> Result<(), UiError> {
+    let client = state.graph_for(&tenant_id);
+    let body = serde_json::json!({ "appRoleAssignmentRequired": required });
+    client
+        .patch_service_principal(&service_principal_id, &body)
+        .await?;
+    invalidate_app_lists(&state.cache, &tenant_id);
+    Ok(())
+}
+
+/// Sets the free-text management `notes` on the service principal (max 1024
+/// chars; an empty string clears it to `null`). No cache bust: `notes` is read
+/// live on the (uncached) detail and is on no cached list/audit payload.
+#[tauri::command]
+pub async fn set_enterprise_app_notes(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    service_principal_id: String,
+    notes: String,
+) -> Result<(), UiError> {
+    let trimmed = notes.trim();
+    if trimmed.chars().count() > 1024 {
+        return Err(UiError::validation(
+            "invalid_notes",
+            "Notes can be at most 1024 characters.",
+        ));
+    }
+    let client = state.graph_for(&tenant_id);
+    // Empty ⇒ JSON null clears the field; otherwise store the trimmed text.
+    let body = serde_json::json!({
+        "notes": if trimmed.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(trimmed.to_string()) }
+    });
+    client
+        .patch_service_principal(&service_principal_id, &body)
+        .await?;
+    Ok(())
+}
+
+/// Adds a user as an owner of the enterprise application's service principal.
+/// Only users can own a service principal (groups can't), so the UI searches
+/// users only. No cache bust: SP owners are read live on the (uncached) detail
+/// and appear in no cached list/audit payload.
+#[tauri::command]
+pub async fn add_enterprise_app_owner(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    service_principal_id: String,
+    principal_id: String,
+) -> Result<(), UiError> {
+    let client = state.graph_for(&tenant_id);
+    client
+        .add_service_principal_owner(&service_principal_id, &principal_id)
+        .await?;
+    Ok(())
+}
+
+/// Removes an owner from the enterprise application's service principal. No cache
+/// bust (same rationale as [`add_enterprise_app_owner`]).
+#[tauri::command]
+pub async fn remove_enterprise_app_owner(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    service_principal_id: String,
+    principal_id: String,
+) -> Result<(), UiError> {
+    let client = state.graph_for(&tenant_id);
+    client
+        .remove_service_principal_owner(&service_principal_id, &principal_id)
+        .await?;
+    Ok(())
+}
+
 /// Deletes an enterprise application's service principal
 /// (`DELETE /servicePrincipals/{id}`). Destructive: removing a first-party or
 /// foreign-tenant SP can break tenant-wide sign-in or orphan consent, so the UI
@@ -550,6 +654,7 @@ mod tests {
             oauth2_permission_scopes: Vec::new(),
             created_date_time: None,
             tags: Vec::new(),
+            notes: None,
         }
     }
 
