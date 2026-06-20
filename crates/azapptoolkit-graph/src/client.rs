@@ -1024,6 +1024,7 @@ fn default_service_principal_select() -> &'static [&'static str] {
         "alternativeNames",
         "tags",
         "createdDateTime",
+        "notes",
     ]
 }
 

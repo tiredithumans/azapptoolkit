@@ -159,6 +159,10 @@ pub struct ServicePrincipal {
     /// When the app was created — used for date filtering on lists.
     #[serde(default)]
     pub created_date_time: Option<DateTime<Utc>>,
+    /// Free-text management notes (max 1024 chars). Only fetched for the detail
+    /// view; the enterprise-app Overview tab edits it.
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

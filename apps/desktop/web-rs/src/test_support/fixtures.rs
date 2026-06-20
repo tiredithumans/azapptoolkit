@@ -88,6 +88,7 @@ pub fn enterprise_app(id: &str, display_name: &str) -> EnterpriseApplicationDto 
         oauth2_permission_scopes: Vec::new(),
         created_date_time: None,
         tags: Vec::new(),
+        notes: None,
     }
 }
 
