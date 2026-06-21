@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-20
+
 ### Added
 
 - **Exposed app roles management on enterprise applications.** A new **App roles**
