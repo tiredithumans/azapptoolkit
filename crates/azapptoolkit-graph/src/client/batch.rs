@@ -16,6 +16,7 @@ use serde::de::DeserializeOwned;
 use azapptoolkit_core::http_retry::{
     next_backoff_ms, parse_retry_after_seconds, sleep_before_retry, BASE_DELAY_MS, MAX_RETRIES,
 };
+use azapptoolkit_core::models::Paged;
 
 use super::GraphClient;
 use crate::error::{GraphError, Result};
@@ -87,6 +88,19 @@ impl GraphClient {
         &self,
         urls: &[String],
     ) -> Result<Vec<Result<T>>> {
+        self.batch_get_json_with_headers(urls, &[]).await
+    }
+
+    /// Like [`Self::batch_get_json`] but applies `headers` to **every**
+    /// sub-request. The lone caller that needs this is an advanced query
+    /// (`memberOf/microsoft.graph.group` with `$count`), which Graph rejects
+    /// without a per-sub-request `ConsistencyLevel: eventual` — the outer POST's
+    /// headers don't propagate to the batched sub-requests.
+    pub async fn batch_get_json_with_headers<T: DeserializeOwned>(
+        &self,
+        urls: &[String],
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<Result<T>>> {
         // Grouped `join_all` rather than `stream::buffered`: the stream
         // adapter's higher-ranked lifetime bounds break the Send inference the
         // Tauri command handlers need (rust-lang/rust#64552). A group barrier
@@ -96,7 +110,8 @@ impl GraphClient {
         let mut out: Vec<Result<T>> = Vec::with_capacity(urls.len());
         for group in chunks.chunks(CHUNK_CONCURRENCY) {
             let results =
-                futures::future::join_all(group.iter().map(|c| self.batch_chunk::<T>(c))).await;
+                futures::future::join_all(group.iter().map(|c| self.batch_chunk::<T>(c, headers)))
+                    .await;
             for chunk in results {
                 out.extend(chunk?);
             }
@@ -104,8 +119,34 @@ impl GraphClient {
         Ok(out)
     }
 
+    /// Resolves a batch of `Paged<T>` sub-results into fully-paginated item
+    /// lists, preserving input order and the per-item `Result`. The common case
+    /// (a small collection whose first page is complete) does no extra I/O; only
+    /// a sub-response that still carries an `@odata.nextLink` follows it — once,
+    /// outside the batch — via `collect_all_pages`. The outer `Result` is always
+    /// `Ok` (a whole-batch failure was already surfaced by `batch_get_json`'s
+    /// `?`); it's kept so paged-batch helpers read uniformly with the rest.
+    pub(crate) async fn finish_paged_batch<T: DeserializeOwned>(
+        &self,
+        pages: Vec<Result<Paged<T>>>,
+    ) -> Result<Vec<Result<Vec<T>>>> {
+        let mut out = Vec::with_capacity(pages.len());
+        for page in pages {
+            match page {
+                Ok(p) => out.push(self.collect_all_pages(p).await),
+                Err(e) => out.push(Err(e)),
+            }
+        }
+        Ok(out)
+    }
+
     /// One `$batch` POST for `urls` (already ≤ `BATCH_MAX`), with inner-429 retry.
-    async fn batch_chunk<T: DeserializeOwned>(&self, urls: &[String]) -> Result<Vec<Result<T>>> {
+    /// `headers`, when non-empty, are attached to every sub-request.
+    async fn batch_chunk<T: DeserializeOwned>(
+        &self,
+        urls: &[String],
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<Result<T>>> {
         let batch_url = format!("{}/$batch", self.base_url);
         let mut results: Vec<Option<Result<T>>> = (0..urls.len()).map(|_| None).collect();
         // `pending` holds the original chunk indices still awaiting a non-retry
@@ -117,7 +158,19 @@ impl GraphClient {
         while !pending.is_empty() {
             let requests: Vec<serde_json::Value> = pending
                 .iter()
-                .map(|&i| serde_json::json!({ "id": i.to_string(), "method": "GET", "url": urls[i] }))
+                .map(|&i| {
+                    let mut req =
+                        serde_json::json!({ "id": i.to_string(), "method": "GET", "url": urls[i] });
+                    if !headers.is_empty() {
+                        req["headers"] = serde_json::Value::Object(
+                            headers
+                                .iter()
+                                .map(|(k, v)| ((*k).to_string(), serde_json::Value::from(*v)))
+                                .collect(),
+                        );
+                    }
+                    req
+                })
                 .collect();
             let body = serde_json::json!({ "requests": requests });
             let bytes = self

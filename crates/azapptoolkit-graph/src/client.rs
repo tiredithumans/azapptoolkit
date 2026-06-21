@@ -1037,6 +1037,28 @@ fn escape_odata(input: &str) -> String {
     input.replace('\'', "''")
 }
 
+/// Builds a Graph-version-root-relative sub-request URL (`/applications/{id}?…`)
+/// with percent-encoded query values, for the `$batch` helpers. Mirrors the
+/// single-call encoding `prewarm_service_principals_lean` does inline, so a
+/// batched read's URL is byte-identical to its per-item equivalent. `path` is
+/// already-escaped (object ids are GUIDs); only the query values are encoded.
+fn batch_sub_url(path: &str, query: &[(&str, &str)]) -> String {
+    // A throwaway base just to reuse `url`'s query encoder; the host is never
+    // emitted — only `path?query` is returned.
+    let mut u = url::Url::parse(&format!("https://graph.invalid{path}"))
+        .expect("static base + GUID path parses");
+    {
+        let mut pairs = u.query_pairs_mut();
+        for (k, v) in query {
+            pairs.append_pair(k, v);
+        }
+    }
+    match u.query() {
+        Some(q) => format!("{path}?{q}"),
+        None => path.to_string(),
+    }
+}
+
 /// Extracts the base64 CAE claims challenge from a `WWW-Authenticate: Bearer …
 /// error="insufficient_claims", claims="<base64>"` header. Returns `None` unless
 /// the header signals `insufficient_claims` and carries a non-empty `claims`

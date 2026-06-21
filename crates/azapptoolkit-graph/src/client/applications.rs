@@ -1,5 +1,14 @@
 use super::*;
 
+/// `$select` for the DR backup's single-shot app read: the typed-model fields
+/// **plus** the Authentication (`web`/`spa`/`publicClient`) and Expose-an-API
+/// (`identifierUris`/`api`) blocks the per-tab paths fetch separately, so one
+/// GET (or one `$batch` sub-request) captures an app's whole configuration.
+/// Shared by the single and batched backup reads so their projections can't drift.
+const APP_BACKUP_SELECT: &str = "id,appId,displayName,description,signInAudience,publisherDomain,\
+     createdDateTime,passwordCredentials,keyCredentials,requiredResourceAccess,\
+     isFallbackPublicClient,web,spa,publicClient,identifierUris,api";
+
 impl GraphClient {
     pub async fn list_applications(&self, q: AppListQuery) -> Result<Paged<Application>> {
         let select = q
@@ -61,11 +70,31 @@ impl GraphClient {
     /// concerns.
     pub async fn get_application_backup_json(&self, object_id: &str) -> Result<serde_json::Value> {
         let path = format!("/applications/{object_id}");
-        let select = "id,appId,displayName,description,signInAudience,publisherDomain,\
-                      createdDateTime,passwordCredentials,keyCredentials,requiredResourceAccess,\
-                      isFallbackPublicClient,web,spa,publicClient,identifierUris,api";
-        let params: [(&str, &str); 2] = [("$select", select), ("$expand", "owners")];
+        let params: [(&str, &str); 2] = [("$select", APP_BACKUP_SELECT), ("$expand", "owners")];
         self.get_json(&path, &params, false).await
+    }
+
+    /// Batched [`Self::get_application_backup_json`]: one `$batch` POST per 20
+    /// object ids instead of an individual GET each, returning one
+    /// `Result<serde_json::Value>` per input id **in order**. The DR backup's
+    /// Pass-1 fan-out; cuts the round-trip count (and the throttling it triggers)
+    /// ~20×. A per-id failure is one `Err` in the vec (the caller skips that
+    /// app); a whole-batch failure surfaces as the outer `Err` so the caller can
+    /// fall back to per-id reads.
+    pub async fn batch_get_applications_backup_json(
+        &self,
+        object_ids: &[String],
+    ) -> Result<Vec<Result<serde_json::Value>>> {
+        let urls: Vec<String> = object_ids
+            .iter()
+            .map(|id| {
+                batch_sub_url(
+                    &format!("/applications/{id}"),
+                    &[("$select", APP_BACKUP_SELECT), ("$expand", "owners")],
+                )
+            })
+            .collect();
+        self.batch_get_json(&urls).await
     }
 
     /// Fetches every application in the tenant by following `@odata.nextLink`

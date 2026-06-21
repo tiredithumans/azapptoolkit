@@ -5,7 +5,7 @@
 //! identities are Azure resources recreated out-of-band.
 
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 
 use crate::bindings::{backup, events};
 use crate::components::icon::{Icon, IconName};
@@ -24,6 +24,20 @@ pub fn DisasterRecoveryView() -> impl IntoView {
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let progress: RwSignal<Option<crate::bindings::bulk::BulkProgress>> = RwSignal::new(None);
     use_progress_stream(progress, events::backup_progress);
+    // Highest adaptive concurrency cap seen this run. The backup emits the live
+    // cap; when it later drops below this peak, Graph is throttling and the run
+    // is backing off — which we surface so a slow backup reads as expected, not
+    // broken. Monotonic, so a recovered cap doesn't retroactively hide the notice
+    // mid-run; reset when a new run clears `progress`.
+    let peak_cap = RwSignal::new(0usize);
+    Effect::new(move |_| match progress.get() {
+        Some(p) => {
+            if let Some(cap) = p.in_flight_cap {
+                peak_cap.update(|peak| *peak = (*peak).max(cap));
+            }
+        }
+        None => peak_cap.set(0),
+    });
 
     // ---- Restore state ----
     let loaded: RwSignal<Option<backup::TenantBackup>> = RwSignal::new(None);
@@ -216,8 +230,19 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                 <Show when=move || progress.get().is_some()>
                     {move || {
                         progress.get().map(|p| {
+                            let pct = if p.total > 0 { (p.done as f64) / (p.total as f64) } else { 0.0 };
                             let label = p.current_app.clone().map(|n| format!(" — {n}")).unwrap_or_default();
-                            view! { <p class="dr-view__progress">{format!("Captured {}/{}", p.done, p.total)}{label}</p> }
+                            let cap_label = p.in_flight_cap.map(|c| format!(" · {c} concurrent")).unwrap_or_default();
+                            let cap = p.in_flight_cap;
+                            view! {
+                                <ProgressBar value=Signal::derive(move || pct) />
+                                <p class="dr-view__progress">{format!("Captured {}/{}", p.done, p.total)}{label}{cap_label}</p>
+                                <Show when=move || matches!(cap, Some(c) if c < peak_cap.get())>
+                                    <p class="dr-view__notice" role="status">
+                                        "Microsoft Graph is rate-limiting this backup, so it's automatically slowing down to recover. It will still complete — large tenants just take longer."
+                                    </p>
+                                </Show>
+                            }
                         })
                     }}
                 </Show>
@@ -294,8 +319,12 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                 <Show when=move || restore_progress.get().is_some()>
                     {move || {
                         restore_progress.get().map(|p| {
+                            let pct = if p.total > 0 { (p.done as f64) / (p.total as f64) } else { 0.0 };
                             let label = p.current_app.clone().map(|n| format!(" — {n}")).unwrap_or_default();
-                            view! { <p class="dr-view__progress">{format!("Created {}/{}", p.done, p.total)}{label}</p> }
+                            view! {
+                                <ProgressBar value=Signal::derive(move || pct) />
+                                <p class="dr-view__progress">{format!("Created {}/{}", p.done, p.total)}{label}</p>
+                            }
                         })
                     }}
                 </Show>

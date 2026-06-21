@@ -81,22 +81,46 @@ a tenant mismatch (that mismatch is the expected DR case). Three object classes:
 
 ## Backup (`commands/backup.rs`) — shipped
 
-`backup_tenant` is read-only (never invalidates a cache) and fans out the
-existing read paths. **App registrations** are captured in full (a per-app
-concurrent fan-out reusing `get_application`, `get_application_auth_fields` +
-`extract_auth_fields`, `get_application_expose_api`, `list_federated_credentials`,
-`list_owners`, and the SP role/grant reads for the consent flag). **Enterprise
-apps and managed identities** are captured at the inventory level from the
-existing index calls; their per-principal assignment / held-permission /
-Azure-RBAC detail is captured alongside the restore slice that consumes it.
+`backup_tenant` is read-only (never invalidates a cache) and runs three passes
+over the estate. The estate is enumerated up front from `list_application_index`
++ the cached `sp_index` (reused from the Enterprise Apps list — same per-tenant
+scan, not re-pulled) + `list_managed_identities`.
+
+The per-object reads are **batched** via Graph JSON batching to keep round-trips
+(and the throttling they trigger) low. Each pass chunks its objects into groups
+of `BATCH_CHUNK` (20, Graph's `$batch` cap) and `dispatch_capped`s the chunks:
+
+- **Pass 1 — app registrations:** per chunk, `batch_get_applications_backup_json`
+  (one consolidated `$expand=owners` doc per app — app + auth + Expose-an-API +
+  owners) and `batch_list_federated_credentials`, fired together. `has_sp` comes
+  from the index, and `admin_consent_granted` is derived from declared
+  permissions — no per-app SP/grant probe.
+- **Pass 2 — enterprise apps:** per chunk, the full SP read
+  (`batch_get_service_principals` — the lean index lacks `appRoles`/`tags`/
+  `appRoleAssignmentRequired`), `batch_list_app_role_assigned_to`, and
+  `batch_list_service_principal_groups` (the advanced `memberOf` query rides a
+  per-sub-request `ConsistencyLevel` header). Group/assignee failures degrade to
+  empty; a vanished SP is skipped.
+- **Pass 3 — managed identities:** `batch_list_app_role_assignments` for all MIs,
+  then one batched prewarm of each **distinct** resource SP (seeding
+  `ResourceLookup`), then assembly with no further round trips. Azure RBAC isn't
+  scanned (runbook-only on restore).
+
+Each batched read returns `Vec<Result<T>>` in input order; a **whole-batch
+failure degrades to per-object reads** for that chunk (never failing the backup),
+and a per-object failure skips just that object. Concurrency is **adaptive**: a
+shared `ConcurrencyThrottle` (`commands/throttle.rs`, the audit's tracker)
+wired as the Graph client's `ThrottleObserver` halves the chunk cap on each 429
+and recovers it when quiet; the cap is fed to `dispatch_capped` and emitted as
+`BulkProgress.in_flight_cap` so the DR view can show it (and a back-off notice).
 
 It is long-running, so it resets and polls the dedicated `AppState.dr_cancel`
 flag (its own — **not** `audit_cancel` — so a backup and a concurrent audit/bulk
-run can't cancel each other) and emits `backup-progress` (`BulkProgress` shape)
-events the DR view renders. A cancelled run is an **error**, not a truncated
-success — a partial backup is a dangerous DR artifact. `save_backup_to_file`
-writes JSON only (the manifest is a structured restore artifact, not a
-spreadsheet) via the shared `save_export_via_dialog`.
+run can't cancel each other; checked at chunk boundaries) and emits
+`backup-progress` (`BulkProgress` shape) events the DR view renders. A cancelled
+run is an **error**, not a truncated success — a partial backup is a dangerous DR
+artifact. `save_backup_to_file` writes JSON only (the manifest is a structured
+restore artifact, not a spreadsheet) via the shared `save_export_via_dialog`.
 
 ## Restore (`commands/restore.rs`) — shipped (app registrations)
 

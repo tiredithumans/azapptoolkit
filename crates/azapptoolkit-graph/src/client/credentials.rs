@@ -55,6 +55,29 @@ impl GraphClient {
         self.collect_all_pages(page).await
     }
 
+    /// Batched [`Self::list_federated_credentials`]: one `$batch` POST per 20
+    /// apps, returning each app's full credential list in input order. Graph
+    /// caps federated credentials at ~20/app, so the first (batched) page is
+    /// almost always complete; the rare overflow finishes via `collect_all_pages`
+    /// outside the batch. A per-app failure is one `Err` in the vec.
+    pub async fn batch_list_federated_credentials(
+        &self,
+        object_ids: &[String],
+    ) -> Result<Vec<Result<Vec<FederatedIdentityCredential>>>> {
+        let urls: Vec<String> = object_ids
+            .iter()
+            .map(|id| {
+                batch_sub_url(
+                    &format!("/applications/{id}/federatedIdentityCredentials"),
+                    &[("$select", "id,name,issuer,subject,description,audiences")],
+                )
+            })
+            .collect();
+        let pages: Vec<Result<Paged<FederatedIdentityCredential>>> =
+            self.batch_get_json(&urls).await?;
+        self.finish_paged_batch(pages).await
+    }
+
     /// Creates a federated identity credential on an application.
     pub async fn add_federated_credential(
         &self,

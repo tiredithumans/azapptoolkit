@@ -7,6 +7,32 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **Disaster-recovery backup is now batched and throttle-aware — far faster and
+  no longer rate-limit-bound on large tenants.** The per-app/-SP/-MI reads that
+  the backup fanned out as individual Graph calls (the bulk of a backup) now go
+  out via Graph JSON batching (`$batch`, 20 sub-requests per round trip),
+  collapsing the round-trip count roughly 20× and cutting wall-clock sharply. All
+  three passes (app registrations, enterprise apps, managed identities) are
+  batched, including the enterprise group-membership read (the advanced
+  `memberOf` query now rides a per-sub-request `ConsistencyLevel` header in the
+  batch). The managed-identity pass resolves each distinct resource service
+  principal once via a batched prewarm. A whole-batch failure degrades to
+  per-object reads for that chunk, and per-object failures still skip just that
+  one object — a cancelled run remains an error, never a partial manifest.
+- **Adaptive concurrency for the backup.** The backup now reuses the security
+  audit's throttle tracker (promoted to a shared `ConcurrencyThrottle`): every
+  Graph 429 halves the in-flight chunk cap, which then recovers after a quiet
+  window — so a throttling tenant backs off gracefully instead of hammering at a
+  fixed concurrency.
+- **Legible DR progress.** The Disaster Recovery screen now shows a progress bar
+  and the live concurrency for both backup and restore, plus a back-off notice
+  while Graph is rate-limiting the backup (the adaptive cap has dropped below its
+  peak) so a slow run reads as expected rather than stuck. `BulkProgress` gained
+  an optional `in_flight_cap` field (additive; absent for the fixed-cap bulk
+  flows).
+
 ## [0.2.0] - 2026-06-20
 
 ### Added

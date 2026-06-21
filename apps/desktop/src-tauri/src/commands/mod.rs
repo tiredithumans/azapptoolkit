@@ -25,4 +25,5 @@ pub mod restore;
 pub mod search;
 pub mod sharepoint;
 pub mod sso;
+pub(crate) mod throttle;
 pub mod usage;

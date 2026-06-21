@@ -209,6 +209,19 @@ pub fn bulk_progress(done: usize, total: usize) -> BulkProgress {
         total,
         current_app: None,
         cancelled: false,
+        in_flight_cap: None,
+    }
+}
+
+/// A backup-progress event carrying the adaptive concurrency cap — drives the DR
+/// view's progress bar and (when the cap drops below its peak) its back-off notice.
+pub fn backup_progress(done: usize, total: usize, in_flight_cap: usize) -> BulkProgress {
+    BulkProgress {
+        done,
+        total,
+        current_app: None,
+        cancelled: false,
+        in_flight_cap: Some(in_flight_cap),
     }
 }
 
