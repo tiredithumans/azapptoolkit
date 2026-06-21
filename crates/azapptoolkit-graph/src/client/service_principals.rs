@@ -368,6 +368,37 @@ impl GraphClient {
         self.send_no_content(Method::PATCH, &path, Some(body)).await
     }
 
+    /// GET `/servicePrincipals/{id}?$select=appRoles`, returning the raw
+    /// `appRoles` array. `appRoles` is a full-collection PATCH (see
+    /// [`Self::set_service_principal_app_roles`]), and gallery/enterprise SPs
+    /// publish a default role (`msiam_access`) with `value: null` plus a
+    /// read-only `origin`, so entries are kept as raw JSON to round-trip every
+    /// field losslessly for the roles a caller isn't editing. Empty when the SP
+    /// exposes no roles.
+    pub async fn get_service_principal_app_roles_raw(
+        &self,
+        object_id: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        let path = format!("/servicePrincipals/{object_id}");
+        let params: [(&str, &str); 1] = [("$select", "appRoles")];
+        let v: serde_json::Value = self.get_json(&path, &params, false).await?;
+        Ok(v.get("appRoles")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// PATCH `/servicePrincipals/{id}` replacing the whole `appRoles` collection
+    /// (Graph treats `appRoles` as a full replacement, not a delta).
+    pub async fn set_service_principal_app_roles(
+        &self,
+        object_id: &str,
+        roles: &[serde_json::Value],
+    ) -> Result<()> {
+        let body = serde_json::json!({ "appRoles": roles });
+        self.patch_service_principal(object_id, &body).await
+    }
+
     /// Looks up a resource SP by app id to resolve permission display names
     /// (appRoles + oauth2PermissionScopes). Result is cached under
     /// [`CacheKind::Permissions`] with the matching TTL.

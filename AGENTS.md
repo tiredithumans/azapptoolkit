@@ -154,6 +154,8 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Permissions catalog** is bundled at compile time from `azapptoolkit-permissions/data/`. Unknown resources fall back to `resolve_resource_sp()` Graph call.
 
+- **Full-collection PATCH for `appRoles` / `oauth2PermissionScopes`.** Both are not-nullable arrays Graph **full-replaces** — re-read live state, mutate, write the whole array back (never merge against a cached payload). Deleting an enabled entry needs two PATCHes: disable first, then remove (`commands/expose_api.rs`, `commands/app_roles.rs`). Exposed **app roles** (`commands/app_roles.rs`) edit the **paired application** when one exists (Entra mirrors onto the SP) else the SP directly, and round-trip roles as **raw JSON** so the `value: null` SAML default (`msiam_access`) survives byte-for-byte (a typed `AppRole` would rewrite it to `""`). Bust with `invalidate_app_details` only — these aren't on any list/audit payload.
+
 ## Coding fundamentals
 
 - Match the style, structure, and idioms of the file you're editing.

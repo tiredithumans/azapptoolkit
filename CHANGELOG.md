@@ -7,6 +7,21 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Exposed app roles management on enterprise applications.** A new **App roles**
+  tab on the enterprise-app detail pane adds, edits, enables/disables, and deletes
+  the app-role definitions an application publishes (the Entra "App roles" blade) —
+  previously these were read-only in the Permissions tab. Edits target the role's
+  canonical home: the **linked app registration** when one exists (Entra mirrors
+  them onto the service principal), otherwise the **service principal** directly
+  (gallery / foreign-tenant apps). The whole `appRoles` collection is re-read live
+  and full-replaced on each change, preserving built-in roles (e.g. the SAML
+  `msiam_access` default, surfaced read-only) byte-for-byte; deleting an enabled
+  role disables it first (Graph rejects removing an enabled role). New backend
+  commands `list_enterprise_app_roles`, `upsert_enterprise_app_role`, and
+  `delete_enterprise_app_role` with typed frontend stubs.
+
 ## [0.1.4] - 2026-06-20
 
 ### Added

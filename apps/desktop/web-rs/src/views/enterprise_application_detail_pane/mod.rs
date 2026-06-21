@@ -30,10 +30,12 @@ use crate::views::tabs::activity_tab::ActivityPanel;
 use crate::views::tabs::conditional_access_tab::ConditionalAccessPanel;
 
 mod access;
+mod app_roles;
 mod permissions;
 mod sso_tab;
 
 use access::AccessContent;
+use app_roles::AppRolesContent;
 use permissions::PermissionsContent;
 use sso_tab::SsoContent;
 
@@ -240,6 +242,7 @@ fn EnterpriseAppPanel(
                 <Tab value="credentials">"Credentials"</Tab>
                 <Tab value="owners">"Owners"</Tab>
                 <Tab value="permissions">"Permissions"</Tab>
+                <Tab value="appRoles">"App roles"</Tab>
                 <Tab value="access">"Access"</Tab>
                 <Tab value="provisioning">"Provisioning"</Tab>
                 <Tab value="conditionalAccess">"Conditional Access"</Tab>
@@ -255,6 +258,10 @@ fn EnterpriseAppPanel(
                             .into_any()
                     }
                     "permissions" => view! { <PermissionsContent signal=ro_signal /> }.into_any(),
+                    "appRoles" => {
+                        view! { <AppRolesContent signal=ro_signal on_refresh=on_refresh /> }
+                            .into_any()
+                    }
                     "access" => view! { <AccessContent signal=ro_signal /> }.into_any(),
                     "provisioning" => {
                         view! { <ProvisioningContent signal=ro_signal /> }.into_any()
