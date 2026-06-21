@@ -82,6 +82,35 @@ pub struct GroupMembershipDto {
     pub group_types: Vec<String>,
 }
 
+/// Input for creating (`id = None` — a GUID is generated server-side) or
+/// updating (`id = Some`) one **exposed** app role on an enterprise application
+/// (the Entra "App roles" blade — the role definitions the app publishes, not
+/// the role *assignments* in [`AppAssignmentDto`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppRoleInput {
+    /// `None` ⇒ create; `Some` ⇒ edit the role with this id.
+    pub id: Option<String>,
+    pub display_name: String,
+    /// The value emitted in the `roles` claim (no spaces; ≤ 250 chars).
+    pub value: String,
+    pub description: Option<String>,
+    /// `User` (users/groups) and/or `Application` (apps/daemons) — who may be
+    /// assigned the role.
+    pub allowed_member_types: Vec<String>,
+    pub is_enabled: bool,
+}
+
+/// The exposed app roles of an enterprise application plus where they're
+/// defined: `application` when a local app registration backs the service
+/// principal (the canonical home — Entra mirrors edits onto the SP), else
+/// `servicePrincipal` (gallery / foreign-tenant apps).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppRolesView {
+    pub target_kind: String,
+    pub roles: Vec<azapptoolkit_core::models::AppRole>,
+}
+
 /// One principal (user/group/service principal) assigned to an enterprise
 /// application's app role — the "who has access" view.
 #[derive(Debug, Clone, Serialize, Deserialize)]

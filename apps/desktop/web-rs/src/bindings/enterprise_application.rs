@@ -338,6 +338,89 @@ pub async fn remove_enterprise_app_owner(
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AppRolesListArgs<'a> {
+    tenant_id: &'a str,
+    service_principal_id: &'a str,
+    app_id: &'a str,
+}
+
+/// Reads the enterprise app's exposed app roles plus where they're defined
+/// (`application` when a local app registration backs the SP, else
+/// `servicePrincipal`).
+pub async fn list_enterprise_app_roles(
+    tenant_id: &str,
+    service_principal_id: &str,
+    app_id: &str,
+) -> Result<AppRolesView, UiError> {
+    invoke_result(
+        "list_enterprise_app_roles",
+        AppRolesListArgs {
+            tenant_id,
+            service_principal_id,
+            app_id,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertAppRoleArgs<'a> {
+    tenant_id: &'a str,
+    service_principal_id: &'a str,
+    app_id: &'a str,
+    input: &'a AppRoleInput,
+}
+
+/// Creates (`input.id = None`) or updates one exposed app role.
+pub async fn upsert_enterprise_app_role(
+    tenant_id: &str,
+    service_principal_id: &str,
+    app_id: &str,
+    input: &AppRoleInput,
+) -> Result<(), UiError> {
+    invoke_result(
+        "upsert_enterprise_app_role",
+        UpsertAppRoleArgs {
+            tenant_id,
+            service_principal_id,
+            app_id,
+            input,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteAppRoleArgs<'a> {
+    tenant_id: &'a str,
+    service_principal_id: &'a str,
+    app_id: &'a str,
+    role_id: &'a str,
+}
+
+/// Deletes one exposed app role (disabling it first when needed).
+pub async fn delete_enterprise_app_role(
+    tenant_id: &str,
+    service_principal_id: &str,
+    app_id: &str,
+    role_id: &str,
+) -> Result<(), UiError> {
+    invoke_result(
+        "delete_enterprise_app_role",
+        DeleteAppRoleArgs {
+            tenant_id,
+            service_principal_id,
+            app_id,
+            role_id,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SaveEnterpriseArgs<'a> {
     rows: &'a [EnterpriseApplicationDto],
     format: &'a str,

@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod app_roles;
 pub mod applications;
 pub mod audit;
 pub mod auth;

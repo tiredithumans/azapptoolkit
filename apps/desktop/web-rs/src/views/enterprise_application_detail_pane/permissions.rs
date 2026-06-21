@@ -220,27 +220,10 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
         );
     };
 
-    let app_roles = signal.with(|d| d.service_principal.app_roles.clone());
+    // App-role *definitions* this app exposes are managed on the dedicated
+    // "App roles" tab (add/edit/enable/delete); this tab keeps the held
+    // permissions + the delegated scopes the app publishes.
     let scopes = signal.with(|d| d.service_principal.oauth2_permission_scopes.clone());
-
-    let roles_view = view! {
-        <DataTable
-            headers=vec!["Value", "Display name", "Member types", "Enabled"]
-            rows=app_roles
-            empty_message="No app roles defined."
-            row=move |r: azapptoolkit_core::models::AppRole| {
-                view! {
-                    <tr>
-                        <td class="mono">{r.value.clone()}</td>
-                        <td>{r.display_name.clone()}</td>
-                        <td>{r.allowed_member_types.join(", ")}</td>
-                        <td>{r.is_enabled.unwrap_or(true).to_string()}</td>
-                    </tr>
-                }
-                    .into_any()
-            }
-        />
-    };
 
     let scopes_view = view! {
         <DataTable
@@ -384,11 +367,6 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
             }}
             {move || scope_note.get().map(|m| view! { <div class="alert alert--ok">{m}</div> })}
             {move || scope_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
-            <h4>"App roles exposed"</h4>
-            <p class="muted">
-                "Roles this app publishes for others to consent to — not permissions it holds."
-            </p>
-            {roles_view}
             <h4>"Delegated scopes exposed"</h4>
             <p class="muted">
                 "Delegated scopes this app publishes for users and clients to consent to."
