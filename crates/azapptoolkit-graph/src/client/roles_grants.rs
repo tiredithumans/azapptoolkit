@@ -31,6 +31,47 @@ impl GraphClient {
         self.collect_all_pages(page).await
     }
 
+    /// Batched [`Self::list_app_role_assigned_to`]: inbound role assignments for
+    /// many SPs in one `$batch` POST per 20. Returns each SP's full assignment
+    /// list (paginating the rare overflow outside the batch) in input order. The
+    /// DR backup's Pass-2 "who's assigned" read.
+    pub async fn batch_list_app_role_assigned_to(
+        &self,
+        sp_ids: &[String],
+    ) -> Result<Vec<Result<Vec<AppRoleAssignment>>>> {
+        let urls: Vec<String> = sp_ids
+            .iter()
+            .map(|id| {
+                batch_sub_url(
+                    &format!("/servicePrincipals/{id}/appRoleAssignedTo"),
+                    &[("$select", APP_ROLE_ASSIGNMENT_SELECT)],
+                )
+            })
+            .collect();
+        let pages: Vec<Result<Paged<AppRoleAssignment>>> = self.batch_get_json(&urls).await?;
+        self.finish_paged_batch(pages).await
+    }
+
+    /// Batched [`Self::list_app_role_assignments`]: the application permissions
+    /// **held by** many SPs, one `$batch` POST per 20. The DR backup's Pass-3
+    /// managed-identity read.
+    pub async fn batch_list_app_role_assignments(
+        &self,
+        sp_ids: &[String],
+    ) -> Result<Vec<Result<Vec<AppRoleAssignment>>>> {
+        let urls: Vec<String> = sp_ids
+            .iter()
+            .map(|id| {
+                batch_sub_url(
+                    &format!("/servicePrincipals/{id}/appRoleAssignments"),
+                    &[("$select", APP_ROLE_ASSIGNMENT_SELECT)],
+                )
+            })
+            .collect();
+        let pages: Vec<Result<Paged<AppRoleAssignment>>> = self.batch_get_json(&urls).await?;
+        self.finish_paged_batch(pages).await
+    }
+
     /// Assigns a principal (user/group) to a role on `resource_sp_id` — grants
     /// access to the enterprise application. `app_role_id` may be the all-zero
     /// GUID for the "default access" (no-specific-role) assignment. Posts to the

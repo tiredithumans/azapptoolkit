@@ -313,6 +313,32 @@ impl GraphClient {
         }
     }
 
+    /// Batched [`Self::get_service_principal_by_object_id`]: one `$batch` POST
+    /// per 20 ids, each sub-result mapped `404 → Ok(None)` so a principal that
+    /// vanished between the index read and the backup is `Ok(None)` (skipped),
+    /// not an error. Used by the DR backup for both the enterprise-app SP read
+    /// (Pass 2) and the managed-identity resource-SP resolves (Pass 3). Returns
+    /// one result per input id, in order.
+    pub async fn batch_get_service_principals(
+        &self,
+        object_ids: &[String],
+    ) -> Result<Vec<Result<Option<ServicePrincipal>>>> {
+        let select = default_service_principal_select().join(",");
+        let urls: Vec<String> = object_ids
+            .iter()
+            .map(|id| batch_sub_url(&format!("/servicePrincipals/{id}"), &[("$select", &select)]))
+            .collect();
+        let raw: Vec<Result<ServicePrincipal>> = self.batch_get_json(&urls).await?;
+        Ok(raw
+            .into_iter()
+            .map(|r| match r {
+                Ok(sp) => Ok(Some(sp)),
+                Err(GraphError::NotFound(_)) => Ok(None),
+                Err(e) => Err(e),
+            })
+            .collect())
+    }
+
     /// GET `/servicePrincipals/{id}` selecting only the SSO-relevant fields, as
     /// raw JSON (`preferredSingleSignOnMode` /
     /// `preferredTokenSigningKeyThumbprint` aren't on the typed

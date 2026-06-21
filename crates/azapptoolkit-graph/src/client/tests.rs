@@ -1,7 +1,9 @@
 use super::*;
 use azapptoolkit_core::cache::Cache;
 use azapptoolkit_core::token::StaticTokenProvider;
-use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
+use wiremock::matchers::{
+    body_string_contains, header, method, path, query_param, query_param_is_missing,
+};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn sample_org_json() -> serde_json::Value {
@@ -1970,6 +1972,94 @@ async fn batch_get_json_retries_inner_429_then_surfaces_throttled() {
     let out: Vec<Result<serde_json::Value>> = client.batch_get_json(&urls).await.unwrap();
     assert_eq!(out.len(), 1);
     assert!(matches!(out[0], Err(GraphError::Throttled { .. })));
+}
+
+#[tokio::test]
+async fn batch_get_service_principals_maps_404_to_none_in_order() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "responses": [
+                { "id": "1", "status": 404, "body": { "error": { "message": "gone" } } },
+                { "id": "0", "status": 200, "body": { "id": "sp-0", "appId": "app-0" } }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let ids = vec!["sp-0".to_string(), "sp-1".to_string()];
+    let out = client.batch_get_service_principals(&ids).await.unwrap();
+    assert_eq!(out.len(), 2);
+    // Matched by `id`, so a vanished principal (404) is `Ok(None)`, not an error.
+    assert_eq!(out[0].as_ref().unwrap().as_ref().unwrap().id, "sp-0");
+    assert!(matches!(out[1], Ok(None)));
+}
+
+#[tokio::test]
+async fn batch_list_app_role_assigned_to_follows_nextlink_overflow() {
+    let server = MockServer::start().await;
+    // First (batched) page carries an `@odata.nextLink` (same-origin, so
+    // `get_json_absolute` will follow it) — proving the overflow fallback runs.
+    let next = format!(
+        "{}/servicePrincipals/sp-0/appRoleAssignedTo?page=2",
+        server.uri()
+    );
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "responses": [{ "id": "0", "status": 200, "body": {
+                "value": [{ "id": "a1", "principalId": "p1", "resourceId": "res1", "appRoleId": "r1" }],
+                "@odata.nextLink": next,
+            }}]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-0/appRoleAssignedTo"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "a2", "principalId": "p2", "resourceId": "res2", "appRoleId": "r2" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let out = client
+        .batch_list_app_role_assigned_to(&["sp-0".to_string()])
+        .await
+        .unwrap();
+    let assigns = out[0].as_ref().unwrap();
+    assert_eq!(assigns.len(), 2, "first page + overflow page concatenated");
+    assert_eq!(assigns[0].id, "a1");
+    assert_eq!(assigns[1].id, "a2");
+}
+
+#[tokio::test]
+async fn batch_list_service_principal_groups_sends_consistencylevel_per_subrequest() {
+    let server = MockServer::start().await;
+    // The mock only answers when the POST body carries the advanced-query
+    // header, so a missing per-sub-request header makes the call fail.
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .and(body_string_contains("ConsistencyLevel"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "responses": [{ "id": "0", "status": 200, "body": {
+                "value": [{ "id": "g1", "displayName": "Group One" }]
+            }}]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let out = client
+        .batch_list_service_principal_groups(&["sp-0".to_string()])
+        .await
+        .unwrap();
+    let groups = out[0].as_ref().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].id, "g1");
 }
 
 // --- Request-struct serialization: guards the hand-typed-camelCase hazard.

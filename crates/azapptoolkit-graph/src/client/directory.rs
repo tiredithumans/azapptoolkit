@@ -176,6 +176,37 @@ impl GraphClient {
         self.collect_all_pages(page).await
     }
 
+    /// Batched [`Self::list_service_principal_groups`]: the group memberships of
+    /// many SPs in one `$batch` POST per 20. The `memberOf/microsoft.graph.group`
+    /// cast is an advanced query, so each sub-request carries its own
+    /// `ConsistencyLevel: eventual` header (the outer POST's headers don't reach
+    /// batched sub-requests) alongside `$count=true`. Returns each SP's group
+    /// list in input order; the rare overflow paginates outside the batch. The
+    /// caller treats a per-SP `Err` as "no groups" (matching the un-batched
+    /// path's degrade-to-empty), so a tenant that rejects `$count` in a batch
+    /// loses group data but never fails the backup.
+    pub async fn batch_list_service_principal_groups(
+        &self,
+        sp_ids: &[String],
+    ) -> Result<Vec<Result<Vec<GroupSummary>>>> {
+        let urls: Vec<String> = sp_ids
+            .iter()
+            .map(|id| {
+                batch_sub_url(
+                    &format!("/servicePrincipals/{id}/memberOf/microsoft.graph.group"),
+                    &[
+                        ("$select", "id,displayName,securityEnabled,groupTypes"),
+                        ("$count", "true"),
+                    ],
+                )
+            })
+            .collect();
+        let pages: Vec<Result<Paged<GroupSummary>>> = self
+            .batch_get_json_with_headers(&urls, &[("ConsistencyLevel", "eventual")])
+            .await?;
+        self.finish_paged_batch(pages).await
+    }
+
     /// Adds a directory object (here: a service principal) as a member of a
     /// group (`POST /groups/{id}/members/$ref`). The `@odata.id` body is built
     /// from the configured base URL so sovereign clouds (and mock tests) point
