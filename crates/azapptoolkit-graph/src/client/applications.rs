@@ -298,4 +298,36 @@ impl GraphClient {
         let path = format!("/applications/{object_id}");
         self.send_no_content(Method::PATCH, &path, Some(body)).await
     }
+
+    /// GET `/applications/{id}?$select=appRoles`, returning the raw `appRoles`
+    /// array. Entries are kept as raw JSON for the same reason as the service
+    /// principal variant (`get_service_principal_app_roles_raw`): `appRoles`
+    /// round-trips through a full-collection PATCH and the SAML default role
+    /// carries a `value: null` that a typed shape would mangle.
+    pub async fn get_application_app_roles_raw(
+        &self,
+        object_id: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        let path = format!("/applications/{object_id}");
+        let params: [(&str, &str); 1] = [("$select", "appRoles")];
+        let v: serde_json::Value = self.get_json(&path, &params, false).await?;
+        Ok(v.get("appRoles")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// PATCH `/applications/{id}` replacing the whole `appRoles` collection. For
+    /// an enterprise app backed by a local app registration this is the
+    /// canonical home of the roles — Entra mirrors them onto the paired SP.
+    pub async fn set_application_app_roles(
+        &self,
+        object_id: &str,
+        roles: &[serde_json::Value],
+    ) -> Result<()> {
+        let path = format!("/applications/{object_id}");
+        let body = serde_json::json!({ "appRoles": roles });
+        self.send_no_content(Method::PATCH, &path, Some(&body))
+            .await
+    }
 }
