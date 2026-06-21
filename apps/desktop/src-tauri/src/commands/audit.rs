@@ -8,13 +8,13 @@
 //! under [`CacheKind::Audit`] keyed `{tenant_id}|audit_run` so the dashboard
 //! can re-render without re-scanning.
 //!
-//! Adaptive concurrency: a [`AuditThrottleTracker`] wired as the Graph
-//! client's `ThrottleObserver` decrements the in-flight cap on every 429 and
-//! gradually recovers it after 30s of quiet. Cancellation is signalled via
-//! `AppState.audit_cancel`; the loop polls it between task dispatches.
+//! Adaptive concurrency: a [`ConcurrencyThrottle`](crate::commands::throttle)
+//! wired as the Graph client's `ThrottleObserver` decrements the in-flight cap
+//! on every 429 and gradually recovers it after 30s of quiet. Cancellation is
+//! signalled via `AppState.audit_cancel`; the loop polls it between dispatches.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, State};
@@ -26,20 +26,19 @@ use azapptoolkit_core::models::{Application, RequiredResourceAccess};
 use azapptoolkit_core::scoping::is_scopable_exchange_permission;
 use azapptoolkit_exchange::{ExchangeClient, ExchangeError};
 use azapptoolkit_graph::client::AppListQuery;
-use azapptoolkit_graph::{GraphClient, ThrottleObserver};
+use azapptoolkit_graph::GraphClient;
 use chrono::{DateTime, Utc};
 
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::exchange::{exchange_client, resolve_mail_scopes_audit_cached};
 use crate::commands::graph_roles::graph_role_index;
+use crate::commands::throttle::ConcurrencyThrottle;
 use crate::dto::audit::{AuditProgress, AuditRunResult};
 use crate::dto::UiError;
 use crate::state::AppState;
 
 /// Upper bound on in-flight per-app lookups when the tenant is healthy.
 const INITIAL_CONCURRENCY: usize = 8;
-/// Minimum in-flight floor: a single request still makes forward progress.
-const MIN_CONCURRENCY: usize = 1;
 /// Page size — Graph caps `$top` at 100 on `/applications`.
 const PAGE_SIZE: u32 = 100;
 /// Safety cap on the total app count per run. Prevents a misconfigured tenant
@@ -66,7 +65,7 @@ pub async fn run_audit(
     state.audit_cancel.reset();
 
     let client = state.graph_for(&tenant_id);
-    let tracker = Arc::new(AuditThrottleTracker::new(INITIAL_CONCURRENCY));
+    let tracker = Arc::new(ConcurrencyThrottle::new(INITIAL_CONCURRENCY));
     client.set_throttle_observer(tracker.clone());
     // Detach the observer however the run exits — the early `?` returns
     // (e.g. app paging failure) previously left a stale tracker attached to
@@ -499,108 +498,6 @@ pub fn export_audit_csv(items: Vec<AuditItem>) -> String {
     out
 }
 
-// ---------------- adaptive throttling ----------------
-
-/// Minimum seconds between cap halvings. The transport notifies the observer
-/// on *every* 429 — including each retry of one hot request — so without a
-/// window a single request retrying three times collapsed the cap 8→1 while
-/// the other lanes were healthy.
-const HALVE_WINDOW_SECS: u64 = 2;
-/// Quiet seconds required before a permit is restored; also the recovery
-/// loop's tick interval.
-const RECOVERY_SECS: u64 = 30;
-
-/// Shared mutable state for the tracker. Held by `Arc` so the background
-/// recovery loop can adjust `current` while the run holds the tracker.
-struct ThrottleInner {
-    current: AtomicUsize,
-    max: usize,
-    /// Most recent throttle event (`tokio::time::Instant`, so paused-clock
-    /// tests can drive it). Gates both the halve window and recovery quiet.
-    last_throttle: std::sync::Mutex<Option<tokio::time::Instant>>,
-}
-
-/// Adjusts the audit's in-flight concurrency cap in response to Graph's 429s.
-/// A throttle event halves the cap (floored at [`MIN_CONCURRENCY`]) at most
-/// once per [`HALVE_WINDOW_SECS`]; one long-lived recovery loop restores one
-/// permit per [`RECOVERY_SECS`] tick once the last tick's window was quiet,
-/// capped at the initial value. (The previous spawn-a-timer-per-429 shape made
-/// a throttle storm snap the cap from the floor back to max in a single burst
-/// ~30s later, re-triggering the storm — a sawtooth.)
-pub struct AuditThrottleTracker {
-    inner: Arc<ThrottleInner>,
-}
-
-impl AuditThrottleTracker {
-    /// Must be called from a Tokio runtime context (spawns the recovery loop).
-    fn new(initial: usize) -> Self {
-        let inner = Arc::new(ThrottleInner {
-            current: AtomicUsize::new(initial.max(MIN_CONCURRENCY)),
-            max: initial,
-            last_throttle: std::sync::Mutex::new(None),
-        });
-        // The loop holds only a Weak: it exits when the run drops its last
-        // tracker handle, so it can't outlive the audit it serves.
-        let weak = Arc::downgrade(&inner);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(RECOVERY_SECS)).await;
-                let Some(inner) = weak.upgrade() else { break };
-                let quiet = inner
-                    .last_throttle
-                    .lock()
-                    .expect("tracker mutex poisoned")
-                    .is_some_and(|t| t.elapsed().as_secs() >= RECOVERY_SECS);
-                if quiet {
-                    let prev = inner.current.load(Ordering::Acquire);
-                    let next = (prev + 1).min(inner.max);
-                    if next > prev {
-                        inner.current.store(next, Ordering::Release);
-                        tracing::info!(from = prev, to = next, "audit: recovering in-flight cap");
-                    }
-                }
-            }
-        });
-        Self { inner }
-    }
-
-    fn current_limit(&self) -> usize {
-        self.inner.current.load(Ordering::Acquire)
-    }
-}
-
-impl ThrottleObserver for AuditThrottleTracker {
-    fn on_throttle(&self, retry_after_secs: Option<u64>) {
-        let now = tokio::time::Instant::now();
-        let within_window = {
-            let mut last = self
-                .inner
-                .last_throttle
-                .lock()
-                .expect("tracker mutex poisoned");
-            let within = last.is_some_and(|t| now.duration_since(t).as_secs() < HALVE_WINDOW_SECS);
-            *last = Some(now);
-            within
-        };
-        if within_window {
-            // One halving per pressure window — retries of a single hot
-            // request must not cascade the cap to the floor.
-            return;
-        }
-        let prev = self.inner.current.load(Ordering::Acquire);
-        let next = (prev / 2).max(MIN_CONCURRENCY);
-        if next < prev {
-            self.inner.current.store(next, Ordering::Release);
-            tracing::info!(
-                from = prev,
-                to = next,
-                ?retry_after_secs,
-                "audit: throttled, reducing in-flight cap"
-            );
-        }
-    }
-}
-
 // ---------------- internals ----------------
 
 pub(crate) fn csv_field(s: &str) -> String {
@@ -893,68 +790,6 @@ async fn score_one(
 mod tests {
     use super::*;
     use azapptoolkit_core::audit::{CredentialStatus, RiskLevel};
-
-    // ---------------- throttle tracker ----------------
-
-    #[tokio::test(start_paused = true)]
-    async fn on_throttle_halves_once_per_window_and_floors_at_one() {
-        let tracker = AuditThrottleTracker::new(8);
-        tracker.on_throttle(None);
-        assert_eq!(tracker.current_limit(), 4);
-        // Same pressure window — the retries of one hot request must not
-        // cascade the cap toward the floor.
-        tracker.on_throttle(None);
-        tracker.on_throttle(None);
-        assert_eq!(tracker.current_limit(), 4);
-        // Past the window: a fresh pressure event halves again, flooring at 1.
-        tokio::time::advance(std::time::Duration::from_secs(HALVE_WINDOW_SECS + 1)).await;
-        tracker.on_throttle(None);
-        assert_eq!(tracker.current_limit(), 2);
-        tokio::time::advance(std::time::Duration::from_secs(HALVE_WINDOW_SECS + 1)).await;
-        tracker.on_throttle(None);
-        assert_eq!(tracker.current_limit(), 1);
-        tokio::time::advance(std::time::Duration::from_secs(HALVE_WINDOW_SECS + 1)).await;
-        tracker.on_throttle(None);
-        assert_eq!(tracker.current_limit(), MIN_CONCURRENCY);
-    }
-
-    /// Advances the paused clock, then yields so a timer-woken task (the
-    /// tracker's recovery loop) actually runs — `advance()` alone only moves
-    /// the timer wheel.
-    async fn advance_and_run(secs: u64) {
-        tokio::time::advance(std::time::Duration::from_secs(secs)).await;
-        for _ in 0..8 {
-            tokio::task::yield_now().await;
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn recovery_restores_one_permit_per_quiet_tick_capped_at_initial() {
-        let tracker = AuditThrottleTracker::new(4);
-        // Let the recovery loop register its first sleep before time moves, so
-        // the tick timeline below is deterministic (t = 30, 60, 90, …).
-        for _ in 0..8 {
-            tokio::task::yield_now().await;
-        }
-        tracker.on_throttle(None); // 4 → 2 at t≈0
-        advance_and_run(HALVE_WINDOW_SECS + 1).await;
-        tracker.on_throttle(None); // 2 → 1 at t≈3
-        assert_eq!(tracker.current_limit(), 1);
-        // First recovery tick (t=30) sees only ~27 quiet seconds — no permit
-        // yet; recovery requires a full quiet window, not just elapsed time.
-        advance_and_run(27).await;
-        assert_eq!(tracker.current_limit(), 1);
-        // Each subsequent quiet tick restores exactly one permit (never the
-        // old burst-back-to-max sawtooth), capped at the initial value.
-        advance_and_run(30).await;
-        assert_eq!(tracker.current_limit(), 2);
-        advance_and_run(30).await;
-        assert_eq!(tracker.current_limit(), 3);
-        advance_and_run(30).await;
-        assert_eq!(tracker.current_limit(), 4);
-        advance_and_run(30).await;
-        assert_eq!(tracker.current_limit(), 4, "never recovers past initial");
-    }
 
     fn sample(name: &str) -> AuditItem {
         AuditItem {
