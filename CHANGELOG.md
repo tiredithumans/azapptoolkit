@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-21
+
 ### Changed
 
 - **Disaster-recovery backup is now batched and throttle-aware — far faster and
