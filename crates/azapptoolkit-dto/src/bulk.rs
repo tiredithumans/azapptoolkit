@@ -8,6 +8,14 @@ pub struct BulkProgress {
     pub total: usize,
     pub current_app: Option<String>,
     pub cancelled: bool,
+    /// Current adaptive in-flight concurrency cap, when the emitting command
+    /// runs under a [`ConcurrencyThrottle`](../../desktop) (the DR backup).
+    /// `None` for the bulk-credential/create/delete flows, which use a fixed
+    /// cap. The DR view surfaces a back-off notice when this drops below its
+    /// observed peak. Additive + skipped when absent, so existing emitters that
+    /// don't set it stay wire-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_flight_cap: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

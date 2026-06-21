@@ -88,6 +88,7 @@ pub async fn bulk_remove_expired_credentials(
             total,
             current_app: None,
             cancelled: false,
+            in_flight_cap: None,
         },
     );
 
@@ -139,6 +140,7 @@ pub async fn bulk_remove_expired_credentials(
                     total,
                     current_app: Some(app_name.clone()),
                     cancelled: cancel.is_cancelled(),
+                    in_flight_cap: None,
                 };
                 drop(guard);
                 emit(&app_handle, progress);
@@ -206,6 +208,7 @@ pub async fn bulk_delete_applications(
                 total,
                 current_app: Some(id.clone()),
                 cancelled: false,
+                in_flight_cap: None,
             },
         );
         match client.delete_application(&id).await {
@@ -227,6 +230,7 @@ pub async fn bulk_delete_applications(
             total,
             current_app: None,
             cancelled: cancel.is_cancelled(),
+            in_flight_cap: None,
         },
     );
 
@@ -269,6 +273,7 @@ pub async fn bulk_grant_permissions(
                 total,
                 current_app: Some(id.clone()),
                 cancelled: false,
+                in_flight_cap: None,
             },
         );
         let outcome = match super::permissions::grant_admin_consent_core(&client, &id).await {
@@ -298,6 +303,7 @@ pub async fn bulk_grant_permissions(
             total,
             current_app: None,
             cancelled: cancel.is_cancelled(),
+            in_flight_cap: None,
         },
     );
 
@@ -344,6 +350,7 @@ pub async fn bulk_create_applications(
                 total,
                 current_app: Some(spec.display_name.clone()),
                 cancelled: false,
+                in_flight_cap: None,
             },
         );
 
@@ -408,6 +415,7 @@ pub async fn bulk_create_applications(
             total,
             current_app: None,
             cancelled: cancel.is_cancelled(),
+            in_flight_cap: None,
         },
     );
 

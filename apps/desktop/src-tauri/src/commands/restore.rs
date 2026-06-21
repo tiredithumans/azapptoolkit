@@ -704,6 +704,7 @@ fn emit(app_handle: &AppHandle, done: usize, total: usize, current_app: Option<S
         total,
         current_app,
         cancelled: false,
+        in_flight_cap: None,
     };
     if let Err(err) = app_handle.emit("restore-progress", progress) {
         tracing::warn!(?err, "failed to emit restore-progress event");

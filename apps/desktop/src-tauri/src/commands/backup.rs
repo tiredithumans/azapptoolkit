@@ -24,13 +24,14 @@ use tokio::sync::Mutex;
 
 use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_core::models::{
-    Application, ApplicationExposeApi, DirectoryObject, KeyCredential, PasswordCredential,
-    ServicePrincipal,
+    AppRoleAssignment, Application, ApplicationExposeApi, DirectoryObject,
+    FederatedIdentityCredential, GroupSummary, KeyCredential, PasswordCredential, ServicePrincipal,
 };
 use azapptoolkit_graph::{GraphClient, GraphError};
 
 use crate::commands::applications::{extract_auth_fields, sp_index_key};
 use crate::commands::dispatch::dispatch_capped;
+use crate::commands::throttle::ConcurrencyThrottle;
 use crate::dto::backup::{
     AppRegistrationBackup, AppRoleAssigneeRef, AppRoleGrantRef, CredentialMeta,
     EnterpriseAppBackup, ManagedIdentityBackup, PrincipalRef, TenantBackup, BACKUP_SCHEMA_VERSION,
@@ -38,20 +39,28 @@ use crate::dto::backup::{
 use crate::dto::bulk::BulkProgress;
 use crate::dto::managed_identity::MiSubtype;
 use crate::dto::UiError;
-use crate::state::AppState;
+use crate::state::{AppState, CancelFlag};
 
-/// Max concurrent per-app read fan-outs. Bounds Graph load on a large estate;
-/// the client retries 429s with backoff, so a big tenant just takes
-/// proportionally longer rather than tripping throttling.
-const CONCURRENCY: usize = 6;
+/// Objects per `$batch` POST. Graph's hard cap is 20 sub-requests per batch, so
+/// each dispatched chunk is one POST per batched read.
+const BATCH_CHUNK: usize = 20;
+
+/// Initial concurrent chunks. The unit of work is now a 20-object `$batch`, and
+/// each chunk task fires up to three batched reads at once (Pass 2 sends the SP
+/// read, the assignees, and the group memberships together), so the peak
+/// in-flight sub-request count is roughly `cap * 3 * BATCH_CHUNK`. Kept low — the
+/// adaptive `ConcurrencyThrottle` raises it toward this value on a healthy tenant
+/// and halves it toward a floor of 1 on a throttling one.
+const INITIAL_DR_CONCURRENCY: usize = 4;
 
 /// Tenant-wide enumeration cap, matching the lists' `APPS_MAX` / `SP_INDEX_MAX`.
 const ESTATE_CAP: usize = 10_000;
 
 /// Captures a full, portable backup of the tenant's app estate. Long-running
-/// (a per-app fan-out), so it polls the dedicated [`AppState::dr_cancel`] flag
-/// — its own, not `audit_cancel`, so a backup and a concurrent audit/bulk run
-/// can't cancel each other. Emits `backup-progress` ([`BulkProgress`]) events.
+/// (a batched per-app fan-out), so it polls the dedicated [`AppState::dr_cancel`]
+/// flag — its own, not `audit_cancel`, so a backup and a concurrent audit/bulk
+/// run can't cancel each other. Emits `backup-progress` ([`BulkProgress`]) events
+/// carrying the live adaptive concurrency cap.
 #[tauri::command]
 pub async fn backup_tenant(
     app_handle: AppHandle,
@@ -60,6 +69,21 @@ pub async fn backup_tenant(
 ) -> Result<TenantBackup, UiError> {
     state.dr_cancel.reset();
     let client = state.graph_for(&tenant_id);
+
+    // Adaptive in-flight concurrency: every 429 (including the per-sub-request
+    // 429s Graph reports inside a `$batch`) halves the chunk cap; it recovers
+    // after a quiet window. Detach the observer however the run exits — an early
+    // `?` (e.g. the index reads below failing) must not leave a stale tracker
+    // halving the shared per-tenant client's cap on unrelated traffic.
+    let throttle = Arc::new(ConcurrencyThrottle::new(INITIAL_DR_CONCURRENCY));
+    client.set_throttle_observer(throttle.clone());
+    struct ObserverGuard(Arc<GraphClient>);
+    impl Drop for ObserverGuard {
+        fn drop(&mut self) {
+            self.0.clear_throttle_observer();
+        }
+    }
+    let _observer_guard = ObserverGuard(client.clone());
 
     // Enumerate the estate up front so progress has a real denominator. The SP
     // index reuses the cache the Enterprise Apps list populates (it's the same
@@ -74,47 +98,46 @@ pub async fn backup_tenant(
         .filter(|sp| !is_managed_identity(sp))
         .count();
     let total = app_total + ent_total + managed.len();
-    emit(&app_handle, 0, total, None);
+    emit(&app_handle, 0, total, None, Some(throttle.current_limit()));
 
-    // ---- App registrations: concurrent full-config fan-out ----
+    // ---- App registrations: batched full-config fan-out ----
     // The set of appIds that have a service principal — derived from the index
     // we already hold, so the per-app capture needs no SP lookup of its own.
-    let sp_app_ids: std::collections::HashSet<String> =
-        sp_index.iter().map(|sp| sp.app_id.clone()).collect();
+    let sp_app_ids: Arc<std::collections::HashSet<String>> =
+        Arc::new(sp_index.iter().map(|sp| sp.app_id.clone()).collect());
     let done = Arc::new(Mutex::new(0usize));
-    let cancel = state.dr_cancel.clone();
+    let app_chunks: Vec<Vec<(String, String)>> =
+        app_index.chunks(BATCH_CHUNK).map(<[_]>::to_vec).collect();
     let mut app_backups: Vec<AppRegistrationBackup> = Vec::with_capacity(app_total);
+    let cancel = state.dr_cancel.clone();
     let cancelled = dispatch_capped(
-        app_index, // (app_id, object_id) pairs
-        || CONCURRENCY,
-        |(app_id, object_id)| {
+        app_chunks,
+        || throttle.current_limit(),
+        |chunk| {
             if cancel.is_cancelled() {
                 return None;
             }
             let client = client.clone();
             let app_handle = app_handle.clone();
             let done = done.clone();
-            let has_sp = sp_app_ids.contains(&app_id);
+            let sp_app_ids = sp_app_ids.clone();
+            let throttle = throttle.clone();
             Some(tokio::spawn(async move {
-                let result = backup_one_application(&client, &object_id, has_sp).await;
-                let count = {
-                    let mut d = done.lock().await;
-                    *d += 1;
-                    *d
-                };
-                emit(&app_handle, count, total, None);
-                match result {
-                    Ok(b) => Some(b),
-                    Err(err) => {
-                        tracing::warn!(%object_id, error = %err, "backup: failed to capture app registration; skipping");
-                        None
-                    }
-                }
+                backup_app_chunk(
+                    &client,
+                    chunk,
+                    &sp_app_ids,
+                    &app_handle,
+                    &done,
+                    total,
+                    &throttle,
+                )
+                .await
             }))
         },
         |joined| {
-            if let Ok(Some(b)) = joined {
-                app_backups.push(b);
+            if let Ok(mut v) = joined {
+                app_backups.append(&mut v);
             }
         },
     )
@@ -122,11 +145,7 @@ pub async fn backup_tenant(
     // A partial backup is a dangerous DR artifact (it reads as complete), so a
     // cancelled run is an error, not a truncated success.
     if cancelled || state.dr_cancel.is_cancelled() {
-        return Err(UiError::new(
-            "cancelled",
-            "backup cancelled before completion",
-            false,
-        ));
+        return Err(cancelled_err());
     }
 
     // appId → source object id, so an enterprise-app SP backed by an in-backup
@@ -136,22 +155,27 @@ pub async fn backup_tenant(
         .map(|a| (a.source_app_id.clone(), a.source_object_id.clone()))
         .collect();
 
-    // ---- Enterprise apps: per-SP fan-out (assignments + group memberships +
-    // settings). Foreign/gallery SPs are captured the same way; their restore is
-    // a runbook (re-consent / re-instantiate), not an automatic replay. The
-    // managed-identity Azure-RBAC detail is captured by the MI re-bind slice.
+    // ---- Enterprise apps: batched per-SP fan-out (full SP + assignments +
+    // group memberships). Foreign/gallery SPs are captured the same way; their
+    // restore is a runbook (re-consent / re-instantiate), not an automatic
+    // replay. The managed-identity Azure-RBAC detail is captured by the MI
+    // re-bind slice.
     let app_obj_by_app_id = Arc::new(app_obj_by_app_id);
     let tenant_arc: Arc<str> = Arc::from(tenant_id.as_str());
     let enterprise_sps: Vec<ServicePrincipal> = sp_index
         .into_iter()
         .filter(|sp| !is_managed_identity(sp))
         .collect();
-    let mut enterprise_apps: Vec<EnterpriseAppBackup> = Vec::with_capacity(enterprise_sps.len());
+    let ent_chunks: Vec<Vec<ServicePrincipal>> = enterprise_sps
+        .chunks(BATCH_CHUNK)
+        .map(<[_]>::to_vec)
+        .collect();
+    let mut enterprise_apps: Vec<EnterpriseAppBackup> = Vec::with_capacity(ent_total);
     let ent_cancel = state.dr_cancel.clone();
     let ent_cancelled = dispatch_capped(
-        enterprise_sps,
-        || CONCURRENCY,
-        |sp| {
+        ent_chunks,
+        || throttle.current_limit(),
+        |chunk| {
             if ent_cancel.is_cancelled() {
                 return None;
             }
@@ -160,63 +184,46 @@ pub async fn backup_tenant(
             let done = done.clone();
             let map = app_obj_by_app_id.clone();
             let tenant = tenant_arc.clone();
+            let throttle = throttle.clone();
             Some(tokio::spawn(async move {
-                let paired = map.get(&sp.app_id).cloned();
-                let result = backup_one_enterprise_app(&client, &sp, &tenant, paired).await;
-                let count = {
-                    let mut d = done.lock().await;
-                    *d += 1;
-                    *d
-                };
-                emit(&app_handle, count, total, Some(sp.display_name.clone()));
-                result
+                backup_enterprise_chunk(
+                    &client,
+                    chunk,
+                    &tenant,
+                    &map,
+                    &app_handle,
+                    &done,
+                    total,
+                    &throttle,
+                )
+                .await
             }))
         },
         |joined| {
-            if let Ok(Some(b)) = joined {
-                enterprise_apps.push(b);
+            if let Ok(mut v) = joined {
+                enterprise_apps.append(&mut v);
             }
         },
     )
     .await;
     if ent_cancelled || state.dr_cancel.is_cancelled() {
-        return Err(UiError::new(
-            "cancelled",
-            "backup cancelled before completion",
-            false,
-        ));
+        return Err(cancelled_err());
     }
 
     // ---- Managed identities: identity + held Graph app-roles (the re-bindable
     // permission). Azure RBAC isn't scanned here — it's runbook-only on restore
     // (source scopes don't exist in the destination) and the MI detail view
-    // already surfaces it for DR planning. Sequential, sharing one resource
-    // resolver so a repeated resource (e.g. Microsoft Graph) resolves once.
-    let mut count = *done.lock().await;
-    let mut resolver = ResourceLookup::new(&client);
-    let mut managed_identities: Vec<ManagedIdentityBackup> = Vec::with_capacity(managed.len());
-    for sp in &managed {
-        if state.dr_cancel.is_cancelled() {
-            return Err(UiError::new(
-                "cancelled",
-                "backup cancelled before completion",
-                false,
-            ));
-        }
-        let subtype = MiSubtype::from_alternative_names(&sp.alternative_names);
-        let held_app_roles = resolver.held_app_roles(&sp.id).await;
-        managed_identities.push(ManagedIdentityBackup {
-            source_principal_id: sp.id.clone(),
-            source_app_id: sp.app_id.clone(),
-            display_name: sp.display_name.clone(),
-            subtype: mi_subtype_label(subtype).to_string(),
-            arm_resource_id: user_assigned_arm_id(&sp.alternative_names),
-            held_app_roles,
-            ..Default::default()
-        });
-        count += 1;
-        emit(&app_handle, count, total, Some(sp.display_name.clone()));
-    }
+    // already surfaces it for DR planning.
+    let managed_identities = backup_managed_identities(
+        &client,
+        &managed,
+        &state.dr_cancel,
+        &app_handle,
+        &done,
+        total,
+        &throttle,
+    )
+    .await?;
 
     Ok(TenantBackup {
         schema_version: BACKUP_SCHEMA_VERSION,
@@ -227,6 +234,12 @@ pub async fn backup_tenant(
         enterprise_apps,
         managed_identities,
     })
+}
+
+/// A cancelled backup is an error, not a truncated success — a partial manifest
+/// reads as complete and is a dangerous DR artifact.
+fn cancelled_err() -> UiError {
+    UiError::new("cancelled", "backup cancelled before completion", false)
 }
 
 /// Writes a [`TenantBackup`] to a JSON file via the OS save dialog. JSON only:
@@ -314,9 +327,86 @@ async fn sp_index_cached(
     Ok(sps)
 }
 
-/// Assembles one app registration's full backup from a **single** Graph read
-/// (`get_application_backup_json`, `$expand=owners`) plus the federated-credential
-/// list — two calls, where the per-tab paths would make eight. The full app +
+/// Backs up one chunk (≤ [`BATCH_CHUNK`]) of app registrations: the full-config
+/// reads and the federated-credential lists each go out as one `$batch` POST,
+/// instead of two individual GETs per app. A whole-batch failure degrades to
+/// per-app reads for this chunk only (never failing the backup); a per-app
+/// failure skips that one app. Emits per-app progress so the bar still advances
+/// smoothly (in bursts of ≤20). Returns the assembled backups for the chunk.
+async fn backup_app_chunk(
+    client: &GraphClient,
+    chunk: Vec<(String, String)>,
+    sp_app_ids: &std::collections::HashSet<String>,
+    app_handle: &AppHandle,
+    done: &Mutex<usize>,
+    total: usize,
+    throttle: &ConcurrencyThrottle,
+) -> Vec<AppRegistrationBackup> {
+    let object_ids: Vec<String> = chunk.iter().map(|(_, oid)| oid.clone()).collect();
+    let (apps_res, feds_res) = tokio::join!(
+        client.batch_get_applications_backup_json(&object_ids),
+        client.batch_list_federated_credentials(&object_ids),
+    );
+    let app_jsons: Vec<Result<serde_json::Value, GraphError>> = match apps_res {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(error = %err, "backup: app batch failed; per-app fallback");
+            let mut v = Vec::with_capacity(object_ids.len());
+            for oid in &object_ids {
+                v.push(client.get_application_backup_json(oid).await);
+            }
+            v
+        }
+    };
+    let feds: Vec<Result<Vec<FederatedIdentityCredential>, GraphError>> = match feds_res {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(error = %err, "backup: federated-cred batch failed; per-app fallback");
+            let mut v = Vec::with_capacity(object_ids.len());
+            for oid in &object_ids {
+                v.push(client.list_federated_credentials(oid).await);
+            }
+            v
+        }
+    };
+
+    let mut out = Vec::with_capacity(chunk.len());
+    for (i, (app_id, object_id)) in chunk.iter().enumerate() {
+        let has_sp = sp_app_ids.contains(app_id);
+        match &app_jsons[i] {
+            Ok(value) => match &feds[i] {
+                Ok(federated) => match assemble_app_backup(value, federated.clone(), has_sp) {
+                    Ok(b) => out.push(b),
+                    Err(err) => {
+                        tracing::warn!(%object_id, error = %err, "backup: app deserialize failed; skipping")
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!(%object_id, error = %err, "backup: federated creds failed; skipping app")
+                }
+            },
+            Err(err) => {
+                tracing::warn!(%object_id, error = %err, "backup: app read failed; skipping")
+            }
+        }
+        let count = {
+            let mut d = done.lock().await;
+            *d += 1;
+            *d
+        };
+        emit(
+            app_handle,
+            count,
+            total,
+            None,
+            Some(throttle.current_limit()),
+        );
+    }
+    out
+}
+
+/// Assembles one app registration's backup from an already-fetched config JSON
+/// (`$expand=owners`) and federated-credential list — no I/O. The full app +
 /// Authentication + Expose-an-API + owners all come from the one JSON document.
 ///
 /// `has_service_principal` is taken from the already-fetched SP index (no per-app
@@ -324,25 +414,21 @@ async fn sp_index_cached(
 /// permissions rather than probing the SP's live grants: restore re-grants admin
 /// consent idempotently whenever permissions are declared, which is the
 /// DR-correct default and removes three calls per app.
-async fn backup_one_application(
-    client: &GraphClient,
-    object_id: &str,
+fn assemble_app_backup(
+    value: &serde_json::Value,
+    federated: Vec<FederatedIdentityCredential>,
     has_service_principal: bool,
-) -> Result<AppRegistrationBackup, GraphError> {
-    let value = client.get_application_backup_json(object_id).await?;
+) -> Result<AppRegistrationBackup, serde_json::Error> {
     // The typed model tolerates Graph's nulls; the Expose-an-API projection and
-    // owners come from the same document. `?` maps a deserialize failure to
-    // `GraphError::Deserialize`.
+    // owners come from the same document. `?` surfaces a deserialize failure.
     let app: Application = serde_json::from_value(value.clone())?;
     let expose: ApplicationExposeApi = serde_json::from_value(value.clone()).unwrap_or_default();
-    let auth = extract_auth_fields(&value);
+    let auth = extract_auth_fields(value);
     let owners: Vec<DirectoryObject> = value
         .get("owners")
         .cloned()
         .and_then(|o| serde_json::from_value(o).ok())
         .unwrap_or_default();
-
-    let federated = client.list_federated_credentials(object_id).await?;
 
     Ok(AppRegistrationBackup {
         source_object_id: app.id.clone(),
@@ -374,38 +460,118 @@ async fn backup_one_application(
     })
 }
 
-/// Captures one enterprise application's full backup: settings (tags,
-/// assignment-required), the users/groups assigned to its roles
-/// (`appRoleAssignedTo`, role values resolved against the SP's own `appRoles`),
-/// and the groups the SP belongs to. Returns `None` if the SP vanished between
-/// the index read and this fetch. The group-membership read is gated (advanced
-/// query) and degrades to empty on failure.
-async fn backup_one_enterprise_app(
+/// Backs up one chunk (≤ [`BATCH_CHUNK`]) of enterprise apps: the full SP read,
+/// the inbound role assignments, and the group memberships each go out as one
+/// `$batch` POST (three POSTs per chunk, fired concurrently), instead of three
+/// individual reads per SP. A whole-batch failure for any of the three degrades
+/// to per-SP reads for this chunk; assignment/group per-SP failures degrade to
+/// empty (matching the prior best-effort reads); an SP that vanished between the
+/// index read and now is skipped. Emits per-SP progress.
+#[allow(clippy::too_many_arguments)]
+async fn backup_enterprise_chunk(
     client: &GraphClient,
-    index_sp: &ServicePrincipal,
+    chunk: Vec<ServicePrincipal>,
     tenant_id: &str,
-    paired_app_registration_object_id: Option<String>,
-) -> Option<EnterpriseAppBackup> {
-    let sp = match client
-        .get_service_principal_by_object_id(&index_sp.id)
-        .await
-    {
-        Ok(Some(sp)) => sp,
-        Ok(None) => return None,
+    app_obj_by_app_id: &HashMap<String, String>,
+    app_handle: &AppHandle,
+    done: &Mutex<usize>,
+    total: usize,
+    throttle: &ConcurrencyThrottle,
+) -> Vec<EnterpriseAppBackup> {
+    let sp_ids: Vec<String> = chunk.iter().map(|sp| sp.id.clone()).collect();
+    let (sps_res, assigned_res, groups_res) = tokio::join!(
+        client.batch_get_service_principals(&sp_ids),
+        client.batch_list_app_role_assigned_to(&sp_ids),
+        client.batch_list_service_principal_groups(&sp_ids),
+    );
+    let full_sps: Vec<Result<Option<ServicePrincipal>, GraphError>> = match sps_res {
+        Ok(v) => v,
         Err(err) => {
-            tracing::warn!(sp = %index_sp.id, error = %err, "backup: enterprise SP fetch failed; skipping");
-            return None;
+            tracing::warn!(error = %err, "backup: enterprise SP batch failed; per-SP fallback");
+            let mut v = Vec::with_capacity(sp_ids.len());
+            for id in &sp_ids {
+                v.push(client.get_service_principal_by_object_id(id).await);
+            }
+            v
         }
     };
-    let assigned = client
-        .list_app_role_assigned_to(&sp.id)
-        .await
-        .unwrap_or_default();
-    let groups = client
-        .list_service_principal_groups(&sp.id)
-        .await
-        .unwrap_or_default();
+    let assigned: Vec<Result<Vec<AppRoleAssignment>, GraphError>> = match assigned_res {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(error = %err, "backup: assignee batch failed; per-SP fallback");
+            let mut v = Vec::with_capacity(sp_ids.len());
+            for id in &sp_ids {
+                v.push(client.list_app_role_assigned_to(id).await);
+            }
+            v
+        }
+    };
+    let groups: Vec<Result<Vec<GroupSummary>, GraphError>> = match groups_res {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(error = %err, "backup: group-membership batch failed; per-SP fallback");
+            let mut v = Vec::with_capacity(sp_ids.len());
+            for id in &sp_ids {
+                v.push(client.list_service_principal_groups(id).await);
+            }
+            v
+        }
+    };
 
+    let mut out = Vec::with_capacity(chunk.len());
+    for (i, index_sp) in chunk.iter().enumerate() {
+        let entry = match &full_sps[i] {
+            Ok(Some(sp)) => {
+                // Assignment/group failures degrade to empty, like the prior reads.
+                let assigned_i = match &assigned[i] {
+                    Ok(v) => v.clone(),
+                    Err(_) => Vec::new(),
+                };
+                let groups_i = match &groups[i] {
+                    Ok(v) => v.clone(),
+                    Err(_) => Vec::new(),
+                };
+                let paired = app_obj_by_app_id.get(&sp.app_id).cloned();
+                Some(assemble_enterprise_backup(
+                    sp, assigned_i, groups_i, tenant_id, paired,
+                ))
+            }
+            Ok(None) => None, // vanished between the index read and now
+            Err(err) => {
+                tracing::warn!(sp = %index_sp.id, error = %err, "backup: enterprise SP fetch failed; skipping");
+                None
+            }
+        };
+        if let Some(b) = entry {
+            out.push(b);
+        }
+        let count = {
+            let mut d = done.lock().await;
+            *d += 1;
+            *d
+        };
+        emit(
+            app_handle,
+            count,
+            total,
+            Some(index_sp.display_name.clone()),
+            Some(throttle.current_limit()),
+        );
+    }
+    out
+}
+
+/// Assembles one enterprise application's backup from already-fetched data — no
+/// I/O. Settings (tags, assignment-required), the users/groups assigned to its
+/// roles (`appRoleAssignedTo`, role values resolved against the SP's own
+/// `appRoles`), and the groups the SP belongs to.
+fn assemble_enterprise_backup(
+    sp: &ServicePrincipal,
+    assigned: Vec<AppRoleAssignment>,
+    groups: Vec<GroupSummary>,
+    tenant_id: &str,
+    paired_app_registration_object_id: Option<String>,
+) -> EnterpriseAppBackup {
     // The role is defined on *this* SP, so its value resolves locally.
     let role_value = |role_id: &str| -> Option<String> {
         sp.app_roles
@@ -444,7 +610,7 @@ async fn backup_one_enterprise_app(
         .map(|o| o != tenant_id)
         .unwrap_or(false);
 
-    Some(EnterpriseAppBackup {
+    EnterpriseAppBackup {
         source_sp_object_id: sp.id.clone(),
         source_app_id: sp.app_id.clone(),
         display_name: sp.display_name.clone(),
@@ -458,7 +624,96 @@ async fn backup_one_enterprise_app(
         app_role_assignees,
         group_memberships,
         held_app_roles: Vec::new(),
-    })
+    }
+}
+
+/// Backs up the managed identities: their identity + held Graph app-roles (the
+/// re-bindable permission). Three batched phases: (1) every MI's held
+/// assignments in one batched read, (2) resolve each distinct resource SP once
+/// via a batched prewarm, (3) assemble (all resolves are now cache hits). Azure
+/// RBAC isn't scanned here — it's runbook-only on restore. Polls `dr_cancel`
+/// between phases and per MI. (Uses the batch helpers' own internal concurrency
+/// rather than the adaptive chunk cap: the MI set is small and Pass 1/2 are the
+/// throttle pressure that matters.)
+#[allow(clippy::too_many_arguments)]
+async fn backup_managed_identities(
+    client: &GraphClient,
+    managed: &[ServicePrincipal],
+    cancel: &CancelFlag,
+    app_handle: &AppHandle,
+    done: &Mutex<usize>,
+    total: usize,
+    throttle: &ConcurrencyThrottle,
+) -> Result<Vec<ManagedIdentityBackup>, UiError> {
+    if cancel.is_cancelled() {
+        return Err(cancelled_err());
+    }
+    let mi_ids: Vec<String> = managed.iter().map(|sp| sp.id.clone()).collect();
+
+    // Phase 1: every MI's held app-role assignments. A read failure (whole-batch
+    // or per-MI) degrades to empty, matching the prior best-effort per-MI read.
+    let assignments: Vec<Vec<AppRoleAssignment>> =
+        match client.batch_list_app_role_assignments(&mi_ids).await {
+            Ok(v) => v.into_iter().map(Result::unwrap_or_default).collect(),
+            Err(err) => {
+                tracing::warn!(error = %err, "backup: MI assignment batch failed; per-MI fallback");
+                let mut v = Vec::with_capacity(mi_ids.len());
+                for id in &mi_ids {
+                    v.push(
+                        client
+                            .list_app_role_assignments(id)
+                            .await
+                            .unwrap_or_default(),
+                    );
+                }
+                v
+            }
+        };
+
+    if cancel.is_cancelled() {
+        return Err(cancelled_err());
+    }
+
+    // Phase 2: resolve each distinct resource SP once, batched, seeding the
+    // lookup so the per-MI assembly below makes no further round trips.
+    let mut resolver = ResourceLookup::new(client);
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<String> = assignments
+        .iter()
+        .flatten()
+        .filter(|a| seen.insert(a.resource_id.clone()))
+        .map(|a| a.resource_id.clone())
+        .collect();
+    resolver.prewarm(&unique).await;
+
+    // Phase 3: assemble (cache hits).
+    let mut out = Vec::with_capacity(managed.len());
+    let mut count = *done.lock().await;
+    for (i, sp) in managed.iter().enumerate() {
+        if cancel.is_cancelled() {
+            return Err(cancelled_err());
+        }
+        let subtype = MiSubtype::from_alternative_names(&sp.alternative_names);
+        let held_app_roles = resolver.held_app_roles_from(&assignments[i]).await;
+        out.push(ManagedIdentityBackup {
+            source_principal_id: sp.id.clone(),
+            source_app_id: sp.app_id.clone(),
+            display_name: sp.display_name.clone(),
+            subtype: mi_subtype_label(subtype).to_string(),
+            arm_resource_id: user_assigned_arm_id(&sp.alternative_names),
+            held_app_roles,
+            ..Default::default()
+        });
+        count += 1;
+        emit(
+            app_handle,
+            count,
+            total,
+            Some(sp.display_name.clone()),
+            Some(throttle.current_limit()),
+        );
+    }
+    Ok(out)
 }
 
 fn is_managed_identity(sp: &ServicePrincipal) -> bool {
@@ -482,11 +737,60 @@ struct ResourceInfo {
     role_value_by_id: HashMap<String, String>,
 }
 
+impl ResourceInfo {
+    fn from_sp(sp: &ServicePrincipal) -> Self {
+        Self {
+            app_id: sp.app_id.clone(),
+            display_name: sp.display_name.clone(),
+            role_value_by_id: sp
+                .app_roles
+                .iter()
+                .map(|r| (r.id.clone(), r.value.clone()))
+                .collect(),
+        }
+    }
+}
+
 impl<'a> ResourceLookup<'a> {
     fn new(client: &'a GraphClient) -> Self {
         Self {
             client,
             cache: HashMap::new(),
+        }
+    }
+
+    /// Resolves many resource SPs in one batched read, seeding the cache so the
+    /// per-MI [`Self::held_app_roles_from`] below makes no further round trips.
+    /// A vanished resource (404) caches `None`; a per-id error is left cold so a
+    /// later `resolve` retries it; a whole-batch failure leaves every id cold.
+    async fn prewarm(&mut self, resource_ids: &[String]) {
+        let missing: Vec<String> = resource_ids
+            .iter()
+            .filter(|id| !self.cache.contains_key(*id))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        match self.client.batch_get_service_principals(&missing).await {
+            Ok(results) => {
+                for (id, res) in missing.iter().zip(results) {
+                    match res {
+                        Ok(Some(sp)) => {
+                            self.cache
+                                .insert(id.clone(), Some(ResourceInfo::from_sp(&sp)));
+                        }
+                        Ok(None) => {
+                            self.cache.insert(id.clone(), None);
+                        }
+                        // Leave cold: `resolve` retries this id per-request.
+                        Err(_) => {}
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "backup: resource-SP prewarm batch failed; per-id resolves")
+            }
         }
     }
 
@@ -499,15 +803,7 @@ impl<'a> ResourceLookup<'a> {
             .get_service_principal_by_object_id(resource_sp_id)
             .await
         {
-            Ok(Some(sp)) => Some(ResourceInfo {
-                app_id: sp.app_id.clone(),
-                display_name: sp.display_name.clone(),
-                role_value_by_id: sp
-                    .app_roles
-                    .iter()
-                    .map(|r| (r.id.clone(), r.value.clone()))
-                    .collect(),
-            }),
+            Ok(Some(sp)) => Some(ResourceInfo::from_sp(&sp)),
             Ok(None) => None,
             Err(err) => {
                 tracing::warn!(%resource_sp_id, error = %err, "backup: resource SP resolve failed; recording raw ids");
@@ -518,14 +814,13 @@ impl<'a> ResourceLookup<'a> {
         info
     }
 
-    /// The application permissions held by `sp_id`, resource-relative. A read
-    /// failure degrades to an empty list (best-effort, like the other reads).
-    async fn held_app_roles(&mut self, sp_id: &str) -> Vec<AppRoleGrantRef> {
-        let assignments = self
-            .client
-            .list_app_role_assignments(sp_id)
-            .await
-            .unwrap_or_default();
+    /// The application permissions a managed identity holds, from its
+    /// already-fetched assignment list, resolving each grant's resource against
+    /// the (prewarmed) cache. A resolve miss degrades that grant to raw ids.
+    async fn held_app_roles_from(
+        &mut self,
+        assignments: &[AppRoleAssignment],
+    ) -> Vec<AppRoleGrantRef> {
         let mut out = Vec::with_capacity(assignments.len());
         for a in assignments {
             let info = self.resolve(&a.resource_id).await;
@@ -539,7 +834,7 @@ impl<'a> ResourceLookup<'a> {
                     .as_ref()
                     .and_then(|i| i.role_value_by_id.get(&a.app_role_id).cloned())
                     .filter(|v| !v.is_empty()),
-                app_role_id: a.app_role_id,
+                app_role_id: a.app_role_id.clone(),
             });
         }
         out
@@ -598,12 +893,19 @@ fn principal_ref_from_dir(o: &DirectoryObject) -> PrincipalRef {
     }
 }
 
-fn emit(app_handle: &AppHandle, done: usize, total: usize, current_app: Option<String>) {
+fn emit(
+    app_handle: &AppHandle,
+    done: usize,
+    total: usize,
+    current_app: Option<String>,
+    in_flight_cap: Option<usize>,
+) {
     let progress = BulkProgress {
         done,
         total,
         current_app,
         cancelled: false,
+        in_flight_cap,
     };
     if let Err(err) = app_handle.emit("backup-progress", progress) {
         tracing::warn!(?err, "failed to emit backup-progress event");
