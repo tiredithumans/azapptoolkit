@@ -280,22 +280,22 @@ that hasn't consented to an optional permission can still sign in and use
 everything else — that feature just shows an "unavailable" notice with a
 one-click **Grant consent** prompt.
 
-| Permission | What it unlocks | Required? |
-|---|---|---|
-| Graph · `Directory.Read.All` | Every read in the app — app registrations, enterprise apps, managed identities, owners, app-role & OAuth2 grants, org info, user/group search (the only read-only Graph scope that can read `/oauth2PermissionGrants`) | **Required** — at sign-in |
-| Graph · `Application.ReadWrite.All` | Create / edit / delete app registrations & service principals; manage credentials and owners | **Required for edits** — on first write |
-| Graph · `AppRoleAssignment.ReadWrite.All` | Grant / revoke application permissions and user/group access assignments | **Required for edits** — on first write |
-| Graph · `DelegatedPermissionGrant.ReadWrite.All` | Grant / revoke delegated (OAuth2) permission grants | **Required for edits** — on first write |
-| Graph · `AuditLog.Read.All` | **Activity** tab (directory change log) and **unused-app** detection in the security audit (the sign-in report also needs Entra ID **P1/P2**) | Optional |
-| Graph · `Policy.Read.All` | **Conditional Access** tab — which CA policies target an app (an Entra ID **P1/P2** feature) | Optional |
-| Graph · `Policy.ReadWrite.ApplicationConfiguration` | **Claims-mapping** policies — SAML attribute & claim customization in the SSO wizard | Optional |
-| Graph · `GroupMember.ReadWrite.All` | **Group memberships** — add/remove a service principal in security groups (the access model for group-gated APIs like Power BI / Fabric) | Optional |
-| Graph · `Synchronization.Read.All` | SCIM **provisioning** job status on enterprise apps (needs Entra ID **P1/P2**) | Optional |
-| Graph · `Sites.FullControl.All` | SharePoint **Sites.Selected** — list / grant / revoke a site's per-app permissions (SharePoint site access section on the Permissions tab) | Optional |
-| Office 365 Exchange Online · `Exchange.Manage` | **Exchange mailbox scoping** (RBAC for Applications) — confine an app's mailbox access to specific groups | Optional |
-| Azure Key Vault · `user_impersonation` | Store a new client secret into, or browse secrets from, an Azure **Key Vault** | Optional |
-| Azure Service Management · `user_impersonation` | View a managed identity's **Azure RBAC** role assignments across subscriptions | Optional |
-| Log Analytics API · `Data.Read` | **Observed Graph activity** — granted-vs-used analysis from `MicrosoftGraphActivityLogs` (also needs Entra diagnostic settings exporting to a Log Analytics workspace, and Log Analytics Reader on it) | Optional |
+| Resource | Permission | What it unlocks | Required? |
+|---|---|---|---|
+| Graph | `Directory.Read.All` | Every read in the app — app registrations, enterprise apps, managed identities, owners, app-role & OAuth2 grants, org info, user/group search (the only read-only Graph scope that can read `/oauth2PermissionGrants`) | **Required** — at sign-in |
+| Graph | `Application.ReadWrite.All` | Create / edit / delete app registrations & service principals; manage credentials and owners | **Required for edits** — on first write |
+| Graph | `AppRoleAssignment.ReadWrite.All` | Grant / revoke application permissions and user/group access assignments | **Required for edits** — on first write |
+| Graph | `DelegatedPermissionGrant.ReadWrite.All` | Grant / revoke delegated (OAuth2) permission grants | **Required for edits** — on first write |
+| Graph | `AuditLog.Read.All` | **Activity** tab (directory change log) and **unused-app** detection in the security audit (the sign-in report also needs Entra ID **P1/P2**) | Optional |
+| Graph | `Policy.Read.All` | **Conditional Access** tab — which CA policies target an app (an Entra ID **P1/P2** feature) | Optional |
+| Graph | `Policy.ReadWrite.ApplicationConfiguration` | **Claims-mapping** policies — SAML attribute & claim customization in the SSO wizard | Optional |
+| Graph | `GroupMember.ReadWrite.All` | **Group memberships** — add/remove a service principal in security groups (the access model for group-gated APIs like Power BI / Fabric) | Optional |
+| Graph | `Synchronization.Read.All` | SCIM **provisioning** job status on enterprise apps (needs Entra ID **P1/P2**) | Optional |
+| Graph | `Sites.FullControl.All` | SharePoint **Sites.Selected** — list / grant / revoke a site's per-app permissions (SharePoint site access section on the Permissions tab) | Optional |
+| Office 365 Exchange Online | `Exchange.Manage` | **Exchange mailbox scoping** (RBAC for Applications) — confine an app's mailbox access to specific groups | Optional |
+| Azure Key Vault | `user_impersonation` | Store a new client secret into, or browse secrets from, an Azure **Key Vault** | Optional |
+| Azure Service Management | `user_impersonation` | View a managed identity's **Azure RBAC** role assignments across subscriptions | Optional |
+| Log Analytics API | `Data.Read` | **Observed Graph activity** — granted-vs-used analysis from `MicrosoftGraphActivityLogs` (also needs Entra diagnostic settings exporting to a Log Analytics workspace, and Log Analytics Reader on it) | Optional |
 
 Everything marked *Optional* needs **admin consent** but is acquired only on
 first use, never at sign-in. The Key Vault, Azure Service Management, and
