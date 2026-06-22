@@ -148,6 +148,8 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Scoped grants reuse shared cores.** Exchange + SharePoint both grant scoped access *before* stripping org-wide, so a failure never strands the principal. Exchange scope source: `azapptoolkit_<app_id>` mail-enabled security group (`group_name_for`); membership changes **don't** invalidate caches. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
+- **Declare-only, never org-wide (the scoped-mailbox wizard).** RBAC for Applications is an *independent* authority — a scoped Exchange role grants mailbox access **without** the org-wide Entra app-role assignment (effective reach = union of the two, so leaving the Entra grant defeats scoping). The `ScopedMailboxWizard` (`web-rs/components/scoped_mailbox_wizard.rs`, the "Grant mailbox access…" button on every principal's Permissions surface) exploits this: it `declare_app_permission`s each permission (manifest only, **no** runtime grant) then assigns the scoped role — no transient over-permission window. Its rare "org-wide" option falls back to `grant_single_permission` / `grant_managed_identity_permission`. Member mailboxes are managed via the shared `ManagedScopeGroupPanel` (also used by the Exchange scoping section).
+
 - **Frontend reactivity is closure-based.** `{move || sig.get()}` for tracking; `.get()`/`.with()` to read. State is `RwSignal<T>` on a context-provided `Session`. CSS: plain global `styles.css` with BEM-ish names.
 
 - **Build-time config baking.** `build.rs` reads `.env`, emits `AZAPPTOOLKIT_BUILD_*`; runtime env vars override.
