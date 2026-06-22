@@ -60,7 +60,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
         with:
           targets: wasm32-unknown-unknown
-          components: rustfmt
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: apps/desktop/web-rs
@@ -71,6 +71,11 @@ jobs:
       # `cargo fmt --all` does not reach it — format-check it here.
       - name: fmt
         run: just web-fmt-check
+      # web-rs is excluded from the root workspace, so the `rust` job's clippy
+      # never reaches this IPC-privileged tier — lint it here (wasm target,
+      # -D warnings), mirroring the backend fmt→clippy→test order.
+      - name: clippy
+        run: just web-clippy
       - name: Test frontend
         run: just web-test
       - name: Build frontend

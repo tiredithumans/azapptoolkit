@@ -304,6 +304,10 @@ h3 {
 
 .form-error {
   color: var(--danger);
+  /* Backend UiErrors append actionable guidance after a blank line (\n\n);
+     keep it on its own lines instead of collapsing the whitespace away. */
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .read-field strong {
@@ -315,6 +319,9 @@ h3 {
   border-radius: var(--radius-md);
   padding: 10px 12px;
   margin-top: var(--space-2);
+  /* Preserve the \n\n actionable-guidance breaks the backend attaches. */
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .alert--ok {
   background: var(--ok-soft);
@@ -398,6 +405,8 @@ h3 {
 }
 .signin-error {
   color: var(--danger);
+  /* Keep the message and its recovery hint on separate lines (\n\n). */
+  white-space: pre-wrap;
 }
 .signin-hint {
   color: var(--text-muted);
@@ -774,6 +783,11 @@ h3 {
 }
 .app-list__error {
   color: var(--danger);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-3);
 }
 /* Total app-registration count line above the virtualized rows. */
 .app-list__count {
@@ -2751,7 +2765,8 @@ h3 {
   color: var(--danger);
   font-size: var(--text-sm);
 }
-.dr-view__notice {
+.dr-view__notice,
+.audit-progress__notice {
   margin: var(--space-2) 0 0;
   padding: var(--space-2) var(--space-3);
   background: var(--warning-soft);

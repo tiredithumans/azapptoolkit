@@ -285,7 +285,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                     &tenant_id,
                     &id,
                     &sel.resource_app_id,
-                    &[sel.permission_value.clone()],
+                    std::slice::from_ref(&sel.permission_value),
                 )
                 .await
             },
@@ -314,7 +314,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                     &tenant_id,
                     &p.sp_object_id,
                     &p.resource_app_id,
-                    &[p.permission_value.clone()],
+                    std::slice::from_ref(&p.permission_value),
                 )
                 .await
             },
@@ -362,7 +362,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                     &p.sp_object_id,
                     &p.app_id,
                     &p.display_name,
-                    &[p.permission_value.clone()],
+                    std::slice::from_ref(&p.permission_value),
                     &groups,
                     true,
                 )

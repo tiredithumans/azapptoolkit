@@ -127,6 +127,7 @@ pub fn run() {
             commands::bulk::bulk_delete_applications,
             commands::bulk::bulk_grant_permissions,
             commands::bulk::bulk_create_applications,
+            commands::bulk::cancel_bulk,
             commands::diagnostics::cache_stats,
             commands::diagnostics::clear_cache,
             commands::diagnostics::invalidate_list_cache,

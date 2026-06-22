@@ -642,10 +642,19 @@ async fn resolve_permissions(
     access: &[RequiredResourceAccess],
 ) -> AppPermissions {
     let resources: HashSet<String> = access.iter().map(|r| r.resource_app_id.clone()).collect();
-    let mut indexes: HashMap<String, ResourceIndex> = HashMap::new();
-    for id in resources {
-        indexes.insert(id.clone(), resolver.index(&id).await);
-    }
+    // Resolve each distinct resource's index concurrently rather than one serial
+    // await at a time (mirrors `resolve_required_resource_access` in
+    // applications.rs). Each lookup is independent and Permissions-cached, so on a
+    // cold cache this collapses N serial round-trips into one concurrent batch;
+    // warm hits cost nothing.
+    let indexes: HashMap<String, ResourceIndex> =
+        futures::future::join_all(resources.into_iter().map(|id| async move {
+            let index = resolver.index(&id).await;
+            (id, index)
+        }))
+        .await
+        .into_iter()
+        .collect();
 
     let mut out = AppPermissions::default();
     for resource in access {

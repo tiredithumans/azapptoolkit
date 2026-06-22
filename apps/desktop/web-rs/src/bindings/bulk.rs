@@ -3,9 +3,15 @@
 
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
+use tauri_sys::core::{invoke, invoke_result};
 
 pub use azapptoolkit_dto::bulk::*;
+
+/// Signals the in-flight bulk action to stop at the next item boundary. Shares
+/// the audit cancel flag on the backend; returns nothing (fire-and-forget).
+pub async fn cancel_bulk() {
+    invoke::<()>("cancel_bulk", ()).await
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

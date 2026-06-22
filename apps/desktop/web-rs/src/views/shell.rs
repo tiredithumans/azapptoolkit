@@ -247,7 +247,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                 {move || {
                     let open = session.create_open.get();
                     if !open {
-                        return view!().into_any();
+                        return ().into_any();
                     }
                     // Capture session by move into each closure so they stay 'static.
                     let on_close = Callback::new({
@@ -274,7 +274,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
             <Show when=move || view.get() == ActiveView::EnterpriseApps>
                 {move || {
                     if !session.sso_wizard_open.get() {
-                        return view!().into_any();
+                        return ().into_any();
                     }
                     let on_close = Callback::new({
                         let session = session;

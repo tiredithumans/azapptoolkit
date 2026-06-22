@@ -113,6 +113,10 @@ pub async fn restore_tenant(
     let mut report = RestoreReport::default();
     // source_app_id → new app id, for remapping cross-app references.
     let mut app_id_remap: HashMap<String, String> = HashMap::new();
+    // Per-run principal-resolution memo (UPN/group display name → destination
+    // object id), shared across passes so a principal reused across owners,
+    // assignees, and group memberships is searched once, not per occurrence.
+    let mut principals: HashMap<String, Option<String>> = HashMap::new();
     // The apps we actually created, paired with their backup + new ids, so
     // passes 2–3 finish wiring exactly those (even after a cancel).
     let mut created: Vec<CreatedApp> = Vec::new();
@@ -156,7 +160,7 @@ pub async fn restore_tenant(
     for c in &created {
         report
             .apps
-            .push(wire_application(&client, c, &app_id_remap).await);
+            .push(wire_application(&client, c, &app_id_remap, &mut principals).await);
     }
 
     // ---- Pass 3: re-consent (after all apps wired, so resources exist) ----
@@ -184,7 +188,7 @@ pub async fn restore_tenant(
     // were recreated by the app-reg restore above. Foreign/gallery apps — and
     // paired apps that weren't restored — become runbook entries.
     for ent in &backup.enterprise_apps {
-        restore_enterprise_app(&client, ent, &app_id_remap, &mut report).await;
+        restore_enterprise_app(&client, ent, &app_id_remap, &mut report, &mut principals).await;
     }
 
     // ---- Pass 6: managed identities ----
@@ -250,6 +254,7 @@ async fn wire_application(
     client: &GraphClient,
     c: &CreatedApp,
     app_id_remap: &HashMap<String, String>,
+    principals: &mut HashMap<String, Option<String>>,
 ) -> RestoredApp {
     let app = &c.backup;
     let mut out = RestoredApp {
@@ -352,7 +357,7 @@ async fn wire_application(
 
     // Owners — remap each principal by UPN / display name in the destination.
     for owner in &app.owners {
-        match resolve_principal(client, owner).await {
+        match resolve_principal(client, principals, owner).await {
             Some(new_id) => {
                 if let Err(e) = client.add_owner(&c.new_object_id, &new_id).await {
                     out.warnings.push(format!("owner: {e}"));
@@ -404,6 +409,7 @@ async fn restore_enterprise_app(
     ent: &EnterpriseAppBackup,
     app_id_remap: &HashMap<String, String>,
     report: &mut RestoreReport,
+    principals: &mut HashMap<String, Option<String>>,
 ) {
     // Restorable only when its app registration was recreated here.
     let new_app_id = match app_id_remap.get(&ent.source_app_id) {
@@ -457,7 +463,8 @@ async fn restore_enterprise_app(
 
     // App-role assignments — principal remapped by name, role by value.
     for assignee in &ent.app_role_assignees {
-        let Some(principal_id) = resolve_principal(client, &assignee.principal).await else {
+        let Some(principal_id) = resolve_principal(client, principals, &assignee.principal).await
+        else {
             out.unresolved_principals
                 .push(owner_label(&assignee.principal));
             continue;
@@ -481,7 +488,7 @@ async fn restore_enterprise_app(
 
     // Group memberships — resolve each group by display name.
     for group in &ent.group_memberships {
-        match resolve_principal(client, group).await {
+        match resolve_principal(client, principals, group).await {
             Some(group_id) => match client.add_group_member(&group_id, &sp.id).await {
                 Ok(()) => out.group_memberships_applied += 1,
                 Err(e) => out.warnings.push(format!("group membership: {e}")),
@@ -651,11 +658,52 @@ fn remap_pre_authorized(
         .collect()
 }
 
+/// Cache key for a principal: its UPN (lowercased) when present, else its display
+/// name. `None` when neither is set (nothing to resolve). Mirrors the lookup
+/// branch order in [`resolve_principal_uncached`].
+fn principal_cache_key(principal: &PrincipalRef) -> Option<String> {
+    if let Some(upn) = principal
+        .user_principal_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        return Some(format!("upn:{}", upn.to_ascii_lowercase()));
+    }
+    principal
+        .display_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|name| format!("name:{name}"))
+}
+
+/// Resolves a backed-up principal to its destination object id, memoizing the
+/// result for the whole restore run. The same UPN or group is reused across
+/// owners, app-role assignees, and group memberships, so without the memo a
+/// multi-app restore re-runs identical `search_users`/`search_groups` calls many
+/// times. The cache is per-run and keyed by [`principal_cache_key`]; negative
+/// results are cached too (a principal absent now stays absent for the run).
+async fn resolve_principal(
+    client: &GraphClient,
+    cache: &mut HashMap<String, Option<String>>,
+    principal: &PrincipalRef,
+) -> Option<String> {
+    let key = principal_cache_key(principal)?;
+    if let Some(cached) = cache.get(&key) {
+        return cached.clone();
+    }
+    let resolved = resolve_principal_uncached(client, principal).await;
+    cache.insert(key, resolved.clone());
+    resolved
+}
+
 /// Resolves a backed-up principal to its object id in the destination tenant by
 /// UPN (users) or display name (groups), returning `None` when no exact match
 /// exists yet. Best-effort: a lookup error resolves to `None` (the owner is then
 /// reported as unresolved rather than failing the whole restore).
-async fn resolve_principal(client: &GraphClient, principal: &PrincipalRef) -> Option<String> {
+async fn resolve_principal_uncached(
+    client: &GraphClient,
+    principal: &PrincipalRef,
+) -> Option<String> {
     if let Some(upn) = principal
         .user_principal_name
         .as_deref()
@@ -837,5 +885,46 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(owner_label(&by_name), "Group X");
+    }
+
+    #[test]
+    fn principal_cache_key_prefers_lowercased_upn_then_name_then_none() {
+        // UPN wins and is lowercased, so case-variant UPNs share one memo entry.
+        let by_upn = PrincipalRef {
+            source_id: "id".into(),
+            user_principal_name: Some("Alice@Contoso.com".into()),
+            display_name: Some("Alice".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            principal_cache_key(&by_upn).as_deref(),
+            Some("upn:alice@contoso.com")
+        );
+
+        // No UPN → keyed by display name (the group path).
+        let by_name = PrincipalRef {
+            source_id: "id".into(),
+            display_name: Some("Group X".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            principal_cache_key(&by_name).as_deref(),
+            Some("name:Group X")
+        );
+
+        // An empty UPN is ignored, falling through to the display name.
+        let empty_upn = PrincipalRef {
+            source_id: "id".into(),
+            user_principal_name: Some(String::new()),
+            display_name: Some("Group Y".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            principal_cache_key(&empty_upn).as_deref(),
+            Some("name:Group Y")
+        );
+
+        // Neither set → no key (nothing to resolve or memoize).
+        assert_eq!(principal_cache_key(&PrincipalRef::default()), None);
     }
 }

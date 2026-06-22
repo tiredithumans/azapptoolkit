@@ -22,7 +22,7 @@ async fn assert_renders_interactive() {
     ts::tick().await;
     assert!(!ts::body_text().is_empty(), "view rendered no content");
     assert!(
-        ts::query_all("button").len() >= 1,
+        !ts::query_all("button").is_empty(),
         "view rendered no interactive controls"
     );
 }

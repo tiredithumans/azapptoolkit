@@ -63,7 +63,7 @@ jobs:
 
       - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
-          tool: just,trunk
+          tool: just,trunk,cargo-audit
 
       - name: Install Tauri CLI
         # Pinned to the exact `tauri` runtime version (Cargo.lock) for reproducible
@@ -78,6 +78,14 @@ jobs:
             Write-Error "updater.active is true but updater.pubkey is still the placeholder — set a real key before releasing"
             exit 1
           }
+
+      # Re-run the RustSec advisory scan against the shipped bytes. main-branch
+      # CI runs `just audit` per-merge, but an advisory filed after the last
+      # merge (or against the exact lockfile this tag builds) would otherwise
+      # ship unscanned — gate it here, before the build, so a new advisory fails
+      # the release instead of riding into an installer. Same recipe CI uses.
+      - name: audit (workspace)
+        run: just audit
 
       - name: Build installers (with updater artifacts)
         env:

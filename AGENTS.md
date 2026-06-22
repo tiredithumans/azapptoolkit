@@ -13,7 +13,7 @@ Deep subsystem detail lives in `docs/architecture/` — this file keeps the inva
 |---|---|
 | **Task runner** | `just` — recipes in `/justfile`; Tauri hooks call them too, so flags never drift. |
 | **Setup / Dev** | `just setup` (OS-aware bootstrap) · `just dev` (`cargo tauri dev`) |
-| **Verify** | `just verify` (fmt → clippy → test → web-fmt-check → web-test → web-build) |
+| **Verify** | `just verify` (fmt → clippy → test → web-fmt-check → web-clippy → web-test → web-build) |
 | **Workspace** | 9 crates (8 in `crates/` + `src-tauri`); frontend (`web-rs`) excluded, builds via Trunk. |
 
 ## Skills
@@ -98,8 +98,8 @@ just setup          # one-time (idempotent OS-aware bootstrap)
 just dev            # daily loop (= cargo tauri dev)
 
 # CI gates:
-just verify          # fmt-check → clippy → test → web-fmt-check → web-test → web-build
-just fmt-check | clippy | test | web-fmt-check | web-test | web-build  # individual gates
+just verify          # fmt-check → clippy → test → web-fmt-check → web-clippy → web-test → web-build
+just fmt-check | clippy | test | web-fmt-check | web-clippy | web-test | web-build  # individual gates
 
 # Frontend GUI tests (browser-gated, NOT in `verify`):
 just web-itest       # real Leptos views in a headless browser, Tauri IPC mocked
@@ -182,7 +182,7 @@ Run the same gates CI runs before declaring a change done. `just verify` is the 
 1. **Format** — `just fmt-check`
 2. **Lint** — `just clippy` (`-D warnings`)
 3. **Test** — `just test` (workspace)
-4. **Frontend** — `just web-fmt-check` + `web-test` + `web-build`
+4. **Frontend** — `just web-fmt-check` + `web-clippy` (`-D warnings`, wasm target; web-rs is excluded from the root workspace so root `clippy` doesn't reach it) + `web-test` + `web-build`
 5. **Frontend GUI tests** *(browser-gated, not in `verify`)* — `just web-itest`: real Leptos views in a headless browser with the Tauri IPC mocked (no tenant/backend). New view-behavior changes get a `tests/<view>.rs` case; the harness (mock IPC + `mount_view` + DOM helpers + fixtures) lives in `web-rs/src/test_support/` behind the `test-support` feature.
 6. **Dependency audit** *(optional locally)* — `just audit` + `web-audit` (RustSec) + `deny` + `web-deny`
 6. **CodeQL** *(GitHub-side)* — security queries, Rust build-mode `none`. Known limitation: CodeQL 2.25.6 doesn't expand macros for this codebase (~39% calls-with-call-target), which is expected and non-failing. Config: `.github/codeql/codeql-config.yml`.

@@ -1,6 +1,6 @@
 //! Detail pane for a selected application: header (name + delete) + tab list
 //! + active tab body. Mirrors
-//! `apps/desktop/web/src/views/ApplicationDetailPane.tsx`.
+//!   `apps/desktop/web/src/views/ApplicationDetailPane.tsx`.
 
 use leptos::prelude::*;
 use thaw::{Card, Tab, TabList};

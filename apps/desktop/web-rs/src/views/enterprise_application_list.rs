@@ -196,10 +196,23 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
                                     .into_any()
                             }
                             Err(err) => {
+                                // Transient (429 / network) loads get an in-context Retry
+                                // instead of a dead-end message — parity with the
+                                // dashboard cards and the app-registrations list.
                                 view! {
-                                    <Body1 class="app-list__error">
-                                        {format!("Failed to load: {}", err.message)}
-                                    </Body1>
+                                    <div class="app-list__error">
+                                        <Body1 class="form-error">
+                                            {format!("Failed to load: {}", err.message)}
+                                        </Body1>
+                                        <Button
+                                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                            on_click=Box::new(move |_| {
+                                                reload.update(|n| *n = n.wrapping_add(1))
+                                            })
+                                        >
+                                            "Retry"
+                                        </Button>
+                                    </div>
                                 }
                                     .into_any()
                             }

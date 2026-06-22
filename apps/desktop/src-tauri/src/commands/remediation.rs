@@ -378,8 +378,7 @@ pub async fn remediate_remove_redundant_permissions(
     // still mutated live state, so bust caches even on the error path (but never
     // when nothing changed).
     if grants_revoked || manifest_patched {
-        super::applications::invalidate_app_details(&state.cache, &tenant_id);
-        super::audit::invalidate_audit_cache(&state.cache, &tenant_id);
+        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
     }
     if let Some(e) = error {
         return Err(e);

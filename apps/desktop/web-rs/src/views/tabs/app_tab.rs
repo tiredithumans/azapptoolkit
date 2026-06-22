@@ -37,6 +37,10 @@ impl AppTab {
     /// dropped: the former "federated" tab → Credentials, the merged "insights"
     /// tab → Conditional Access, and the former Exchange/SharePoint access tabs →
     /// Permissions (now sections below the permissions table). Unknown → Overview.
+    // Infallible (clamps to Overview, never errors), so the std `FromStr` trait —
+    // with its mandatory `Err` type and `Result` return — would be the wrong shape;
+    // keep the inherent total method.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "overview" => Self::Overview,
@@ -72,7 +76,10 @@ impl AppTab {
             Self::Credentials => "Credentials",
             Self::Authentication => "Authentication",
             Self::Owners => "Owners",
-            Self::Permissions => "Permissions",
+            // "API permissions" (the portal's term) — the permissions this app
+            // *requests* (requiredResourceAccess), distinct from the *held* grants
+            // the Enterprise App / Managed Identity "Permissions" tabs show.
+            Self::Permissions => "API permissions",
             Self::ExposeApi => "Expose an API",
             Self::ConditionalAccess => "Conditional Access",
             Self::Activity => "Activity",

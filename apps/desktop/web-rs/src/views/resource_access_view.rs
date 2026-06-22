@@ -350,16 +350,16 @@ fn SitesPanel() -> impl IntoView {
         }}
         {move || {
             if result.with(|r| r.is_none()) {
-                return (!scanning.get())
-                    .then(|| {
-                        view! {
-                            <Body1>
-                                "No scan yet for this tenant. Scanning reads every site's application permissions with the signed-in user's SharePoint admin rights — it can take a while on large tenants and can be cancelled anytime."
-                            </Body1>
-                        }
-                            .into_any()
-                    })
-                    .unwrap_or_else(|| ().into_any());
+                return if !scanning.get() {
+                    view! {
+                        <Body1>
+                            "No scan yet for this tenant. Scanning reads every site's application permissions with the signed-in user's SharePoint admin rights — it can take a while on large tenants and can be cancelled anytime."
+                        </Body1>
+                    }
+                        .into_any()
+                } else {
+                    ().into_any()
+                };
             }
             // The shell renders once per sweep; the summary line and the keyed
             // <For> react to search changes on their own, so a keystroke diffs

@@ -4,8 +4,8 @@
 //!
 //! Steps: 0 = protocol + display name, 1 = protocol-specific config, 2 = review
 //! + create, 3 = output summary. Step state is a plain `RwSignal<u8>` matched in
-//! the view (the codebase has no Thaw stepper). Mirrors `create_app_dialog.rs`
-//! for the modal shell and `secret_reveal_dialog.rs` for show-once output.
+//!   the view (the codebase has no Thaw stepper). Mirrors `create_app_dialog.rs`
+//!   for the modal shell and `secret_reveal_dialog.rs` for show-once output.
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};

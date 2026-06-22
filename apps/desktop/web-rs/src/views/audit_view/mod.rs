@@ -48,6 +48,15 @@ pub fn AuditView() -> impl IntoView {
     });
     let scanning = RwSignal::new(false);
     let progress: RwSignal<Option<AuditProgress>> = RwSignal::new(None);
+    // High-water concurrency cap. When the live cap later drops below this peak,
+    // Graph is throttling and the scan is backing off — surfaced below so a slow
+    // audit reads as expected, not stalled (mirrors the DR backup view).
+    // Monotonic within a run; reset when a new run clears `progress`.
+    let peak_cap = RwSignal::new(0usize);
+    Effect::new(move |_| match progress.get() {
+        Some(p) => peak_cap.update(|peak| *peak = (*peak).max(p.in_flight_cap)),
+        None => peak_cap.set(0),
+    });
     let scan_error: RwSignal<Option<String>> = RwSignal::new(None);
     let facet = RwSignal::new(String::from("all"));
     let search = RwSignal::new(String::new());
@@ -358,6 +367,7 @@ pub fn AuditView() -> impl IntoView {
                         } else {
                             0.0
                         };
+                        let cap = p.in_flight_cap;
                         view! {
                             <div class="audit-progress">
                                 <ProgressBar value=Signal::derive(move || pct) />
@@ -366,11 +376,16 @@ pub fn AuditView() -> impl IntoView {
                                         "{} / {} apps  (cap: {}{})",
                                         p.done,
                                         p.total,
-                                        p.in_flight_cap,
+                                        cap,
                                         if p.cancelled { ", cancelled" } else { "" },
                                     )}
                                 </Body1>
                                 {p.current_app.map(|n| view! { <Body1>{n}</Body1> })}
+                                <Show when=move || cap < peak_cap.get()>
+                                    <p class="audit-progress__notice" role="status">
+                                        "Microsoft Graph is rate-limiting this scan, so it's automatically slowing down to recover. It will still complete — large tenants just take longer."
+                                    </p>
+                                </Show>
                             </div>
                         }
                     })
