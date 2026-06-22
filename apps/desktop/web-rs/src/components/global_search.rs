@@ -184,6 +184,12 @@ pub fn GlobalSearch() -> impl IntoView {
             }
         });
 
+    // Flattened record hits (apps → enterprise → managed identities, matching
+    // render order) for the keyboard roving selection — read synchronously by the
+    // keydown handler. Derived from the async `results` resource (no separate
+    // signal write) so it can never drift out of sync with what's rendered.
+    let record_hits = Signal::derive(move || flatten_hits(results.get()));
+
     let on_input = move |ev: ev::Event| {
         if let Some(target) = ev.target() {
             if let Ok(input) = target.dyn_into::<HtmlInputElement>() {
@@ -199,28 +205,38 @@ pub fn GlobalSearch() -> impl IntoView {
         }
     };
 
+    // The roving selection spans the command matches first, then the record hits
+    // (Arrow cycles the combined list; Enter activates whichever is highlighted),
+    // so a keyboard-only user can reach searched records, not just commands.
     let on_keydown = move |evt: ev::KeyboardEvent| match evt.key().as_str() {
         "ArrowDown" => {
             evt.prevent_default();
-            let len = command_matches.with(Vec::len);
-            if len > 0 {
-                selected.update(|i| *i = (*i + 1) % len);
+            let total = command_matches.with(Vec::len) + record_hits.with(Vec::len);
+            if total > 0 {
+                selected.update(|i| *i = (*i + 1) % total);
             }
         }
         "ArrowUp" => {
             evt.prevent_default();
-            let len = command_matches.with(Vec::len);
-            if len > 0 {
-                selected.update(|i| *i = if *i == 0 { len - 1 } else { *i - 1 });
+            let total = command_matches.with(Vec::len) + record_hits.with(Vec::len);
+            if total > 0 {
+                selected.update(|i| *i = if *i == 0 { total - 1 } else { *i - 1 });
             }
         }
         "Enter" => {
-            // Run the highlighted command (if any matched); records are click-only.
-            if let Some(action) = command_matches.with(|m| m.get(selected.get_untracked()).copied())
+            let cmd_count = command_matches.with(Vec::len);
+            let sel = selected.get_untracked();
+            if sel < cmd_count {
+                if let Some(action) = command_matches.with(|m| m.get(sel).copied()) {
+                    evt.prevent_default();
+                    (action.run)(session);
+                    clear();
+                    blur();
+                }
+            } else if let Some((kind, hit)) = record_hits.with(|r| r.get(sel - cmd_count).cloned())
             {
                 evt.prevent_default();
-                (action.run)(session);
-                clear();
+                pick_hit(session, &hit, kind, raw_query);
                 blur();
             }
         }
@@ -249,10 +265,16 @@ pub fn GlobalSearch() -> impl IntoView {
                     aria-controls="global-search-listbox"
                     aria-expanded=move || dropdown_visible.get().to_string()
                     aria-activedescendant=move || {
-                        if command_matches.with(Vec::is_empty) {
-                            String::new()
+                        // The active row is a command while `selected` is within the
+                        // command count, otherwise a record hit (offset past commands).
+                        let cmd_count = command_matches.with(Vec::len);
+                        let sel = selected.get();
+                        if sel < cmd_count {
+                            format!("gs-cmd-{sel}")
+                        } else if record_hits.with(Vec::len) > 0 {
+                            format!("gs-rec-{}", sel - cmd_count)
                         } else {
-                            format!("gs-cmd-{}", selected.get())
+                            String::new()
                         }
                     }
                     placeholder="Search or run a command (⌘K) — apps, GUIDs, audit, key vault…"
@@ -362,7 +384,15 @@ pub fn GlobalSearch() -> impl IntoView {
                                         </div>
                                     }
                                         .into_any(),
-                                    Some(Ok(r)) => view_results(r, session, raw_query),
+                                    Some(Ok(r)) => {
+                                        // Records are keyboard-selectable after the
+                                        // commands, so their roving indices start at
+                                        // the current command count (untracked — the
+                                        // count is stable for a resolved query, and
+                                        // `selected` resets on every query change).
+                                        let cmd_count = command_matches.with_untracked(Vec::len);
+                                        view_results(r, session, raw_query, selected, cmd_count)
+                                    }
                                 }
                             })}
                         </Suspense>
@@ -378,6 +408,8 @@ fn view_results(
     results: GlobalSearchResults,
     session: crate::state::Session,
     raw_query: RwSignal<String>,
+    selected: RwSignal<usize>,
+    cmd_count: usize,
 ) -> leptos::prelude::AnyView {
     let empty = results.app_registrations.is_empty()
         && results.enterprise_apps.is_empty()
@@ -389,33 +421,39 @@ fn view_results(
         .into_any();
     }
 
+    // Roving indices continue past the commands: apps, then enterprise, then MIs.
+    let apps_n = results.app_registrations.len();
+    let ent_n = results.enterprise_apps.len();
     view! {
         {render_group(
             "App Registrations",
             AppKind::AppRegistration,
             results.app_registrations,
-            ActiveView::Apps,
             session,
             raw_query,
             SelectionKind::AppReg,
+            selected,
+            cmd_count,
         )}
         {render_group(
             "Enterprise Applications",
             AppKind::EnterpriseApp,
             results.enterprise_apps,
-            ActiveView::EnterpriseApps,
             session,
             raw_query,
             SelectionKind::EntApp,
+            selected,
+            cmd_count + apps_n,
         )}
         {render_group(
             "Managed Identities",
             AppKind::ManagedIdentityUnknown,
             results.managed_identities,
-            ActiveView::ManagedIdentities,
             session,
             raw_query,
             SelectionKind::Mi,
+            selected,
+            cmd_count + apps_n + ent_n,
         )}
     }
     .into_any()
@@ -428,14 +466,16 @@ enum SelectionKind {
     Mi,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_group(
     label: &'static str,
     chip_kind: AppKind,
     hits: Vec<SearchHit>,
-    target_view: ActiveView,
     session: crate::state::Session,
     raw_query: RwSignal<String>,
     selection: SelectionKind,
+    selected: RwSignal<usize>,
+    base: usize,
 ) -> impl IntoView {
     if hits.is_empty() {
         return ().into_any();
@@ -444,42 +484,30 @@ fn render_group(
         <div class="global-search__group-label">{label}</div>
         {hits
             .into_iter()
-            .map(move |hit| {
-                let id = hit.id.clone();
+            .enumerate()
+            .map(move |(i, hit)| {
+                // Combined roving index: commands occupy 0..cmd_count, then this
+                // group starts at `base`. The active class + aria-selected react to
+                // `selected` so Arrow keys highlight the row without rebuilding it.
+                let idx = base + i;
                 let app_id = hit.app_id.clone();
                 let display = hit.display_name.clone();
-                let name = hit.display_name.clone();
-                let on_pick = move |_| {
-                    let id = id.clone();
-                    session.set_view(target_view);
-                    // Seed the destination tab's "Filter this list" query with the
-                    // picked record's name, so the user lands on a visibly-filtered
-                    // list with this record's detail open — the bridge that makes
-                    // the top-bar search and the per-list filter feel like one
-                    // system. One keystroke (or Clear) widens it again.
-                    match selection {
-                        SelectionKind::AppReg => {
-                            session.set_selected_app(Some(id));
-                            session.apps_search.set(name.clone());
-                        }
-                        SelectionKind::EntApp => {
-                            session.set_selected_enterprise_app(Some(id));
-                            session.enterprise_search.set(name.clone());
-                        }
-                        SelectionKind::Mi => {
-                            session.set_selected_managed_identity(Some(id));
-                            session.mi_search.set(name.clone());
-                        }
-                    }
-                    raw_query.set(String::new());
-                };
+                let hit_for_pick = hit.clone();
                 view! {
                     <button
-                        class="global-search__row"
+                        class=move || {
+                            if selected.get() == idx {
+                                "global-search__row global-search__row--active".to_string()
+                            } else {
+                                "global-search__row".to_string()
+                            }
+                        }
                         type="button"
+                        id=format!("gs-rec-{idx}")
                         role="option"
-                        aria-selected="false"
-                        on:mousedown=on_pick
+                        aria-selected=move || (selected.get() == idx).to_string()
+                        on:mousedown=move |_| pick_hit(session, &hit_for_pick, selection, raw_query)
+                        on:mouseenter=move |_| selected.set(idx)
                     >
                         <TypeChip kind=chip_kind compact=true />
                         <span class="global-search__row-title">{display}</span>
@@ -492,6 +520,67 @@ fn render_group(
             .collect_view()}
     }
     .into_any()
+}
+
+/// Flattens the async search results into one ordered list — apps, then
+/// enterprise apps, then managed identities (matching render order) — for the
+/// keyboard roving selection.
+fn flatten_hits(
+    results: Option<Option<Result<GlobalSearchResults, String>>>,
+) -> Vec<(SelectionKind, SearchHit)> {
+    let Some(Some(Ok(r))) = results else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(
+        r.app_registrations.len() + r.enterprise_apps.len() + r.managed_identities.len(),
+    );
+    out.extend(
+        r.app_registrations
+            .into_iter()
+            .map(|h| (SelectionKind::AppReg, h)),
+    );
+    out.extend(
+        r.enterprise_apps
+            .into_iter()
+            .map(|h| (SelectionKind::EntApp, h)),
+    );
+    out.extend(
+        r.managed_identities
+            .into_iter()
+            .map(|h| (SelectionKind::Mi, h)),
+    );
+    out
+}
+
+/// Opens a picked record: switches to its list view, selects it, and seeds that
+/// list's filter with its name (the search↔filter bridge). Shared by the row
+/// mouse handler and the keyboard Enter dispatch so both behave identically.
+fn pick_hit(
+    session: crate::state::Session,
+    hit: &SearchHit,
+    selection: SelectionKind,
+    raw_query: RwSignal<String>,
+) {
+    let id = hit.id.clone();
+    let name = hit.display_name.clone();
+    match selection {
+        SelectionKind::AppReg => {
+            session.set_view(ActiveView::Apps);
+            session.set_selected_app(Some(id));
+            session.apps_search.set(name);
+        }
+        SelectionKind::EntApp => {
+            session.set_view(ActiveView::EnterpriseApps);
+            session.set_selected_enterprise_app(Some(id));
+            session.enterprise_search.set(name);
+        }
+        SelectionKind::Mi => {
+            session.set_view(ActiveView::ManagedIdentities);
+            session.set_selected_managed_identity(Some(id));
+            session.mi_search.set(name);
+        }
+    }
+    raw_query.set(String::new());
 }
 
 #[cfg(test)]
@@ -511,5 +600,38 @@ mod tests {
         assert!(!fuzzy_matches("Go to App Registrations", "zxq"));
         assert!(!fuzzy_matches("abcdef", "xyz"));
         assert!(!fuzzy_matches("abc", "cba")); // right chars, wrong order
+    }
+
+    fn hit(name: &str) -> SearchHit {
+        SearchHit {
+            id: name.into(),
+            app_id: None,
+            display_name: name.into(),
+        }
+    }
+
+    #[test]
+    fn flatten_hits_orders_apps_then_enterprise_then_mi() {
+        let results = Some(Some(Ok(GlobalSearchResults {
+            query: String::new(),
+            looked_up_as_guid: false,
+            app_registrations: vec![hit("a-app")],
+            enterprise_apps: vec![hit("b-ent")],
+            managed_identities: vec![hit("c-mi")],
+        })));
+        let flat = flatten_hits(results);
+        // Render order = roving order: apps, then enterprise, then managed identities.
+        let names: Vec<&str> = flat.iter().map(|(_, h)| h.display_name.as_str()).collect();
+        assert_eq!(names, ["a-app", "b-ent", "c-mi"]);
+        assert!(matches!(flat[0].0, SelectionKind::AppReg));
+        assert!(matches!(flat[1].0, SelectionKind::EntApp));
+        assert!(matches!(flat[2].0, SelectionKind::Mi));
+    }
+
+    #[test]
+    fn flatten_hits_empty_for_loading_and_error_states() {
+        assert!(flatten_hits(None).is_empty()); // resource still loading
+        assert!(flatten_hits(Some(None)).is_empty()); // empty query
+        assert!(flatten_hits(Some(Some(Err("boom".into())))).is_empty()); // search failed
     }
 }

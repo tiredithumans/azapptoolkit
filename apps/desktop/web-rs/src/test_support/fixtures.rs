@@ -242,3 +242,23 @@ pub fn mailbox_probe_progress(done: usize, total: usize) -> MailboxProbeProgress
         cancelled: false,
     }
 }
+
+/// A `global_search` result carrying only `app_registrations` hits (synthetic
+/// ids/appIds), with no enterprise/MI hits — for the top-bar search dropdown.
+pub fn global_search_apps(display_names: &[&str]) -> azapptoolkit_dto::search::GlobalSearchResults {
+    azapptoolkit_dto::search::GlobalSearchResults {
+        query: String::new(),
+        looked_up_as_guid: false,
+        app_registrations: display_names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| azapptoolkit_dto::search::SearchHit {
+                id: format!("obj-{i}"),
+                app_id: Some(format!("app-{i}")),
+                display_name: (*n).to_string(),
+            })
+            .collect(),
+        enterprise_apps: Vec::new(),
+        managed_identities: Vec::new(),
+    }
+}

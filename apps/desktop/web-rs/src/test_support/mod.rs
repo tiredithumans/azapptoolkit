@@ -391,6 +391,28 @@ pub fn set_input_value(selector: &str, value: &str) {
     }
 }
 
+/// Focus an element (fires its `focus` event), as Tab/click would — e.g. to open
+/// the global-search dropdown, which only shows while the input is focused.
+pub fn focus(selector: &str) {
+    if let Some(el) = query(selector) {
+        let el: web_sys::HtmlElement = el.unchecked_into();
+        let _ = el.focus();
+    }
+}
+
+/// Dispatch a bubbling `keydown` for `key` (e.g. "ArrowDown", "Enter", "Escape")
+/// on the element matching `selector`, as a keyboard user would.
+pub fn press_key(selector: &str, key: &str) {
+    if let Some(el) = query(selector) {
+        let init = web_sys::KeyboardEventInit::new();
+        init.set_key(key);
+        init.set_bubbles(true);
+        let event =
+            web_sys::KeyboardEvent::new_with_keyboard_event_init_dict("keydown", &init).unwrap();
+        let _ = el.dispatch_event(&event);
+    }
+}
+
 /// Resolve after a short macrotask, flushing pending microtasks (mocked
 /// Promises) and Leptos effects.
 pub async fn tick() {
