@@ -705,6 +705,25 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
     }
 }
 
+/// Resolves an `appRoleId` to a friendly name against the SP's defined roles.
+/// The all-zero GUID is Entra's "default access" assignment (no specific role).
+fn resolve_role(roles: &[azapptoolkit_core::models::AppRole], id: &str) -> String {
+    if id.chars().all(|c| c == '0' || c == '-') {
+        return "Default access".to_string();
+    }
+    roles
+        .iter()
+        .find(|r| r.id == id)
+        .map(|r| {
+            if r.display_name.is_empty() {
+                r.value.clone()
+            } else {
+                r.display_name.clone()
+            }
+        })
+        .unwrap_or_else(|| id.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::group_type_label;
@@ -739,23 +758,4 @@ mod tests {
             "Microsoft 365 · Dynamic"
         );
     }
-}
-
-/// Resolves an `appRoleId` to a friendly name against the SP's defined roles.
-/// The all-zero GUID is Entra's "default access" assignment (no specific role).
-fn resolve_role(roles: &[azapptoolkit_core::models::AppRole], id: &str) -> String {
-    if id.chars().all(|c| c == '0' || c == '-') {
-        return "Default access".to_string();
-    }
-    roles
-        .iter()
-        .find(|r| r.id == id)
-        .map(|r| {
-            if r.display_name.is_empty() {
-                r.value.clone()
-            } else {
-                r.display_name.clone()
-            }
-        })
-        .unwrap_or_else(|| id.to_string())
 }
