@@ -152,8 +152,7 @@ pub async fn update_required_resource_access(
         ..Default::default()
     };
     client.update_application(&object_id, &patch).await?;
-    super::applications::invalidate_app_details(&state.cache, &tenant_id);
-    super::audit::invalidate_audit_cache(&state.cache, &tenant_id);
+    super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
     Ok(())
 }
 
@@ -196,8 +195,7 @@ pub async fn remove_declared_permission(
         ..Default::default()
     };
     client.update_application(&object_id, &patch).await?;
-    super::applications::invalidate_app_details(&state.cache, &tenant_id);
-    super::audit::invalidate_audit_cache(&state.cache, &tenant_id);
+    super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
     Ok(())
 }
 
@@ -255,8 +253,7 @@ pub async fn grant_admin_consent(
 ) -> Result<GrantResult, UiError> {
     let client = state.graph_for(&tenant_id);
     let result = grant_admin_consent_core(&client, &object_id).await?;
-    super::applications::invalidate_app_details(&state.cache, &tenant_id);
-    super::audit::invalidate_audit_cache(&state.cache, &tenant_id);
+    super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
     Ok(result)
 }
 
@@ -577,8 +574,7 @@ pub async fn grant_single_permission(
         PermissionKind::Unknown => unreachable!("guarded above"),
     }
 
-    super::applications::invalidate_app_details(&state.cache, &tenant_id);
-    super::audit::invalidate_audit_cache(&state.cache, &tenant_id);
+    super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
     Ok(GrantResult {
         client_service_principal_id: client_sp.id,
         role_assignments_created,
@@ -744,8 +740,7 @@ pub async fn downgrade_application_permission(
     }
 
     if outcome.narrow_granted || outcome.broad_revoked || outcome.declaration_swapped {
-        super::applications::invalidate_app_details(&state.cache, &tenant_id);
-        super::audit::invalidate_audit_cache(&state.cache, &tenant_id);
+        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
     }
     if let Some(e) = error {
         return Err(e);
@@ -770,8 +765,7 @@ pub async fn revoke_app_role_assignment(
     client
         .remove_app_role_assignment(&service_principal_id, &assignment_id)
         .await?;
-    super::applications::invalidate_app_details(&state.cache, &tenant_id);
-    super::audit::invalidate_audit_cache(&state.cache, &tenant_id);
+    super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
     Ok(())
 }
 
@@ -802,8 +796,7 @@ pub async fn revoke_oauth2_scope(
         client.update_oauth2_grant_scope(&grant_id, &joined).await?;
         RevokeScopeOutcome::Updated { remaining: joined }
     };
-    super::applications::invalidate_app_details(&state.cache, &tenant_id);
-    super::audit::invalidate_audit_cache(&state.cache, &tenant_id);
+    super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
     Ok(outcome)
 }
 
