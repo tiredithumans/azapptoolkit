@@ -2,6 +2,7 @@
 
 pub mod audit_dashboard;
 pub mod claims_editor;
+pub mod collapsible_scoping_section;
 pub mod date_range_filter;
 pub mod detail_header;
 pub mod exchange_scoping_section;
