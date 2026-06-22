@@ -24,7 +24,11 @@ pub fn DetailHeader(
     /// never-busy).
     #[prop(optional, into, default = Signal::derive(|| false))]
     refreshing: Signal<bool>,
-    #[prop(into)] on_delete: Callback<()>,
+    /// Delete action. Optional: panes for objects that can't be deleted from
+    /// here (e.g. managed identities, which are Azure resources) omit it and the
+    /// Delete button isn't rendered.
+    #[prop(optional, into)]
+    on_delete: Option<Callback<()>>,
     /// Middle slot — pairing link, foreign-tenant badge, etc.
     #[prop(optional)]
     children: Option<Children>,
@@ -55,13 +59,18 @@ pub fn DetailHeader(
                     busy=refreshing
                     on_click=Callback::new(move |_| on_refresh.run(()))
                 />
-                <Button
-                    class="button--danger"
-                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                    on_click=Box::new(move |_| on_delete.run(()))
-                >
-                    "Delete"
-                </Button>
+                {on_delete
+                    .map(|cb| {
+                        view! {
+                            <Button
+                                class="button--danger"
+                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                on_click=Box::new(move |_| cb.run(()))
+                            >
+                                "Delete"
+                            </Button>
+                        }
+                    })}
             </div>
         </header>
     }

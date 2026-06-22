@@ -16,16 +16,15 @@ use crate::bindings::managed_identity::{
     self, AppRoleGrantDto, GrantManagedIdentityResult, ManagedIdentityDto,
 };
 use crate::bindings::TenantContext;
+use crate::components::detail_header::DetailHeader;
 use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
-use crate::components::icon::IconName;
 use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
 use crate::components::requires_role::RequiresRole;
 use crate::components::scope_badge::is_exchange_scopable;
 use crate::components::scope_panel::ScopePanel;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
-use crate::components::type_chip::TypeChip;
-use crate::components::ui::{CopyableId, DataTable, IconButton};
+use crate::components::ui::{CopyableId, DataTable};
 use crate::state::use_session;
 use crate::views::managed_identities::{
     chip_kind_for, existing_scope_kind_for, PendingScope, MICROSOFT_GRAPH_APP_ID,
@@ -101,19 +100,14 @@ pub fn ManagedIdentityDetailPane(
     Effect::new(move |_| session.last_mi_tab.set(active_tab.get()));
 
     view! {
-        <div class="row-between">
-            <div class="detail-header">
-                <TypeChip kind=chip_kind />
-                <h3>{title}</h3>
-            </div>
-            <IconButton
-                icon=IconName::Refresh
-                aria_label="Refresh this identity".to_string()
-                title="Refresh".to_string()
-                busy=Signal::derive(move || refreshing.get())
-                on_click=Callback::new(move |_| on_refresh.run(()))
-            />
-        </div>
+        <DetailHeader
+            kind=chip_kind
+            title=title
+            app_id=mi_app_id.clone()
+            on_refresh=on_refresh
+            refreshing=refreshing
+        />
+        // (managed identities can't be deleted from here — no on_delete passed)
         <TabList selected_value=active_tab>
             <Tab value="overview">"Overview"</Tab>
             <Tab value="permissions">"Permissions"</Tab>

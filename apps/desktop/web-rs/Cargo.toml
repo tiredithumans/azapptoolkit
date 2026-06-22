@@ -42,7 +42,9 @@ tracing = "0.1"
 # Compiles the `test_support` browser-test harness (mock IPC + view mounting).
 # Off by default so it never enters the shipped Trunk bundle; enabled by
 # `just web-itest`.
-test-support = ["dep:serde-wasm-bindgen"]
+# `web-sys/KeyboardEvent` is only needed by the test harness's `press_key`
+# helper, so it rides the test-support feature and stays out of the shipped bundle.
+test-support = ["dep:serde-wasm-bindgen", "web-sys/KeyboardEvent", "web-sys/KeyboardEventInit"]
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

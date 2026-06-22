@@ -18,7 +18,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Spinner, SpinnerSize, Textare
 
 use crate::bindings::auth;
 use crate::bindings::exchange::{self, AapMigrationReport};
-use crate::components::requires_role::RequiresRole;
+use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
 use crate::components::ui::DataTable;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -356,7 +356,11 @@ pub fn ExchangeScopingSection(
     };
 
     view! {
-        <section class="detail-section">
+        <CollapsibleScopingSection
+            title="Exchange scoping"
+            capability_key="exchange_rbac"
+            open=open
+        >
             <ConfirmDialog
                 open=Signal::derive(move || pending_remove_mailbox.with(|p| p.is_some()))
                 title="Remove mailbox from scope group?"
@@ -374,23 +378,7 @@ pub fn ExchangeScopingSection(
                     group_cmd.error.set(None);
                 })
             />
-            <header class="row-between">
-                <strong>"Exchange scoping"</strong>
-                <span class="detail-section__controls">
-                    <RequiresRole capability_key="exchange_rbac" />
-                    <Button
-                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                        on_click=Box::new(move |_| open.update(|o| *o = !*o))
-                    >
-                        {move || if open.get() { "Hide" } else { "Show" }}
-                    </Button>
-                </span>
-            </header>
-            {move || {
-                open.get()
-                    .then(|| {
-                        view! {
-                            <Body1>
+            <Body1>
                                 {move || {
                                     format!(
                                         "Restrict this {}'s mailbox access to specific mailboxes using RBAC for Applications (the replacement for Application Access Policies). Recommended: add mailboxes to the toolkit-managed group below, then grant — afterwards you adjust who's in scope just by changing its membership. {}",
@@ -753,9 +741,6 @@ pub fn ExchangeScopingSection(
                                     })
                             }}
                             })}
-                        }
-                    })
-            }}
-        </section>
+        </CollapsibleScopingSection>
     }
 }
