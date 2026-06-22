@@ -14,6 +14,7 @@ pub(crate) mod dispatch;
 pub mod enterprise_application;
 pub mod exchange;
 pub mod expose_api;
+pub(crate) mod graph_err;
 pub mod graph_roles;
 pub mod keyvault;
 pub mod managed_identity;

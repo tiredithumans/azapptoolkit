@@ -10,6 +10,7 @@ use tauri::State;
 use azapptoolkit_core::models::{CaApplications, ConditionalAccessPolicy};
 use azapptoolkit_graph::GraphError;
 
+use crate::commands::graph_err;
 use crate::dto::conditional_access::ConditionalAccessPolicyDto;
 use crate::dto::UiError;
 use crate::state::AppState;
@@ -134,42 +135,19 @@ fn state_rank(state: &str) -> u8 {
     }
 }
 
-/// Graceful, body-safe error mapping for the Conditional Access tab. Mirrors the
-/// Activity tab: a missing license vs. consent gets a distinct message, every
-/// variant degrades to `ca_unavailable`, and a raw Graph body is never leaked.
+/// Graceful, body-safe error mapping for the Conditional Access tab. Shares the
+/// premium/consent mapping with the Activity tab (see
+/// [`graph_err::premium_feature_err`]): a missing license vs. consent gets a
+/// distinct message, every variant degrades to `ca_unavailable`, and a raw Graph
+/// body is never leaked.
 fn map_ca_err(err: GraphError) -> UiError {
-    let msg = |retryable: bool, message: &str| UiError {
-        code: "ca_unavailable".to_string(),
-        message: message.to_string(),
-        retryable,
-    };
-    match &err {
-        GraphError::Forbidden(body) => {
-            let lower = body.to_lowercase();
-            // `requestfromnonpremium` is Graph's actual license-denial code; the
-            // broader words back it up. (Earlier " p1"/" p2" substrings were
-            // dropped — they false-matched unrelated words like "map1ng".)
-            if ["license", "premium", "requestfromnonpremium"]
-                .iter()
-                .any(|n| lower.contains(n))
-            {
-                msg(false, "Conditional Access visibility requires an Entra ID P1 or P2 license, which this tenant doesn't appear to have.")
-            } else {
-                msg(false, "Conditional Access visibility requires admin consent for Policy.Read.All. Ask a Global Administrator to grant it, then reopen this tab.")
-            }
-        }
-        GraphError::Token(_) => msg(
-            false,
-            "Couldn't acquire Policy.Read.All consent for Conditional Access. It needs admin consent (and Entra ID P1/P2); the rest of the app is unaffected.",
-        ),
-        GraphError::Unauthorized => {
-            msg(false, "Your session expired. Sign in again to view Conditional Access.")
-        }
-        GraphError::Throttled { .. } | GraphError::Server { .. } | GraphError::Network(_) => {
-            msg(true, "Couldn't reach Conditional Access just now. Try Refresh in a moment.")
-        }
-        _ => msg(false, "Conditional Access is unavailable for this app right now."),
-    }
+    graph_err::premium_feature_err(
+        "ca_unavailable",
+        "Conditional Access",
+        "Conditional Access",
+        "Policy.Read.All",
+        err,
+    )
 }
 
 #[cfg(test)]

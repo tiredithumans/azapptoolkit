@@ -12,6 +12,7 @@ use tauri::State;
 use azapptoolkit_core::models::{DirectoryAuditLog, ServicePrincipalSignInActivity};
 use azapptoolkit_graph::GraphError;
 
+use crate::commands::graph_err;
 use crate::dto::activity::{ActivityLogItem, ModifiedPropertyDto, SignInActivityDto};
 use crate::dto::UiError;
 use crate::state::AppState;
@@ -152,7 +153,7 @@ fn sign_in_unavailable(message: &str) -> SignInActivityDto {
 fn map_sign_in_err(err: GraphError) -> SignInActivityDto {
     match &err {
         GraphError::Forbidden(body) => {
-            if looks_like_missing_license(body) {
+            if graph_err::looks_like_missing_license(body) {
                 sign_in_unavailable("Sign-in activity requires an Entra ID P1 or P2 license, which this tenant doesn't appear to have.")
             } else {
                 sign_in_unavailable("Sign-in activity requires admin consent for AuditLog.Read.All and a supported reader role.")
@@ -225,53 +226,19 @@ fn to_item(log: DirectoryAuditLog) -> ActivityLogItem {
     }
 }
 
-/// True when a 403 body looks like a missing-license rejection rather than a
-/// missing-consent one. Graph encodes the body as JSON, so the `error.code` and
-/// `error.message` text are both present in the raw string — a substring scan
-/// over the lowercased body covers both. Known license signals include the
-/// `Authentication_RequestFromNonPremiumTenantOrB2CTenant` code and the
-/// "doesn't have premium license" message.
-fn looks_like_missing_license(body: &str) -> bool {
-    let lower = body.to_lowercase();
-    ["license", "premium", "requestfromnonpremium", " p1", " p2"]
-        .iter()
-        .any(|needle| lower.contains(needle))
-}
-
-/// Turns Graph errors into graceful, actionable messages for the Activity tab.
-/// Every variant maps to an `activity_unavailable` message so the tab degrades
-/// rather than failing the surrounding detail pane — and so a raw Graph error
-/// body is never surfaced verbatim to the user. Transient classes stay
-/// `retryable` so a Refresh is the obvious next step.
+/// Turns Graph errors into graceful, actionable messages for the Activity tab —
+/// every variant degrades to `activity_unavailable` rather than failing the
+/// surrounding detail pane, and a raw Graph body is never surfaced verbatim.
+/// Shares the premium/consent mapping with Conditional Access (see
+/// [`graph_err::premium_feature_err`]).
 fn map_activity_err(err: GraphError) -> UiError {
-    let msg = |retryable: bool, message: &str| UiError {
-        code: "activity_unavailable".to_string(),
-        message: message.to_string(),
-        retryable,
-    };
-    match &err {
-        GraphError::Forbidden(body) => {
-            if looks_like_missing_license(body) {
-                msg(false, "The activity log requires an Entra ID P1 or P2 license, which this tenant doesn't appear to have.")
-            } else {
-                msg(false, "The activity log requires admin consent for AuditLog.Read.All. Ask a Global Administrator to grant it, then reopen this tab.")
-            }
-        }
-        GraphError::Token(_) => msg(
-            false,
-            "Couldn't acquire AuditLog.Read.All consent for the activity log. It needs admin consent (and Entra ID P1/P2); the rest of the app is unaffected.",
-        ),
-        GraphError::Unauthorized => {
-            msg(false, "Your session expired. Sign in again to view the activity log.")
-        }
-        GraphError::Throttled { .. } | GraphError::Server { .. } | GraphError::Network(_) => msg(
-            true,
-            "Couldn't reach the activity log just now. Try Refresh in a moment.",
-        ),
-        // NotFound / Api / Deserialize / Protocol / Url: don't leak the raw
-        // Graph body; surface a generic, non-retryable unavailable message.
-        _ => msg(false, "The activity log is unavailable for this app right now."),
-    }
+    graph_err::premium_feature_err(
+        "activity_unavailable",
+        "The activity log",
+        "the activity log",
+        "AuditLog.Read.All",
+        err,
+    )
 }
 
 #[cfg(test)]
