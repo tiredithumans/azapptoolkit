@@ -498,6 +498,35 @@ pub async fn find_mailbox_reachers(
         }
     }
 
+    // Prewarm the SP object-id → appId map in one batched read instead of one
+    // Graph GET per candidate inside the probe loop. The Exchange cmdlets and UI
+    // deep links want the appId, not the SP object id the assignment row carries;
+    // resolving that per candidate is an N-round-trip fan-out, while the batch
+    // helper collapses it to ~N/20 (results in input order, 20 per `$batch`).
+    // A prewarm miss (or whole-batch failure) just falls through to the probe's
+    // own per-candidate resolve, so this never changes a verdict.
+    let candidate_ids: Vec<String> = candidates.keys().cloned().collect();
+    let app_id_by_principal: Arc<HashMap<String, String>> = Arc::new(
+        match client.batch_get_service_principals(&candidate_ids).await {
+            Ok(results) => candidate_ids
+                .iter()
+                .cloned()
+                .zip(results)
+                .filter_map(|(id, r)| match r {
+                    Ok(Some(sp)) => Some((id, sp.app_id)),
+                    _ => None,
+                })
+                .collect(),
+            Err(err) => {
+                tracing::info!(
+                    ?err,
+                    "mailbox probe: SP prewarm batch failed; resolving per-candidate"
+                );
+                HashMap::new()
+            }
+        },
+    );
+
     let total = candidates.len();
     emit_probe_progress(
         &app_handle,
@@ -528,6 +557,7 @@ pub async fn find_mailbox_reachers(
             let done = done.clone();
             let cancel_for_task = cancel.clone();
             let mailbox = mailbox_shared.clone();
+            let prewarmed_app_id = app_id_by_principal.get(&principal_id).cloned();
             Some(tokio::spawn(async move {
                 let row = probe_candidate(
                     &client,
@@ -537,6 +567,7 @@ pub async fn find_mailbox_reachers(
                     principal_id,
                     display_name,
                     held,
+                    prewarmed_app_id,
                 )
                 .await;
                 let mut guard = done.lock().await;
@@ -607,6 +638,10 @@ fn merge_exchange_candidates(
 /// already known and the AAP list pre-fetched. Infallible by design — every
 /// failure path lands in a verdict (`unknown` at worst) so one bad candidate
 /// can't abort the whole probe.
+// Each argument is an independent piece of probe context (clients, the mailbox,
+// the candidate's identity/grants, and the batch-prewarmed appId); bundling them
+// into a struct would only add ceremony at the single call site.
+#[allow(clippy::too_many_arguments)]
 async fn probe_candidate(
     client: &azapptoolkit_graph::GraphClient,
     exo: Option<&ExchangeClient>,
@@ -615,28 +650,34 @@ async fn probe_candidate(
     principal_id: String,
     display_name: Option<String>,
     held_permissions: Vec<String>,
+    prewarmed_app_id: Option<String>,
 ) -> MailboxReacherRow {
     // The Exchange cmdlets and the UI's deep links want the appId, not the SP
-    // object id the assignment row carries.
-    let app_id = match client
-        .get_service_principal_by_object_id(&principal_id)
-        .await
-    {
-        Ok(Some(sp)) => sp.app_id,
-        other => {
-            if let Err(err) = other {
-                tracing::info!(%principal_id, ?err, "mailbox probe: SP resolve failed");
+    // object id the assignment row carries. Use the batch-prewarmed appId when we
+    // have it; only fall back to a per-candidate Graph read when the prewarm
+    // missed this principal (or its whole batch failed).
+    let app_id = match prewarmed_app_id {
+        Some(app_id) => app_id,
+        None => match client
+            .get_service_principal_by_object_id(&principal_id)
+            .await
+        {
+            Ok(Some(sp)) => sp.app_id,
+            other => {
+                if let Err(err) = other {
+                    tracing::info!(%principal_id, ?err, "mailbox probe: SP resolve failed");
+                }
+                return MailboxReacherRow {
+                    app_id: String::new(),
+                    principal_id,
+                    display_name,
+                    held_permissions,
+                    verdict: "unknown".into(),
+                    roles: Vec::new(),
+                    detail: Some("Couldn't resolve the service principal.".into()),
+                };
             }
-            return MailboxReacherRow {
-                app_id: String::new(),
-                principal_id,
-                display_name,
-                held_permissions,
-                verdict: "unknown".into(),
-                roles: Vec::new(),
-                detail: Some("Couldn't resolve the service principal.".into()),
-            };
-        }
+        },
     };
 
     let result = match exo {
