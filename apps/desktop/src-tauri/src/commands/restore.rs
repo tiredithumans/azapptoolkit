@@ -60,7 +60,17 @@ pub async fn plan_restore(
     tenant_id: String,
     backup: TenantBackup,
 ) -> Result<RestorePlan, UiError> {
-    let dest_cloud = state.auth.cloud().as_str();
+    Ok(build_restore_plan(
+        &backup,
+        tenant_id,
+        state.auth.cloud().as_str(),
+    ))
+}
+
+/// Pure dry-run analysis (no I/O): the counts plus the cloud/tenant checks
+/// derived from the backup. Split out from [`plan_restore`] so it is unit-testable
+/// without an `AppState`. `dest_cloud` is the destination build's cloud label.
+fn build_restore_plan(backup: &TenantBackup, tenant_id: String, dest_cloud: &str) -> RestorePlan {
     let cloud_mismatch = (backup.cloud != dest_cloud).then(|| CloudMismatch {
         backup_cloud: backup.cloud.clone(),
         destination_cloud: dest_cloud.to_string(),
@@ -68,7 +78,7 @@ pub async fn plan_restore(
     let sum = |f: fn(&AppRegistrationBackup) -> usize| -> usize {
         backup.app_registrations.iter().map(f).sum()
     };
-    Ok(RestorePlan {
+    RestorePlan {
         cloud_mismatch,
         tenant_changed: backup.source_tenant_id != tenant_id,
         source_tenant_id: backup.source_tenant_id.clone(),
@@ -78,7 +88,7 @@ pub async fn plan_restore(
         certificates_needing_manual_upload: sum(|a| a.certificates.len()),
         federated_credentials_to_restore: sum(|a| a.federated_credentials.len()),
         owners_to_remap: sum(|a| a.owners.len()),
-    })
+    }
 }
 
 /// Replays the backup's app registrations into the current tenant. See the
@@ -926,5 +936,47 @@ mod tests {
 
         // Neither set → no key (nothing to resolve or memoize).
         assert_eq!(principal_cache_key(&PrincipalRef::default()), None);
+    }
+
+    #[test]
+    fn build_restore_plan_counts_actions_and_flags_cloud_and_tenant_changes() {
+        use crate::dto::backup::{AppRegistrationBackup, CredentialMeta, TenantBackup};
+        use azapptoolkit_core::models::FederatedIdentityCredential;
+
+        let app =
+            |secrets: usize, certs: usize, feds: usize, owners: usize| AppRegistrationBackup {
+                secrets: vec![CredentialMeta::default(); secrets],
+                certificates: vec![CredentialMeta::default(); certs],
+                federated_credentials: vec![FederatedIdentityCredential::default(); feds],
+                owners: vec![PrincipalRef::default(); owners],
+                ..Default::default()
+            };
+        let backup = TenantBackup {
+            schema_version: 1,
+            created_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            source_tenant_id: "src-tenant".into(),
+            cloud: "Commercial".into(),
+            app_registrations: vec![app(2, 1, 3, 1), app(0, 0, 0, 2)],
+            enterprise_apps: Vec::new(),
+            managed_identities: Vec::new(),
+        };
+
+        // Same cloud, different destination tenant — the expected DR case. Counts
+        // are summed across every app registration.
+        let plan = build_restore_plan(&backup, "dest-tenant".to_string(), "Commercial");
+        assert!(plan.cloud_mismatch.is_none());
+        assert!(plan.tenant_changed);
+        assert_eq!(plan.destination_tenant_id, "dest-tenant");
+        assert_eq!(plan.app_registrations_to_create, 2);
+        assert_eq!(plan.secrets_to_regenerate, 2);
+        assert_eq!(plan.certificates_needing_manual_upload, 1);
+        assert_eq!(plan.federated_credentials_to_restore, 3);
+        assert_eq!(plan.owners_to_remap, 3);
+
+        // A cross-cloud manifest is flagged; restoring into the source tenant is
+        // not a "tenant change".
+        let blocked = build_restore_plan(&backup, "src-tenant".to_string(), "UsGov");
+        assert!(blocked.cloud_mismatch.is_some());
+        assert!(!blocked.tenant_changed);
     }
 }

@@ -61,6 +61,9 @@ time = "0.3"
 # `test-util` enables the paused clock (`tokio::time::advance`) the throttle
 # tracker tests drive; dev-only so the shipped binary keeps the lean feature set.
 tokio = { workspace = true, features = ["test-util"] }
+# Mock Graph HTTP server for the backup degrade-path tests (same pattern the
+# graph crate's own tests use). Dev-only.
+wiremock = { workspace = true }
 
 [features]
 default = ["custom-protocol"]
