@@ -39,7 +39,14 @@ pub fn ConfigScreen() -> impl IntoView {
                 // settings.json. `restart_app` diverges, so nothing after runs.
                 Ok(()) => config::restart_app().await,
                 Err(e) => {
-                    error.set(Some(format!("error [{}]: {}", e.code, e.message)));
+                    // The first screen a new user sees — pair the backend message
+                    // with an actionable recovery step instead of a raw code dump
+                    // (mirrors sign_in.rs's recovery_hint).
+                    error.set(Some(format!(
+                        "{}\n\n{}",
+                        e.message,
+                        config_error_hint(&e.code)
+                    )));
                     busy.set(false);
                 }
             }
@@ -85,5 +92,24 @@ pub fn ConfigScreen() -> impl IntoView {
                 }}
             </Card>
         </main>
+    }
+}
+
+/// One actionable recovery step per `UiError.code` from `set_auth_config`.
+fn config_error_hint(code: &str) -> &'static str {
+    match code {
+        "invalid_client_id" => {
+            "The Application (client) ID must be a GUID — copy it from the app \
+             registration's Overview page in the Entra portal."
+        }
+        "invalid_tenant_id" => {
+            "The Directory (tenant) ID must be a GUID or a domain like \
+             contoso.onmicrosoft.com — copy it from the registration's Overview page."
+        }
+        "io" => {
+            "Couldn't write settings.json — check that the app's config folder is \
+             writable (not blocked by permissions or disk space), then retry."
+        }
+        _ => "Double-check the IDs and try again.",
     }
 }
