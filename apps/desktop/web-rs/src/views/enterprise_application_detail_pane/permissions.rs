@@ -15,7 +15,9 @@ use azapptoolkit_core::audit::MailPermissionScope;
 use std::collections::HashMap;
 
 #[component]
-pub(super) fn PermissionsContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
+pub(super) fn PermissionsContent(
+    signal: Signal<Arc<EnterpriseApplicationDetail>>,
+) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
     let sp_id = Signal::derive(move || signal.with(|d| d.service_principal.id.clone()));
