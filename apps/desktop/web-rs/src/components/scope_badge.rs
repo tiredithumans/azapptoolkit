@@ -86,7 +86,7 @@ pub fn permission_scope_cell(
         return mailbox_scope_badge(MailPermissionScope::Unknown);
     }
     match value {
-        Some(v) if v == "Sites.Selected" => view! {
+        Some("Sites.Selected") => view! {
             <span
                 class="badge badge--ok"
                 title="Confined to individually-granted sites (Sites.Selected)"

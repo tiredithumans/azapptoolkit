@@ -413,7 +413,7 @@ pub fn PermissionsTab(
                 exchange::grant_exchange_mailbox_access(
                     &tenant_id,
                     &p.object_id,
-                    Some(&[p.permission_value.clone()]),
+                    Some(std::slice::from_ref(&p.permission_value)),
                     &groups,
                     true,
                 )
@@ -1044,6 +1044,10 @@ fn chip_kind_for_permission(kind: PermissionKind) -> AppKind {
     }
 }
 
+// Row renderer wiring one resolved permission to the five mutation callbacks the
+// table exposes (revoke app/delegated, remove declaration, scope, downgrade); the
+// props are genuinely independent, so a parameter struct would only add ceremony.
+#[allow(clippy::too_many_arguments)]
 fn view_resolved_row<RevApp, RevDel, Remove, Scope, Downgrade>(
     p: ResolvedPermission,
     mail_scope: Option<MailPermissionScope>,
@@ -1118,7 +1122,7 @@ where
                 }
                 .into_any()
             }
-            None => view! { <></> }.into_any(),
+            None => ().into_any(),
         },
         // Not granted (declared only): the Trash icon removes the declaration
         // from the manifest rather than revoking a (nonexistent) runtime grant.

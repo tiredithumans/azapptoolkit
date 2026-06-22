@@ -175,9 +175,7 @@ pub fn GlobalSearch() -> impl IntoView {
                 if trimmed.is_empty() {
                     return None;
                 }
-                let Some(t) = tenant else {
-                    return None;
-                };
+                let t = tenant?;
                 Some(
                     search::global_search(&t.tenant_id, trimmed)
                         .await

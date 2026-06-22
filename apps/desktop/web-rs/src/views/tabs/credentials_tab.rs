@@ -127,6 +127,13 @@ const EXPIRES_PRESETS: &[(&str, &str)] = &[
 const CUSTOM_PRESET: &str = "custom";
 const MAX_SECRET_LIFETIME_DAYS: i64 = 730;
 
+/// `AddPasswordInput`'s `(lifetime_days, start_date_time, end_date_time)`.
+type ExpiryFields = (
+    Option<u32>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<chrono::DateTime<chrono::Utc>>,
+);
+
 /// Resolves the Expires controls into `AddPasswordInput`'s
 /// `(lifetime_days, start_date_time, end_date_time)`. Mirrors the backend's
 /// validation (end after start, 24-month cap) for friendlier, pre-submit
@@ -136,14 +143,7 @@ fn resolve_expiry_fields(
     start: Option<NaiveDate>,
     end: Option<NaiveDate>,
     today: NaiveDate,
-) -> Result<
-    (
-        Option<u32>,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<chrono::DateTime<chrono::Utc>>,
-    ),
-    String,
-> {
+) -> Result<ExpiryFields, String> {
     if preset != CUSTOM_PRESET {
         let days = preset
             .parse::<u32>()
