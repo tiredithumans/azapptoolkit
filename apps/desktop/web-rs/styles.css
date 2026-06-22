@@ -1386,6 +1386,18 @@ h3 {
   gap: 6px;
   align-items: center;
 }
+.checkbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+}
+.radio-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: var(--space-1) 0;
+}
 
 /* ---------- Modal ---------- */
 .modal-backdrop {
