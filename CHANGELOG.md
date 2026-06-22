@@ -68,6 +68,13 @@ the project adheres to
   one `invalidate_app_detail_state` helper; and the duplicated (and already
   drifting) premium-feature error mapper shared by the Activity and Conditional
   Access tabs was unified into one `graph_err::premium_feature_err`.
+- **DR backup/restore now have automated coverage of their hardest invariants.**
+  A mock-Graph (wiremock) test proves the backup degrades to per-object reads when
+  a whole `$batch` fails and skips an individual failed object rather than aborting
+  the run; a unit test pins `plan_restore`'s action counts and cloud/tenant-change
+  flags. (The backup chunk helper is now generic over the Tauri runtime so it can
+  run under the mock runtime — a test-only change; `wiremock` and Tauri's `test`
+  feature were added as dev-dependencies.)
 
 ## [0.3.0] - 2026-06-21
 

@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Runtime, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_core::cache::CacheKind;
@@ -333,11 +333,11 @@ async fn sp_index_cached(
 /// per-app reads for this chunk only (never failing the backup); a per-app
 /// failure skips that one app. Emits per-app progress so the bar still advances
 /// smoothly (in bursts of ≤20). Returns the assembled backups for the chunk.
-async fn backup_app_chunk(
+async fn backup_app_chunk<R: Runtime>(
     client: &GraphClient,
     chunk: Vec<(String, String)>,
     sp_app_ids: &std::collections::HashSet<String>,
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<R>,
     done: &Mutex<usize>,
     total: usize,
     throttle: &ConcurrencyThrottle,
@@ -893,8 +893,8 @@ fn principal_ref_from_dir(o: &DirectoryObject) -> PrincipalRef {
     }
 }
 
-fn emit(
-    app_handle: &AppHandle,
+fn emit<R: Runtime>(
+    app_handle: &AppHandle<R>,
     done: usize,
     total: usize,
     current_app: Option<String>,
@@ -966,5 +966,104 @@ mod tests {
             cred_meta_from_key(&cert).thumbprint.as_deref(),
             Some("THUMBPRINT==")
         );
+    }
+
+    // The DR backup's headline invariant: a whole-`$batch` failure must degrade to
+    // per-object reads (never failing the run), and a per-object read that fails
+    // must skip only that object. Exercised against a mock Graph server, the same
+    // way the graph crate tests its client.
+    #[tokio::test]
+    async fn backup_app_chunk_degrades_to_per_app_reads_and_skips_failures() {
+        use azapptoolkit_core::cache::Cache;
+        use azapptoolkit_core::token::StaticTokenProvider;
+        use std::collections::HashSet;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Every `$batch` POST 503s — forcing the per-object fallback for both the
+        // app-config and the federated-credential reads.
+        Mock::given(method("POST"))
+            .and(path("/$batch"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        // obj-1 resolves via the fallback GETs.
+        let app_json = serde_json::json!({
+            "id": "obj-1",
+            "appId": "app-1",
+            "displayName": "Demo App",
+            "signInAudience": "AzureADMyOrg",
+            "passwordCredentials": [],
+            "keyCredentials": [],
+            "requiredResourceAccess": []
+        });
+        Mock::given(method("GET"))
+            .and(path("/applications/obj-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(app_json))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/applications/obj-1/federatedIdentityCredentials"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
+            )
+            .mount(&server)
+            .await;
+
+        // obj-2's per-object read fails (500): it must be skipped, not abort the run.
+        Mock::given(method("GET"))
+            .and(path("/applications/obj-2"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/applications/obj-2/federatedIdentityCredentials"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
+            )
+            .mount(&server)
+            .await;
+
+        let token = StaticTokenProvider::new("tok");
+        let client = GraphClient::with_base_url(
+            "tenant-test",
+            token.clone(),
+            token,
+            Cache::new(),
+            server.uri(),
+        );
+
+        let app = tauri::test::mock_app();
+        let done = Mutex::new(0usize);
+        let throttle = ConcurrencyThrottle::new(8);
+        let chunk = vec![
+            ("app-1".to_string(), "obj-1".to_string()),
+            ("app-2".to_string(), "obj-2".to_string()),
+        ];
+        let sp_app_ids = HashSet::new();
+
+        let out = backup_app_chunk(
+            &client,
+            chunk,
+            &sp_app_ids,
+            app.handle(),
+            &done,
+            2,
+            &throttle,
+        )
+        .await;
+
+        // The run never fails: obj-1 is recovered via the per-object fallback, and
+        // obj-2's failed read is skipped rather than aborting the chunk.
+        assert_eq!(
+            out.len(),
+            1,
+            "the failed object should be skipped, not fatal"
+        );
+        // Progress still advances for every object in the chunk, including the skip.
+        assert_eq!(*done.lock().await, 2);
     }
 }
