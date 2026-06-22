@@ -4,6 +4,8 @@
 //! Header strip + tab list (Overview, Credentials, Owners, Permissions) with
 //! per-tab content. Mirrors the App Registrations detail pane structure.
 
+use std::sync::Arc;
+
 use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
 use thaw::{
@@ -117,6 +119,10 @@ pub fn EnterpriseApplicationDetailPane(
                             // this Suspend render fed back into the scope and looped
                             // (the pane refetched forever, then froze); the App
                             // Registrations pane derives the same way.
+                            //
+                            // Wrap in `Arc` first so the (non-memoized) derive clones a
+                            // refcount, not the whole detail struct, on every tab read.
+                            let d = std::sync::Arc::new(d);
                             let detail_signal = Signal::derive(move || d.clone());
                             view! {
                                 <EnterpriseAppPanel
@@ -143,7 +149,7 @@ pub fn EnterpriseApplicationDetailPane(
 
 #[component]
 fn EnterpriseAppPanel(
-    detail_signal: Signal<EnterpriseApplicationDetail>,
+    detail_signal: Signal<Arc<EnterpriseApplicationDetail>>,
     #[prop(into)] on_refresh: Callback<()>,
 ) -> impl IntoView {
     let session = use_session();
@@ -299,7 +305,7 @@ fn EnterpriseAppPanel(
 }
 
 #[component]
-fn OverviewContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoView {
+fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
     let session = use_session();
     let sp = signal.with(|d| d.service_principal.clone());
 
@@ -541,7 +547,7 @@ fn OverviewContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoView
 }
 
 #[component]
-fn CredentialsContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoView {
+fn CredentialsContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
     let secrets = signal.with(|d| d.service_principal.password_credentials.clone());
     let certs = signal.with(|d| d.service_principal.key_credentials.clone());
 
@@ -609,7 +615,7 @@ fn CredentialsContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoV
 /// refetches.
 #[component]
 fn OwnersContent(
-    signal: Signal<EnterpriseApplicationDetail>,
+    signal: Signal<Arc<EnterpriseApplicationDetail>>,
     #[prop(into)] on_refresh: Callback<()>,
 ) -> impl IntoView {
     let session = use_session();
@@ -840,7 +846,7 @@ fn OwnersContent(
 }
 
 #[component]
-fn ProvisioningContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoView {
+fn ProvisioningContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
     let sp_id = Signal::derive(move || signal.with(|d| d.service_principal.id.clone()));
@@ -943,7 +949,7 @@ fn ProvisioningContent(signal: Signal<EnterpriseApplicationDetail>) -> impl Into
 /// Activity / change-log for the enterprise app — directory audit entries
 /// targeting the service principal and its paired app registration (if any).
 #[component]
-fn ActivityContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoView {
+fn ActivityContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
     let app_id = Signal::derive(move || signal.with(|d| d.service_principal.app_id.clone()));
     let primary = Signal::derive(move || signal.with(|d| d.service_principal.id.clone()));
     let secondary = Signal::derive(move || {
@@ -954,7 +960,7 @@ fn ActivityContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoView
 
 /// Conditional Access for the enterprise app — policies that target its appId.
 #[component]
-fn CaContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoView {
+fn CaContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
     let app_id = Signal::derive(move || signal.with(|d| d.service_principal.app_id.clone()));
     view! { <ConditionalAccessPanel app_id=app_id /> }
 }

@@ -10,6 +10,8 @@
 //! on success the tab refetches and bumps the parent detail (the Access tab's role
 //! picker reads the SP's mirrored roles).
 
+use std::sync::Arc;
+
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
 
@@ -42,7 +44,7 @@ fn member_types_label(types: &[String]) -> String {
 
 #[component]
 pub(super) fn AppRolesContent(
-    signal: Signal<EnterpriseApplicationDetail>,
+    signal: Signal<Arc<EnterpriseApplicationDetail>>,
     on_refresh: Callback<()>,
 ) -> impl IntoView {
     let session = use_session();

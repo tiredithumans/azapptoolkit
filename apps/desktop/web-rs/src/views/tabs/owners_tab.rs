@@ -1,6 +1,8 @@
 //! Owners tab. Lists current owners + lets you search and add. Mirrors
 //! `apps/desktop/web/src/views/tabs/OwnersTab.tsx`.
 
+use std::sync::Arc;
+
 use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
@@ -26,7 +28,7 @@ fn owner_kind(o: &DirectoryObject) -> &'static str {
 
 #[component]
 pub fn OwnersTab(
-    #[prop(into)] detail: Signal<ApplicationDetail>,
+    #[prop(into)] detail: Signal<Arc<ApplicationDetail>>,
     #[prop(into)] on_changed: Callback<()>,
 ) -> impl IntoView {
     let session = use_session();

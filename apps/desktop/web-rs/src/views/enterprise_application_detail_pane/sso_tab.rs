@@ -6,7 +6,7 @@ use crate::hooks::use_command::use_command;
 /// and surface the app-owner output summary. Reads `get_sso_config`; edits go
 /// through the per-field SSO commands and bump a local `reload`.
 #[component]
-pub(super) fn SsoContent(signal: Signal<EnterpriseApplicationDetail>) -> impl IntoView {
+pub(super) fn SsoContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
     let sp_id = Signal::derive(move || signal.with(|d| d.service_principal.id.clone()));

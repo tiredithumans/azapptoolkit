@@ -350,6 +350,13 @@ h3 {
   border-color: var(--danger);
   color: var(--danger);
 }
+/* Critical risk: a solid (filled) red so it's distinct at a glance from the
+   soft-outline High badge (badge--danger) when they sit in adjacent rows. */
+.badge--critical {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
 .badge--warning {
   background: var(--warning-soft);
   border-color: var(--warning);

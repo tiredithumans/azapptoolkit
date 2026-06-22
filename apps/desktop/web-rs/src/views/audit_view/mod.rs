@@ -652,7 +652,7 @@ pub fn AuditView() -> impl IntoView {
 
 fn risk_class(level: &RiskLevel) -> &'static str {
     match level {
-        RiskLevel::Critical => "badge--danger",
+        RiskLevel::Critical => "badge--critical",
         RiskLevel::High => "badge--danger",
         RiskLevel::Medium => "badge--warning",
         RiskLevel::Low => "badge--ok",

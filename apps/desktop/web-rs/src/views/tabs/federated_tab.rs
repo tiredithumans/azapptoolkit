@@ -4,6 +4,8 @@
 //! scenario picker with structured per-scenario fields that auto-build the
 //! issuer/subject, plus in-place editing (everything but the immutable name).
 
+use std::sync::Arc;
+
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize};
 
@@ -37,7 +39,7 @@ const GITHUB_ENTITIES: &[(&str, &str)] = &[
 ];
 
 #[component]
-pub fn FederatedTab(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl IntoView {
+pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl IntoView {
     let session = use_session();
     let object_id = Signal::derive(move || detail.with(|d| d.application.id.clone()));
     let tenant_id = Signal::derive(move || {

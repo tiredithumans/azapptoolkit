@@ -1,6 +1,8 @@
 //! Overview tab. Read mode + edit mode for display name / sign-in audience /
 //! description.
 
+use std::sync::Arc;
+
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
 
@@ -36,7 +38,7 @@ fn audience_label(value: Option<&str>) -> String {
 
 #[component]
 pub fn OverviewTab(
-    #[prop(into)] detail: Signal<ApplicationDetail>,
+    #[prop(into)] detail: Signal<Arc<ApplicationDetail>>,
     #[prop(into)] on_changed: Callback<()>,
 ) -> impl IntoView {
     let editing = RwSignal::new(false);
