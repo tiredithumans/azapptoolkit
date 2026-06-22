@@ -188,7 +188,12 @@ pub fn GlobalSearch() -> impl IntoView {
     // render order) for the keyboard roving selection — read synchronously by the
     // keydown handler. Derived from the async `results` resource (no separate
     // signal write) so it can never drift out of sync with what's rendered.
-    let record_hits = Signal::derive(move || flatten_hits(results.get()));
+    // Mirror the resolved record hits into a plain signal via an Effect (rather
+    // than a derive the keydown handler reads) so the handler always sees the
+    // current list synchronously. `record_hits` is not a dependency of the
+    // `results` resource, so setting it can't re-trigger the search.
+    let record_hits: RwSignal<Vec<(SelectionKind, SearchHit)>> = RwSignal::new(Vec::new());
+    Effect::new(move |_| record_hits.set(flatten_hits(results.get())));
 
     let on_input = move |ev: ev::Event| {
         if let Some(target) = ev.target() {
@@ -495,13 +500,8 @@ fn render_group(
                 let hit_for_pick = hit.clone();
                 view! {
                     <button
-                        class=move || {
-                            if selected.get() == idx {
-                                "global-search__row global-search__row--active".to_string()
-                            } else {
-                                "global-search__row".to_string()
-                            }
-                        }
+                        class="global-search__row"
+                        class:global-search__row--active=move || selected.get() == idx
                         type="button"
                         id=format!("gs-rec-{idx}")
                         role="option"
