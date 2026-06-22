@@ -95,6 +95,15 @@ test: _stub-frontend-dist
 web-fmt-check:
     cargo fmt -- --check
 
+# Lint the frontend with warnings as errors (CI gate). web-rs is excluded from
+# the root workspace, so the root `clippy` recipe never reaches it — yet this is
+# the largest, IPC-privileged tier. Lints the actual wasm build + the browser
+# test harness; --features test-support so the integration-test targets (which
+# use it) compile under --all-targets. --locked enforces the web-rs Cargo.lock.
+[working-directory('apps/desktop/web-rs')]
+web-clippy:
+    cargo clippy --locked --target wasm32-unknown-unknown --all-targets --features test-support -- -D warnings
+
 # Run the frontend unit tests on the host target (web-rs is excluded from the
 # root workspace, so `just test` doesn't reach it). The pure-logic helpers have
 # no runtime WASM dependency, so they compile and run natively. --locked enforces
@@ -107,7 +116,7 @@ web-test:
 # Run every CI gate locally, in order. Run this before declaring a change done.
 # Frontend tests run before the (slower) web build, matching the CI web job and
 # failing fast on a logic regression.
-verify: fmt-check clippy test web-fmt-check web-test web-build
+verify: fmt-check clippy test web-fmt-check web-clippy web-test web-build
 
 # --- Dependency policy (CI audit/deny jobs) ---------------------------------
 
