@@ -78,17 +78,27 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
     });
 
     // Revoke a held app-role grant — the same generic delete the managed-identity
-    // view uses (an enterprise app's SP is a service principal too). On success
-    // re-fetch the list.
-    let do_revoke = Callback::new(move |assignment_id: String| {
+    // view uses (an enterprise app's SP is a service principal too). Staged behind
+    // a confirmation dialog (parity with the managed-identity pane, which gates the
+    // identical action): the panel's revoke icon sets `pending_revoke`, and
+    // confirming runs `do_revoke`. On success clear the selection and re-fetch.
+    let pending_revoke: RwSignal<Option<String>> = RwSignal::new(None);
+    let do_revoke = move |assignment_id: String| {
         let id = sp_id.get();
         revoke_cmd.run(
-            move |()| reload.update(|n| *n += 1),
+            move |()| {
+                pending_revoke.set(None);
+                reload.update(|n| *n += 1);
+            },
             move |tenant_id| async move {
                 permissions_bindings::revoke_app_role_assignment(&tenant_id, &id, &assignment_id)
                     .await
             },
         );
+    };
+    let on_revoke = Callback::new(move |assignment_id: String| {
+        revoke_cmd.error.set(None);
+        pending_revoke.set(Some(assignment_id));
     });
 
     // In-place "Scope…" for an already-held org-wide permission. The enterprise
@@ -330,7 +340,7 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
                                     permissions=list
                                     scope_map=scope_map
                                     show_scope_column=true
-                                    on_revoke=do_revoke
+                                    on_revoke=on_revoke
                                     on_scope=on_scope
                                     busy=Signal::derive(move || revoke_cmd.busy.get())
                                 />
@@ -342,9 +352,23 @@ pub(super) fn PermissionsContent(signal: Signal<EnterpriseApplicationDetail>) ->
                     }
                 })}
             </Suspense>
-            {move || {
-                revoke_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
-            }}
+            <ConfirmDialog
+                open=Signal::derive(move || pending_revoke.with(|p| p.is_some()))
+                title="Revoke permission?"
+                body="Remove this app's held app-role assignment. The app loses that permission until it's granted again; the live grant is re-checked before removal."
+                confirm_label="Revoke"
+                busy=revoke_cmd.busy
+                error=revoke_cmd.error
+                on_confirm=Callback::new(move |()| {
+                    if let Some(aid) = pending_revoke.get() {
+                        do_revoke(aid);
+                    }
+                })
+                on_close=Callback::new(move |()| {
+                    pending_revoke.set(None);
+                    revoke_cmd.error.set(None);
+                })
+            />
             {move || {
                 pending_scope
                     .get()
