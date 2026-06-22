@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
@@ -95,7 +96,7 @@ fn grant_scope_kind(value: &str) -> Option<ScopeKind> {
 /// `RefCell` self-reference cell.
 fn run_grant(
     session: Session,
-    detail: Signal<ApplicationDetail>,
+    detail: Signal<Arc<ApplicationDetail>>,
     consenting: RwSignal<bool>,
     consent_error: RwSignal<Option<String>>,
     consent_result: RwSignal<Option<GrantResult>>,
@@ -181,7 +182,7 @@ fn load_mail_scopes(
 
 #[component]
 pub fn PermissionsTab(
-    #[prop(into)] detail: Signal<ApplicationDetail>,
+    #[prop(into)] detail: Signal<Arc<ApplicationDetail>>,
     on_changed: Callback<()>,
 ) -> impl IntoView {
     let session = use_session();
@@ -863,7 +864,7 @@ pub fn PermissionsTab(
 /// only GETs observed → the Downgrade… action applies). Degrades to setup
 /// guidance (`usage_unavailable`) or a consent button — never breaks the tab.
 #[component]
-fn UsagePanel(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl IntoView {
+fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
 

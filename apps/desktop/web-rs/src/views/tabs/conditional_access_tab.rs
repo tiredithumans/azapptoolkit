@@ -2,6 +2,8 @@
 //! enforce. Read-only; degrades gracefully when Policy.Read.All is un-consented
 //! or the tenant lacks an Entra ID P1/P2 license.
 
+use std::sync::Arc;
+
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 
@@ -15,7 +17,7 @@ use crate::util::no_tenant;
 
 /// App-registration Conditional Access tab (keys on the app's appId).
 #[component]
-pub fn ConditionalAccessTab(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl IntoView {
+pub fn ConditionalAccessTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl IntoView {
     let app_id = Signal::derive(move || detail.with(|d| d.application.app_id.clone()));
     view! { <ConditionalAccessPanel app_id=app_id /> }
 }

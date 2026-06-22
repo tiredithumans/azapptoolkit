@@ -1,6 +1,8 @@
 //! Credentials tab. Lists secrets + certificates for an app, lets you add /
 //! remove / sweep expired.
 
+use std::sync::Arc;
+
 use chrono::NaiveDate;
 use leptos::prelude::*;
 use thaw::{
@@ -182,7 +184,7 @@ fn sanitize_secret_name(name: &str) -> String {
 
 #[component]
 pub fn CredentialsTab(
-    #[prop(into)] detail: Signal<ApplicationDetail>,
+    #[prop(into)] detail: Signal<Arc<ApplicationDetail>>,
     #[prop(into)] on_changed: Callback<()>,
 ) -> impl IntoView {
     let session = use_session();

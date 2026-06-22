@@ -9,6 +9,8 @@
 //! Reply URIs are validated server-side (no wildcards; https / loopback-http /
 //! custom schemes only) — the rejection reason surfaces inline.
 
+use std::sync::Arc;
+
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
 
@@ -34,7 +36,7 @@ use crate::util::no_tenant;
 
 #[component]
 pub fn AuthenticationTab(
-    #[prop(into)] detail: Signal<ApplicationDetail>,
+    #[prop(into)] detail: Signal<Arc<ApplicationDetail>>,
     #[prop(into)] on_changed: Callback<()>,
 ) -> impl IntoView {
     let session = use_session();
