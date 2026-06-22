@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-22
+
 ### Added
 
 - **Cancel button for Bulk Actions.** A long-running bulk grant / delete /
