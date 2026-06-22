@@ -662,8 +662,11 @@ pub fn PermissionsTab(
                 })
             }}
             {move || {
-                let resolved = detail.with(|d| d.resolved_permissions.clone());
-                if resolved.is_empty() {
+                // The empty check reads only the (stable) resolved set, so this
+                // outer block renders the table shell once. The rows are a keyed
+                // `<For>` whose `each` tracks just the filters — so toggling
+                // Application/Delegated diffs rows instead of rebuilding the table.
+                if detail.with(|d| d.resolved_permissions.is_empty()) {
                     return view! {
                         <Body1>
                             "No permissions declared. Use the Entra portal or restore from a saved manifest."
@@ -671,24 +674,6 @@ pub fn PermissionsTab(
                     }
                         .into_any();
                 }
-                let show_app = show_application.get();
-                let show_del = show_delegated.get();
-                let filtered: Vec<ResolvedPermission> = resolved
-                    .into_iter()
-                    .filter(|p| match p.permission_kind {
-                        PermissionKind::Application => show_app,
-                        PermissionKind::Delegated => show_del,
-                        // Unknown shows whenever either filter is on so the
-                        // user can still see uncategorized rows.
-                        PermissionKind::Unknown => show_app || show_del,
-                    })
-                    .collect();
-                let revoke_app = do_revoke_application;
-                let revoke_del = do_revoke_delegated;
-                let remove_decl = do_remove_declared;
-                let scope_action = open_scope;
-                let downgrade_action = open_downgrade;
-                let scopes = mail_scopes.get();
                 view! {
                     <table class="data-table">
                         <thead>
@@ -702,25 +687,50 @@ pub fn PermissionsTab(
                             </tr>
                         </thead>
                         <tbody>
-                            {filtered
-                                .into_iter()
-                                .map(|p| {
-                                    let scope = p
-                                        .permission_value
-                                        .as_deref()
-                                        .and_then(|v| scopes.get(v).cloned());
+                            <For
+                                each=move || {
+                                    let show_app = show_application.get();
+                                    let show_del = show_delegated.get();
+                                    detail.with(|d| {
+                                        d.resolved_permissions
+                                            .iter()
+                                            .filter(|p| match p.permission_kind {
+                                                PermissionKind::Application => show_app,
+                                                PermissionKind::Delegated => show_del,
+                                                // Unknown shows whenever either filter is on.
+                                                PermissionKind::Unknown => show_app || show_del,
+                                            })
+                                            .cloned()
+                                            .collect::<Vec<_>>()
+                                    })
+                                }
+                                key=|p| {
+                                    let k = match p.permission_kind {
+                                        PermissionKind::Application => 'a',
+                                        PermissionKind::Delegated => 'd',
+                                        PermissionKind::Unknown => 'u',
+                                    };
+                                    format!(
+                                        "{}|{}|{}|{}",
+                                        p.resource_app_id,
+                                        p.permission_id,
+                                        k,
+                                        p.permission_value.as_deref().unwrap_or(""),
+                                    )
+                                }
+                                children=move |p| {
                                     view_resolved_row(
                                         p,
-                                        scope,
-                                        scopes_loading.get(),
-                                        revoke_app,
-                                        revoke_del,
-                                        remove_decl,
-                                        scope_action,
-                                        downgrade_action,
+                                        mail_scopes,
+                                        scopes_loading,
+                                        do_revoke_application,
+                                        do_revoke_delegated,
+                                        do_remove_declared,
+                                        open_scope,
+                                        open_downgrade,
                                     )
-                                })
-                                .collect_view()}
+                                }
+                            />
                         </tbody>
                     </table>
                 }
@@ -1051,8 +1061,11 @@ fn chip_kind_for_permission(kind: PermissionKind) -> AppKind {
 #[allow(clippy::too_many_arguments)]
 fn view_resolved_row<RevApp, RevDel, Remove, Scope, Downgrade>(
     p: ResolvedPermission,
-    mail_scope: Option<MailPermissionScope>,
-    scope_loading: bool,
+    // Read reactively in the Scope cell (below) so that under a keyed `<For>` a
+    // row's scope still updates when the async mail-scopes resolve — without
+    // re-rendering the whole table on every filter toggle.
+    mail_scopes: RwSignal<HashMap<String, MailPermissionScope>>,
+    scopes_loading: RwSignal<bool>,
     revoke_application: RevApp,
     revoke_delegated: RevDel,
     remove_declared: Remove,
@@ -1204,12 +1217,22 @@ where
                 <TypeChip kind=chip_kind />
             </td>
             <td class="cell-mid">
-                {permission_scope_cell(
-                    scope_value.as_deref(),
-                    mail_scope,
-                    permission_kind == PermissionKind::Application,
-                    scope_loading,
-                )}
+                {
+                    let is_app = permission_kind == PermissionKind::Application;
+                    move || {
+                        // Same lookup as before, but reactive: re-resolves when the
+                        // mail-scopes map / loading flag change.
+                        let mail_scope = scope_value
+                            .as_deref()
+                            .and_then(|v| mail_scopes.with(|m| m.get(v).cloned()));
+                        permission_scope_cell(
+                            scope_value.as_deref(),
+                            mail_scope,
+                            is_app,
+                            scopes_loading.get(),
+                        )
+                    }
+                }
             </td>
             <td class="cell-mid">
                 <span class=status_class>{status_label}</span>
