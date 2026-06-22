@@ -228,6 +228,48 @@ pub(crate) fn remove_declared_access(
     removed
 }
 
+/// Adds the `(resource_app_id, permission_id, entry_type)` access to `required`
+/// in place unless it's already declared, creating the resource entry when the
+/// app declares nothing for that resource yet. Returns whether the manifest
+/// changed (`false` = already declared, so the caller skips the PATCH). Pure so
+/// the declaration semantics are unit-testable without a Graph client; shared by
+/// `grant_single_permission` (declare-then-grant) and `declare_app_permission`
+/// (declare-only).
+pub(crate) fn declare_resource_access(
+    required: &mut Vec<RequiredResourceAccess>,
+    resource_app_id: &str,
+    permission_id: &str,
+    entry_type: &str,
+) -> bool {
+    let already = required
+        .iter()
+        .find(|r| r.resource_app_id == resource_app_id)
+        .is_some_and(|r| {
+            r.resource_access
+                .iter()
+                .any(|a| a.id == permission_id && a.r#type == entry_type)
+        });
+    if already {
+        return false;
+    }
+    let access = ResourceAccess {
+        id: permission_id.to_string(),
+        r#type: entry_type.to_string(),
+    };
+    if let Some(existing) = required
+        .iter_mut()
+        .find(|r| r.resource_app_id == resource_app_id)
+    {
+        existing.resource_access.push(access);
+    } else {
+        required.push(RequiredResourceAccess {
+            resource_app_id: resource_app_id.to_string(),
+            resource_access: vec![access],
+        });
+    }
+    true
+}
+
 // ---------------- Admin consent ----------------
 
 /// Ensures admin consent is granted for every permission declared in the
@@ -450,45 +492,17 @@ pub async fn grant_single_permission(
     // 1) Patch requiredResourceAccess if the (resource, permission, kind)
     //    triple isn't already declared. Empty resource entry with the right
     //    appId is created when needed.
-    let needs_manifest_patch = {
-        let resource = app
-            .required_resource_access
-            .iter()
-            .find(|r| r.resource_app_id == resource_app_id);
-        match resource {
-            None => true,
-            Some(r) => !r
-                .resource_access
-                .iter()
-                .any(|a| a.id == permission_id && a.r#type == entry_type),
-        }
-    };
-
-    if needs_manifest_patch {
-        let mut next = app.required_resource_access.clone();
-        if let Some(existing) = next
-            .iter_mut()
-            .find(|r| r.resource_app_id == resource_app_id)
-        {
-            existing.resource_access.push(ResourceAccess {
-                id: permission_id.clone(),
-                r#type: entry_type.to_string(),
-            });
-        } else {
-            next.push(RequiredResourceAccess {
-                resource_app_id: resource_app_id.clone(),
-                resource_access: vec![ResourceAccess {
-                    id: permission_id.clone(),
-                    r#type: entry_type.to_string(),
-                }],
-            });
-        }
+    if declare_resource_access(
+        &mut app.required_resource_access,
+        &resource_app_id,
+        &permission_id,
+        entry_type,
+    ) {
         let patch = azapptoolkit_graph::client::AppPatch {
-            required_resource_access: Some(next.clone()),
+            required_resource_access: Some(app.required_resource_access.clone()),
             ..Default::default()
         };
         client.update_application(&object_id, &patch).await?;
-        app.required_resource_access = next;
     }
 
     // 2) Create the runtime grant. Errors stay structured so the UI can
@@ -582,6 +596,53 @@ pub async fn grant_single_permission(
         scope_grants_upserted,
         failures,
     })
+}
+
+/// Declares a single permission in `object_id`'s `requiredResourceAccess`
+/// **without** creating any runtime grant — the manifest half of
+/// `grant_single_permission`, nothing else. Used by the scoped-mailbox flow: the
+/// permission is declared so it's visible in the UI and the Exchange scoping path
+/// can derive its target from the manifest, while effective access comes solely
+/// from a scoped Exchange RBAC role assignment — never an org-wide Entra app-role
+/// grant (RBAC for Applications authorizes independently of the Entra consent).
+/// Idempotent: an already-declared permission is a no-op success (no write, no
+/// cache bust).
+#[tauri::command]
+pub async fn declare_app_permission(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    object_id: String,
+    resource_app_id: String,
+    permission_id: String,
+    kind: PermissionKind,
+) -> Result<(), UiError> {
+    let entry_type = match kind {
+        PermissionKind::Application => "Role",
+        PermissionKind::Delegated => "Scope",
+        PermissionKind::Unknown => {
+            return Err(UiError::validation(
+                "invalid_permission_kind",
+                "permission kind must be Application or Delegated",
+            ));
+        }
+    };
+
+    let client = state.graph_for(&tenant_id);
+    let mut app = client.get_application(&object_id).await?;
+    if declare_resource_access(
+        &mut app.required_resource_access,
+        &resource_app_id,
+        &permission_id,
+        entry_type,
+    ) {
+        let patch = azapptoolkit_graph::client::AppPatch {
+            required_resource_access: Some(app.required_resource_access.clone()),
+            ..Default::default()
+        };
+        client.update_application(&object_id, &patch).await?;
+        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
+    }
+    Ok(())
 }
 
 // ---------------- Least-privilege downgrade ----------------
@@ -936,6 +997,48 @@ mod tests {
         let mut req = manifest(&[("graph", &[("dup", "Role")])]);
         assert!(remove_declared_access(&mut req, "graph", "dup", None));
         assert!(req.is_empty());
+    }
+
+    #[test]
+    fn declare_resource_access_creates_resource_entry_when_absent() {
+        // No declaration for the resource yet — a fresh entry carries the access.
+        let mut req = manifest(&[]);
+        assert!(declare_resource_access(&mut req, "graph", "role-1", "Role"));
+        assert_eq!(req.len(), 1);
+        assert_eq!(req[0].resource_app_id, "graph");
+        assert_eq!(req[0].resource_access.len(), 1);
+        assert_eq!(req[0].resource_access[0].id, "role-1");
+        assert_eq!(req[0].resource_access[0].r#type, "Role");
+    }
+
+    #[test]
+    fn declare_resource_access_appends_to_existing_resource() {
+        // Resource already declared with a sibling — the new access is appended,
+        // not a duplicate resource entry.
+        let mut req = manifest(&[("graph", &[("scope-1", "Scope")])]);
+        assert!(declare_resource_access(&mut req, "graph", "role-1", "Role"));
+        assert_eq!(req.len(), 1);
+        let ids: Vec<(&str, &str)> = req[0]
+            .resource_access
+            .iter()
+            .map(|a| (a.id.as_str(), a.r#type.as_str()))
+            .collect();
+        assert_eq!(ids, [("scope-1", "Scope"), ("role-1", "Role")]);
+    }
+
+    #[test]
+    fn declare_resource_access_already_declared_is_noop() {
+        // Same (id, type) already present → no change, so the caller skips the PATCH.
+        let mut req = manifest(&[("graph", &[("role-1", "Role")])]);
+        assert!(!declare_resource_access(
+            &mut req, "graph", "role-1", "Role"
+        ));
+        assert_eq!(req[0].resource_access.len(), 1);
+        // Same id but a different type is a distinct declaration and is added.
+        assert!(declare_resource_access(
+            &mut req, "graph", "role-1", "Scope"
+        ));
+        assert_eq!(req[0].resource_access.len(), 2);
     }
 
     #[test]

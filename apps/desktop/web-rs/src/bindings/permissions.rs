@@ -114,6 +114,41 @@ pub async fn grant_single_permission(
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct DeclareAppPermissionArgs<'a> {
+    tenant_id: &'a str,
+    object_id: &'a str,
+    resource_app_id: &'a str,
+    permission_id: &'a str,
+    kind: PermissionKind,
+}
+
+/// Declares a permission in the app's `requiredResourceAccess` manifest
+/// **without** creating any runtime grant — the manifest half of
+/// `grant_single_permission`. The scoped-mailbox wizard uses this so the
+/// permission is declared (visible + scopable) while access comes solely from a
+/// scoped Exchange RBAC role assignment, never an org-wide Entra grant.
+pub async fn declare_app_permission(
+    tenant_id: &str,
+    object_id: &str,
+    resource_app_id: &str,
+    permission_id: &str,
+    kind: PermissionKind,
+) -> Result<(), UiError> {
+    invoke_result(
+        "declare_app_permission",
+        DeclareAppPermissionArgs {
+            tenant_id,
+            object_id,
+            resource_app_id,
+            permission_id,
+            kind,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DowngradePermissionArgs<'a> {
     tenant_id: &'a str,
     object_id: &'a str,
