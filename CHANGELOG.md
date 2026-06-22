@@ -5,6 +5,20 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Internal
+
+- **GUI test coverage for the managed-identity inline Exchange-scoping path.**
+  A browser GUI test (`just web-itest`) now drives the real Managed Identities
+  view — selecting an identity, opening the permission picker, and granting
+  `Mail.Read` — and proves that picking a scopable Microsoft Graph mail
+  permission opens the inline Exchange **scope panel** (confine to mailbox
+  group[s]) rather than granting org-wide, and that submitting it routes to the
+  scoped grant (`grant_managed_identity_scoped_exchange_access`), never the
+  org-wide one. Adds a `set_textarea_value` test-harness helper and three
+  catalog/exchange fixture builders, all behind the `test-support` feature.
+
 ## [0.3.2] - 2026-06-22
 
 ### Internal
