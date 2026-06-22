@@ -391,6 +391,18 @@ pub fn set_input_value(selector: &str, value: &str) {
     }
 }
 
+/// Set the value of a `<textarea>` and dispatch an `input` event so the bound
+/// (Thaw / Leptos) signal updates, exactly as typing would — the multi-line
+/// twin of [`set_input_value`] (e.g. the Exchange scope panel's group field).
+pub fn set_textarea_value(selector: &str, value: &str) {
+    if let Some(el) = query(selector) {
+        let area: web_sys::HtmlTextAreaElement = el.unchecked_into();
+        area.set_value(value);
+        let event = web_sys::Event::new("input").unwrap();
+        area.dispatch_event(&event).unwrap();
+    }
+}
+
 /// Focus an element (fires its `focus` event), as Tab/click would — e.g. to open
 /// the global-search dropdown, which only shows while the input is focused.
 pub fn focus(selector: &str) {

@@ -9,9 +9,11 @@ use azapptoolkit_dto::applications::{ApplicationDetail, ApplicationListRowDto};
 use azapptoolkit_dto::bulk::BulkProgress;
 use azapptoolkit_dto::config::AuthConfigStatus;
 use azapptoolkit_dto::enterprise_application::EnterpriseApplicationDto;
+use azapptoolkit_dto::exchange::ExchangeAccessResult;
 use azapptoolkit_dto::keyvault::{KvSecretItemDto, KvSecretValueDto};
 use azapptoolkit_dto::managed_identity::{ManagedIdentityDto, MiSubtype};
 use azapptoolkit_dto::permission_tester::MailboxProbeProgress;
+use azapptoolkit_dto::permissions::{CatalogResourceSummary, ResourcePermissions, RoleEntry};
 use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use azapptoolkit_dto::sharepoint::SiteSweepProgress;
 use azapptoolkit_dto::UiError;
@@ -260,5 +262,61 @@ pub fn global_search_apps(display_names: &[&str]) -> azapptoolkit_dto::search::G
             .collect(),
         enterprise_apps: Vec::new(),
         managed_identities: Vec::new(),
+    }
+}
+
+// ---------------- Permission picker (catalog) ----------------
+
+/// Microsoft Graph's well-known first-party appId — the picker's default
+/// resource, and the only one the MI / SP grant flows resource-scope against.
+pub const MICROSOFT_GRAPH_APP_ID: &str = "00000003-0000-0000-c000-000000000000";
+
+/// The Microsoft Graph entry for the picker's resource dropdown.
+pub fn graph_resource_summary() -> CatalogResourceSummary {
+    CatalogResourceSummary {
+        app_id: MICROSOFT_GRAPH_APP_ID.to_string(),
+        display_name: "Microsoft Graph".to_string(),
+        role_count: 1,
+        scope_count: 0,
+    }
+}
+
+/// A `ResourcePermissions` for Microsoft Graph exposing the given application
+/// permissions (app roles) by value — each with
+/// `allowed_member_types = ["Application"]` so the managed-identity picker
+/// (`ApplicationOnly`) keeps them.
+pub fn graph_resource_permissions(role_values: &[&str]) -> ResourcePermissions {
+    ResourcePermissions {
+        app_id: MICROSOFT_GRAPH_APP_ID.to_string(),
+        display_name: "Microsoft Graph".to_string(),
+        app_roles: role_values
+            .iter()
+            .map(|v| RoleEntry {
+                id: format!("{v}-role-id"),
+                value: (*v).to_string(),
+                display_name: format!("{v} (application)"),
+                description: None,
+                allowed_member_types: vec!["Application".to_string()],
+            })
+            .collect(),
+        oauth2_permission_scopes: Vec::new(),
+        source: "test".to_string(),
+    }
+}
+
+/// A successful `ExchangeAccessResult` — the outcome the inline scope panel
+/// reports after confining a mail permission to a group (one role assigned,
+/// one org-wide grant removed).
+pub fn exchange_access_result() -> ExchangeAccessResult {
+    ExchangeAccessResult {
+        app_id: "mi-0-appid".to_string(),
+        service_principal_object_id: Some("mi-0".to_string()),
+        scope_name: "azapptoolkit_mi-0-appid".to_string(),
+        scope_filter: "MemberOfGroup -eq 'azapptoolkit_mi-0-appid'".to_string(),
+        groups: Vec::new(),
+        roles_assigned: vec!["Application Mail.Read".to_string()],
+        roles_skipped: Vec::new(),
+        removed_entra_grants: vec!["Mail.Read".to_string()],
+        warnings: Vec::new(),
     }
 }
