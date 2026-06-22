@@ -72,9 +72,9 @@ the project adheres to
   A mock-Graph (wiremock) test proves the backup degrades to per-object reads when
   a whole `$batch` fails and skips an individual failed object rather than aborting
   the run; a unit test pins `plan_restore`'s action counts and cloud/tenant-change
-  flags. (The backup chunk helper is now generic over the Tauri runtime so it can
-  run under the mock runtime — a test-only change; `wiremock` and Tauri's `test`
-  feature were added as dev-dependencies.)
+  flags. (The backup chunk helper now takes a progress callback instead of the
+  Tauri `AppHandle`, so the test needs no webview/mock runtime; `wiremock` was
+  added as a dev-dependency.)
 
 ## [0.3.0] - 2026-06-21
 

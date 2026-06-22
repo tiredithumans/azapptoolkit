@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, Runtime, State};
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_core::cache::CacheKind;
@@ -123,16 +123,16 @@ pub async fn backup_tenant(
             let sp_app_ids = sp_app_ids.clone();
             let throttle = throttle.clone();
             Some(tokio::spawn(async move {
-                backup_app_chunk(
-                    &client,
-                    chunk,
-                    &sp_app_ids,
-                    &app_handle,
-                    &done,
-                    total,
-                    &throttle,
-                )
-                .await
+                let report = |count: usize| {
+                    emit(
+                        &app_handle,
+                        count,
+                        total,
+                        None,
+                        Some(throttle.current_limit()),
+                    );
+                };
+                backup_app_chunk(&client, chunk, &sp_app_ids, &done, &report).await
             }))
         },
         |joined| {
@@ -333,14 +333,16 @@ async fn sp_index_cached(
 /// per-app reads for this chunk only (never failing the backup); a per-app
 /// failure skips that one app. Emits per-app progress so the bar still advances
 /// smoothly (in bursts of ≤20). Returns the assembled backups for the chunk.
-async fn backup_app_chunk<R: Runtime>(
+async fn backup_app_chunk(
     client: &GraphClient,
     chunk: Vec<(String, String)>,
     sp_app_ids: &std::collections::HashSet<String>,
-    app_handle: &AppHandle<R>,
     done: &Mutex<usize>,
-    total: usize,
-    throttle: &ConcurrencyThrottle,
+    // Called once per processed app with the new running total, so the chunk
+    // stays decoupled from the Tauri `AppHandle` (the caller closes over the
+    // handle + throttle to emit progress; tests pass a no-op). `+ Sync` so the
+    // reference can be held across the `.await`s in a `Send` future.
+    report: &(dyn Fn(usize) + Sync),
 ) -> Vec<AppRegistrationBackup> {
     let object_ids: Vec<String> = chunk.iter().map(|(_, oid)| oid.clone()).collect();
     let (apps_res, feds_res) = tokio::join!(
@@ -394,13 +396,7 @@ async fn backup_app_chunk<R: Runtime>(
             *d += 1;
             *d
         };
-        emit(
-            app_handle,
-            count,
-            total,
-            None,
-            Some(throttle.current_limit()),
-        );
+        report(count);
     }
     out
 }
@@ -893,8 +889,8 @@ fn principal_ref_from_dir(o: &DirectoryObject) -> PrincipalRef {
     }
 }
 
-fn emit<R: Runtime>(
-    app_handle: &AppHandle<R>,
+fn emit(
+    app_handle: &AppHandle,
     done: usize,
     total: usize,
     current_app: Option<String>,
@@ -1036,25 +1032,17 @@ mod tests {
             server.uri(),
         );
 
-        let app = tauri::test::mock_app();
         let done = Mutex::new(0usize);
-        let throttle = ConcurrencyThrottle::new(8);
         let chunk = vec![
             ("app-1".to_string(), "obj-1".to_string()),
             ("app-2".to_string(), "obj-2".to_string()),
         ];
         let sp_app_ids = HashSet::new();
 
-        let out = backup_app_chunk(
-            &client,
-            chunk,
-            &sp_app_ids,
-            app.handle(),
-            &done,
-            2,
-            &throttle,
-        )
-        .await;
+        // No-op progress callback — the degrade logic under test doesn't depend on
+        // it, and this keeps the test free of a Tauri AppHandle / mock runtime.
+        let report = |_count: usize| {};
+        let out = backup_app_chunk(&client, chunk, &sp_app_ids, &done, &report).await;
 
         // The run never fails: obj-1 is recovered via the per-object fallback, and
         // obj-2's failed read is skipped rather than aborting the chunk.
