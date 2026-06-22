@@ -5,7 +5,20 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.2] - 2026-06-22
+
+### Internal
+
+- **Dependency refresh.** Both lockfiles — the root workspace and the
+  workspace-excluded `web-rs` front-end — were updated to their latest
+  semver-compatible versions: notably `rustls` 0.23.41, `quinn` 0.11.11, and
+  `time` 0.3.51 (+ `time-macros`), alongside routine bumps to `bytes`,
+  `camino`, `cc`, `getrandom`, `log`, `quote`, `web_atoms`, and the
+  `wasm_split_*` helpers. Stale build-time transitives (`wit-bindgen` /
+  `wasm-encoder` / `wasmparser` tooling) were pruned from the graph. No held
+  major versions were touched (`rand` / `sha2` / `rsa` unchanged), and the
+  RustSec advisory scan plus the cargo-deny license/source/bans gates remain
+  green on both trees.
 
 ## [0.3.1] - 2026-06-22
 
