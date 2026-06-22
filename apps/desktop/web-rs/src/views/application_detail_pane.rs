@@ -113,6 +113,12 @@ pub fn ApplicationDetailPane(#[prop(into)] object_id: Signal<String>) -> impl In
                 {move || Suspend::new(async move {
                     match detail.await {
                         Ok(d) => {
+                            // Wrap in `Arc` so the (non-memoized) derive's per-read
+                            // clone is a refcount bump, not a deep clone of the whole
+                            // detail struct — every tab read of `detail_signal`
+                            // otherwise deep-cloned Application + ServicePrincipal +
+                            // owners + grants + resolved permissions.
+                            let d = std::sync::Arc::new(d);
                             let detail_signal = Signal::derive(move || d.clone());
                             view! {
                                 <div class="app-detail__body">

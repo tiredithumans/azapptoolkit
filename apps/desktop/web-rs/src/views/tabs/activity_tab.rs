@@ -4,6 +4,8 @@
 //! degrades gracefully when AuditLog.Read.All is un-consented or the tenant
 //! lacks an Entra ID P1/P2 license.
 
+use std::sync::Arc;
+
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 
@@ -17,7 +19,7 @@ use crate::util::no_tenant;
 
 /// App-registration Activity tab: changes to the app object and its paired SP.
 #[component]
-pub fn ActivityTab(#[prop(into)] detail: Signal<ApplicationDetail>) -> impl IntoView {
+pub fn ActivityTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl IntoView {
     let app_id = Signal::derive(move || detail.with(|d| d.application.app_id.clone()));
     let primary = Signal::derive(move || detail.with(|d| d.application.id.clone()));
     let secondary = Signal::derive(move || {

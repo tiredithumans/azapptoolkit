@@ -10,7 +10,7 @@ use thaw::{Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 use crate::bindings::{backup, events};
 use crate::components::icon::{Icon, IconName};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{Card, SectionHeader};
+use crate::components::ui::{Card, CopyableId, SectionHeader};
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
 
@@ -445,7 +445,9 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
                                     {secrets.into_iter().map(|s| view! {
                                         <li>
                                             <span class="dr-view__secret-name">{s.display_name}": "</span>
-                                            <code class="dr-view__secret-value">{s.secret_value}</code>
+                                            // Show-once secret — must be copied in full before it's
+                                            // gone, so give it a copy button like the new-secret dialog.
+                                            <CopyableId value=s.secret_value label="secret value" full=true />
                                         </li>
                                     }).collect_view()}
                                 </ul>

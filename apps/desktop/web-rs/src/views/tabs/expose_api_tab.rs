@@ -9,6 +9,8 @@
 //! `api` arrays. After a successful save the tab refetches itself and bumps
 //! the parent detail (the paired SP mirrors the scope list).
 
+use std::sync::Arc;
+
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
 
@@ -35,7 +37,7 @@ fn consent_label(scope_type: Option<&str>) -> &'static str {
 
 #[component]
 pub fn ExposeApiTab(
-    #[prop(into)] detail: Signal<ApplicationDetail>,
+    #[prop(into)] detail: Signal<Arc<ApplicationDetail>>,
     #[prop(into)] on_changed: Callback<()>,
 ) -> impl IntoView {
     let session = use_session();

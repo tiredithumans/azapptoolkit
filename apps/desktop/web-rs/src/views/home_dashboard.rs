@@ -313,7 +313,7 @@ pub fn HomeDashboard() -> impl IntoView {
                                     view! {
                                         <div class="dash-metrics">
                                             {metric(crit, "Critical", "danger")}
-                                            {metric(high, "High", "warning")}
+                                            {metric(high, "High", "danger")}
                                             {metric(ownerless, "Ownerless", "warning")}
                                             {metric(unused, "Unused", "warning")}
                                         </div>
