@@ -52,6 +52,17 @@ fn expired_password_key_ids(app: &Application, now: DateTime<Utc>) -> Vec<String
         .collect()
 }
 
+/// Signals an in-progress bulk action (delete / grant / create / expired-secret
+/// sweep) to stop at the next item boundary. Shares [`AppState::audit_cancel`]
+/// with the security audit — the two long-running loops never run at once, so
+/// one flag covers both; this intent-named command lets the Bulk Actions view
+/// wire its own Cancel button without reaching for `cancel_audit`. Already
+/// in-flight per-item work finishes so partial results stay clean.
+#[tauri::command]
+pub fn cancel_bulk(state: State<'_, AppState>) {
+    state.audit_cancel.cancel();
+}
+
 /// Sweeps app registrations and deletes any password credential (secret) that
 /// is expired per [`expired_password_key_ids`]'s whole-day rule. Note this is
 /// **secrets-only** by design; the per-app one-click fix
@@ -311,8 +322,7 @@ pub async fn bulk_grant_permissions(
     // bust the detail + audit caches exactly like the single-app path
     // (permissions::grant_admin_consent). Only on this success path.
     if outcomes.iter().any(|o| o.granted > 0) {
-        super::applications::invalidate_app_details(&state.cache, &tenant_id);
-        super::audit::invalidate_audit_cache(&state.cache, &tenant_id);
+        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
     }
 
     Ok(BulkGrantResult {

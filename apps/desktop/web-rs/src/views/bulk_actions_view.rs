@@ -42,6 +42,26 @@ pub fn BulkActionsView() -> impl IntoView {
     let progress: RwSignal<Option<bulk::BulkProgress>> = RwSignal::new(None);
     use_progress_stream(progress, events::bulk_progress);
 
+    // Cancel an in-flight run. The backend bulk loops poll the shared cancel
+    // flag and stop at the next item boundary (the run still returns its partial
+    // result, tagged `cancelled`). `cancelling` disables the button + shows
+    // feedback until the run actually ends; reset whenever `busy` clears.
+    let cancelling = RwSignal::new(false);
+    Effect::new(move |_| {
+        if !busy.get() {
+            cancelling.set(false);
+        }
+    });
+    let do_cancel = move |_| {
+        if cancelling.get() {
+            return;
+        }
+        cancelling.set(true);
+        leptos::task::spawn_local(async move {
+            bulk::cancel_bulk().await;
+        });
+    };
+
     let create_json = RwSignal::new(String::new());
 
     // Destructive-action confirmation gates. Each tab keeps its own confirm
@@ -452,6 +472,13 @@ pub fn BulkActionsView() -> impl IntoView {
                                         _ => "Working…".to_string(),
                                     }}
                                 </Body1>
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                    on_click=Box::new(do_cancel)
+                                    disabled=Signal::derive(move || cancelling.get())
+                                >
+                                    {move || if cancelling.get() { "Cancelling…" } else { "Cancel" }}
+                                </Button>
                             </div>
                         }
                     })
