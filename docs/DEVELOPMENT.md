@@ -145,9 +145,13 @@ Outputs:
 
 `just build-windows` does **not** produce updater artifacts. The
 release workflow uses `just build-windows-updater` (which adds
-`--config '{"bundle":{"createUpdaterArtifacts":true}}'`); with the
+`--config updater-build.json`); with the
 signing key in the environment, that variant writes `-setup.exe.sig`
-next to the NSIS installer. `cargo tauri build` does not emit
+next to the NSIS installer. (The override lives in
+`apps/desktop/src-tauri/updater-build.json` rather than inline
+`--config '{...}'`: PowerShell, the Windows recipe shell, strips the
+JSON's inner double quotes when handing args to `cargo.exe`, so inline
+JSON parses as invalid — a file path has no quoting to mangle.) `cargo tauri build` does not emit
 `latest.json` — the workflow assembles it (see [CI](#ci) below). The
 auto-update target is the **NSIS `-setup.exe`** (per-user, no admin);
 the MSI is published for manual/enterprise download only.

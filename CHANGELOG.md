@@ -7,6 +7,68 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Cancel button for Bulk Actions.** A long-running bulk grant / delete /
+  remove-expired / create run can now be stopped from the UI — the backend bulk
+  loops already polled the shared cancel flag, but the page had no control wired
+  to it. A new `cancel_bulk` command drives it; the in-flight run still returns
+  its partial result, tagged cancelled.
+- **Retry on a failed list load.** When the App Registrations or Enterprise Apps
+  list fails to load (e.g. a transient 429 or network blip), the error now offers
+  an in-context **Retry** instead of a dead-end message — matching the dashboard
+  cards.
+- **Rate-limit back-off notice on the security audit.** When Microsoft Graph
+  throttles a scan and the adaptive concurrency cap drops below its peak, the
+  audit view now explains the slow-down (the same notice the DR backup shows), so
+  a throttled scan reads as expected rather than stalled.
+
+### Changed
+
+- **Confirmation before revoking an enterprise application's permission.**
+  Revoking a held app-role grant on an Enterprise App now prompts for
+  confirmation, matching the Managed Identity pane — the identical action was
+  previously a single un-guarded click that could break a live integration.
+- **The App Registrations "Permissions" tab is now labelled "API permissions"**
+  (the Entra portal's term) to distinguish the permissions an app *requests*
+  (`requiredResourceAccess`) from the *held* grants shown on the Enterprise App /
+  Managed Identity "Permissions" tabs. The routing value is unchanged, so
+  deep-links still work.
+- **Faster mailbox reverse-lookup.** The "who can reach this mailbox" probe now
+  resolves every candidate's service-principal appId in one batched Graph read
+  (`$batch`, ~20×) up front instead of one round trip per candidate.
+- **Faster security audit on cold caches.** Each app's distinct resource indexes
+  are now resolved concurrently rather than one serial round trip at a time.
+- **Faster DR restore.** Principal resolution (users/groups by UPN / display
+  name) is memoized for the run, so a principal reused across owners, assignees,
+  and group memberships is searched once instead of per occurrence.
+
+### Fixed
+
+- **Actionable error guidance no longer collapses onto one line.** The recovery
+  hints the backend attaches after a blank line (e.g. "You may need the Exchange
+  Administrator role" on a 403) are now rendered with their line breaks intact
+  instead of being flattened away.
+- **The first-run configuration screen now shows a recovery hint** for each
+  failure (invalid client/tenant ID, or a settings.json write error) instead of a
+  raw `error [code]: message` dump — matching the sign-in screen.
+
+### Internal
+
+- **The WASM frontend (`web-rs`) is now linted under clippy** (`-D warnings`) in
+  `just verify` and CI. Previously the largest, IPC-privileged tier escaped the
+  lint gate entirely because it is excluded from the root workspace; the existing
+  warnings are fixed.
+- **The release workflow re-runs the RustSec advisory scan before building the
+  installers**, so an advisory filed after the last main-branch CI run can't ride
+  into a shipped build unscanned.
+- **Internal cleanup (no behaviour change):** the 1,700-line
+  `commands/applications.rs` was split into a `commands/applications/` module
+  directory; the 13-site detail-pane cache-invalidation pairing was factored into
+  one `invalidate_app_detail_state` helper; and the duplicated (and already
+  drifting) premium-feature error mapper shared by the Activity and Conditional
+  Access tabs was unified into one `graph_err::premium_feature_err`.
+
 ## [0.3.0] - 2026-06-21
 
 ### Changed
