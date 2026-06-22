@@ -25,6 +25,7 @@ use crate::components::scope_badge::{
 };
 use crate::components::scope_panel::{ScopeKind, ScopePanel};
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
+use crate::components::scoped_mailbox_wizard::ScopedMailboxWizard;
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::components::toast::ToastAction;
 use crate::components::type_chip::{AppKind, TypeChip};
@@ -190,6 +191,13 @@ pub fn PermissionsTab(
     let consent_error: RwSignal<Option<String>> = RwSignal::new(None);
     let consent_result: RwSignal<Option<GrantResult>> = RwSignal::new(None);
     let picker_open = RwSignal::new(false);
+    // The streamlined "grant scoped mailbox access" wizard — always reachable, so
+    // scoping is the obvious first move (no need to grant org-wide to find it).
+    let wizard_open = RwSignal::new(false);
+    let wizard_target = Signal::derive(move || ExchangeScopeTarget::Application {
+        object_id: detail.with(|d| d.application.id.clone()),
+    });
+    let wizard_app_id = Signal::derive(move || detail.with(|d| d.application.app_id.clone()));
     // One shared runner for every grant/revoke/scope/downgrade mutation in this
     // tab — they share a single busy + error (`cmd.error` is the row-level error
     // surface, formerly `row_error`).
@@ -594,6 +602,12 @@ pub fn PermissionsTab(
                 </div>
                 <div class="actions-row">
                     <Button
+                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                        on_click=Box::new(move |_| wizard_open.set(true))
+                    >
+                        "Grant mailbox access…"
+                    </Button>
+                    <Button
                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                         on_click=Box::new(move |_| picker_open.update(|v| *v = !*v))
                     >
@@ -623,6 +637,13 @@ pub fn PermissionsTab(
                     </Button>
                 </div>
             </header>
+            <ScopedMailboxWizard
+                open=wizard_open
+                target=wizard_target
+                app_id=wizard_app_id
+                on_close=Callback::new(move |()| wizard_open.set(false))
+                on_changed=on_changed
+            />
             {move || {
                 picker_open
                     .get()

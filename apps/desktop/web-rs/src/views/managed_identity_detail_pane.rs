@@ -24,6 +24,7 @@ use crate::components::requires_role::RequiresRole;
 use crate::components::scope_badge::is_exchange_scopable;
 use crate::components::scope_panel::ScopePanel;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
+use crate::components::scoped_mailbox_wizard::ScopedMailboxWizard;
 use crate::components::ui::{CopyableId, DataTable};
 use crate::state::use_session;
 use crate::views::managed_identities::{
@@ -91,6 +92,22 @@ pub fn ManagedIdentityDetailPane(
     // isn't pushed down by an always-open picker.
     let picker_open = RwSignal::new(false);
 
+    // Streamlined scoped-mailbox grant — always reachable, so the MI can be scoped
+    // from the start (the Exchange section only appears once it holds a mail
+    // permission). The wizard scopes by the values selected in it, so the target's
+    // `mail_permissions` are unused here.
+    let wizard_open = RwSignal::new(false);
+    let wiz_sp = mi.id.clone();
+    let wiz_name = mi.display_name.clone();
+    let wiz_app = mi.app_id.clone();
+    let wizard_app_id = Signal::derive(move || wiz_app.clone());
+    let wizard_target = Signal::derive(move || ExchangeScopeTarget::ServicePrincipal {
+        sp_object_id: wiz_sp.clone(),
+        display_name: wiz_name.clone(),
+        mail_permissions: Vec::new(),
+        is_managed_identity: true,
+    });
+
     // Tabbed layout (Overview / Permissions / Azure RBAC) to match the app-reg
     // and enterprise panes — the Azure RBAC section was previously buried below
     // a long held-permissions list + grant picker. Restore the last-viewed tab
@@ -131,7 +148,22 @@ pub fn ManagedIdentityDetailPane(
             style:display=move || if active_tab.get() == "permissions" { "block" } else { "none" }
         >
         <div>
-            <h4>"Current permissions"</h4>
+            <header class="row-between">
+                <h4>"Current permissions"</h4>
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                    on_click=Box::new(move |_| wizard_open.set(true))
+                >
+                    "Grant mailbox access…"
+                </Button>
+            </header>
+            <ScopedMailboxWizard
+                open=wizard_open
+                target=wizard_target
+                app_id=wizard_app_id
+                on_close=Callback::new(move |()| wizard_open.set(false))
+                on_changed=Callback::new(move |()| reload.update(|n| *n += 1))
+            />
             <Suspense fallback=move || {
                 view! {
                     <Spinner

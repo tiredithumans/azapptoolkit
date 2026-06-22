@@ -7,8 +7,32 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **"Grant mailbox access" wizard — one guided flow for scoped Exchange access.**
+  A new always-available **Grant mailbox access…** button on the Permissions tab
+  (app registrations) and the Enterprise App / Managed Identity detail panes opens
+  a three-step wizard — pick the mail permissions (Mail.Read / Mail.ReadWrite /
+  Mail.Send and more) → choose the mailboxes → review & grant — replacing the old
+  "grant org-wide, then hunt for the scoping menu, then strip the grant" dance.
+  The default path is **scoped and least-privilege**: the permission is *declared*
+  (so it's visible and the Exchange scoping path can target it) while access comes
+  solely from a scoped Exchange RBAC role assignment — no org-wide Entra grant is
+  ever created (new `declare_app_permission` command). An explicit, de-emphasized
+  **org-wide (no scoping)** option remains for the rare permission that genuinely
+  needs tenant-wide reach. The wizard resolves and lets you add/remove the managed
+  scope group's member mailboxes inline, via a shared `ManagedScopeGroupPanel` now
+  reused by the "Exchange scoping" section too.
+
 ### Internal
 
+- **GUI test coverage for the mailbox-access wizard.** A browser GUI test
+  (`just web-itest`) drives `ScopedMailboxWizard` end-to-end for an app
+  registration and proves the apply orchestration: the scoped path *declares*
+  each permission and assigns the scoped Exchange roles with
+  `removeUnscopedEntraGrants = true` (never `grant_single_permission`), while the
+  org-wide option grants via `grant_single_permission` and never touches Exchange
+  RBAC. Adds a typed `grant_result()` fixture.
 - **GUI test coverage for the managed-identity inline Exchange-scoping path.**
   A browser GUI test (`just web-itest`) now drives the real Managed Identities
   view — selecting an identity, opening the permission picker, and granting

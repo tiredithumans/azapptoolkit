@@ -304,6 +304,18 @@ pub fn graph_resource_permissions(role_values: &[&str]) -> ResourcePermissions {
     }
 }
 
+/// A clean `GrantResult` (no failures) — the outcome of an org-wide
+/// `grant_single_permission`.
+pub fn grant_result() -> azapptoolkit_dto::permissions::GrantResult {
+    azapptoolkit_dto::permissions::GrantResult {
+        client_service_principal_id: "client-sp".to_string(),
+        role_assignments_created: Vec::new(),
+        role_assignments_skipped: Vec::new(),
+        scope_grants_upserted: Vec::new(),
+        failures: Vec::new(),
+    }
+}
+
 /// A successful `ExchangeAccessResult` — the outcome the inline scope panel
 /// reports after confining a mail permission to a group (one role assigned,
 /// one org-wide grant removed).

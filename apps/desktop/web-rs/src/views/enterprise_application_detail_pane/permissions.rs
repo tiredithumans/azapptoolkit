@@ -8,6 +8,7 @@ use crate::components::held_permissions_panel::HeldPermissionsPanel;
 use crate::components::scope_badge::{is_exchange_scopable, is_sharepoint_orgwide};
 use crate::components::scope_panel::{ScopeKind, ScopePanel};
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
+use crate::components::scoped_mailbox_wizard::ScopedMailboxWizard;
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::hooks::use_command::use_command;
 use crate::util::parse_lines;
@@ -237,6 +238,18 @@ pub(super) fn PermissionsContent(
     // permissions + the delegated scopes the app publishes.
     let scopes = signal.with(|d| d.service_principal.oauth2_permission_scopes.clone());
 
+    // Streamlined scoped-mailbox grant — always reachable, so a bare SP can be
+    // scoped from the start (the Exchange section below only appears once the SP
+    // already holds a mail permission). The wizard scopes by the values selected
+    // in it, so the target's `mail_permissions` are unused here.
+    let wizard_open = RwSignal::new(false);
+    let wizard_target = Signal::derive(move || ExchangeScopeTarget::ServicePrincipal {
+        sp_object_id: sp_id.get(),
+        display_name: display_name.get(),
+        mail_permissions: Vec::new(),
+        is_managed_identity: false,
+    });
+
     let scopes_view = view! {
         <DataTable
             headers=vec!["Scope", "Admin consent name", "Type"]
@@ -259,10 +272,25 @@ pub(super) fn PermissionsContent(
 
     view! {
         <section>
-            <h4>"Granted permissions"</h4>
+            <header class="row-between">
+                <h4>"Granted permissions"</h4>
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                    on_click=Box::new(move |_| wizard_open.set(true))
+                >
+                    "Grant mailbox access…"
+                </Button>
+            </header>
             <p class="muted">
                 "Application permissions this app has been granted — what it can do as a client."
             </p>
+            <ScopedMailboxWizard
+                open=wizard_open
+                target=wizard_target
+                app_id=app_id
+                on_close=Callback::new(move |()| wizard_open.set(false))
+                on_changed=Callback::new(move |()| reload.update(|n| *n += 1))
+            />
             <Suspense fallback=move || {
                 view! {
                     <div class="centered-pad">

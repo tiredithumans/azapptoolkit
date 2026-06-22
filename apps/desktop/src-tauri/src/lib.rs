@@ -100,6 +100,7 @@ pub fn run() {
             commands::permissions::update_required_resource_access,
             commands::permissions::grant_admin_consent,
             commands::permissions::grant_single_permission,
+            commands::permissions::declare_app_permission,
             commands::permissions::downgrade_application_permission,
             commands::permissions::remove_declared_permission,
             commands::permissions::revoke_app_role_assignment,
