@@ -5,6 +5,24 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The "Grant scoped access" wizard is now the unified "Grant access" flow,
+  replacing the separate "Add permission" picker.** Each Permissions surface (app
+  registration, enterprise app, managed identity) now has a single **Grant
+  access** button. Step 1 is the full live permission catalog (every resource,
+  Application + Delegated, searchable) as a **multi-select cart** — pick as many
+  permissions as you want, then grant them in one pass. Step 2 auto-offers scoped
+  targets (mailbox group or SharePoint sites) **only when the whole selection is
+  one scopable mechanism** (all mailbox, or all SharePoint); mixed, non-scopable,
+  or delegated selections grant org-wide, preserving "one mechanism per run". The
+  per-row **Scope…** action still opens the wizard pre-seeded to that permission.
+  The old inline single-grant picker (one permission per click, always org-wide)
+  is retired; the catalog `PermissionPicker` is now a reusable multi-select
+  component the wizard embeds.
+
 ## [0.4.0] - 2026-06-22
 
 ### Added
