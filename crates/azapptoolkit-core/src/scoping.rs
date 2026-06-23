@@ -56,6 +56,66 @@ pub fn is_sharepoint_orgwide(value: &str) -> bool {
     value.starts_with("Sites.") && value != "Sites.Selected"
 }
 
+/// Which scoping *authority* can confine a Graph application permission. Each
+/// mechanism has its own target type and apply strategy, but the scope UX shell
+/// (pick permission → choose targets → review) is uniform across them — this enum
+/// is the dispatch key. Add a variant (plus a target panel + apply arm) to teach
+/// the app a new mechanism; nothing else branches on the concrete mechanism.
+///
+/// Distinct from [`crate::audit::ScopeMechanism`], which is the Exchange-*internal*
+/// detail (RBAC vs legacy Application Access Policy) of how mail is confined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeKind {
+    /// Mail/calendar/contacts → confine to mailbox group(s) via Exchange RBAC.
+    Exchange,
+    /// `Sites.*` → confine to specific sites via `Sites.Selected`.
+    SharePoint,
+    // Future: AdministrativeUnit (directory perms), AzureRbac (ARM/MI),
+    // ResourceSpecificConsent (Teams/Chat — owner-consented, see `admin_applicable`).
+}
+
+impl ScopeKind {
+    /// Plural noun for the scope targets, for generic UI copy ("…confined to N {noun}").
+    pub fn target_noun(self) -> &'static str {
+        match self {
+            ScopeKind::Exchange => "mailboxes",
+            ScopeKind::SharePoint => "sites",
+        }
+    }
+
+    /// Capabilities-catalog key for the role hint a scope action surfaces.
+    pub fn capability_key(self) -> &'static str {
+        match self {
+            ScopeKind::Exchange => "exchange_rbac",
+            ScopeKind::SharePoint => "sharepoint_sites_selected",
+        }
+    }
+
+    /// Whether an admin can apply this scoping centrally. Future owner-consented
+    /// mechanisms (Teams/Chat resource-specific consent) return `false`, so the UI
+    /// renders guidance instead of an apply button rather than offering a control
+    /// that can't work.
+    pub fn admin_applicable(self) -> bool {
+        match self {
+            ScopeKind::Exchange | ScopeKind::SharePoint => true,
+        }
+    }
+}
+
+/// The mechanism (if any) that can resource-scope the Graph permission `value`.
+/// Single source of truth: mail/calendar/contacts → Exchange RBAC; `Sites.Selected`
+/// or a broad `Sites.*` → SharePoint `Sites.Selected`; everything else (e.g.
+/// `Directory.Read.All`) is org-wide only and returns `None`.
+pub fn scope_kind(value: &str) -> Option<ScopeKind> {
+    if is_scopable_exchange_permission(value) {
+        Some(ScopeKind::Exchange)
+    } else if value == "Sites.Selected" || is_sharepoint_orgwide(value) {
+        Some(ScopeKind::SharePoint)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +161,38 @@ mod tests {
         assert!(!is_sharepoint_orgwide("Sites.Selected"));
         assert!(!is_sharepoint_orgwide("Mail.Read"));
         assert!(!is_sharepoint_orgwide("Directory.Read.All"));
+    }
+
+    #[test]
+    fn scope_kind_classifies_by_mechanism() {
+        // Mail/calendar/contacts → Exchange RBAC.
+        assert_eq!(scope_kind("Mail.Read"), Some(ScopeKind::Exchange));
+        assert_eq!(scope_kind("Calendars.ReadWrite"), Some(ScopeKind::Exchange));
+        assert_eq!(scope_kind("Contacts.Read"), Some(ScopeKind::Exchange));
+        // Both the scoped model and a broad Sites.* → SharePoint.
+        assert_eq!(scope_kind("Sites.Selected"), Some(ScopeKind::SharePoint));
+        assert_eq!(scope_kind("Sites.Read.All"), Some(ScopeKind::SharePoint));
+        assert_eq!(
+            scope_kind("Sites.FullControl.All"),
+            Some(ScopeKind::SharePoint)
+        );
+        // Org-wide-only permissions are not scopable.
+        assert_eq!(scope_kind("Directory.Read.All"), None);
+        assert_eq!(scope_kind("User.Read.All"), None);
+        // A mail look-alike with no Exchange role is not scopable.
+        assert_eq!(scope_kind("Mail.ReadWrite.Shared"), None);
+    }
+
+    #[test]
+    fn scope_kind_metadata_is_per_mechanism() {
+        assert_eq!(ScopeKind::Exchange.target_noun(), "mailboxes");
+        assert_eq!(ScopeKind::SharePoint.target_noun(), "sites");
+        assert_eq!(ScopeKind::Exchange.capability_key(), "exchange_rbac");
+        assert_eq!(
+            ScopeKind::SharePoint.capability_key(),
+            "sharepoint_sites_selected"
+        );
+        assert!(ScopeKind::Exchange.admin_applicable());
+        assert!(ScopeKind::SharePoint.admin_applicable());
     }
 }
