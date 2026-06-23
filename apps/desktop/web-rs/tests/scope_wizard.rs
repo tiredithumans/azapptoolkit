@@ -151,6 +151,24 @@ fn mount_wizard(preseed: Option<PickerSelection>) -> ts::Mounted {
 }
 
 #[wasm_bindgen_test]
+async fn step1_hint_explains_disabled_next_until_a_permission_is_picked() {
+    let _m = mount_wizard(None);
+    ts::wait_for(|| ts::body_contains("Mail.Read")).await;
+    // Empty cart: Next is disabled and a hint says why (the apply-time validation
+    // message is unreachable from step 1, so without this the button is mute).
+    assert!(!next_enabled());
+    assert!(ts::body_contains(
+        "Select at least one permission to continue."
+    ));
+    // Picking one clears the hint and enables Next.
+    select_permission("Mail.Read");
+    ts::wait_for(next_enabled).await;
+    assert!(!ts::body_contains(
+        "Select at least one permission to continue."
+    ));
+}
+
+#[wasm_bindgen_test]
 async fn exchange_scoped_path_declares_then_scopes_without_orgwide() {
     let _m = mount_wizard(None);
     ts::mock_ok("list_exchange_scope_group", &populated_scope_group());

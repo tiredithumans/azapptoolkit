@@ -678,6 +678,20 @@ pub fn ScopeWizard(
 
                     {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
 
+                    // Tell the user why "Next" is disabled on step 1 — the cart is
+                    // empty. The apply-time validation message is unreachable from
+                    // step 0, so without this the disabled button has no explanation.
+                    {move || {
+                        (step.get() == 0 && selected.with(|s| s.is_empty()))
+                            .then(|| {
+                                view! {
+                                    <Body1 class="hint">
+                                        "Select at least one permission to continue."
+                                    </Body1>
+                                }
+                            })
+                    }}
+
                     // ---- Footer ----
                     <div class="actions-row">
                         <Button
