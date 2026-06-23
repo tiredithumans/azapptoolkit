@@ -269,6 +269,20 @@ impl GraphClient {
     pub async fn list_service_principal_sign_in_activities(
         &self,
     ) -> Result<Vec<ServicePrincipalSignInActivity>> {
+        // Read-through cache: this report is a slow, rate-limited beta endpoint
+        // (up to 200 pages) that is fetched whole once per app on the Activity
+        // tab AND once by every audit run — all reading the same tenant-wide
+        // data. Cache the full Vec per tenant so clicking through N apps (and the
+        // audit) collapses to one fetch per TTL window. It's read-only telemetry,
+        // so the 60-min Permissions TTL + the sign-out tenant sweep are
+        // sufficient invalidation — no mutation makes it stale.
+        let cache_key = format!("{}|sp_sign_in_activities", self.tenant_id);
+        if let Some(cached) = self
+            .cache
+            .get::<Vec<ServicePrincipalSignInActivity>>(CacheKind::Permissions, &cache_key)
+        {
+            return Ok(cached);
+        }
         let token = self.audit_log_token()?;
 
         const MAX_PAGES: usize = 200;
@@ -298,6 +312,7 @@ impl GraphClient {
                 None => break,
             }
         }
+        self.cache.put(CacheKind::Permissions, cache_key, &out);
         Ok(out)
     }
 }

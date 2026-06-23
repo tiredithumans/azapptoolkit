@@ -1584,6 +1584,38 @@ async fn directory_audits_without_token_is_forbidden() {
 }
 
 #[tokio::test]
+async fn sign_in_activities_are_cached_per_tenant() {
+    let server = MockServer::start().await;
+    // The slow beta report is expected exactly ONCE: the second call must be
+    // served from the per-tenant Permissions cache, not re-paginated. `.expect(1)`
+    // is verified on server drop, so a regression that dropped caching fails here.
+    Mock::given(method("GET"))
+        .and(path("/reports/servicePrincipalSignInActivities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "appId": "app-1",
+                "lastSignInActivity": { "lastSignInDateTime": "2026-05-01T00:00:00Z" }
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri()).with_audit_log_token(StaticTokenProvider::new("a"));
+    let first = client
+        .list_service_principal_sign_in_activities()
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    // Second call is a cache hit — no second request reaches the mock.
+    let second = client
+        .list_service_principal_sign_in_activities()
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].app_id.as_deref(), Some("app-1"));
+}
+
+#[tokio::test]
 async fn conditional_access_policies_parse_and_follow_paging() {
     let server = MockServer::start().await;
     let uri = server.uri();
