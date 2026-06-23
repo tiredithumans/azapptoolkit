@@ -1975,6 +1975,36 @@ h3 {
 }
 .permission-picker__row-note--warn { color: var(--danger); }
 .permission-picker__row-note--ok { color: var(--ok); }
+/* The row's cart checkbox sits in the grid's trailing column (where the Grant
+   button used to). */
+.permission-picker__check {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+/* The "Grant access" wizard's selection cart: removable chips above the picker. */
+.scope-wizard__cart {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+}
+.scope-wizard__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill, 999px);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.scope-wizard__chip:hover { border-color: var(--danger); }
 
 /* =====================================================================
  * UI primitives (.ui-*) — used by src/components/ui/*

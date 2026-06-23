@@ -1,8 +1,8 @@
-//! "Grant scoped access" wizard — one guided flow to confine a Graph application
-//! permission to specific resources, dispatching on the scoping mechanism
-//! (`azapptoolkit_core::scoping::ScopeKind`). The UX shell is uniform — pick
-//! permissions → choose targets → review & grant — while Step 2's target panel
-//! and Step 3's apply call vary per mechanism:
+//! "Grant access" wizard — one guided flow to grant Graph permissions and,
+//! where the mechanism allows, confine them to specific resources. The shell is
+//! uniform — **select permissions → choose access → review & grant** — while the
+//! "choose access" step's target panel and the apply call vary by scoping
+//! mechanism (`azapptoolkit_core::scoping::ScopeKind`):
 //!
 //! - **Exchange RBAC** (mail/calendar/contacts) → confine to a mailbox group;
 //!   declare-only (no org-wide Entra grant is ever created), access comes from the
@@ -11,13 +11,13 @@
 //!   (`convert_site_access_to_selected` grants the narrow role + per-site access
 //!   and strips the broad grant).
 //!
-//! A de-emphasized org-wide option stays for the rare permission that needs
-//! tenant-wide reach. **One mechanism per run** — picking a permission locks the
-//! checklist to its mechanism (scope the other mechanism in a separate pass).
-//! Opening with `preseed = Some(value)` jumps straight to the target step for that
-//! permission (the per-row "Scope…" entry).
-
-use std::collections::HashMap;
+//! Step 1 is the full live permission catalog (the [`PermissionPicker`]) as a
+//! multi-select cart, so any permission — scopable or not — can be granted from
+//! here. Scoped targets are offered **only** when the whole cart is one scopable
+//! mechanism (all mailbox, or all SharePoint); mixed / non-scopable / delegated
+//! selections grant org-wide. **One mechanism per run.** Opening with
+//! `preseed = Some(selection)` seeds the cart with that one permission and jumps
+//! to the choose-access step (the per-row "Scope…" entry).
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize, Textarea};
@@ -26,6 +26,7 @@ use crate::bindings::exchange::{self, ExchangeScopeGroupDto};
 use crate::bindings::{auth, managed_identity, permissions, sharepoint};
 use crate::components::group_autocomplete::GroupAutocomplete;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
+use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
 use crate::components::requires_role::RequiresRole;
 use crate::components::site_selection_panel::SiteSelectionPanel;
 use crate::hooks::use_escape::use_escape;
@@ -36,14 +37,11 @@ use azapptoolkit_core::scoping::{scope_kind, ScopeKind};
 use azapptoolkit_dto::permissions::PermissionKind;
 use azapptoolkit_dto::UiError;
 
-/// Microsoft Graph's well-known resource appId — the resource every scopable
-/// application permission here lives on.
-const GRAPH_APP_ID: &str = "00000003-0000-0000-c000-000000000000";
-
 /// Everything the wizard needs about the principal, across mechanisms.
 /// `object_id` is the app-registration object id (drives the Exchange
-/// declare-only manifest path) — `None` for a bare service principal (enterprise
-/// app / managed identity). `sp_object_id` receives `Sites.Selected` / scoped
+/// declare-only manifest path, and enables delegated permissions) — `None` for a
+/// bare service principal (enterprise app / managed identity), whose org-wide
+/// grants are app-role-only. `sp_object_id` receives `Sites.Selected` / scoped
 /// roles and is always required.
 #[derive(Clone, Default)]
 pub struct ScopeTarget {
@@ -54,44 +52,10 @@ pub struct ScopeTarget {
     pub is_managed_identity: bool,
 }
 
-/// The Exchange-scopable mail permissions shown first (the common case).
-const PRIMARY_PERMS: &[(&str, &str)] = &[
-    ("Mail.Read", "Read mail"),
-    ("Mail.ReadWrite", "Read and write mail"),
-    ("Mail.Send", "Send mail as the mailbox"),
-];
-
-/// Additional Exchange-scopable permissions behind the "More" expander.
-const MORE_PERMS: &[(&str, &str)] = &[
-    ("Mail.ReadBasic.All", "Read basic mail (envelope only)"),
-    ("Calendars.Read", "Read calendars"),
-    ("Calendars.ReadWrite", "Read and write calendars"),
-    ("Contacts.Read", "Read contacts"),
-    ("Contacts.ReadWrite", "Read and write contacts"),
-    ("MailboxSettings.Read", "Read mailbox settings"),
-    (
-        "MailboxSettings.ReadWrite",
-        "Read and write mailbox settings",
-    ),
-];
-
-/// The SharePoint `Sites.*` permissions, scopable via `Sites.Selected`.
-const SHAREPOINT_PERMS: &[(&str, &str)] = &[
-    ("Sites.Read.All", "Read items in site collections"),
-    (
-        "Sites.ReadWrite.All",
-        "Read and write items in site collections",
-    ),
-    (
-        "Sites.Manage.All",
-        "Manage lists and items in site collections",
-    ),
-    ("Sites.FullControl.All", "Full control of site collections"),
-];
-
 /// How step 2 confines (or doesn't) the granted permissions. Which options apply
 /// depends on the inferred mechanism (Managed/Existing for Exchange, Sites for
-/// SharePoint; OrgWide for both).
+/// SharePoint; OrgWide for both, and the only option when the cart isn't
+/// homogeneously scopable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScopeMode {
     Managed,
@@ -106,18 +70,6 @@ fn default_mode(kind: ScopeKind) -> ScopeMode {
         ScopeKind::Exchange => ScopeMode::Managed,
         ScopeKind::SharePoint => ScopeMode::Sites,
     }
-}
-
-/// Resolves Microsoft Graph's application-permission `value -> id` map, needed to
-/// declare/grant a permission on an app registration (the bare-SP path grants by
-/// value and skips this).
-async fn graph_app_role_ids(tenant_id: &str) -> Result<HashMap<String, String>, UiError> {
-    let perms = permissions::list_resource_permissions(tenant_id, GRAPH_APP_ID).await?;
-    Ok(perms
-        .app_roles
-        .into_iter()
-        .map(|r| (r.value, r.id))
-        .collect())
 }
 
 fn exchange_summary(r: &exchange::ExchangeAccessResult) -> String {
@@ -145,29 +97,28 @@ fn sharepoint_summary(r: &sharepoint::SiteScopeResult) -> String {
     s
 }
 
+/// Comma-joined permission values for the review line / summaries.
+fn perm_values(items: &[PickerSelection]) -> Vec<String> {
+    items.iter().map(|i| i.permission_value.clone()).collect()
+}
+
 /// Exchange scoped path: declare each permission without an org-wide grant (app
-/// registration only), then assign the scoped Exchange RBAC roles + strip any
-/// org-wide grant so scoping bites.
+/// registration only) — using the id the cart already carries — then assign the
+/// scoped Exchange RBAC roles + strip any org-wide grant so scoping bites.
 async fn apply_exchange_scoped(
     tenant_id: String,
     target: ScopeTarget,
-    perms: Vec<String>,
+    items: Vec<PickerSelection>,
     groups: Vec<String>,
 ) -> Result<String, UiError> {
+    let perms = perm_values(&items);
     if let Some(object_id) = &target.object_id {
-        let ids = graph_app_role_ids(&tenant_id).await?;
-        for p in &perms {
-            let id = ids.get(p).ok_or_else(|| {
-                UiError::validation(
-                    "unknown_permission",
-                    format!("{p} is not a Microsoft Graph application permission"),
-                )
-            })?;
+        for item in &items {
             permissions::declare_app_permission(
                 &tenant_id,
                 object_id,
-                GRAPH_APP_ID,
-                id,
+                &item.resource_app_id,
+                &item.permission_id,
                 PermissionKind::Application,
             )
             .await?;
@@ -224,28 +175,24 @@ async fn apply_sharepoint_scoped(
     Ok(sharepoint_summary(&r))
 }
 
-/// Rare path: grant the permissions org-wide (no scoping). Mechanism-agnostic —
-/// app registrations go through `grant_single_permission` per value; bare service
-/// principals get a single app-role grant by value.
+/// Org-wide path: grant the permissions with tenant-wide reach (no scoping).
+/// App registrations grant each `(resource, permission, kind)` directly — so any
+/// resource and delegated scopes work. Bare service principals get app-role
+/// grants by value, one call per resource.
 async fn apply_orgwide(
     tenant_id: String,
     target: ScopeTarget,
-    perms: Vec<String>,
+    items: Vec<PickerSelection>,
 ) -> Result<String, UiError> {
     if let Some(object_id) = &target.object_id {
-        let ids = graph_app_role_ids(&tenant_id).await?;
         let mut failures: Vec<String> = Vec::new();
-        for p in &perms {
-            let Some(id) = ids.get(p) else {
-                failures.push(format!("{p}: not a Graph application permission"));
-                continue;
-            };
+        for item in &items {
             match permissions::grant_single_permission(
                 &tenant_id,
                 object_id,
-                GRAPH_APP_ID,
-                id,
-                PermissionKind::Application,
+                &item.resource_app_id,
+                &item.permission_id,
+                item.kind,
             )
             .await
             {
@@ -253,7 +200,7 @@ async fn apply_orgwide(
                 Err(e) => return Err(e),
             }
         }
-        let mut s = format!("Granted {} permission(s) org-wide.", perms.len());
+        let mut s = format!("Granted {} permission(s) org-wide.", items.len());
         if !failures.is_empty() {
             s.push_str(&format!(
                 " {} issue(s): {}",
@@ -263,23 +210,39 @@ async fn apply_orgwide(
         }
         Ok(s)
     } else {
-        let r = managed_identity::grant_managed_identity_permission(
-            &tenant_id,
-            &target.sp_object_id,
-            GRAPH_APP_ID,
-            &perms,
-        )
-        .await?;
-        let mut s = format!("Granted {} permission(s) org-wide", r.granted.len());
-        if !r.skipped.is_empty() {
-            s.push_str(&format!(", {} already present", r.skipped.len()));
+        // Bare SP: app-role grants only, grouped by resource (one call each).
+        let mut by_resource: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for item in &items {
+            by_resource
+                .entry(item.resource_app_id.clone())
+                .or_default()
+                .push(item.permission_value.clone());
+        }
+        let (mut granted, mut skipped) = (0usize, 0usize);
+        let mut failures: Vec<String> = Vec::new();
+        for (resource, values) in &by_resource {
+            let r = managed_identity::grant_managed_identity_permission(
+                &tenant_id,
+                &target.sp_object_id,
+                resource,
+                values,
+            )
+            .await?;
+            granted += r.granted.len();
+            skipped += r.skipped.len();
+            failures.extend(r.failures);
+        }
+        let mut s = format!("Granted {granted} permission(s) org-wide");
+        if skipped > 0 {
+            s.push_str(&format!(", {skipped} already present"));
         }
         s.push('.');
-        if !r.failures.is_empty() {
+        if !failures.is_empty() {
             s.push_str(&format!(
                 " {} issue(s): {}",
-                r.failures.len(),
-                r.failures.join("; ")
+                failures.len(),
+                failures.join("; ")
             ));
         }
         Ok(s)
@@ -290,10 +253,11 @@ async fn apply_orgwide(
 pub fn ScopeWizard(
     #[prop(into)] open: Signal<bool>,
     #[prop(into)] target: Signal<ScopeTarget>,
-    /// When set on open, pre-selects this permission and jumps to the target step
-    /// (the per-row "Scope…" entry). `None` opens a blank pick step.
+    /// When set on open, seeds the cart with this permission and jumps to the
+    /// choose-access step (the per-row "Scope…" entry). `None` opens a blank
+    /// select step.
     #[prop(into)]
-    preseed: Signal<Option<String>>,
+    preseed: Signal<Option<PickerSelection>>,
     #[prop(into)] on_close: Callback<()>,
     /// Fired after a successful grant so the host refreshes detail + scope badges.
     #[prop(into)]
@@ -301,10 +265,19 @@ pub fn ScopeWizard(
 ) -> impl IntoView {
     let session = use_session();
     let app_id = Signal::derive(move || target.with(|t| t.app_id.clone()));
+    let tenant_for_picker: Signal<Option<String>> =
+        Signal::derive(move || session.active_tenant.get().map(|t| t.tenant_id.clone()));
+    // App registrations (manifest present) can grant delegated scopes; a bare
+    // service principal (MI / enterprise app) only takes app-role grants, so
+    // restrict its picker to Application permissions.
+    let picker_mode = if target.with_untracked(|t| t.object_id.is_some()) {
+        PickerMode::AppAndDelegated
+    } else {
+        PickerMode::ApplicationOnly
+    };
 
     let step = RwSignal::new(0u8);
-    let selected: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
-    let show_more = RwSignal::new(false);
+    let selected: RwSignal<Vec<PickerSelection>> = RwSignal::new(Vec::new());
     let scope_mode = RwSignal::new(ScopeMode::Managed);
 
     // Exchange target state.
@@ -318,10 +291,32 @@ pub fn ScopeWizard(
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let needs_consent = RwSignal::new(false);
 
-    // The single mechanism this run scopes — inferred from the first picked
-    // permission (the checklist locks to it).
-    let mechanism =
-        Signal::derive(move || selected.with(|s| s.first().and_then(|v| scope_kind(v))));
+    // The single mechanism this run scopes: `Some(k)` only when the cart is
+    // non-empty and every item is an Application permission mapping to the same
+    // `ScopeKind`; otherwise `None` (org-wide only). Delegated scopes never
+    // scope, so they force `None`.
+    let mechanism = Signal::derive(move || {
+        selected.with(|s| {
+            if s.is_empty() {
+                return None;
+            }
+            let mut kind: Option<ScopeKind> = None;
+            for item in s {
+                if item.kind != PermissionKind::Application {
+                    return None;
+                }
+                match scope_kind(&item.permission_value) {
+                    Some(k) => match kind {
+                        None => kind = Some(k),
+                        Some(prev) if prev == k => {}
+                        _ => return None,
+                    },
+                    None => return None,
+                }
+            }
+            kind
+        })
+    });
 
     use_escape(
         move || open.get_untracked() && !busy.get_untracked(),
@@ -333,7 +328,6 @@ pub fn ScopeWizard(
     let reset = move || {
         step.set(0);
         selected.set(Vec::new());
-        show_more.set(false);
         scope_mode.set(ScopeMode::Managed);
         existing_groups.set(String::new());
         group_state.set(None);
@@ -349,47 +343,46 @@ pub fn ScopeWizard(
     };
 
     // Pre-seed on open: a row "Scope…" opens the wizard with one permission
-    // already chosen, jumping to the target step for its mechanism.
+    // already in the cart, jumping to the choose-access step for its mechanism.
     Effect::new(move |_| {
         if open.get() {
-            if let Some(v) = preseed.get_untracked() {
-                if let Some(k) = scope_kind(&v) {
+            if let Some(sel) = preseed.get_untracked() {
+                if let Some(k) = scope_kind(&sel.permission_value) {
                     if k == ScopeKind::SharePoint {
-                        site_write.set(v != "Sites.Read.All");
+                        site_write.set(sel.permission_value != "Sites.Read.All");
                     }
                     scope_mode.set(default_mode(k));
-                    selected.set(vec![v]);
-                    step.set(1);
                 }
+                selected.set(vec![sel]);
+                step.set(1);
             }
         }
     });
 
-    let toggle = move |value: String| {
-        selected.update(|s| {
-            if let Some(pos) = s.iter().position(|v| v == &value) {
-                s.remove(pos);
-            } else {
-                s.push(value.clone());
+    // Add/remove a permission from the cart, then re-anchor the scope mode to the
+    // resulting mechanism's default (org-wide when the cart isn't scopable).
+    let toggle =
+        move |sel: PickerSelection| {
+            selected.update(|s| {
+                if let Some(pos) = s.iter().position(|x| x == &sel) {
+                    s.remove(pos);
+                } else {
+                    s.push(sel.clone());
+                }
+            });
+            error.set(None);
+            match mechanism.get_untracked() {
+                Some(ScopeKind::SharePoint) => {
+                    site_write.set(selected.with_untracked(|s| {
+                        s.iter().any(|i| i.permission_value != "Sites.Read.All")
+                    }));
+                    scope_mode.set(ScopeMode::Sites);
+                }
+                Some(k) => scope_mode.set(default_mode(k)),
+                None => scope_mode.set(ScopeMode::OrgWide),
             }
-        });
-        // Entering SharePoint mode: default the role from the picked permission.
-        if scope_kind(&value) == Some(ScopeKind::SharePoint) {
-            site_write.set(value != "Sites.Read.All");
-        }
-        // Re-anchor the scope mode to the (possibly new) mechanism's default.
-        if let Some(k) = selected.with_untracked(|s| s.first().and_then(|v| scope_kind(v))) {
-            scope_mode.set(default_mode(k));
-        }
-        error.set(None);
-    };
-
-    // A checklist row is disabled once a different mechanism is locked in.
-    let locked_out = move |value: &str| {
-        mechanism
-            .get()
-            .is_some_and(|m| Some(m) != scope_kind(value))
-    };
+        };
+    let on_toggle = Callback::new(move |sel: PickerSelection| toggle(sel));
 
     let run_apply = move || {
         if busy.get_untracked() {
@@ -398,63 +391,66 @@ pub fn ScopeWizard(
         let Some(t) = session.active_tenant.get_untracked() else {
             return;
         };
-        let perms = selected.get_untracked();
-        if perms.is_empty() {
+        let items = selected.get_untracked();
+        if items.is_empty() {
             error.set(Some("Select at least one permission.".into()));
             return;
         }
-        let Some(kind) = mechanism.get_untracked() else {
-            return;
-        };
         let mode = scope_mode.get_untracked();
         let tenant_id = t.tenant_id.clone();
         let target = target.get_untracked();
 
         // Resolve targets for the scoped modes up front so a missing selection
-        // fails fast with a clear message.
+        // fails fast with a clear message. Org-wide needs no mechanism.
         enum Plan {
             ExchangeScoped(Vec<String>),
             SharePointScoped(Vec<String>, &'static str),
             OrgWide,
         }
-        let plan = match (kind, mode) {
-            (_, ScopeMode::OrgWide) => Plan::OrgWide,
-            (ScopeKind::Exchange, ScopeMode::Managed) => match group_state.get_untracked() {
-                Some(Ok(g)) if g.exists => Plan::ExchangeScoped(vec![g
-                    .primary_smtp_address
-                    .clone()
-                    .unwrap_or(g.group_name.clone())]),
-                _ => {
-                    error.set(Some(
-                        "Add at least one mailbox to the managed group first — that creates the group to scope to.".into(),
-                    ));
-                    return;
+        let plan = if mode == ScopeMode::OrgWide {
+            Plan::OrgWide
+        } else {
+            let Some(kind) = mechanism.get_untracked() else {
+                return;
+            };
+            match (kind, mode) {
+                (ScopeKind::Exchange, ScopeMode::Managed) => match group_state.get_untracked() {
+                    Some(Ok(g)) if g.exists => Plan::ExchangeScoped(vec![g
+                        .primary_smtp_address
+                        .clone()
+                        .unwrap_or(g.group_name.clone())]),
+                    _ => {
+                        error.set(Some(
+                            "Add at least one mailbox to the managed group first — that creates the group to scope to.".into(),
+                        ));
+                        return;
+                    }
+                },
+                (ScopeKind::Exchange, ScopeMode::Existing) => {
+                    let g = parse_lines(&existing_groups.get_untracked());
+                    if g.is_empty() {
+                        error.set(Some(
+                            "Enter at least one group identifier (one per line).".into(),
+                        ));
+                        return;
+                    }
+                    Plan::ExchangeScoped(g)
                 }
-            },
-            (ScopeKind::Exchange, ScopeMode::Existing) => {
-                let g = parse_lines(&existing_groups.get_untracked());
-                if g.is_empty() {
-                    error.set(Some(
-                        "Enter at least one group identifier (one per line).".into(),
-                    ));
-                    return;
+                (ScopeKind::SharePoint, ScopeMode::Sites) => {
+                    let urls = parse_lines(&site_urls.get_untracked());
+                    if urls.is_empty() {
+                        error.set(Some("Enter at least one site URL (one per line).".into()));
+                        return;
+                    }
+                    let role = if site_write.get_untracked() {
+                        "write"
+                    } else {
+                        "read"
+                    };
+                    Plan::SharePointScoped(urls, role)
                 }
-                Plan::ExchangeScoped(g)
+                _ => return,
             }
-            (ScopeKind::SharePoint, ScopeMode::Sites) => {
-                let urls = parse_lines(&site_urls.get_untracked());
-                if urls.is_empty() {
-                    error.set(Some("Enter at least one site URL (one per line).".into()));
-                    return;
-                }
-                let role = if site_write.get_untracked() {
-                    "write"
-                } else {
-                    "read"
-                };
-                Plan::SharePointScoped(urls, role)
-            }
-            _ => return,
         };
 
         busy.set(true);
@@ -462,9 +458,9 @@ pub fn ScopeWizard(
         needs_consent.set(false);
         leptos::task::spawn_local(async move {
             let res = match plan {
-                Plan::OrgWide => apply_orgwide(tenant_id, target, perms).await,
+                Plan::OrgWide => apply_orgwide(tenant_id, target, items).await,
                 Plan::ExchangeScoped(groups) => {
-                    apply_exchange_scoped(tenant_id, target, perms, groups).await
+                    apply_exchange_scoped(tenant_id, target, items, groups).await
                 }
                 Plan::SharePointScoped(urls, role) => {
                     apply_sharepoint_scoped(tenant_id, target, urls, role).await
@@ -520,7 +516,7 @@ pub fn ScopeWizard(
     let step0_ready = move || selected.with(|s| !s.is_empty());
 
     let review_line = move || {
-        let perms = selected.get().join(", ");
+        let perms = selected.with(|s| perm_values(s).join(", "));
         match scope_mode.get() {
             ScopeMode::OrgWide => format!(
                 "Grant {perms} org-wide. The app will reach EVERY resource in the tenant — use only when the permission genuinely needs tenant-wide reach.",
@@ -534,28 +530,6 @@ pub fn ScopeWizard(
         }
     };
 
-    let perm_checklist = move |perms: &'static [(&'static str, &'static str)]| {
-        perms
-            .iter()
-            .map(|(value, label)| {
-                let v = value.to_string();
-                let v2 = value.to_string();
-                let v3 = value.to_string();
-                view! {
-                    <label class="checkbox-row">
-                        <input
-                            type="checkbox"
-                            prop:checked=move || selected.with(|s| s.iter().any(|x| x == &v))
-                            prop:disabled=move || locked_out(&v3)
-                            on:change=move |_| toggle(v2.clone())
-                        />
-                        <span><span class="mono">{*value}</span> " — " {*label}</span>
-                    </label>
-                }
-            })
-            .collect_view()
-    };
-
     view! {
         <Show when=move || open.get() fallback=|| view! { <></> }>
             <div
@@ -565,38 +539,28 @@ pub fn ScopeWizard(
                 aria-labelledby="scope-wizard-title"
             >
                 <div class="modal modal--wide" node_ref=modal_ref>
-                    <h3 id="scope-wizard-title">"Grant scoped access"</h3>
+                    <h3 id="scope-wizard-title">"Grant access"</h3>
                     <div class="sso-wizard__steps">
                         <Body1 class="hint">
                             {move || match step.get() {
-                                0 => "Step 1 of 3 — Permissions",
-                                1 => "Step 2 of 3 — Targets",
+                                0 => "Step 1 of 3 — Select permissions",
+                                1 => "Step 2 of 3 — Choose access",
                                 _ => "Step 3 of 3 — Review & grant",
                             }}
                         </Body1>
                     </div>
 
-                    // ---- Step 0: permissions ----
+                    // ---- Step 0: select permissions (full catalog, multi-select) ----
                     <Show when=move || step.get() == 0 fallback=|| ()>
-                        <Body1 class="hint">
-                            "Choose the permissions to grant. You'll confine them to specific mailboxes or sites next; once you pick one, the rest lock to that mechanism (scope the other separately)."
-                        </Body1>
-                        <strong>"Mailbox access"</strong>
-                        <div class="checkbox-list">{move || perm_checklist(PRIMARY_PERMS)}</div>
-                        <Button
-                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                            on_click=Box::new(move |_| show_more.update(|m| *m = !*m))
-                        >
-                            {move || if show_more.get() { "Fewer mailbox permissions" } else { "More mailbox permissions" }}
-                        </Button>
-                        <Show when=move || show_more.get() fallback=|| ()>
-                            <div class="checkbox-list">{move || perm_checklist(MORE_PERMS)}</div>
-                        </Show>
-                        <strong>"SharePoint site access"</strong>
-                        <div class="checkbox-list">{move || perm_checklist(SHAREPOINT_PERMS)}</div>
+                        <SelectPermissionsStep
+                            tenant_id=tenant_for_picker
+                            mode=picker_mode
+                            selected=selected
+                            on_toggle=on_toggle
+                        />
                     </Show>
 
-                    // ---- Step 1: targets (dispatched on mechanism) ----
+                    // ---- Step 1: choose access (dispatched on mechanism) ----
                     <Show when=move || step.get() == 1 fallback=|| ()>
                         <Show
                             when=move || mechanism.get() == Some(ScopeKind::Exchange)
@@ -641,15 +605,40 @@ pub fn ScopeWizard(
                             </Show>
                         </Show>
 
-                        <label class="radio-row">
-                            <input
-                                type="radio"
-                                name="scope-mode"
-                                prop:checked=move || scope_mode.get() == ScopeMode::OrgWide
-                                on:change=move |_| scope_mode.set(ScopeMode::OrgWide)
-                            />
-                            <span class="muted">"Org-wide — no scoping (rare)"</span>
-                        </label>
+                        // Org-wide: a de-emphasized alternative when the cart is
+                        // scopable; the only path otherwise.
+                        {move || {
+                            mechanism
+                                .get()
+                                .is_some()
+                                .then(|| {
+                                    view! {
+                                        <label class="radio-row">
+                                            <input
+                                                type="radio"
+                                                name="scope-mode"
+                                                prop:checked=move || {
+                                                    scope_mode.get() == ScopeMode::OrgWide
+                                                }
+                                                on:change=move |_| scope_mode.set(ScopeMode::OrgWide)
+                                            />
+                                            <span class="muted">"Org-wide — no scoping (rare)"</span>
+                                        </label>
+                                    }
+                                })
+                        }}
+                        {move || {
+                            mechanism
+                                .get()
+                                .is_none()
+                                .then(|| {
+                                    view! {
+                                        <Body1 class="hint">
+                                            "These permissions can't be scoped together — they'll be granted org-wide. To scope instead, select only mailbox permissions, or only SharePoint site permissions, in one pass."
+                                        </Body1>
+                                    }
+                                })
+                        }}
                         <Show when=move || scope_mode.get() == ScopeMode::OrgWide fallback=|| ()>
                             <div class="alert alert--warn">
                                 <Body1>
@@ -732,5 +721,51 @@ pub fn ScopeWizard(
                 </div>
             </div>
         </Show>
+    }
+}
+
+/// Step 1: the full live permission catalog as a multi-select cart. The picker
+/// emits toggles; this renders the running cart (removable chips) above it.
+#[component]
+fn SelectPermissionsStep(
+    #[prop(into)] tenant_id: Signal<Option<String>>,
+    mode: PickerMode,
+    selected: RwSignal<Vec<PickerSelection>>,
+    on_toggle: Callback<PickerSelection>,
+) -> impl IntoView {
+    view! {
+        <Body1 class="hint">
+            "Choose the permissions to grant. You'll decide how to grant them — org-wide, or scoped to specific mailboxes or sites — next."
+        </Body1>
+        {move || {
+            let items = selected.get();
+            (!items.is_empty())
+                .then(|| {
+                    view! {
+                        <div class="scope-wizard__cart">
+                            <span class="hint">{format!("{} selected", items.len())}</span>
+                            {items
+                                .into_iter()
+                                .map(|item| {
+                                    let sel = item.clone();
+                                    let label = item.permission_value.clone();
+                                    view! {
+                                        <button
+                                            type="button"
+                                            class="scope-wizard__chip"
+                                            title="Remove"
+                                            on:click=move |_| on_toggle.run(sel.clone())
+                                        >
+                                            <span class="mono">{label}</span>
+                                            " ✕"
+                                        </button>
+                                    }
+                                })
+                                .collect_view()}
+                        </div>
+                    }
+                })
+        }}
+        <PermissionPicker tenant_id=tenant_id mode=mode selected=selected on_toggle=on_toggle />
     }
 }

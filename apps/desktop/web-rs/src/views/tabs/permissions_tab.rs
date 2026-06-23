@@ -17,7 +17,7 @@ use crate::bindings::permissions::{self, GrantResult};
 use crate::bindings::usage;
 use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
 use crate::components::icon::IconName;
-use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
+use crate::components::permission_picker::PickerSelection;
 use crate::components::requires_role::RequiresRole;
 use crate::components::scope_badge::{
     is_exchange_scopable, is_sharepoint_orgwide, permission_scope_cell,
@@ -158,12 +158,11 @@ pub fn PermissionsTab(
     let consenting = RwSignal::new(false);
     let consent_error: RwSignal<Option<String>> = RwSignal::new(None);
     let consent_result: RwSignal<Option<GrantResult>> = RwSignal::new(None);
-    let picker_open = RwSignal::new(false);
-    // The "grant scoped access" wizard — always reachable, so scoping is the
-    // obvious first move. `wizard_preseed` carries a permission value when a row's
-    // "Scope…" opens the wizard pre-selected; None opens a blank pick step.
+    // The unified "Grant access" wizard — always reachable, so adding/scoping is
+    // the obvious first move. `wizard_preseed` carries a permission selection when
+    // a row's "Scope…" opens the wizard pre-selected; None opens a blank select step.
     let wizard_open = RwSignal::new(false);
-    let wizard_preseed: RwSignal<Option<String>> = RwSignal::new(None);
+    let wizard_preseed: RwSignal<Option<PickerSelection>> = RwSignal::new(None);
     let wizard_target = Signal::derive(move || {
         detail.with(|d| ScopeTarget {
             object_id: Some(d.application.id.clone()),
@@ -250,52 +249,11 @@ pub fn PermissionsTab(
         )
     };
 
-    let tenant_for_picker: Signal<Option<String>> =
-        Signal::derive(move || session.active_tenant.get().map(|t| t.tenant_id.clone()));
-
-    let do_grant_one = Callback::new(move |sel: PickerSelection| {
-        if cmd.busy.get() {
-            return;
-        }
-        let object_id = detail.with(|d| d.application.id.clone());
-        cmd.run(
-            move |r: GrantResult| {
-                on_changed.run(());
-                if !r.failures.is_empty() {
-                    // The manifest declaration landed but the runtime grant
-                    // didn't (commonly: the signed-in user can't self-consent).
-                    // Say so — the row now shows "Not granted" with a Remove
-                    // (trash) affordance, and admin consent stays available.
-                    let why = r
-                        .failures
-                        .iter()
-                        .map(|f| f.message.clone())
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    cmd.error.set(Some(format!(
-                        "Permission declared, but the grant wasn’t created: {why}. \
-                         Grant admin consent, or remove it.",
-                    )));
-                }
-            },
-            move |tenant_id| async move {
-                permissions::grant_single_permission(
-                    &tenant_id,
-                    &object_id,
-                    &sel.resource_app_id,
-                    &sel.permission_id,
-                    sel.kind,
-                )
-                .await
-            },
-        );
-    });
-
     // A row's "Scope…" opens the wizard pre-selected to that permission, jumping
-    // to its target step. The wizard infers the mechanism, so `kind` is unused.
-    let open_scope = move |permission_value: String, _kind: ScopeKind| {
+    // to the choose-access step. The wizard infers the mechanism from it.
+    let open_scope = move |sel: PickerSelection| {
         cmd.error.set(None);
-        wizard_preseed.set(Some(permission_value));
+        wizard_preseed.set(Some(sel));
         wizard_open.set(true);
     };
 
@@ -422,19 +380,7 @@ pub fn PermissionsTab(
                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                         on_click=Box::new(move |_| wizard_open.set(true))
                     >
-                        "Grant mailbox access…"
-                    </Button>
-                    <Button
-                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                        on_click=Box::new(move |_| picker_open.update(|v| *v = !*v))
-                    >
-                        {move || {
-                            if picker_open.get() {
-                                view! { "Hide picker" }.into_any()
-                            } else {
-                                view! { "Add permission" }.into_any()
-                            }
-                        }}
+                        "Grant access"
                     </Button>
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Primary)
@@ -464,20 +410,6 @@ pub fn PermissionsTab(
                 })
                 on_changed=on_changed
             />
-            {move || {
-                picker_open
-                    .get()
-                    .then(|| {
-                        view! {
-                            <PermissionPicker
-                                tenant_id=tenant_for_picker
-                                mode=PickerMode::AppAndDelegated
-                                on_grant=do_grant_one
-                                busy=Signal::derive(move || cmd.busy.get())
-                            />
-                        }
-                    })
-            }}
             {move || cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
             <div class="permissions-tab__filters">
                 <button
@@ -897,7 +829,7 @@ where
     RevApp: Fn(String) + Send + Sync + Copy + 'static,
     RevDel: Fn(String, String) + Send + Sync + Copy + 'static,
     Remove: Fn(String, String, PermissionKind) + Send + Sync + Copy + 'static,
-    Scope: Fn(String, ScopeKind) + Send + Sync + Copy + 'static,
+    Scope: Fn(PickerSelection) + Send + Sync + Copy + 'static,
     Downgrade: Fn(String, String) + Send + Sync + Copy + 'static,
 {
     let resource_display = p
@@ -987,9 +919,17 @@ where
     // restricted per row after the fact — an org-wide Sites.* (mail scoping is
     // app-wide, handled by the "Exchange scoping" section, not this button).
     let scope_button = match (permission_kind, granted, scope_value.as_deref()) {
-        (PermissionKind::Application, true, Some(value)) => row_scope_kind(value).map(|kind| {
-            let value = value.to_string();
-            let on_click = move |_| scope(value.clone(), kind);
+        // A held-scopable row is always a Microsoft Graph `Sites.*` application
+        // role, so the selection is fully determined here; the wizard infers the
+        // mechanism from it.
+        (PermissionKind::Application, true, Some(value)) => row_scope_kind(value).map(|_kind| {
+            let sel = PickerSelection {
+                resource_app_id: p.resource_app_id.clone(),
+                kind: PermissionKind::Application,
+                permission_id: p.permission_id.clone(),
+                permission_value: value.to_string(),
+            };
+            let on_click = move |_| scope(sel.clone());
             view! {
                 <IconButton
                     icon=IconName::Filter

@@ -6,9 +6,7 @@ use std::sync::Arc;
 
 use leptos::prelude::*;
 
-use crate::bindings::managed_identity::{
-    GrantManagedIdentityResult, ManagedIdentityDto, MiSubtype,
-};
+use crate::bindings::managed_identity::{ManagedIdentityDto, MiSubtype};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::constants::*;
 use crate::state::use_session;
@@ -28,7 +26,6 @@ pub(super) fn render_row(
     idx: usize,
     mi: ManagedIdentityDto,
     selected_id: RwSignal<Option<String>>,
-    result: RwSignal<Option<GrantManagedIdentityResult>>,
     error: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let session = use_session();
@@ -63,7 +60,6 @@ pub(super) fn render_row(
                 type="button"
                 on:click=move |_| {
                     session.set_selected_managed_identity(Some(id_for_click.to_string()));
-                    result.set(None);
                     error.set(None);
                 }
             >
