@@ -1,9 +1,10 @@
-//! Searchable picker for granting a single Application or Delegated
-//! permission. The resource dropdown is the bundled directory (`appId` +
+//! Searchable picker for selecting one or more Application or Delegated
+//! permissions. The resource dropdown is the bundled directory (`appId` +
 //! name); the permissions for the selected resource — and the per-resource
 //! counts shown in the dropdown — are resolved live from Microsoft Graph. The
-//! picker is presentation-only — the parent owns the actual Tauri grant call
-//! and the busy flag.
+//! picker is presentation-only — the parent owns the selection (the "cart")
+//! and the eventual Tauri grant call: each row is a checkbox that emits a
+//! toggle, and the parent renders the running cart and the Grant action.
 
 use std::collections::HashMap;
 
@@ -12,7 +13,7 @@ use azapptoolkit_core::audit::{
 };
 use azapptoolkit_core::scoping::is_sharepoint_orgwide;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Input};
+use thaw::{Body1, Input};
 
 use crate::bindings::permissions::{
     self, CatalogResourceSummary, PermissionKind, ResourcePermissions,
@@ -37,7 +38,7 @@ pub enum PickerMode {
     AppAndDelegated,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickerSelection {
     pub resource_app_id: String,
     pub kind: PermissionKind,
@@ -49,8 +50,12 @@ pub struct PickerSelection {
 pub fn PermissionPicker(
     #[prop(into)] tenant_id: Signal<Option<String>>,
     mode: PickerMode,
-    on_grant: Callback<PickerSelection>,
-    #[prop(into)] busy: Signal<bool>,
+    /// The current selection ("cart"), owned by the parent. A row renders
+    /// checked when it appears here.
+    #[prop(into)]
+    selected: Signal<Vec<PickerSelection>>,
+    /// Add/remove a permission from the selection (the parent flips it).
+    on_toggle: Callback<PickerSelection>,
 ) -> impl IntoView {
     let resource_app_id = RwSignal::new(MICROSOFT_GRAPH_APP_ID.to_string());
     let filter = RwSignal::new(String::new());
@@ -180,8 +185,8 @@ pub fn PermissionPicker(
                                     mode=mode
                                     active_kind=kind
                                     filter=needle
-                                    busy=busy
-                                    on_grant=on_grant
+                                    selected=selected
+                                    on_toggle=on_toggle
                                 />
                             }
                                 .into_any(),
@@ -291,8 +296,8 @@ fn PermissionList(
     mode: PickerMode,
     active_kind: String,
     filter: String,
-    busy: Signal<bool>,
-    on_grant: Callback<PickerSelection>,
+    selected: Signal<Vec<PickerSelection>>,
+    on_toggle: Callback<PickerSelection>,
 ) -> impl IntoView {
     let resource_app_id = perms.app_id;
     let want_delegated = matches!(mode, PickerMode::AppAndDelegated) && active_kind == "delegated";
@@ -322,14 +327,15 @@ fn PermissionList(
                 // Delegated grant-time hints (advisory). Computed before s.value moves.
                 let drisk = delegated_risk_badge(&s.value);
                 let dhint = delegated_scope_hint(&s.value);
-                let on_click = move |_| {
-                    on_grant.run(PickerSelection {
-                        resource_app_id: resource_app_id.clone(),
-                        kind: PermissionKind::Delegated,
-                        permission_id: payload_id.clone(),
-                        permission_value: payload_value.clone(),
-                    });
+                let sel = PickerSelection {
+                    resource_app_id,
+                    kind: PermissionKind::Delegated,
+                    permission_id: payload_id,
+                    permission_value: payload_value,
                 };
+                let sel_checked = sel.clone();
+                let checked = move || selected.with(|v| v.contains(&sel_checked));
+                let on_change = move |_| on_toggle.run(sel.clone());
                 view! {
                     <li class="permission-picker__row">
                         <span class="permission-picker__row-chip">
@@ -343,13 +349,13 @@ fn PermissionList(
                             <span class="permission-picker__row-sub">{display}</span>
                             {dhint}
                         </span>
-                        <Button
-                            appearance=Signal::derive(|| ButtonAppearance::Primary)
-                            on_click=Box::new(on_click)
-                            disabled=busy
-                        >
-                            "Grant"
-                        </Button>
+                        <input
+                            type="checkbox"
+                            class="permission-picker__check"
+                            aria-label="Select permission"
+                            prop:checked=checked
+                            on:change=on_change
+                        />
                     </li>
                 }
             })
@@ -376,14 +382,15 @@ fn PermissionList(
                 let risk = app_permission_risk_badge(&r.value);
                 let hint = scope_hint(&r.value);
                 let downgrade = downgrade_hint(&r.value);
-                let on_click = move |_| {
-                    on_grant.run(PickerSelection {
-                        resource_app_id: resource_app_id.clone(),
-                        kind: PermissionKind::Application,
-                        permission_id: payload_id.clone(),
-                        permission_value: payload_value.clone(),
-                    });
+                let sel = PickerSelection {
+                    resource_app_id,
+                    kind: PermissionKind::Application,
+                    permission_id: payload_id,
+                    permission_value: payload_value,
                 };
+                let sel_checked = sel.clone();
+                let checked = move || selected.with(|v| v.contains(&sel_checked));
+                let on_change = move |_| on_toggle.run(sel.clone());
                 view! {
                     <li class="permission-picker__row">
                         <span class="permission-picker__row-chip">
@@ -398,13 +405,13 @@ fn PermissionList(
                             {hint}
                             {downgrade}
                         </span>
-                        <Button
-                            appearance=Signal::derive(|| ButtonAppearance::Primary)
-                            on_click=Box::new(on_click)
-                            disabled=busy
-                        >
-                            "Grant"
-                        </Button>
+                        <input
+                            type="checkbox"
+                            class="permission-picker__check"
+                            aria-label="Select permission"
+                            prop:checked=checked
+                            on:change=on_change
+                        />
                     </li>
                 }
             })

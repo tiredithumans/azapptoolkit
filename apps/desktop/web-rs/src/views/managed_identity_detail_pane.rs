@@ -12,14 +12,12 @@ use thaw::{Body1, Button, ButtonAppearance, Input, Select, Spinner, SpinnerSize,
 use azapptoolkit_core::audit::MailPermissionScope;
 
 use crate::bindings::auth as auth_bindings;
-use crate::bindings::managed_identity::{
-    self, AppRoleGrantDto, GrantManagedIdentityResult, ManagedIdentityDto,
-};
+use crate::bindings::managed_identity::{self, AppRoleGrantDto, ManagedIdentityDto};
 use crate::bindings::TenantContext;
 use crate::components::detail_header::DetailHeader;
 use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
-use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
+use crate::components::permission_picker::PickerSelection;
 use crate::components::requires_role::RequiresRole;
 use crate::components::scope_badge::is_exchange_scopable;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
@@ -47,8 +45,6 @@ pub fn ManagedIdentityDetailPane(
 
     // Shared state signals (all Copy — pass the same handle, never re-wrap).
     #[prop(into)] busy: RwSignal<bool>,
-    #[prop(into)] error: RwSignal<Option<String>>,
-    #[prop(into)] result: RwSignal<Option<GrantManagedIdentityResult>>,
     #[prop(into)] refreshing: RwSignal<bool>,
     #[prop(into)] consenting: RwSignal<bool>,
     #[prop(into)] consent_error: RwSignal<Option<String>>,
@@ -56,12 +52,8 @@ pub fn ManagedIdentityDetailPane(
     #[prop(into)] arm_reload: RwSignal<u32>,
     #[prop(into)] tenant: RwSignal<Option<TenantContext>>,
     #[prop(into)] selected_id: RwSignal<Option<String>>,
-    /// Tenant id for the permission picker (derived in the parent).
-    #[prop(into)]
-    tenant_for_picker: Signal<Option<String>>,
 
     // Callbacks (all defined in the parent — this pane only invokes them).
-    #[prop(into)] on_grant: Callback<PickerSelection>,
     #[prop(into)] on_revoke: Callback<(String, String)>,
     #[prop(into)] on_refresh: Callback<()>,
 ) -> impl IntoView {
@@ -76,17 +68,13 @@ pub fn ManagedIdentityDetailPane(
         .map(|e| if e { "Enabled" } else { "Disabled" })
         .unwrap_or("Unknown");
     let chip_kind = chip_kind_for(mi.mi_subtype);
-    // Reveal the permission picker behind an "Add permission" toggle, mirroring
-    // the App Registrations Permissions tab — so a long held-permissions list
-    // isn't pushed down by an always-open picker.
-    let picker_open = RwSignal::new(false);
 
-    // The "grant scoped access" wizard — always reachable, so the MI can be scoped
-    // from the start (the Exchange section only appears once it holds a mail
-    // permission). A row's "Scope…" opens it pre-selected to that permission
-    // (`wizard_preseed`); the header button opens it blank.
+    // The unified "Grant access" wizard — always reachable, so the MI can be
+    // granted/scoped from the start (the Exchange section only appears once it
+    // holds a mail permission). A row's "Scope…" opens it pre-selected to that
+    // permission (`wizard_preseed`); the header button opens it blank.
     let wizard_open = RwSignal::new(false);
-    let wizard_preseed: RwSignal<Option<String>> = RwSignal::new(None);
+    let wizard_preseed: RwSignal<Option<PickerSelection>> = RwSignal::new(None);
     let wiz_sp = mi.id.clone();
     let wiz_name = mi.display_name.clone();
     let wiz_app = mi.app_id.clone();
@@ -144,7 +132,7 @@ pub fn ManagedIdentityDetailPane(
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(move |_| wizard_open.set(true))
                 >
-                    "Grant scoped access…"
+                    "Grant access"
                 </Button>
             </header>
             <ScopeWizard
@@ -207,8 +195,8 @@ pub fn ManagedIdentityDetailPane(
                             });
                             // A held org-wide Sites.* row's "Scope…" opens the
                             // wizard pre-selected to that permission.
-                            let on_scope = Callback::new(move |value: String| {
-                                wizard_preseed.set(Some(value));
+                            let on_scope = Callback::new(move |sel: PickerSelection| {
+                                wizard_preseed.set(Some(sel));
                                 wizard_open.set(true);
                             });
                             // App-wide Exchange scoping for the MI's held mail
@@ -264,67 +252,6 @@ pub fn ManagedIdentityDetailPane(
                     })
                 }}
             </Suspense>
-        </div>
-        <div class="mi-grant">
-            <header class="row-between">
-                <h4>"Grant application permissions"</h4>
-                <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                    on_click=Box::new(move |_| picker_open.update(|v| *v = !*v))
-                >
-                    {move || {
-                        if picker_open.get() {
-                            view! { "Hide picker" }.into_any()
-                        } else {
-                            view! { "Add permission" }.into_any()
-                        }
-                    }}
-                </Button>
-            </header>
-            {move || {
-                picker_open
-                    .get()
-                    .then(|| {
-                        view! {
-                            <PermissionPicker
-                                tenant_id=tenant_for_picker
-                                mode=PickerMode::ApplicationOnly
-                                on_grant=on_grant
-                                busy=Signal::derive(move || busy.get())
-                            />
-                        }
-                    })
-            }}
-            {move || {
-                error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
-            }}
-            {move || {
-                result
-                    .get()
-                    .map(|r| {
-                        let summary = format!(
-                            "Granted {}, skipped {}, {} failure(s).",
-                            r.granted.len(),
-                            r.skipped.len(),
-                            r.failures.len(),
-                        );
-                        let failures = r.failures.clone();
-                        view! {
-                            <div class="alert alert--ok">{summary}</div>
-                            {(!failures.is_empty())
-                                .then(|| {
-                                    view! {
-                                        <ul class="warnings">
-                                            {failures
-                                                .into_iter()
-                                                .map(|f| view! { <li>{f}</li> })
-                                                .collect_view()}
-                                        </ul>
-                                    }
-                                })}
-                        }
-                    })
-            }}
         </div>
         </div>
         <div

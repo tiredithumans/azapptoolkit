@@ -4,6 +4,7 @@ use crate::bindings::graph_roles;
 use crate::bindings::permissions as permissions_bindings;
 use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
+use crate::components::permission_picker::PickerSelection;
 use crate::components::scope_badge::{is_exchange_scopable, is_sharepoint_orgwide};
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
@@ -104,12 +105,13 @@ pub(super) fn PermissionsContent(
     let display_name =
         Signal::derive(move || signal.with(|d| d.service_principal.display_name.clone()));
 
-    // The "grant scoped access" wizard — always reachable, so a bare SP can be
-    // scoped from the start (the Exchange section below only appears once the SP
-    // already holds a mail permission). A row's "Scope…" opens it pre-selected to
-    // that permission (`wizard_preseed`); the header button opens it blank.
+    // The unified "Grant access" wizard — always reachable, so a bare SP can be
+    // granted/scoped from the start (the Exchange section below only appears once
+    // the SP already holds a mail permission). A row's "Scope…" opens it
+    // pre-selected to that permission (`wizard_preseed`); the header button opens
+    // it blank.
     let wizard_open = RwSignal::new(false);
-    let wizard_preseed: RwSignal<Option<String>> = RwSignal::new(None);
+    let wizard_preseed: RwSignal<Option<PickerSelection>> = RwSignal::new(None);
     let wizard_target = Signal::derive(move || ScopeTarget {
         object_id: None,
         sp_object_id: sp_id.get(),
@@ -118,8 +120,8 @@ pub(super) fn PermissionsContent(
         is_managed_identity: false,
     });
 
-    let on_scope = Callback::new(move |value: String| {
-        wizard_preseed.set(Some(value));
+    let on_scope = Callback::new(move |sel: PickerSelection| {
+        wizard_preseed.set(Some(sel));
         wizard_open.set(true);
     });
 
@@ -156,7 +158,7 @@ pub(super) fn PermissionsContent(
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(move |_| wizard_open.set(true))
                 >
-                    "Grant mailbox access…"
+                    "Grant access"
                 </Button>
             </header>
             <p class="muted">

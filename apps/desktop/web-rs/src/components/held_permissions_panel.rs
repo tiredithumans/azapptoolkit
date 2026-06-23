@@ -10,15 +10,17 @@
 //! scope resolution (the [`MailPermissionScope`] arrives already resolved). It
 //! does **not** own the inline scope panel — in the managed-identity view that
 //! panel is shared with the grant flow — so a row's "Scope…" action just emits
-//! the permission value and the caller opens its own panel.
+//! a [`PickerSelection`] for the permission and the caller opens its own panel.
 
 use std::collections::HashMap;
 
 use azapptoolkit_core::audit::{classify_app_permission_risk, MailPermissionScope};
 use azapptoolkit_dto::managed_identity::AppRoleGrantDto;
+use azapptoolkit_dto::permissions::PermissionKind;
 use leptos::prelude::*;
 
 use crate::components::icon::IconName;
+use crate::components::permission_picker::{PickerSelection, MICROSOFT_GRAPH_APP_ID};
 use crate::components::scope_badge::{
     app_permission_risk_badge, is_sharepoint_orgwide, permission_scope_cell,
 };
@@ -51,11 +53,12 @@ pub fn HeldPermissionsPanel(
     /// rendered per row.
     #[prop(optional, into)]
     on_revoke: Option<Callback<String>>,
-    /// Restrict an already-held org-wide permission, by permission value. When
-    /// set, a "Scope…" action is rendered for held-scopable permissions; the
-    /// caller opens its own scope panel for the emitted value.
+    /// Restrict an already-held org-wide permission. When set, a "Scope…" action
+    /// is rendered for held-scopable permissions; the caller opens its own scope
+    /// panel for the emitted [`PickerSelection`] (a held-scopable permission is
+    /// always a Microsoft Graph `Sites.*` application role).
     #[prop(optional, into)]
-    on_scope: Option<Callback<String>>,
+    on_scope: Option<Callback<PickerSelection>>,
     /// When true, the per-row revoke/scope actions are disabled — the caller
     /// sets this while a mutation it owns is in flight, so a second click can't
     /// fire a duplicate revoke/scope (and the greyed buttons signal "in
@@ -106,8 +109,9 @@ pub fn HeldPermissionsPanel(
         let res = p
             .resource_display_name
             .unwrap_or_else(|| p.resource_id.clone());
+        let app_role_id = p.app_role_id.clone();
         let value = p.app_role_value.clone();
-        let perm = value.clone().unwrap_or(p.app_role_id);
+        let perm = value.clone().unwrap_or_else(|| app_role_id.clone());
         let risk = value.as_deref().map(app_permission_risk_badge);
         let scope = value.as_deref().and_then(|v| scope_map.get(v).cloned());
         let scope_value = value.clone();
@@ -115,13 +119,21 @@ pub fn HeldPermissionsPanel(
         let scope_btn = on_scope.and_then(|cb| {
             let v = value.clone()?;
             is_held_scopable(&v).then(|| {
+                // Held-scopable ⇒ a Microsoft Graph `Sites.*` application role,
+                // so the selection is fully determined here.
+                let sel = PickerSelection {
+                    resource_app_id: MICROSOFT_GRAPH_APP_ID.to_string(),
+                    kind: PermissionKind::Application,
+                    permission_id: app_role_id.clone(),
+                    permission_value: v.clone(),
+                };
                 view! {
                     <IconButton
                         icon=IconName::Filter
                         aria_label="Scope this permission".to_string()
                         title="Scope…".to_string()
                         disabled=busy
-                        on_click=Callback::new(move |_| cb.run(v.clone()))
+                        on_click=Callback::new(move |_| cb.run(sel.clone()))
                     />
                 }
             })

@@ -15,7 +15,6 @@ use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 use azapptoolkit_core::audit::MailPermissionScope;
 
 use crate::components::icon::IconName;
-use crate::components::permission_picker::PickerSelection;
 use crate::components::scope_badge::is_exchange_scopable;
 use crate::components::ui::{EmptyState, IconButton, SearchInput, SectionHeader, SkeletonList};
 use crate::components::virtual_list::VirtualList;
@@ -23,9 +22,7 @@ use crate::components::virtual_list::VirtualList;
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
 use crate::bindings::exchange as exchange_bindings;
 use crate::bindings::graph_roles;
-use crate::bindings::managed_identity::{
-    self, GrantManagedIdentityResult, ManagedIdentityDto, MiSubtype,
-};
+use crate::bindings::managed_identity::{self, ManagedIdentityDto, MiSubtype};
 use crate::bindings::permissions as permissions_bindings;
 use crate::components::filter_chip::FilterChip;
 use crate::components::saved_views::SavedViews;
@@ -76,7 +73,6 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
     // Confirmation gate for revoking a held app-role grant — a destructive,
     // irreversible server mutation. Holds (assignment_id, sp_id) while open.
     let pending_revoke: RwSignal<Option<(String, String)>> = RwSignal::new(None);
-    let result: RwSignal<Option<GrantManagedIdentityResult>> = RwSignal::new(None);
     // Bumped after a grant or revoke to refresh the permissions list.
     let reload = RwSignal::new(0_u32);
     // Bumped by the Refresh button to force the identities list to re-evaluate.
@@ -221,33 +217,6 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
         }
     });
 
-    let do_grant = Callback::new(move |sel: PickerSelection| {
-        if cmd.busy.get() {
-            return;
-        }
-        let Some(id) = selected_id.get() else {
-            return;
-        };
-        cmd.error.set(None);
-        result.set(None);
-
-        cmd.run(
-            move |r| {
-                result.set(Some(r));
-                reload.update(|n| *n += 1);
-            },
-            move |tenant_id| async move {
-                managed_identity::grant_managed_identity_permission(
-                    &tenant_id,
-                    &id,
-                    &sel.resource_app_id,
-                    std::slice::from_ref(&sel.permission_value),
-                )
-                .await
-            },
-        );
-    });
-
     let do_revoke = move |assignment_id: String, sp_id: String| {
         cmd.run(
             move |()| {
@@ -286,9 +255,6 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
             refreshing.set(false);
         });
     };
-
-    let tenant_for_picker: Signal<Option<String>> =
-        Signal::derive(move || tenant.get().map(|t| t.tenant_id.clone()));
 
     view! {
         <div class="mi-view">
@@ -367,7 +333,6 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                                 mi_filter=mi_filter
                                                 export_rows=export_rows
                                                 selected_id=selected_id
-                                                result=result
                                                 error=cmd.error
                                             />
                                         }
@@ -420,8 +385,6 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                             mail_scopes=mail_scopes
                                             azure_roles=azure_roles
                                             busy=cmd.busy
-                                            error=cmd.error
-                                            result=result
                                             refreshing=refreshing
                                             consenting=consenting
                                             consent_error=consent_error
@@ -429,8 +392,6 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                             arm_reload=arm_reload
                                             tenant=tenant
                                             selected_id=selected_id
-                                            tenant_for_picker=tenant_for_picker
-                                            on_grant=do_grant
                                             on_revoke=Callback::new(move |(aid, sp): (String, String)| {
                                                 cmd.error.set(None);
                                                 pending_revoke.set(Some((aid, sp)))
@@ -459,7 +420,6 @@ fn LoadedManagedIdentities(
     mi_filter: RwSignal<String>,
     export_rows: StoredValue<Arc<Vec<ManagedIdentityDto>>>,
     selected_id: RwSignal<Option<String>>,
-    result: RwSignal<Option<GrantManagedIdentityResult>>,
     error: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let list = use_filtered_list(FilteredListSpec {
@@ -544,7 +504,7 @@ fn LoadedManagedIdentities(
                 sizer_class="app-list__sizer"
                 key=|mi: &ManagedIdentityDto| mi.id.clone()
                 render_row=move |idx, mi| {
-                    render_row(idx, mi, selected_id, result, error).into_any()
+                    render_row(idx, mi, selected_id, error).into_any()
                 }
             />
         </Show>
