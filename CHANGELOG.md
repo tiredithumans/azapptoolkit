@@ -9,6 +9,16 @@ the project adheres to
 
 ### Changed
 
+- **Bulk delete / grant-consent now run with bounded concurrency and adaptive
+  throttling.** Both ran fully serially with a fixed 50 ms pause between items —
+  slow on the healthy path yet with no back-off under throttling. They now fan out
+  through the shared bounded-concurrency dispatcher with an adaptive
+  `ConcurrencyThrottle` (the in-flight cap halves on a Graph 429 and recovers when
+  quiet), and report the live cap to the progress UI. The expired-credential sweep
+  gains the same adaptive back-off (it had a fixed cap) and now projects only the
+  fields it reads (`passwordCredentials`) instead of full app payloads.
+- **Removed a dead, uncached `list_applications` command** that bypassed the
+  cached app-list path and had no callers.
 - **Tenant-wide reads are now cached, cutting redundant Graph traffic.** The
   service-principal sign-in activity report (a slow beta endpoint that paginates
   the whole tenant) is cached per tenant, so clicking through several apps' Activity

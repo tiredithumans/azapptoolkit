@@ -126,6 +126,13 @@ impl GraphClient {
     /// outside the batch — via `collect_all_pages`. The outer `Result` is always
     /// `Ok` (a whole-batch failure was already surfaced by `batch_get_json`'s
     /// `?`); it's kept so paged-batch helpers read uniformly with the rest.
+    ///
+    /// The overflow continuations are resolved serially (one `collect_all_pages`
+    /// at a time) **by design**: an order-preserving `join_all` would parallelize
+    /// them, but the overflow path almost never fires — federated creds cap at
+    /// ~20/app and role assignments rarely page beyond the first response — so
+    /// concurrency here is speculative. Left serial until profiling shows it
+    /// matters (a deliberate no-action item from the caching/perf assessment).
     pub(crate) async fn finish_paged_batch<T: DeserializeOwned>(
         &self,
         pages: Vec<Result<Paged<T>>>,

@@ -32,7 +32,7 @@ use chrono::{DateTime, Utc};
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::exchange::{exchange_client, resolve_mail_scopes_audit_cached};
 use crate::commands::graph_roles::graph_role_index;
-use crate::commands::throttle::ConcurrencyThrottle;
+use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::audit::{AuditProgress, AuditRunResult};
 use crate::dto::UiError;
 use crate::state::AppState;
@@ -66,18 +66,11 @@ pub async fn run_audit(
 
     let client = state.graph_for(&tenant_id);
     let tracker = Arc::new(ConcurrencyThrottle::new(INITIAL_CONCURRENCY));
-    client.set_throttle_observer(tracker.clone());
-    // Detach the observer however the run exits — the early `?` returns
-    // (e.g. app paging failure) previously left a stale tracker attached to
-    // the shared per-tenant client, halving its cap on unrelated 429s until
-    // the next audit replaced it.
-    struct ObserverGuard(Arc<GraphClient>);
-    impl Drop for ObserverGuard {
-        fn drop(&mut self) {
-            self.0.clear_throttle_observer();
-        }
-    }
-    let _observer_guard = ObserverGuard(client.clone());
+    // Detach the observer however the run exits — an early `?` return (e.g. app
+    // paging failure) previously left a stale tracker attached to the shared
+    // per-tenant client, halving its cap on unrelated 429s until the next audit
+    // replaced it. (RAII guard shared with the bulk fan-out commands.)
+    let _observer_guard = ThrottleGuard::attach(client.clone(), tracker.clone());
 
     // Effective Exchange mailbox-scoping is resolved on every run so a mail
     // permission confined to specific mailboxes scores below an org-wide one.
