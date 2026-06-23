@@ -5,7 +5,7 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-06-22
 
 ### Added
 
@@ -31,30 +31,22 @@ the project adheres to
 
 ### Internal
 
-- **Scope-mechanism registry in `azapptoolkit-core::scoping`.** Promoted the
-  `ScopeKind` enum (Exchange / SharePoint) into the shared core crate and added a
-  single `scope_kind(value)` classifier plus per-mechanism metadata
-  (`target_noun` / `capability_key` / `admin_applicable`) — one source of truth
-  for "what mechanism, if any, scopes this Graph permission?" The app-registration
-  new-grant classifier now delegates to it and `scope_panel.rs` re-exports the
-  enum. Behavior-preserving groundwork for unifying scoping (Exchange, SharePoint,
-  and future mechanisms) behind one mechanism-dispatched flow.
-- **GUI test coverage for the mailbox-access wizard.** A browser GUI test
-  (`just web-itest`) drives `ScopedMailboxWizard` end-to-end for an app
-  registration and proves the apply orchestration: the scoped path *declares*
-  each permission and assigns the scoped Exchange roles with
-  `removeUnscopedEntraGrants = true` (never `grant_single_permission`), while the
-  org-wide option grants via `grant_single_permission` and never touches Exchange
-  RBAC. Adds a typed `grant_result()` fixture.
-- **GUI test coverage for the managed-identity inline Exchange-scoping path.**
-  A browser GUI test (`just web-itest`) now drives the real Managed Identities
-  view — selecting an identity, opening the permission picker, and granting
-  `Mail.Read` — and proves that picking a scopable Microsoft Graph mail
-  permission opens the inline Exchange **scope panel** (confine to mailbox
-  group[s]) rather than granting org-wide, and that submitting it routes to the
-  scoped grant (`grant_managed_identity_scoped_exchange_access`), never the
-  org-wide one. Adds a `set_textarea_value` test-harness helper and three
-  catalog/exchange fixture builders, all behind the `test-support` feature.
+- **Scope-mechanism registry in `azapptoolkit-core::scoping`.** A single
+  `scope_kind(value)` classifier + the `ScopeKind` enum (Exchange / SharePoint) +
+  per-mechanism metadata (`target_noun` / `capability_key` / `admin_applicable`) —
+  one source of truth for which mechanism, if any, scopes a Graph permission, and
+  the dispatch key the scope wizard is built on. `admin_applicable()` is the seam
+  for future owner-consented mechanisms (e.g. Teams resource-specific consent) that
+  render guidance instead of an apply button.
+- **GUI test coverage for the scope wizard.** Browser GUI tests (`just web-itest`)
+  drive `ScopeWizard` end-to-end per mechanism: the Exchange scoped path declares
+  each permission and assigns scoped roles with `removeUnscopedEntraGrants = true`
+  (no org-wide grant); the org-wide option grants via `grant_single_permission`;
+  SharePoint routes to `convert_site_access_to_selected` (`removeOrgwide = true`)
+  and never touches Exchange RBAC; and a pre-seeded open jumps to the target step.
+  The managed-identity picker test verifies the org-wide-direct grant after the
+  inline scope nudge's retirement. Adds a `set_textarea_value` harness helper plus
+  typed catalog / exchange / sharepoint fixture builders behind `test-support`.
 
 ## [0.3.2] - 2026-06-22
 
