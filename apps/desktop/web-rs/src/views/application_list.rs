@@ -49,6 +49,8 @@ pub fn ApplicationList() -> impl IntoView {
     // Client-side filters over the loaded rows. "any" disables the credential
     // filter; an unset date picker (None) leaves that side of the creation-date
     // range open — together they bound creation date to an inclusive window.
+    // (Local, not lifted: no Home metric drills into the apps credential facet —
+    // the Credential Health card drills into the per-credential Security surface.)
     let cred_filter = RwSignal::new("any".to_string());
     let created_after: RwSignal<Option<NaiveDate>> = RwSignal::new(None);
     let created_before: RwSignal<Option<NaiveDate>> = RwSignal::new(None);

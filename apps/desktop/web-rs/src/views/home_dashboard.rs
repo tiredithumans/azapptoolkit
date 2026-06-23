@@ -173,8 +173,18 @@ pub fn HomeDashboard() -> impl IntoView {
                                     view! {
                                         <span class="dash-card__count">{total}</span>
                                         <div class="dash-metrics">
-                                            {metric(disabled, "Disabled", "warning")}
-                                            {metric(foreign, "Foreign tenant", "warning")}
+                                            {metric_link(
+                                                disabled,
+                                                "Disabled",
+                                                "warning",
+                                                move || session.open_enterprise_with_facet("disabled"),
+                                            )}
+                                            {metric_link(
+                                                foreign,
+                                                "Foreign tenant",
+                                                "warning",
+                                                move || session.open_enterprise_with_facet("foreign"),
+                                            )}
                                         </div>
                                         <Button
                                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -220,8 +230,22 @@ pub fn HomeDashboard() -> impl IntoView {
                                     view! {
                                         <span class="dash-card__count">{total}</span>
                                         <div class="dash-metrics">
-                                            {metric(system, "System-assigned", "neutral")}
-                                            {metric(user, "User-assigned", "neutral")}
+                                            {metric_link(
+                                                system,
+                                                "System-assigned",
+                                                "neutral",
+                                                move || {
+                                                    session.open_managed_identities_with_facet("system")
+                                                },
+                                            )}
+                                            {metric_link(
+                                                user,
+                                                "User-assigned",
+                                                "neutral",
+                                                move || {
+                                                    session.open_managed_identities_with_facet("user")
+                                                },
+                                            )}
                                         </div>
                                         <Button
                                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -270,9 +294,24 @@ pub fn HomeDashboard() -> impl IntoView {
                                         .count();
                                     view! {
                                         <div class="dash-metrics">
-                                            {metric(expired, "Expired", "danger")}
-                                            {metric(soon, "≤ 7 days", "danger")}
-                                            {metric(m30, "≤ 30 days", "warning")}
+                                            {metric_link(
+                                                expired,
+                                                "Expired",
+                                                "danger",
+                                                move || session.open_credentials_with_facet("expired"),
+                                            )}
+                                            {metric_link(
+                                                soon,
+                                                "≤ 7 days",
+                                                "danger",
+                                                move || session.open_credentials_with_facet("7"),
+                                            )}
+                                            {metric_link(
+                                                m30,
+                                                "≤ 30 days",
+                                                "warning",
+                                                move || session.open_credentials_with_facet("30"),
+                                            )}
                                         </div>
                                         <Button
                                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -305,17 +344,41 @@ pub fn HomeDashboard() -> impl IntoView {
                                 Some(r) => {
                                     let crit = count_level(&r.items, RiskLevel::Critical);
                                     let high = count_level(&r.items, RiskLevel::High);
-                                    let ownerless = count_issue(&r.items, issue::NO_OWNERS);
+                                    // Match the audit "Ownership" facet this metric drills into:
+                                    // apps with no owners OR a single owner (both are ownership
+                                    // risks; the two markers are disjoint, so the sum is exact).
+                                    let ownership = count_issue(&r.items, issue::NO_OWNERS)
+                                        + count_issue(&r.items, issue::SINGLE_OWNER);
                                     // Structured flag set by the audit runner from the
                                     // sign-in activity report — matches the audit view's
                                     // "Unused" facet (no issue-text parsing).
                                     let unused = r.items.iter().filter(|i| i.unused).count();
                                     view! {
                                         <div class="dash-metrics">
-                                            {metric(crit, "Critical", "danger")}
-                                            {metric(high, "High", "danger")}
-                                            {metric(ownerless, "Ownerless", "warning")}
-                                            {metric(unused, "Unused", "warning")}
+                                            {metric_link(
+                                                crit,
+                                                "Critical",
+                                                "danger",
+                                                move || session.open_posture_with_facet("critical"),
+                                            )}
+                                            {metric_link(
+                                                high,
+                                                "High",
+                                                "danger",
+                                                move || session.open_posture_with_facet("high"),
+                                            )}
+                                            {metric_link(
+                                                ownership,
+                                                "Ownership",
+                                                "warning",
+                                                move || session.open_posture_with_facet("ownership"),
+                                            )}
+                                            {metric_link(
+                                                unused,
+                                                "Unused",
+                                                "warning",
+                                                move || session.open_posture_with_facet("unused"),
+                                            )}
                                         </div>
                                         <Button
                                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -380,6 +443,41 @@ fn metric(n: usize, label: &'static str, tone: &'static str) -> impl IntoView {
             <span class="dash-metric__label">{label}</span>
         </div>
     }
+}
+
+/// A clickable metric that drills into the matching pre-filtered list/facet
+/// (`on_click` sets the destination facet + navigates). A zero count degrades to
+/// a muted, non-interactive box — there's nothing to drill into — but keeps the
+/// same geometry so it lines up with its clickable siblings in the row. Mirrors
+/// the audit view's posture cards (`.audit-card`).
+fn metric_link(
+    n: usize,
+    label: &'static str,
+    tone: &'static str,
+    on_click: impl Fn() + 'static,
+) -> impl IntoView {
+    if n == 0 {
+        return view! {
+            <div class="dash-metric dash-metric--box">
+                <span class="dash-metric__num">{n}</span>
+                <span class="dash-metric__label">{label}</span>
+            </div>
+        }
+        .into_any();
+    }
+    let num_class = format!("dash-metric__num dash-metric__num--{tone}");
+    view! {
+        <button
+            type="button"
+            class="dash-metric dash-metric--link"
+            title=format!("Show {label}")
+            on:click=move |_| on_click()
+        >
+            <span class=num_class>{n}</span>
+            <span class="dash-metric__label">{label}</span>
+        </button>
+    }
+    .into_any()
 }
 
 fn count_level(items: &[azapptoolkit_core::audit::AuditItem], level: RiskLevel) -> usize {
