@@ -23,6 +23,7 @@ use azapptoolkit_core::models::Application;
 use azapptoolkit_graph::client::AppListQuery;
 
 use crate::commands::dispatch::dispatch_capped;
+use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::applications::CreateApplicationInput;
 use crate::dto::bulk::{
     AppRemovalSummary, BulkCreateOutcome, BulkCreateResult, BulkCreateSpec, BulkDeleteFailure,
@@ -82,8 +83,21 @@ pub async fn bulk_remove_expired_credentials(
     state.audit_cancel.reset();
 
     let client = state.graph_for(&tenant_id);
+    // Project only what the sweep reads (`expired_password_key_ids` touches
+    // `passwordCredentials`); the default projection drags in
+    // `requiredResourceAccess` etc. — the bulk of a permission-heavy app's
+    // payload, multiplied across a full-tenant scan. Mirrors
+    // `list_credential_expirations`.
     let mut apps = client
-        .list_applications_all(AppListQuery::default().with_top(100), Some(10_000))
+        .list_applications_all(
+            AppListQuery::default().with_top(100).with_select(vec![
+                "id",
+                "appId",
+                "displayName",
+                "passwordCredentials",
+            ]),
+            Some(10_000),
+        )
         .await?;
     // Scope the sweep to the selected apps, if any were provided. Reuses the
     // same list path so credential semantics stay identical to the full sweep.
@@ -92,6 +106,12 @@ pub async fn bulk_remove_expired_credentials(
     }
     let total = apps.len();
 
+    // Adaptive 429 backoff (was a fixed `CONCURRENCY` cap with no observer): the
+    // throttle halves the in-flight cap on a 429 and recovers when quiet, and the
+    // live cap is surfaced via `in_flight_cap` so the UI can show the back-off.
+    let tracker = Arc::new(ConcurrencyThrottle::new(CONCURRENCY));
+    let _throttle_guard = ThrottleGuard::attach(client.clone(), tracker.clone());
+
     emit(
         &app_handle,
         BulkProgress {
@@ -99,7 +119,7 @@ pub async fn bulk_remove_expired_credentials(
             total,
             current_app: None,
             cancelled: false,
-            in_flight_cap: None,
+            in_flight_cap: Some(tracker.current_limit()),
         },
     );
 
@@ -110,13 +130,14 @@ pub async fn bulk_remove_expired_credentials(
     let mut summaries: Vec<AppRemovalSummary> = Vec::new();
     let cancelled_early = dispatch_capped(
         apps,
-        || CONCURRENCY,
+        || tracker.current_limit(),
         |app| {
             if cancel.is_cancelled() {
                 return None;
             }
             let app_handle = app_handle.clone();
             let client = client.clone();
+            let tracker = tracker.clone();
             let done = done.clone();
             let cancel = cancel.clone();
             let app_name = app.display_name.clone();
@@ -151,7 +172,7 @@ pub async fn bulk_remove_expired_credentials(
                     total,
                     current_app: Some(app_name.clone()),
                     cancelled: cancel.is_cancelled(),
-                    in_flight_cap: None,
+                    in_flight_cap: Some(tracker.current_limit()),
                 };
                 drop(guard);
                 emit(&app_handle, progress);
@@ -205,34 +226,58 @@ pub async fn bulk_delete_applications(
     let total = object_ids.len();
     let cancel = state.audit_cancel.clone();
 
+    // Bounded-concurrency fan-out with adaptive 429 backoff, replacing the old
+    // serial loop + fixed 50ms pause (which slowed the healthy case yet never
+    // backed off under throttling). The throttle halves the in-flight cap on a
+    // 429 and recovers when quiet; `dispatch_capped` re-reads it between
+    // completions so the cap takes effect mid-run.
+    let tracker = Arc::new(ConcurrencyThrottle::new(CONCURRENCY));
+    let _throttle_guard = ThrottleGuard::attach(client.clone(), tracker.clone());
+    let done = Arc::new(Mutex::new(0usize));
+
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
-
-    for (i, id) in object_ids.into_iter().enumerate() {
-        if cancel.is_cancelled() {
-            break;
-        }
-        emit(
-            &app_handle,
-            BulkProgress {
-                done: i,
-                total,
-                current_app: Some(id.clone()),
-                cancelled: false,
-                in_flight_cap: None,
-            },
-        );
-        match client.delete_application(&id).await {
-            Ok(()) => deleted.push(id),
-            Err(err) => failed.push(BulkDeleteFailure {
-                object_id: id,
-                message: err.to_string(),
-            }),
-        }
-        // Small pause so we don't sprint through a 100-app deletion and burn
-        // the tenant-level request budget.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let cancelled_early = dispatch_capped(
+        object_ids,
+        || tracker.current_limit(),
+        |id| {
+            if cancel.is_cancelled() {
+                return None;
+            }
+            let client = client.clone();
+            let app_handle = app_handle.clone();
+            let done = done.clone();
+            let cancel = cancel.clone();
+            let tracker = tracker.clone();
+            Some(tokio::spawn(async move {
+                let result = client.delete_application(&id).await;
+                let mut guard = done.lock().await;
+                *guard += 1;
+                let progress = BulkProgress {
+                    done: *guard,
+                    total,
+                    current_app: Some(id.clone()),
+                    cancelled: cancel.is_cancelled(),
+                    in_flight_cap: Some(tracker.current_limit()),
+                };
+                drop(guard);
+                emit(&app_handle, progress);
+                match result {
+                    Ok(()) => Ok(id),
+                    Err(err) => Err(BulkDeleteFailure {
+                        object_id: id,
+                        message: err.to_string(),
+                    }),
+                }
+            }))
+        },
+        |joined| match joined {
+            Ok(Ok(id)) => deleted.push(id),
+            Ok(Err(f)) => failed.push(f),
+            Err(err) => tracing::warn!(?err, "bulk delete join error"),
+        },
+    )
+    .await;
 
     emit(
         &app_handle,
@@ -240,8 +285,8 @@ pub async fn bulk_delete_applications(
             done: total,
             total,
             current_app: None,
-            cancelled: cancel.is_cancelled(),
-            in_flight_cap: None,
+            cancelled: cancelled_early || cancel.is_cancelled(),
+            in_flight_cap: Some(tracker.current_limit()),
         },
     );
 
@@ -251,14 +296,14 @@ pub async fn bulk_delete_applications(
     Ok(BulkDeleteResult {
         deleted,
         failed,
-        cancelled: cancel.is_cancelled(),
+        cancelled: cancelled_early || cancel.is_cancelled(),
     })
 }
 
 /// Grants admin consent to each application in `object_ids`, reusing the same
-/// orchestration as the single-app command. Sequential (each app issues
-/// several Graph writes) with a small inter-app pause; cancellation and
-/// progress share the audit/bulk plumbing.
+/// orchestration as the single-app command. Bounded-concurrency fan-out with
+/// adaptive 429 backoff (each app issues several Graph writes, so the throttle
+/// matters); cancellation and progress share the audit/bulk plumbing.
 #[tauri::command]
 pub async fn bulk_grant_permissions(
     app_handle: AppHandle,
@@ -271,47 +316,78 @@ pub async fn bulk_grant_permissions(
     let client = state.graph_for(&tenant_id);
     let total = object_ids.len();
     let cancel = state.audit_cancel.clone();
+
+    // Bounded-concurrency fan-out with adaptive 429 backoff, replacing the old
+    // serial loop + fixed 50ms pause. Each grant is a multi-write orchestration,
+    // so backing off the in-flight cap under throttling matters more here than
+    // for the delete sweep.
+    let tracker = Arc::new(ConcurrencyThrottle::new(CONCURRENCY));
+    let _throttle_guard = ThrottleGuard::attach(client.clone(), tracker.clone());
+    let done = Arc::new(Mutex::new(0usize));
+
     let mut outcomes = Vec::new();
     // True if any app's grant created a brand-new SP — that adds Enterprise App
     // rows / search-index entries, so the run must bust the full list caches.
     let mut any_sp_created = false;
-
-    for (i, id) in object_ids.into_iter().enumerate() {
-        if cancel.is_cancelled() {
-            break;
-        }
-        emit(
-            &app_handle,
-            BulkProgress {
-                done: i,
-                total,
-                current_app: Some(id.clone()),
-                cancelled: false,
-                in_flight_cap: None,
-            },
-        );
-        let outcome = match super::permissions::grant_admin_consent_core(&client, &id).await {
-            Ok((r, sp_created)) => {
-                any_sp_created |= sp_created;
-                BulkGrantOutcome {
-                    object_id: id,
-                    granted: r.role_assignments_created.len() + r.scope_grants_upserted.len(),
-                    skipped: r.role_assignments_skipped.len(),
-                    failed: r.failures.len(),
-                    error: r.failures.first().map(|f| f.message.clone()),
-                }
+    let cancelled_early = dispatch_capped(
+        object_ids,
+        || tracker.current_limit(),
+        |id| {
+            if cancel.is_cancelled() {
+                return None;
             }
-            Err(e) => BulkGrantOutcome {
-                object_id: id,
-                granted: 0,
-                skipped: 0,
-                failed: 0,
-                error: Some(e.message),
-            },
-        };
-        outcomes.push(outcome);
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+            let client = client.clone();
+            let app_handle = app_handle.clone();
+            let done = done.clone();
+            let cancel = cancel.clone();
+            let tracker = tracker.clone();
+            Some(tokio::spawn(async move {
+                let res = super::permissions::grant_admin_consent_core(&client, &id).await;
+                let mut guard = done.lock().await;
+                *guard += 1;
+                let progress = BulkProgress {
+                    done: *guard,
+                    total,
+                    current_app: Some(id.clone()),
+                    cancelled: cancel.is_cancelled(),
+                    in_flight_cap: Some(tracker.current_limit()),
+                };
+                drop(guard);
+                emit(&app_handle, progress);
+                match res {
+                    Ok((r, sp_created)) => (
+                        BulkGrantOutcome {
+                            object_id: id,
+                            granted: r.role_assignments_created.len()
+                                + r.scope_grants_upserted.len(),
+                            skipped: r.role_assignments_skipped.len(),
+                            failed: r.failures.len(),
+                            error: r.failures.first().map(|f| f.message.clone()),
+                        },
+                        sp_created,
+                    ),
+                    Err(e) => (
+                        BulkGrantOutcome {
+                            object_id: id,
+                            granted: 0,
+                            skipped: 0,
+                            failed: 0,
+                            error: Some(e.message),
+                        },
+                        false,
+                    ),
+                }
+            }))
+        },
+        |joined| match joined {
+            Ok((outcome, sp_created)) => {
+                any_sp_created |= sp_created;
+                outcomes.push(outcome);
+            }
+            Err(err) => tracing::warn!(?err, "bulk grant join error"),
+        },
+    )
+    .await;
 
     emit(
         &app_handle,
@@ -319,8 +395,8 @@ pub async fn bulk_grant_permissions(
             done: total,
             total,
             current_app: None,
-            cancelled: cancel.is_cancelled(),
-            in_flight_cap: None,
+            cancelled: cancelled_early || cancel.is_cancelled(),
+            in_flight_cap: Some(tracker.current_limit()),
         },
     );
 
@@ -337,7 +413,7 @@ pub async fn bulk_grant_permissions(
 
     Ok(BulkGrantResult {
         outcomes,
-        cancelled: cancel.is_cancelled(),
+        cancelled: cancelled_early || cancel.is_cancelled(),
     })
 }
 

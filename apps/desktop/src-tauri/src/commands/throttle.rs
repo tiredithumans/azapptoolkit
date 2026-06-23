@@ -14,7 +14,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use azapptoolkit_graph::ThrottleObserver;
+use azapptoolkit_graph::{GraphClient, ThrottleObserver};
 
 /// Minimum in-flight floor: a single request still makes forward progress.
 pub(crate) const MIN_CONCURRENCY: usize = 1;
@@ -119,6 +119,28 @@ impl ThrottleObserver for ConcurrencyThrottle {
                 "throttle: throttled, reducing in-flight cap"
             );
         }
+    }
+}
+
+/// RAII guard that attaches `tracker` as `client`'s throttle observer and
+/// detaches it on drop. However the command exits — including an early `?`
+/// return — the shared per-tenant `GraphClient` is never left with a stale
+/// observer that would halve its in-flight cap on a *later*, unrelated 429.
+/// Hold the returned guard for the command's whole duration.
+pub(crate) struct ThrottleGuard {
+    client: Arc<GraphClient>,
+}
+
+impl ThrottleGuard {
+    pub(crate) fn attach(client: Arc<GraphClient>, tracker: Arc<ConcurrencyThrottle>) -> Self {
+        client.set_throttle_observer(tracker);
+        Self { client }
+    }
+}
+
+impl Drop for ThrottleGuard {
+    fn drop(&mut self) {
+        self.client.clear_throttle_observer();
     }
 }
 
