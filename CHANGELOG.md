@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-23
+
 ### Changed
 
 - **The "Grant scoped access" wizard is now the unified "Grant access" flow,
