@@ -483,7 +483,9 @@ pub async fn grant_exchange_mailbox_access(
     let exo = exchange_client_checked(&state, &tenant_id).await?;
 
     let app = graph.get_application(&object_id).await?;
-    let entra_sp = graph.ensure_service_principal(&app.app_id).await?;
+    // The list caches are busted unconditionally on success below (line ~450),
+    // so the `created` flag isn't needed here.
+    let (entra_sp, _created) = graph.ensure_service_principal(&app.app_id).await?;
     let (graph_resource_sp_id, role_value_by_id) = graph_role_index(&graph).await?;
 
     let targets = filter_targets_by_value(

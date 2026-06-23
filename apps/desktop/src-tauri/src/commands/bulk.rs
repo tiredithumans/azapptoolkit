@@ -272,6 +272,9 @@ pub async fn bulk_grant_permissions(
     let total = object_ids.len();
     let cancel = state.audit_cancel.clone();
     let mut outcomes = Vec::new();
+    // True if any app's grant created a brand-new SP — that adds Enterprise App
+    // rows / search-index entries, so the run must bust the full list caches.
+    let mut any_sp_created = false;
 
     for (i, id) in object_ids.into_iter().enumerate() {
         if cancel.is_cancelled() {
@@ -288,13 +291,16 @@ pub async fn bulk_grant_permissions(
             },
         );
         let outcome = match super::permissions::grant_admin_consent_core(&client, &id).await {
-            Ok(r) => BulkGrantOutcome {
-                object_id: id,
-                granted: r.role_assignments_created.len() + r.scope_grants_upserted.len(),
-                skipped: r.role_assignments_skipped.len(),
-                failed: r.failures.len(),
-                error: r.failures.first().map(|f| f.message.clone()),
-            },
+            Ok((r, sp_created)) => {
+                any_sp_created |= sp_created;
+                BulkGrantOutcome {
+                    object_id: id,
+                    granted: r.role_assignments_created.len() + r.scope_grants_upserted.len(),
+                    skipped: r.role_assignments_skipped.len(),
+                    failed: r.failures.len(),
+                    error: r.failures.first().map(|f| f.message.clone()),
+                }
+            }
             Err(e) => BulkGrantOutcome {
                 object_id: id,
                 granted: 0,
@@ -320,8 +326,12 @@ pub async fn bulk_grant_permissions(
 
     // Consent really changed app-role/scope state for any app that granted >0, so
     // bust the detail + audit caches exactly like the single-app path
-    // (permissions::grant_admin_consent). Only on this success path.
-    if outcomes.iter().any(|o| o.granted > 0) {
+    // (permissions::grant_admin_consent). Only on this success path. If any grant
+    // created a new SP, bust the full list caches instead (new Enterprise App
+    // row / search-index entry), matching grant_single_permission.
+    if any_sp_created {
+        super::applications::invalidate_app_lists(&state.cache, &tenant_id);
+    } else if outcomes.iter().any(|o| o.granted > 0) {
         super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
     }
 

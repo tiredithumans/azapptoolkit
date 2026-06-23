@@ -178,8 +178,11 @@ pub async fn restore_tenant(
         if !c.backup.admin_consent_granted {
             continue;
         }
+        // The freshly-restored app reg already has its SP (Pass 1), so the
+        // `created` flag is moot here — list-cache freshness isn't relied on
+        // mid-restore.
         match grant_admin_consent_core(&client, &c.new_object_id).await {
-            Ok(grant) => {
+            Ok((grant, _created)) => {
                 report.apps[idx].consent_granted = true;
                 for f in grant.failures {
                     report.apps[idx]

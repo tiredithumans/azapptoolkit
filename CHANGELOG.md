@@ -7,6 +7,20 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Stale service-principal cache no longer skews audit posture or detail panes.**
+  Mutating an enterprise application's service principal — toggling sign-in /
+  assignment-required, hiding it, changing SSO mode, or deleting it — now busts
+  the per-app SP cache, so a re-run security audit reads the live `accountEnabled`
+  (correct Rule-4 risk score) and the app-registration detail pane never shows a
+  just-deleted paired SP. Previously these stayed cached for up to 60 minutes.
+- **First permission grant on an unpaired app now appears immediately.** When a
+  grant (single, admin-consent, or bulk) creates an app registration's first
+  enterprise service principal, the App Registrations / Enterprise Apps lists and
+  global search now refresh right away instead of waiting out the 60-minute cache
+  TTL or a manual refresh.
+
 ## [0.5.0] - 2026-06-23
 
 ### Changed
