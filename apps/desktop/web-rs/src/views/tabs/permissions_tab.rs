@@ -14,7 +14,6 @@ use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::auth;
 use crate::bindings::exchange;
 use crate::bindings::permissions::{self, GrantResult};
-use crate::bindings::sharepoint;
 use crate::bindings::usage;
 use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
 use crate::components::icon::IconName;
@@ -23,33 +22,18 @@ use crate::components::requires_role::RequiresRole;
 use crate::components::scope_badge::{
     is_exchange_scopable, is_sharepoint_orgwide, permission_scope_cell,
 };
-use crate::components::scope_panel::{ScopeKind, ScopePanel};
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
-use crate::components::scoped_mailbox_wizard::ScopedMailboxWizard;
+use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::components::toast::ToastAction;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::IconButton;
 use crate::hooks::use_command::use_command;
 use crate::state::{use_session, Session};
-use crate::util::parse_lines;
 use azapptoolkit_core::audit::{downgrade_alternatives, MailPermissionScope};
+use azapptoolkit_core::scoping::ScopeKind;
 use azapptoolkit_dto::permissions::{PermissionKind, ResolvedPermission};
 use azapptoolkit_dto::UiError;
-
-/// An already-granted permission the user chose to restrict after the fact.
-#[derive(Clone)]
-struct PendingRowScope {
-    /// App registration object id — for the Exchange grant (reads the manifest).
-    object_id: String,
-    /// The app's id — for the SharePoint site grant's `grantedToIdentities`.
-    app_id: String,
-    app_display_name: String,
-    /// The app's service-principal object id — receives `Sites.Selected`.
-    sp_object_id: String,
-    permission_value: String,
-    kind: ScopeKind,
-}
 
 /// A held broad application permission the user chose to swap for a documented
 /// narrower alternative. Held until the user picks the target (or cancels) —
@@ -72,15 +56,6 @@ struct PendingDowngrade {
 /// scoping" section below, never per row.
 fn row_scope_kind(value: &str) -> Option<ScopeKind> {
     is_sharepoint_orgwide(value).then_some(ScopeKind::SharePoint)
-}
-
-/// New-grant (scope-first) classifier: a freshly-granted permission that can be
-/// confined opens the scope panel immediately. This is exactly the core scope
-/// registry — Exchange mail/calendar/contacts and **any** SharePoint `Sites.*`
-/// (`Sites.Selected` or a broad grant). Unlike [`row_scope_kind`] it includes
-/// `Sites.Selected`, since a brand-new `Sites.Selected` still needs sites added.
-fn grant_scope_kind(value: &str) -> Option<ScopeKind> {
-    azapptoolkit_core::scoping::scope_kind(value)
 }
 
 /// Runs the admin-consent grant for the app in `detail`, reporting via toasts.
@@ -184,24 +159,30 @@ pub fn PermissionsTab(
     let consent_error: RwSignal<Option<String>> = RwSignal::new(None);
     let consent_result: RwSignal<Option<GrantResult>> = RwSignal::new(None);
     let picker_open = RwSignal::new(false);
-    // The streamlined "grant scoped mailbox access" wizard — always reachable, so
-    // scoping is the obvious first move (no need to grant org-wide to find it).
+    // The "grant scoped access" wizard — always reachable, so scoping is the
+    // obvious first move. `wizard_preseed` carries a permission value when a row's
+    // "Scope…" opens the wizard pre-selected; None opens a blank pick step.
     let wizard_open = RwSignal::new(false);
-    let wizard_target = Signal::derive(move || ExchangeScopeTarget::Application {
-        object_id: detail.with(|d| d.application.id.clone()),
+    let wizard_preseed: RwSignal<Option<String>> = RwSignal::new(None);
+    let wizard_target = Signal::derive(move || {
+        detail.with(|d| ScopeTarget {
+            object_id: Some(d.application.id.clone()),
+            sp_object_id: d
+                .service_principal
+                .as_ref()
+                .map(|sp| sp.id.clone())
+                .unwrap_or_default(),
+            app_id: d.application.app_id.clone(),
+            display_name: d.application.display_name.clone(),
+            is_managed_identity: false,
+        })
     });
-    let wizard_app_id = Signal::derive(move || detail.with(|d| d.application.app_id.clone()));
     // One shared runner for every grant/revoke/scope/downgrade mutation in this
     // tab — they share a single busy + error (`cmd.error` is the row-level error
     // surface, formerly `row_error`).
     let cmd = use_command();
-
-    // Inline "restrict an already-granted permission" panel. `pending_scope`
-    // holds the chosen permission until the user supplies a scope (mailbox
-    // groups / site URL) or cancels. `scope_note` reports the outcome.
-    let pending_scope: RwSignal<Option<PendingRowScope>> = RwSignal::new(None);
-    let scope_groups_text = RwSignal::new(String::new());
-    let scope_site_url = RwSignal::new(String::new());
+    // Outcome note for the per-row downgrade flow (reports inline rather than via
+    // a toast, since the success path keeps the chooser open).
     let scope_note: RwSignal<Option<String>> = RwSignal::new(None);
 
     // Application/Delegated filter toggles. Both default on.
@@ -277,9 +258,6 @@ pub fn PermissionsTab(
             return;
         }
         let object_id = detail.with(|d| d.application.id.clone());
-        // `sel` feeds the op; its permission value is also read in the success
-        // arm, so pull that out before `sel` moves into the op.
-        let permission_value = sel.permission_value.clone();
         cmd.run(
             move |r: GrantResult| {
                 on_changed.run(());
@@ -298,33 +276,6 @@ pub fn PermissionsTab(
                         "Permission declared, but the grant wasn’t created: {why}. \
                          Grant admin consent, or remove it.",
                     )));
-                } else if let Some(kind) = grant_scope_kind(&permission_value) {
-                    // Scope-first nudge: a freshly-granted scopable permission
-                    // opens the scope panel so the admin can confine it now
-                    // rather than navigating back later. The backend manifest is
-                    // already updated, so the panel's submit reads the new
-                    // permission live; Cancel keeps the (applied) org-wide grant.
-                    let (object_id, app_id, app_display_name, sp_object_id) = detail.with(|d| {
-                        (
-                            d.application.id.clone(),
-                            d.application.app_id.clone(),
-                            d.application.display_name.clone(),
-                            d.service_principal.as_ref().map(|sp| sp.id.clone()),
-                        )
-                    });
-                    scope_groups_text.set(String::new());
-                    scope_site_url.set(String::new());
-                    scope_note.set(Some(format!(
-                        "Granted {permission_value} — confine it now, or Cancel to keep it org-wide.",
-                    )));
-                    pending_scope.set(Some(PendingRowScope {
-                        object_id,
-                        app_id,
-                        app_display_name,
-                        sp_object_id: sp_object_id.unwrap_or_default(),
-                        permission_value,
-                        kind,
-                    }));
                 }
             },
             move |tenant_id| async move {
@@ -340,139 +291,12 @@ pub fn PermissionsTab(
         );
     });
 
-    // Open the inline scope panel for an already-granted permission. Reads the
-    // app's ids from `detail`; SharePoint needs the service-principal object id.
-    let open_scope = move |permission_value: String, kind: ScopeKind| {
-        let (object_id, app_id, app_display_name, sp_object_id) = detail.with(|d| {
-            (
-                d.application.id.clone(),
-                d.application.app_id.clone(),
-                d.application.display_name.clone(),
-                d.service_principal.as_ref().map(|sp| sp.id.clone()),
-            )
-        });
-        if kind == ScopeKind::SharePoint && sp_object_id.is_none() {
-            cmd.error.set(Some(
-                "App has no service principal — grant it first, then scope.".into(),
-            ));
-            return;
-        }
-        scope_groups_text.set(String::new());
-        scope_site_url.set(String::new());
+    // A row's "Scope…" opens the wizard pre-selected to that permission, jumping
+    // to its target step. The wizard infers the mechanism, so `kind` is unused.
+    let open_scope = move |permission_value: String, _kind: ScopeKind| {
         cmd.error.set(None);
-        scope_note.set(None);
-        pending_scope.set(Some(PendingRowScope {
-            object_id,
-            app_id,
-            app_display_name,
-            sp_object_id: sp_object_id.unwrap_or_default(),
-            permission_value,
-            kind,
-        }));
-    };
-
-    let cancel_scope = move |_| {
-        pending_scope.set(None);
-        cmd.error.set(None);
-        // Clear the scope-first nudge so it doesn't linger after Cancel.
-        scope_note.set(None);
-    };
-
-    // Scope a mail permission to mailbox group(s) via Exchange RBAC.
-    let submit_exchange_scope = move |_| {
-        let Some(p) = pending_scope.get() else {
-            return;
-        };
-        if cmd.busy.get() {
-            return;
-        }
-        let groups = parse_lines(&scope_groups_text.get());
-        if groups.is_empty() {
-            cmd.error.set(Some(
-                "Enter at least one group or mailbox identifier.".into(),
-            ));
-            return;
-        }
-        scope_note.set(None);
-        let perm_value = p.permission_value.clone();
-        cmd.run(
-            move |r: exchange::ExchangeAccessResult| {
-                let mut note = format!(
-                    "Scoped {} via “{}” — {} role(s) assigned, {} org-wide grant(s) removed.",
-                    perm_value,
-                    r.scope_name,
-                    r.roles_assigned.len(),
-                    r.removed_entra_grants.len(),
-                );
-                if !r.warnings.is_empty() {
-                    note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
-                }
-                scope_note.set(Some(note));
-                pending_scope.set(None);
-                on_changed.run(());
-            },
-            move |tenant_id| async move {
-                exchange::grant_exchange_mailbox_access(
-                    &tenant_id,
-                    &p.object_id,
-                    Some(std::slice::from_ref(&p.permission_value)),
-                    &groups,
-                    true,
-                )
-                .await
-            },
-        );
-    };
-
-    // Convert an org-wide Sites.* grant to Sites.Selected on one site.
-    let submit_sharepoint_scope = move |role: &'static str| {
-        let Some(p) = pending_scope.get() else {
-            return;
-        };
-        if cmd.busy.get() {
-            return;
-        }
-        let url = scope_site_url.get().trim().to_string();
-        if url.is_empty() {
-            cmd.error.set(Some("Enter a SharePoint site URL.".into()));
-            return;
-        }
-        scope_note.set(None);
-        let url_op = url.clone();
-        cmd.run(
-            move |r: sharepoint::SiteScopeResult| {
-                let site = r
-                    .sites_granted
-                    .first()
-                    .and_then(|s| s.site_display_name.clone())
-                    .unwrap_or(url);
-                let mut note = format!("Granted {role} access to {site}.");
-                if !r.removed_orgwide_grants.is_empty() {
-                    note.push_str(&format!(
-                        " Removed org-wide grant(s): {}.",
-                        r.removed_orgwide_grants.join(", ")
-                    ));
-                }
-                if !r.warnings.is_empty() {
-                    note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
-                }
-                scope_note.set(Some(note));
-                pending_scope.set(None);
-                on_changed.run(());
-            },
-            move |tenant_id| async move {
-                sharepoint::convert_site_access_to_selected(
-                    &tenant_id,
-                    &p.sp_object_id,
-                    &p.app_id,
-                    &p.app_display_name,
-                    &[url_op],
-                    role,
-                    true,
-                )
-                .await
-            },
-        );
+        wizard_preseed.set(Some(permission_value));
+        wizard_open.set(true);
     };
 
     // Inline "swap a broad permission for a narrower one" chooser. Opened from a
@@ -630,11 +454,14 @@ pub fn PermissionsTab(
                     </Button>
                 </div>
             </header>
-            <ScopedMailboxWizard
+            <ScopeWizard
                 open=wizard_open
                 target=wizard_target
-                app_id=wizard_app_id
-                on_close=Callback::new(move |()| wizard_open.set(false))
+                preseed=wizard_preseed
+                on_close=Callback::new(move |()| {
+                    wizard_open.set(false);
+                    wizard_preseed.set(None);
+                })
                 on_changed=on_changed
             />
             {move || {
@@ -749,26 +576,6 @@ pub fn PermissionsTab(
                     </table>
                 }
                     .into_any()
-            }}
-            {move || {
-                pending_scope
-                    .get()
-                    .map(|p| {
-                        view! {
-                            <ScopePanel
-                                kind=p.kind
-                                permission_value=p.permission_value.clone()
-                                groups_text=scope_groups_text
-                                site_url=scope_site_url
-                                busy=Signal::derive(move || cmd.busy.get())
-                                on_submit_exchange=Callback::new(move |()| submit_exchange_scope(()))
-                                on_submit_sharepoint=Callback::new(move |w: bool| {
-                                    submit_sharepoint_scope(if w { "write" } else { "read" })
-                                })
-                                on_cancel=Callback::new(move |()| cancel_scope(()))
-                            />
-                        }
-                    })
             }}
             {move || {
                 pending_downgrade

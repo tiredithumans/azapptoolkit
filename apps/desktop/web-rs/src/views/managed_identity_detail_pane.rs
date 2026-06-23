@@ -22,14 +22,11 @@ use crate::components::held_permissions_panel::HeldPermissionsPanel;
 use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
 use crate::components::requires_role::RequiresRole;
 use crate::components::scope_badge::is_exchange_scopable;
-use crate::components::scope_panel::ScopePanel;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
-use crate::components::scoped_mailbox_wizard::ScopedMailboxWizard;
+use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::ui::{CopyableId, DataTable};
 use crate::state::use_session;
-use crate::views::managed_identities::{
-    chip_kind_for, existing_scope_kind_for, PendingScope, MICROSOFT_GRAPH_APP_ID,
-};
+use crate::views::managed_identities::chip_kind_for;
 
 #[component]
 pub fn ManagedIdentityDetailPane(
@@ -53,10 +50,6 @@ pub fn ManagedIdentityDetailPane(
     #[prop(into)] error: RwSignal<Option<String>>,
     #[prop(into)] result: RwSignal<Option<GrantManagedIdentityResult>>,
     #[prop(into)] refreshing: RwSignal<bool>,
-    #[prop(into)] pending_scope: RwSignal<Option<PendingScope>>,
-    #[prop(into)] scope_groups_text: RwSignal<String>,
-    #[prop(into)] scope_site_url: RwSignal<String>,
-    #[prop(into)] scope_note: RwSignal<Option<String>>,
     #[prop(into)] consenting: RwSignal<bool>,
     #[prop(into)] consent_error: RwSignal<Option<String>>,
     #[prop(into)] reload: RwSignal<u32>,
@@ -71,10 +64,6 @@ pub fn ManagedIdentityDetailPane(
     #[prop(into)] on_grant: Callback<PickerSelection>,
     #[prop(into)] on_revoke: Callback<(String, String)>,
     #[prop(into)] on_refresh: Callback<()>,
-    #[prop(into)] on_cancel_scope: Callback<()>,
-    #[prop(into)] on_submit_orgwide: Callback<()>,
-    #[prop(into)] on_submit_exchange: Callback<()>,
-    #[prop(into)] on_submit_sharepoint: Callback<&'static str>,
 ) -> impl IntoView {
     let title = mi.display_name.clone();
     let mi_id = mi.id.clone();
@@ -92,19 +81,20 @@ pub fn ManagedIdentityDetailPane(
     // isn't pushed down by an always-open picker.
     let picker_open = RwSignal::new(false);
 
-    // Streamlined scoped-mailbox grant — always reachable, so the MI can be scoped
+    // The "grant scoped access" wizard — always reachable, so the MI can be scoped
     // from the start (the Exchange section only appears once it holds a mail
-    // permission). The wizard scopes by the values selected in it, so the target's
-    // `mail_permissions` are unused here.
+    // permission). A row's "Scope…" opens it pre-selected to that permission
+    // (`wizard_preseed`); the header button opens it blank.
     let wizard_open = RwSignal::new(false);
+    let wizard_preseed: RwSignal<Option<String>> = RwSignal::new(None);
     let wiz_sp = mi.id.clone();
     let wiz_name = mi.display_name.clone();
     let wiz_app = mi.app_id.clone();
-    let wizard_app_id = Signal::derive(move || wiz_app.clone());
-    let wizard_target = Signal::derive(move || ExchangeScopeTarget::ServicePrincipal {
+    let wizard_target = Signal::derive(move || ScopeTarget {
+        object_id: None,
         sp_object_id: wiz_sp.clone(),
+        app_id: wiz_app.clone(),
         display_name: wiz_name.clone(),
-        mail_permissions: Vec::new(),
         is_managed_identity: true,
     });
 
@@ -154,14 +144,17 @@ pub fn ManagedIdentityDetailPane(
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(move |_| wizard_open.set(true))
                 >
-                    "Grant mailbox access…"
+                    "Grant scoped access…"
                 </Button>
             </header>
-            <ScopedMailboxWizard
+            <ScopeWizard
                 open=wizard_open
                 target=wizard_target
-                app_id=wizard_app_id
-                on_close=Callback::new(move |()| wizard_open.set(false))
+                preseed=wizard_preseed
+                on_close=Callback::new(move |()| {
+                    wizard_open.set(false);
+                    wizard_preseed.set(None);
+                })
                 on_changed=Callback::new(move |()| reload.update(|n| *n += 1))
             />
             <Suspense fallback=move || {
@@ -212,27 +205,11 @@ pub fn ManagedIdentityDetailPane(
                                 let sp = mi_sp_id.clone();
                                 move |aid: String| on_revoke.run((aid, sp.clone()))
                             });
-                            let on_scope = Callback::new({
-                                let sp = mi_sp_id.clone();
-                                let app = mi_app_id_row.clone();
-                                let name = mi_name_row.clone();
-                                move |value: String| {
-                                    if let Some(kind) = existing_scope_kind_for(&value) {
-                                        scope_groups_text.set(String::new());
-                                        scope_site_url.set(String::new());
-                                        error.set(None);
-                                        scope_note.set(None);
-                                        pending_scope.set(Some(PendingScope {
-                                            sp_object_id: sp.clone(),
-                                            app_id: app.clone(),
-                                            display_name: name.clone(),
-                                            resource_app_id: MICROSOFT_GRAPH_APP_ID
-                                                .to_string(),
-                                            permission_value: value,
-                                            kind,
-                                        }));
-                                    }
-                                }
+                            // A held org-wide Sites.* row's "Scope…" opens the
+                            // wizard pre-selected to that permission.
+                            let on_scope = Callback::new(move |value: String| {
+                                wizard_preseed.set(Some(value));
+                                wizard_open.set(true);
                             });
                             // App-wide Exchange scoping for the MI's held mail
                             // permissions (mirrors the enterprise pane). Mail
@@ -317,32 +294,6 @@ pub fn ManagedIdentityDetailPane(
                             />
                         }
                     })
-            }}
-            {move || {
-                pending_scope
-                    .get()
-                    .map(|p| {
-                        view! {
-                            <ScopePanel
-                                kind=p.kind
-                                permission_value=p.permission_value.clone()
-                                groups_text=scope_groups_text
-                                site_url=scope_site_url
-                                busy=Signal::derive(move || busy.get())
-                                on_submit_exchange=Callback::new(move |()| on_submit_exchange.run(()))
-                                on_submit_sharepoint=Callback::new(move |w: bool| {
-                                    on_submit_sharepoint.run(if w { "write" } else { "read" })
-                                })
-                                on_cancel=Callback::new(move |()| on_cancel_scope.run(()))
-                                on_orgwide=Callback::new(move |()| on_submit_orgwide.run(()))
-                            />
-                        }
-                    })
-            }}
-            {move || {
-                scope_note
-                    .get()
-                    .map(|m| view! { <div class="alert alert--ok">{m}</div> })
             }}
             {move || {
                 error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })

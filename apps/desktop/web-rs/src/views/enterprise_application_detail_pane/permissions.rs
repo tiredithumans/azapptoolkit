@@ -2,16 +2,13 @@ use super::*;
 use crate::bindings::exchange as exchange_bindings;
 use crate::bindings::graph_roles;
 use crate::bindings::permissions as permissions_bindings;
-use crate::bindings::sharepoint;
 use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
 use crate::components::scope_badge::{is_exchange_scopable, is_sharepoint_orgwide};
-use crate::components::scope_panel::{ScopeKind, ScopePanel};
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
-use crate::components::scoped_mailbox_wizard::ScopedMailboxWizard;
+use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::hooks::use_command::use_command;
-use crate::util::parse_lines;
 use azapptoolkit_core::audit::MailPermissionScope;
 use std::collections::HashMap;
 
@@ -104,151 +101,32 @@ pub(super) fn PermissionsContent(
         pending_revoke.set(Some(assignment_id));
     });
 
-    // In-place "Scope…" for an already-held org-wide permission. The enterprise
-    // app's SP is a service principal like any other, so this reuses the same
-    // SP-generic backend cores the managed-identity view uses (scoped Exchange
-    // grant / convert-to-Sites.Selected) — confine the held permission, then the
-    // org-wide grant is stripped and the held list refetches. `pending_scope`
-    // holds the picked permission until the admin supplies groups / a site URL.
     let display_name =
         Signal::derive(move || signal.with(|d| d.service_principal.display_name.clone()));
-    let pending_scope: RwSignal<Option<(String, ScopeKind)>> = RwSignal::new(None);
-    let scope_groups_text = RwSignal::new(String::new());
-    let scope_site_url = RwSignal::new(String::new());
-    let scope_cmd = use_command();
-    let scope_note: RwSignal<Option<String>> = RwSignal::new(None);
 
-    let on_scope = Callback::new(move |value: String| {
-        // Restrict-after-the-fact classifier: org-wide Sites.* → SharePoint. Mail
-        // is excluded — Exchange RBAC scoping is app-wide, driven by the "Exchange
-        // scoping" section below, not a per-row button. (This is the only call
-        // site, so it lives inline.)
-        let kind = is_sharepoint_orgwide(&value).then_some(ScopeKind::SharePoint);
-        if let Some(kind) = kind {
-            scope_groups_text.set(String::new());
-            scope_site_url.set(String::new());
-            scope_cmd.error.set(None);
-            scope_note.set(None);
-            pending_scope.set(Some((value, kind)));
-        }
+    // The "grant scoped access" wizard — always reachable, so a bare SP can be
+    // scoped from the start (the Exchange section below only appears once the SP
+    // already holds a mail permission). A row's "Scope…" opens it pre-selected to
+    // that permission (`wizard_preseed`); the header button opens it blank.
+    let wizard_open = RwSignal::new(false);
+    let wizard_preseed: RwSignal<Option<String>> = RwSignal::new(None);
+    let wizard_target = Signal::derive(move || ScopeTarget {
+        object_id: None,
+        sp_object_id: sp_id.get(),
+        app_id: app_id.get(),
+        display_name: display_name.get(),
+        is_managed_identity: false,
     });
 
-    let cancel_scope = move || {
-        pending_scope.set(None);
-        scope_cmd.error.set(None);
-    };
-
-    // Retained only to satisfy the shared `ScopePanel`'s mandatory Exchange
-    // callback. Now unreachable for this pane: mail no longer opens a per-row
-    // scope panel (Exchange scoping is app-wide — see the "Exchange scoping"
-    // section below), so `pending_scope` here is always SharePoint.
-    let submit_exchange = move || {
-        let Some((value, _)) = pending_scope.get() else {
-            return;
-        };
-        if scope_cmd.busy.get() {
-            return;
-        }
-        let groups = parse_lines(&scope_groups_text.get());
-        if groups.is_empty() {
-            scope_cmd.error.set(Some(
-                "Enter at least one group or mailbox identifier.".into(),
-            ));
-            return;
-        }
-        scope_note.set(None);
-        let (sp, app, name) = (sp_id.get(), app_id.get(), display_name.get());
-        let value_for_op = value.clone();
-        scope_cmd.run(
-            move |r: exchange_bindings::ExchangeAccessResult| {
-                scope_note.set(Some(format!(
-                    "Scoped {} via “{}” — {} role(s) assigned, {} org-wide grant(s) removed.",
-                    value,
-                    r.scope_name,
-                    r.roles_assigned.len(),
-                    r.removed_entra_grants.len(),
-                )));
-                pending_scope.set(None);
-                reload.update(|n| *n += 1);
-            },
-            move |tenant_id| async move {
-                exchange_bindings::grant_managed_identity_scoped_exchange_access(
-                    &tenant_id,
-                    &sp,
-                    &app,
-                    &name,
-                    &[value_for_op],
-                    &groups,
-                    true,
-                )
-                .await
-            },
-        );
-    };
-
-    let submit_sharepoint = move |role: &'static str| {
-        if pending_scope.get().is_none() || scope_cmd.busy.get() {
-            return;
-        }
-        let url = scope_site_url.get().trim().to_string();
-        if url.is_empty() {
-            scope_cmd
-                .error
-                .set(Some("Enter a SharePoint site URL.".into()));
-            return;
-        }
-        scope_note.set(None);
-        let (sp, app, name) = (sp_id.get(), app_id.get(), display_name.get());
-        let url_for_op = url.clone();
-        scope_cmd.run(
-            move |r: sharepoint::SiteScopeResult| {
-                let site = r
-                    .sites_granted
-                    .first()
-                    .and_then(|s| s.site_display_name.clone())
-                    .unwrap_or(url);
-                let mut note = format!("Granted {role} access to {site}.");
-                if !r.removed_orgwide_grants.is_empty() {
-                    note.push_str(&format!(
-                        " Removed org-wide grant(s): {}.",
-                        r.removed_orgwide_grants.join(", ")
-                    ));
-                }
-                scope_note.set(Some(note));
-                pending_scope.set(None);
-                reload.update(|n| *n += 1);
-            },
-            move |tenant_id| async move {
-                sharepoint::convert_site_access_to_selected(
-                    &tenant_id,
-                    &sp,
-                    &app,
-                    &name,
-                    &[url_for_op],
-                    role,
-                    true,
-                )
-                .await
-            },
-        );
-    };
+    let on_scope = Callback::new(move |value: String| {
+        wizard_preseed.set(Some(value));
+        wizard_open.set(true);
+    });
 
     // App-role *definitions* this app exposes are managed on the dedicated
     // "App roles" tab (add/edit/enable/delete); this tab keeps the held
     // permissions + the delegated scopes the app publishes.
     let scopes = signal.with(|d| d.service_principal.oauth2_permission_scopes.clone());
-
-    // Streamlined scoped-mailbox grant — always reachable, so a bare SP can be
-    // scoped from the start (the Exchange section below only appears once the SP
-    // already holds a mail permission). The wizard scopes by the values selected
-    // in it, so the target's `mail_permissions` are unused here.
-    let wizard_open = RwSignal::new(false);
-    let wizard_target = Signal::derive(move || ExchangeScopeTarget::ServicePrincipal {
-        sp_object_id: sp_id.get(),
-        display_name: display_name.get(),
-        mail_permissions: Vec::new(),
-        is_managed_identity: false,
-    });
 
     let scopes_view = view! {
         <DataTable
@@ -284,11 +162,14 @@ pub(super) fn PermissionsContent(
             <p class="muted">
                 "Application permissions this app has been granted — what it can do as a client."
             </p>
-            <ScopedMailboxWizard
+            <ScopeWizard
                 open=wizard_open
                 target=wizard_target
-                app_id=app_id
-                on_close=Callback::new(move |()| wizard_open.set(false))
+                preseed=wizard_preseed
+                on_close=Callback::new(move |()| {
+                    wizard_open.set(false);
+                    wizard_preseed.set(None);
+                })
                 on_changed=Callback::new(move |()| reload.update(|n| *n += 1))
             />
             <Suspense fallback=move || {
@@ -399,28 +280,6 @@ pub(super) fn PermissionsContent(
                     revoke_cmd.error.set(None);
                 })
             />
-            {move || {
-                pending_scope
-                    .get()
-                    .map(|(value, kind)| {
-                        view! {
-                            <ScopePanel
-                                kind=kind
-                                permission_value=value
-                                groups_text=scope_groups_text
-                                site_url=scope_site_url
-                                busy=Signal::derive(move || scope_cmd.busy.get())
-                                on_submit_exchange=Callback::new(move |()| submit_exchange())
-                                on_submit_sharepoint=Callback::new(move |w: bool| {
-                                    submit_sharepoint(if w { "write" } else { "read" })
-                                })
-                                on_cancel=Callback::new(move |()| cancel_scope())
-                            />
-                        }
-                    })
-            }}
-            {move || scope_note.get().map(|m| view! { <div class="alert alert--ok">{m}</div> })}
-            {move || scope_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
             <h4>"Delegated scopes exposed"</h4>
             <p class="muted">
                 "Delegated scopes this app publishes for users and clients to consent to."
