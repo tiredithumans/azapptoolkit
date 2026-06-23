@@ -73,6 +73,16 @@ fn app_detail_key(tenant_id: &str, object_id: &str) -> String {
     format!("{tenant_id}|app_detail|{object_id}")
 }
 
+/// Cache key for the tenant-wide credential-expiry list (`list_credential_expirations`:
+/// every app registration's secrets + certs, flattened and expiry-sorted). Read
+/// by the Home dashboard's credential tile and the Credential Expiry security
+/// sub-tab. Busted by both [`invalidate_app_credentials`] (a credential change
+/// shifts an expiry) and [`invalidate_app_lists`] (a create/delete changes the
+/// app set), so a rotated/removed credential is never shown as still-expiring.
+pub(crate) fn credential_expirations_key(tenant_id: &str) -> String {
+    format!("{tenant_id}|credential_expirations")
+}
+
 /// Drops every cached detail-pane payload for `tenant_id`. Detail entries are
 /// invalidated as a per-tenant group rather than one key at a time because
 /// several mutations that change detail-visible state (revoking a role
@@ -115,6 +125,8 @@ pub(crate) fn invalidate_app_lists(cache: &Cache, tenant_id: &str) {
     cache.invalidate(CacheKind::Lists, &app_name_index_key(tenant_id));
     // The search corpus is derived from those two indexes, so it must fall too.
     cache.invalidate(CacheKind::Lists, &search_corpus_key(tenant_id));
+    // A create/delete changes the app set the credential-expiry list scans.
+    cache.invalidate(CacheKind::Lists, &credential_expirations_key(tenant_id));
     // Any list-changing mutation (create/delete, credential add/remove, …) also
     // changes the affected app's detail payload, so drop the cached details too.
     invalidate_app_details(cache, tenant_id);
@@ -142,6 +154,10 @@ pub(crate) fn invalidate_app_credentials(cache: &Cache, tenant_id: &str, object_
     cache.invalidate(CacheKind::Lists, &apps_pairing_key(tenant_id));
     // Only the mutated app's detail payload changed.
     cache.invalidate(CacheKind::Lists, &app_detail_key(tenant_id, object_id));
+    // A credential add/remove/rotate shifts this app's row in the tenant-wide
+    // credential-expiry list, so drop the cached list (the index stays — the app
+    // set is unchanged).
+    cache.invalidate(CacheKind::Lists, &credential_expirations_key(tenant_id));
     // Expiring-credential findings change ⇒ the cached audit run is stale.
     crate::commands::audit::invalidate_audit_cache(cache, tenant_id);
 }

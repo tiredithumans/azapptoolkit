@@ -6,12 +6,19 @@
 //! the security audit's. CSV export goes through the OS save dialog, mirroring
 //! `save_audit_to_file`.
 //!
-//! No read-through cache: the list is always fetched fresh so a credential that
-//! was just rotated/removed is never shown as still-expiring.
+//! Read-through cached under `CacheKind::Lists` (`{tenant}|credential_expirations`).
+//! It scans the same `/applications` collection the Home dashboard's
+//! `list_applications_with_pairing` already caches, so an uncached scan here was a
+//! second full-tenant scan on every cold load. The cache is busted by
+//! `invalidate_app_credentials` (a rotate/remove shifts an expiry) and
+//! `invalidate_app_lists` (a create/delete changes the app set), so a
+//! just-rotated/removed credential is never shown as still-expiring — the same
+//! freshness contract `apps_pairing` accepts.
 
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::audit::summarize_credentials;
+use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_graph::client::AppListQuery;
 
 use crate::commands::audit::csv_field;
@@ -32,6 +39,13 @@ pub async fn list_credential_expirations(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<Vec<CredentialRowDto>, UiError> {
+    let cache_key = crate::commands::applications::credential_expirations_key(&tenant_id);
+    if let Some(cached) = state
+        .cache
+        .get::<Vec<CredentialRowDto>>(CacheKind::Lists, &cache_key)
+    {
+        return Ok(cached);
+    }
     let client = state.graph_for(&tenant_id);
     // Project only what `summarize_credentials` + the row build read. The
     // default projection drags in `requiredResourceAccess`, `verifiedPublisher`,
@@ -72,6 +86,7 @@ pub async fn list_credential_expirations(
     }
 
     rows.sort_by_key(|r| sort_key(r.days_to_expiry));
+    state.cache.put(CacheKind::Lists, cache_key, &rows);
     Ok(rows)
 }
 

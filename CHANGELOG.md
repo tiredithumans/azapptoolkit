@@ -7,6 +7,20 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **Tenant-wide reads are now cached, cutting redundant Graph traffic.** The
+  service-principal sign-in activity report (a slow beta endpoint that paginates
+  the whole tenant) is cached per tenant, so clicking through several apps' Activity
+  tabs — and the security audit — share one fetch instead of re-scanning it each
+  time. The Home dashboard's credential-expiry list is likewise read-through cached
+  (it was re-scanning every app registration on each cold load, duplicating the
+  apps list's own scan); it's busted whenever a credential or app changes, so a
+  just-rotated credential is never shown as still-expiring. The discovered Graph
+  activity workspace and ARM role-definition names are documented as read-only
+  until their cache TTL / sign-out (cleared via "Clear all" in Cache diagnostics if
+  ever re-pointed mid-session).
+
 ### Fixed
 
 - **Stale service-principal cache no longer skews audit posture or detail panes.**

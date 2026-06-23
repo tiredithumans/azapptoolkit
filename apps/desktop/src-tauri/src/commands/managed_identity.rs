@@ -256,6 +256,9 @@ pub async fn list_managed_identity_azure_roles(
                 // managed-identity Azure-RBAC view re-fetches the same handful
                 // (and ARM throttles aggressively). Only a real name is cached;
                 // a fetch failure falls back to the GUID tail without poisoning.
+                // Read-only until TTL / sign-out by design: a role-definition
+                // rename is rare, so no mutation busts this — it's cleared by the
+                // 60-min Permissions TTL and the sign-out tenant sweep.
                 let key = format!("{tenant_id}|arm_roledef|{id}");
                 if let Some(name) = cache.get::<String>(CacheKind::Permissions, &key) {
                     return (id, name);

@@ -26,6 +26,12 @@ const MAX_WORKSPACES_PROBED: usize = 50;
 
 /// Tenant-prefixed cache key for the discovered workspace (cross-tenant
 /// leakage guard, same convention as the list caches).
+///
+/// **Read-only until TTL / sign-out, by design.** The workspace exporting
+/// `MicrosoftGraphActivityLogs` is effectively immutable for a tenant, so no
+/// mutation busts this key — it's cleared only by the 60-min `Permissions` TTL
+/// and the sign-out tenant sweep (`invalidate_tenant`). If a workspace is
+/// re-pointed mid-session, "Clear all" in Cache diagnostics forces re-discovery.
 fn workspace_cache_key(tenant_id: &str) -> String {
     format!("{tenant_id}|graph_activity_ws")
 }
