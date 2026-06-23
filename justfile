@@ -53,6 +53,19 @@ web-build:
 web-itest *ARGS:
     wasm-pack test --headless --chrome {{ARGS}} -- --features test-support
 
+# --- Housekeeping ------------------------------------------------------------
+
+# Delete every cargo build artifact to reclaim disk. There are TWO independent
+# build trees: the root workspace (`target/`) and the web-rs frontend, which is
+# excluded from the workspace — so the root `cargo clean` never reaches it, and
+# `web-rs/target/` is by far the larger of the two. `--manifest-path` cleans it
+# without a chdir, keeping the recipe one plain `cargo` call per tree (works
+# under both sh and PowerShell). The next build recompiles from scratch. The
+# committed dist/ stub is left alone (verify recreates it via _stub-frontend-dist).
+clean:
+    cargo clean
+    cargo clean --manifest-path apps/desktop/web-rs/Cargo.toml
+
 # --- Verify (CI gates, in the order CI runs them) ---------------------------
 
 # Auto-format the whole workspace.

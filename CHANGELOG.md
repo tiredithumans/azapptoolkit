@@ -9,6 +9,11 @@ the project adheres to
 
 ### Added
 
+- **`just clean` reclaims disk.** A new task-runner recipe that runs `cargo
+  clean` against both independent build trees — the root workspace and the
+  web-rs frontend (excluded from the workspace, so the root clean never reaches
+  it, and its `target/` is by far the larger). Frees disk when the cargo build
+  caches grow unbounded.
 - **Typed "DELETE" confirmation for the dangerous SP deletes.** Deleting a
   foreign-tenant or Microsoft first-party enterprise application's service
   principal (which can break tenant-wide sign-in) now requires typing `DELETE` to
