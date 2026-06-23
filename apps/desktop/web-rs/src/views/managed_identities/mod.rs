@@ -3,10 +3,8 @@
 //! Master list on the left, selected-identity properties + grant form on the right.
 
 mod row;
-mod scoping;
 
 pub(crate) use row::chip_kind_for;
-pub(crate) use scoping::{existing_scope_kind_for, PendingScope};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,7 +19,6 @@ use crate::components::permission_picker::PickerSelection;
 use crate::components::scope_badge::is_exchange_scopable;
 use crate::components::ui::{EmptyState, IconButton, SearchInput, SectionHeader, SkeletonList};
 use crate::components::virtual_list::VirtualList;
-use crate::util::parse_lines;
 
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
 use crate::bindings::exchange as exchange_bindings;
@@ -30,7 +27,6 @@ use crate::bindings::managed_identity::{
     self, GrantManagedIdentityResult, ManagedIdentityDto, MiSubtype,
 };
 use crate::bindings::permissions as permissions_bindings;
-use crate::bindings::sharepoint;
 use crate::components::filter_chip::FilterChip;
 use crate::components::saved_views::SavedViews;
 use crate::constants::*;
@@ -42,12 +38,6 @@ use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::managed_identity_detail_pane::ManagedIdentityDetailPane;
 
 use row::render_row;
-use scoping::scope_kind_for;
-
-/// Microsoft Graph's first-party app id — mail/calendar/contacts and
-/// `Sites.Selected` application permissions live on this resource, so scoping
-/// only applies when the picked permission's resource matches.
-pub(crate) const MICROSOFT_GRAPH_APP_ID: &str = "00000003-0000-0000-c000-000000000000";
 
 use crate::util::no_tenant;
 
@@ -131,14 +121,6 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
             exporting.set(false);
         });
     };
-
-    // Inline resource-scoping for a scopable permission picked in the grant
-    // form. `pending_scope` holds the picked permission until the user supplies
-    // a scope (mailbox groups / site URL) or grants it org-wide.
-    let pending_scope: RwSignal<Option<PendingScope>> = RwSignal::new(None);
-    let scope_groups_text = RwSignal::new(String::new());
-    let scope_site_url = RwSignal::new(String::new());
-    let scope_note: RwSignal<Option<String>> = RwSignal::new(None);
 
     let identities = LocalResource::new(move || {
         let tenant = tenant.get();
@@ -248,32 +230,6 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
         };
         cmd.error.set(None);
         result.set(None);
-        scope_note.set(None);
-
-        // A scopable permission (mail or Sites.Selected) opens the inline scope
-        // panel instead of granting immediately. We need the MI's app_id +
-        // display name (for the Exchange SP pointer / site grant), resolved from
-        // the loaded identities list.
-        if let Some(kind) = scope_kind_for(&sel.resource_app_id, &sel.permission_value) {
-            let mi = identities
-                .get()
-                .and_then(|r| r.ok())
-                .and_then(|list| list.into_iter().find(|m| m.id == id));
-            if let Some(mi) = mi {
-                scope_groups_text.set(String::new());
-                scope_site_url.set(String::new());
-                pending_scope.set(Some(PendingScope {
-                    sp_object_id: mi.id,
-                    app_id: mi.app_id,
-                    display_name: mi.display_name,
-                    resource_app_id: sel.resource_app_id,
-                    permission_value: sel.permission_value,
-                    kind,
-                }));
-                return;
-            }
-            // Couldn't resolve the MI — fall through to an org-wide grant.
-        }
 
         cmd.run(
             move |r| {
@@ -291,141 +247,6 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
             },
         );
     });
-
-    // Cancel the pending scope panel without granting.
-    let cancel_scope = move |_| {
-        pending_scope.set(None);
-        cmd.error.set(None);
-    };
-
-    // Grant the pending permission org-wide (the panel's fallback button).
-    let submit_orgwide = move |_| {
-        let Some(p) = pending_scope.get() else {
-            return;
-        };
-        cmd.run(
-            move |r| {
-                result.set(Some(r));
-                pending_scope.set(None);
-                reload.update(|n| *n += 1);
-            },
-            move |tenant_id| async move {
-                managed_identity::grant_managed_identity_permission(
-                    &tenant_id,
-                    &p.sp_object_id,
-                    &p.resource_app_id,
-                    std::slice::from_ref(&p.permission_value),
-                )
-                .await
-            },
-        );
-    };
-
-    // Grant the pending mail permission scoped to mailbox group(s) via RBAC.
-    let submit_exchange = move |_| {
-        let Some(p) = pending_scope.get() else {
-            return;
-        };
-        if cmd.busy.get() {
-            return;
-        }
-        let groups = parse_lines(&scope_groups_text.get());
-        if groups.is_empty() {
-            cmd.error.set(Some(
-                "Enter at least one group or mailbox identifier.".into(),
-            ));
-            return;
-        }
-        scope_note.set(None);
-        // `p` feeds both the op (sp/app/name) and the success note (its
-        // permission value), so pull the note's part out before `p` moves.
-        let perm_value = p.permission_value.clone();
-        cmd.run(
-            move |r: exchange_bindings::ExchangeAccessResult| {
-                let mut note = format!(
-                    "Scoped {} via “{}” — {} role(s) assigned, {} org-wide grant(s) removed.",
-                    perm_value,
-                    r.scope_name,
-                    r.roles_assigned.len(),
-                    r.removed_entra_grants.len(),
-                );
-                if !r.warnings.is_empty() {
-                    note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
-                }
-                scope_note.set(Some(note));
-                pending_scope.set(None);
-                reload.update(|n| *n += 1);
-            },
-            move |tenant_id| async move {
-                exchange_bindings::grant_managed_identity_scoped_exchange_access(
-                    &tenant_id,
-                    &p.sp_object_id,
-                    &p.app_id,
-                    &p.display_name,
-                    std::slice::from_ref(&p.permission_value),
-                    &groups,
-                    true,
-                )
-                .await
-            },
-        );
-    };
-
-    // Restrict SharePoint access to one site via the Sites.Selected model.
-    // `role` is "read" or "write". One command grants Sites.Selected (idempotent),
-    // grants the site permission, and — when the identity already held a broad
-    // `Sites.*` grant — strips it. Safe for both the new-grant picker path (no
-    // broad grant to remove) and the per-row "restrict existing" path. Copy
-    // (captures only Copy signals) so both site buttons can reuse it.
-    let submit_sharepoint = move |role: &'static str| {
-        let Some(p) = pending_scope.get() else {
-            return;
-        };
-        if cmd.busy.get() {
-            return;
-        }
-        let url = scope_site_url.get().trim().to_string();
-        if url.is_empty() {
-            cmd.error.set(Some("Enter a SharePoint site URL.".into()));
-            return;
-        }
-        scope_note.set(None);
-        let url_op = url.clone();
-        cmd.run(
-            move |r: sharepoint::SiteScopeResult| {
-                let site = r
-                    .sites_granted
-                    .first()
-                    .and_then(|s| s.site_display_name.clone())
-                    .unwrap_or(url);
-                let mut note = format!("Granted {role} access to {site}.");
-                if !r.removed_orgwide_grants.is_empty() {
-                    note.push_str(&format!(
-                        " Removed org-wide grant(s): {}.",
-                        r.removed_orgwide_grants.join(", ")
-                    ));
-                }
-                if !r.warnings.is_empty() {
-                    note.push_str(&format!(" Warnings: {}", r.warnings.join("; ")));
-                }
-                scope_note.set(Some(note));
-                pending_scope.set(None);
-                reload.update(|n| *n += 1);
-            },
-            move |tenant_id| async move {
-                sharepoint::convert_site_access_to_selected(
-                    &tenant_id,
-                    &p.sp_object_id,
-                    &p.app_id,
-                    &p.display_name,
-                    &[url_op],
-                    role,
-                    true,
-                )
-                .await
-            },
-        );
-    };
 
     let do_revoke = move |assignment_id: String, sp_id: String| {
         cmd.run(
@@ -602,10 +423,6 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                             error=cmd.error
                                             result=result
                                             refreshing=refreshing
-                                            pending_scope=pending_scope
-                                            scope_groups_text=scope_groups_text
-                                            scope_site_url=scope_site_url
-                                            scope_note=scope_note
                                             consenting=consenting
                                             consent_error=consent_error
                                             reload=reload
@@ -619,12 +436,6 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                                 pending_revoke.set(Some((aid, sp)))
                                             })
                                             on_refresh=Callback::new(move |()| on_refresh_detail(()))
-                                            on_cancel_scope=Callback::new(move |()| cancel_scope(()))
-                                            on_submit_orgwide=Callback::new(move |()| submit_orgwide(()))
-                                            on_submit_exchange=Callback::new(move |()| submit_exchange(()))
-                                            on_submit_sharepoint=Callback::new(move |role: &'static str| {
-                                                submit_sharepoint(role)
-                                            })
                                         />
                                     }
                                         .into_any()

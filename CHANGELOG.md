@@ -9,20 +9,25 @@ the project adheres to
 
 ### Added
 
-- **"Grant mailbox access" wizard — one guided flow for scoped Exchange access.**
-  A new always-available **Grant mailbox access…** button on the Permissions tab
-  (app registrations) and the Enterprise App / Managed Identity detail panes opens
-  a three-step wizard — pick the mail permissions (Mail.Read / Mail.ReadWrite /
-  Mail.Send and more) → choose the mailboxes → review & grant — replacing the old
-  "grant org-wide, then hunt for the scoping menu, then strip the grant" dance.
-  The default path is **scoped and least-privilege**: the permission is *declared*
-  (so it's visible and the Exchange scoping path can target it) while access comes
-  solely from a scoped Exchange RBAC role assignment — no org-wide Entra grant is
-  ever created (new `declare_app_permission` command). An explicit, de-emphasized
-  **org-wide (no scoping)** option remains for the rare permission that genuinely
-  needs tenant-wide reach. The wizard resolves and lets you add/remove the managed
-  scope group's member mailboxes inline, via a shared `ManagedScopeGroupPanel` now
-  reused by the "Exchange scoping" section too.
+- **"Grant scoped access" wizard — one guided flow for confining permissions,
+  across mechanisms.** A single always-available **Grant scoped access…** button
+  on the Permissions tab (app registrations) and the Enterprise App / Managed
+  Identity detail panes opens a three-step wizard — pick the permissions → choose
+  the targets → review & grant — replacing the old "grant org-wide, then hunt for
+  the scoping menu, then strip the grant" dance *and* the per-row inline scope
+  nudge (now retired, along with `scope_panel.rs`). The wizard **dispatches on the
+  scoping mechanism**: **Exchange RBAC** (Mail/Calendars/Contacts) confines to a
+  mailbox group — declare-only, so no org-wide Entra grant is ever created (the
+  `declare_app_permission` command) — and **SharePoint** (`Sites.*`) confines to
+  specific sites via `Sites.Selected` (`convert_site_access_to_selected`). Picking
+  a permission locks the run to its mechanism (scope the other separately); a held
+  row's **Scope…** opens the wizard pre-selected to that permission. A de-emphasized
+  **org-wide (no scoping)** option remains for the rare permission that needs
+  tenant-wide reach. Built on the `ScopeKind` registry, so new mechanisms
+  (Administrative Units, Azure RBAC, Teams resource-specific consent) drop in as a
+  registry entry + a target panel + an apply arm. Managed-group mailboxes and the
+  site list are managed inline via shared `ManagedScopeGroupPanel` /
+  `SiteSelectionPanel` components.
 
 ### Internal
 
