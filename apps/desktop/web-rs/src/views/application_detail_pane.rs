@@ -8,7 +8,7 @@ use thaw::{Card, Tab, TabList};
 use crate::bindings::applications;
 use crate::components::detail_header::DetailHeader;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::DetailSkeleton;
+use crate::components::ui::{DetailLoadError, DetailSkeleton};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -223,14 +223,7 @@ pub fn ApplicationDetailPane(#[prop(into)] object_id: Signal<String>) -> impl In
                                 .into_any()
                         }
                         Err(err) => {
-                            view! {
-                                <div class="app-detail__body">
-                                    <span style="color: var(--tauri-accent-color);">
-                                        {format!("error [{}]: {}", err.code, err.message)}
-                                    </span>
-                                </div>
-                            }
-                                .into_any()
+                            view! { <DetailLoadError error=err reload=reload /> }.into_any()
                         }
                     }
                 })}

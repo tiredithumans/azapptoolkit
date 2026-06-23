@@ -22,7 +22,7 @@ use crate::components::requires_role::RequiresRole;
 use crate::components::scope_badge::is_exchange_scopable;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
-use crate::components::ui::{CopyableId, DataTable};
+use crate::components::ui::{CopyableId, DataTable, DetailLoadError, SkeletonList};
 use crate::state::use_session;
 use crate::views::managed_identities::chip_kind_for;
 
@@ -145,14 +145,7 @@ pub fn ManagedIdentityDetailPane(
                 })
                 on_changed=Callback::new(move |()| reload.update(|n| *n += 1))
             />
-            <Suspense fallback=move || {
-                view! {
-                    <Spinner
-                        size=Signal::derive(|| SpinnerSize::Tiny)
-                        label="Loading…"
-                    />
-                }
-            }>
+            <Suspense fallback=move || view! { <SkeletonList rows=4 /> }>
                 {move || {
                     let mi_sp_id = mi_id_for_table.clone();
                     let mi_app_id_row = mi_app_id_for_scope.clone();
@@ -245,8 +238,7 @@ pub fn ManagedIdentityDetailPane(
                                 .into_any()
                         }
                         Err(e) => {
-                            view! { <Body1 class="form-error">{e.message}</Body1> }
-                                .into_any()
+                            view! { <DetailLoadError error=e reload=reload /> }.into_any()
                         }
                     }
                     })
@@ -269,14 +261,7 @@ pub fn ManagedIdentityDetailPane(
                     arm_reload.update(|n| *n += 1)
                 })
             />
-            <Suspense fallback=move || {
-                view! {
-                    <Spinner
-                        size=Signal::derive(|| SpinnerSize::Tiny)
-                        label="Loading Azure roles…"
-                    />
-                }
-            }>
+            <Suspense fallback=move || view! { <SkeletonList rows=4 /> }>
                 {move || Suspend::new(async move {
                     match azure_roles.await {
                         // The signed-in user (or tenant admin) hasn't

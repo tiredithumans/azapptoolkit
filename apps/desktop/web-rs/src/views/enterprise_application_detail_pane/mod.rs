@@ -22,7 +22,7 @@ use crate::components::detail_header::DetailHeader;
 use crate::components::requires_role::RequiresRole;
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{DataTable, DetailSkeleton};
+use crate::components::ui::{DataTable, DetailLoadError, DetailSkeleton};
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
@@ -133,12 +133,7 @@ pub fn EnterpriseApplicationDetailPane(
                                 .into_any()
                         }
                         Err(err) => {
-                            view! {
-                                <Body1 class="app-detail__error">
-                                    {format!("error [{}]: {}", err.code, err.message)}
-                                </Body1>
-                            }
-                                .into_any()
+                            view! { <DetailLoadError error=err reload=reload /> }.into_any()
                         }
                     }
                 })}
