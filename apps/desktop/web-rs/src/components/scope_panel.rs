@@ -13,17 +13,12 @@ use thaw::{Body1, Button, ButtonAppearance, Input, Textarea};
 use crate::components::group_autocomplete::GroupAutocomplete;
 use crate::components::requires_role::RequiresRole;
 
-/// Which scoping model a "Scope…" action drives. The classifier that decides
-/// this differs by call site (new-grant vs restrict-existing treat
-/// `Sites.Selected` differently), so each caller computes it with its own helper
-/// and passes the result in — this enum is shared, the classifiers are not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScopeKind {
-    /// Mail/calendar/contacts → confine to mailbox group(s) via Exchange RBAC.
-    Exchange,
-    /// `Sites.*` → confine to a specific site via `Sites.Selected`.
-    SharePoint,
-}
+/// Which scoping model a "Scope…" action drives. Re-exported from the core
+/// scope registry (`azapptoolkit_core::scoping::ScopeKind`) so the frontend and
+/// backend share one definition; the per-call-site classifiers that decide it
+/// (new-grant vs restrict-existing treat `Sites.Selected` differently) live with
+/// their callers.
+pub use azapptoolkit_core::scoping::ScopeKind;
 
 #[component]
 pub fn ScopePanel(

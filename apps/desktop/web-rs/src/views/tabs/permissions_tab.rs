@@ -75,19 +75,12 @@ fn row_scope_kind(value: &str) -> Option<ScopeKind> {
 }
 
 /// New-grant (scope-first) classifier: a freshly-granted permission that can be
-/// confined opens the scope panel immediately. Covers Exchange
-/// mail/calendar/contacts and **any** SharePoint `Sites.*` — `Sites.Selected`
-/// (grant per-site access) or a broad grant (convert to `Sites.Selected`).
-/// Unlike [`row_scope_kind`] it includes `Sites.Selected`, since a brand-new
-/// `Sites.Selected` still needs sites added to be useful.
+/// confined opens the scope panel immediately. This is exactly the core scope
+/// registry — Exchange mail/calendar/contacts and **any** SharePoint `Sites.*`
+/// (`Sites.Selected` or a broad grant). Unlike [`row_scope_kind`] it includes
+/// `Sites.Selected`, since a brand-new `Sites.Selected` still needs sites added.
 fn grant_scope_kind(value: &str) -> Option<ScopeKind> {
-    if is_exchange_scopable(value) {
-        Some(ScopeKind::Exchange)
-    } else if value == "Sites.Selected" || is_sharepoint_orgwide(value) {
-        Some(ScopeKind::SharePoint)
-    } else {
-        None
-    }
+    azapptoolkit_core::scoping::scope_kind(value)
 }
 
 /// Runs the admin-consent grant for the app in `detail`, reporting via toasts.

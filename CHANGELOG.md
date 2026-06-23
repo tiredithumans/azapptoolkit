@@ -26,6 +26,14 @@ the project adheres to
 
 ### Internal
 
+- **Scope-mechanism registry in `azapptoolkit-core::scoping`.** Promoted the
+  `ScopeKind` enum (Exchange / SharePoint) into the shared core crate and added a
+  single `scope_kind(value)` classifier plus per-mechanism metadata
+  (`target_noun` / `capability_key` / `admin_applicable`) — one source of truth
+  for "what mechanism, if any, scopes this Graph permission?" The app-registration
+  new-grant classifier now delegates to it and `scope_panel.rs` re-exports the
+  enum. Behavior-preserving groundwork for unifying scoping (Exchange, SharePoint,
+  and future mechanisms) behind one mechanism-dispatched flow.
 - **GUI test coverage for the mailbox-access wizard.** A browser GUI test
   (`just web-itest`) drives `ScopedMailboxWizard` end-to-end for an app
   registration and proves the apply orchestration: the scoped path *declares*
