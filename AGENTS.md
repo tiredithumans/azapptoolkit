@@ -114,6 +114,9 @@ just web-deny       # same policy, web-rs tree
 # Release (Windows) + icons:
 just build-windows  # MSI + NSIS installers
 just icon           # regenerate from icons/icon.svg
+
+# Housekeeping:
+just clean          # cargo clean BOTH build trees (root + excluded web-rs) to reclaim disk
 ```
 
 Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For team builds, bake via `.env` (see `build.rs`).
