@@ -392,7 +392,14 @@ pub(crate) async fn create_application_core(
     let application = client.create_application(&body).await?;
 
     let service_principal = if input.create_service_principal {
-        Some(client.ensure_service_principal(&application.app_id).await?)
+        // `create_application` already busts the list caches below, so the
+        // `created` flag is unused here.
+        Some(
+            client
+                .ensure_service_principal(&application.app_id)
+                .await?
+                .0,
+        )
     } else {
         None
     };

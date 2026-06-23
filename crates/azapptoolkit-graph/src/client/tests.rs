@@ -814,8 +814,9 @@ async fn ensure_service_principal_skips_post_when_present() {
     // POST mock is intentionally NOT registered; if we fall through to it
     // wiremock returns 404 and the test fails.
     let client = make_client(&server.uri());
-    let sp = client.ensure_service_principal("app-1").await.unwrap();
+    let (sp, created) = client.ensure_service_principal("app-1").await.unwrap();
     assert_eq!(sp.id, "sp-1");
+    assert!(!created, "an existing SP must not report as newly created");
 }
 
 #[tokio::test]
@@ -839,8 +840,49 @@ async fn ensure_service_principal_creates_when_absent() {
         .mount(&server)
         .await;
     let client = make_client(&server.uri());
-    let sp = client.ensure_service_principal("app-1").await.unwrap();
+    let (sp, created) = client.ensure_service_principal("app-1").await.unwrap();
     assert_eq!(sp.id, "sp-new");
+    assert!(created, "a POSTed SP must report as newly created");
+}
+
+#[tokio::test]
+async fn patch_service_principal_busts_the_sp_cache() {
+    let server = MockServer::start().await;
+    // The appId lookup is expected TWICE: once to prime the cache, once after
+    // the patch busts it. A cache that survived the mutation would serve the
+    // second read from cache and the GET would fire only once (failing
+    // `.expect(2)` on drop) — that was the stale-SP bug this guards against.
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "sp-1", "appId": "app-1", "displayName": "Demo App" }]
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/servicePrincipals/sp-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    // Prime the per-app SP cache.
+    client
+        .get_service_principal_by_app_id("app-1")
+        .await
+        .unwrap();
+    // A patch (by SP object id) must sweep this tenant's SP cache — it's keyed
+    // by appId, so the whole `{tenant}|` prefix falls.
+    client
+        .patch_service_principal("sp-1", &serde_json::json!({ "accountEnabled": false }))
+        .await
+        .unwrap();
+    // The next lookup therefore re-fetches rather than returning the stale entry.
+    client
+        .get_service_principal_by_app_id("app-1")
+        .await
+        .unwrap();
 }
 
 #[test]

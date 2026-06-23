@@ -294,8 +294,14 @@ pub async fn grant_admin_consent(
     object_id: String,
 ) -> Result<GrantResult, UiError> {
     let client = state.graph_for(&tenant_id);
-    let result = grant_admin_consent_core(&client, &object_id).await?;
-    super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
+    let (result, sp_created) = grant_admin_consent_core(&client, &object_id).await?;
+    // A brand-new SP is a new Enterprise App row / search-index entry, so bust
+    // the full list caches; otherwise the cheaper detail+audit bust suffices.
+    if sp_created {
+        super::applications::invalidate_app_lists(&state.cache, &tenant_id);
+    } else {
+        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
+    }
     Ok(result)
 }
 
@@ -317,12 +323,16 @@ fn grant_failure_message(err: &azapptoolkit_graph::GraphError) -> String {
 
 /// Shared admin-consent orchestration, reused by the single-app command and
 /// the bulk path so both keep identical semantics.
+///
+/// Returns the [`GrantResult`] **and** whether ensuring the client SP created a
+/// brand-new one — callers bust the list caches (not just detail) on that path,
+/// since a new SP is a new Enterprise App row / search-index entry.
 pub(crate) async fn grant_admin_consent_core(
     client: &azapptoolkit_graph::GraphClient,
     object_id: &str,
-) -> Result<GrantResult, UiError> {
+) -> Result<(GrantResult, bool), UiError> {
     let app = client.get_application(object_id).await?;
-    let client_sp = client.ensure_service_principal(&app.app_id).await?;
+    let (client_sp, sp_created) = client.ensure_service_principal(&app.app_id).await?;
     // Must not swallow this: if the existing-assignments lookup fails we can't
     // tell which roles are already granted, and proceeding would re-grant
     // everything (duplicate/conflicting assignments).
@@ -450,13 +460,16 @@ pub(crate) async fn grant_admin_consent_core(
         }
     }
 
-    Ok(GrantResult {
-        client_service_principal_id: client_sp.id,
-        role_assignments_created,
-        role_assignments_skipped,
-        scope_grants_upserted,
-        failures,
-    })
+    Ok((
+        GrantResult {
+            client_service_principal_id: client_sp.id,
+            role_assignments_created,
+            role_assignments_skipped,
+            scope_grants_upserted,
+            failures,
+        },
+        sp_created,
+    ))
 }
 
 // ---------------- Single-permission grant ----------------
@@ -507,7 +520,7 @@ pub async fn grant_single_permission(
 
     // 2) Create the runtime grant. Errors stay structured so the UI can
     //    show a per-row failure without losing the manifest patch.
-    let client_sp = client.ensure_service_principal(&app.app_id).await?;
+    let (client_sp, sp_created) = client.ensure_service_principal(&app.app_id).await?;
     let resource_sp = client
         .resolve_resource_sp(&resource_app_id)
         .await?
@@ -588,7 +601,13 @@ pub async fn grant_single_permission(
         PermissionKind::Unknown => unreachable!("guarded above"),
     }
 
-    super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
+    // A first grant that materializes the app's SP adds an Enterprise App row /
+    // search-index entry, so bust the full list caches; otherwise detail+audit.
+    if sp_created {
+        super::applications::invalidate_app_lists(&state.cache, &tenant_id);
+    } else {
+        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
+    }
     Ok(GrantResult {
         client_service_principal_id: client_sp.id,
         role_assignments_created,

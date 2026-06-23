@@ -244,19 +244,37 @@ impl GraphClient {
             .await
     }
 
-    /// Creates a service principal for `app_id` if one does not exist, and
-    /// invalidates the cached lookup so the next read sees the fresh SP.
-    pub async fn ensure_service_principal(&self, app_id: &str) -> Result<ServicePrincipal> {
+    /// Drops every per-app service-principal cache entry (full **and** `|lean`)
+    /// for this client's tenant. The SP cache is keyed by `appId`, but the SP
+    /// mutators below only know the SP *object* id, so a targeted single-key
+    /// bust isn't possible — sweep the whole `{tenant}|` prefix (the can't-miss
+    /// option, matching `commands::applications::invalidate_app_details`). SP
+    /// writes are infrequent user-initiated actions and the bucket refills
+    /// lazily (the detail pane) or via the batch prewarm (the audit), so the
+    /// re-fetch cost is acceptable. Without this, a patched/deleted SP stays
+    /// cached up to the 60-min TTL, skewing the audit's `accountEnabled` read and
+    /// the app-registration detail pane's paired-SP fields.
+    fn invalidate_sp_cache(&self) {
+        self.cache
+            .invalidate_prefix(CacheKind::ServicePrincipal, &format!("{}|", self.tenant_id));
+    }
+
+    /// Creates a service principal for `app_id` if one does not exist. Returns
+    /// the SP and whether it was **newly created** — callers bust the Lists
+    /// caches (the shared SP index / search corpus) only on first creation,
+    /// since that is what adds a row to them. On creation, sweeps this tenant's
+    /// SP cache so a `None` cached by an earlier lookup (before the SP existed)
+    /// can't survive under the full or `|lean` key.
+    pub async fn ensure_service_principal(&self, app_id: &str) -> Result<(ServicePrincipal, bool)> {
         if let Some(existing) = self.get_service_principal_by_app_id(app_id).await? {
-            return Ok(existing);
+            return Ok((existing, false));
         }
         let body = serde_json::json!({ "appId": app_id });
         let sp: ServicePrincipal = self
             .send_json(Method::POST, "/servicePrincipals", &body)
             .await?;
-        self.cache
-            .invalidate(CacheKind::ServicePrincipal, &self.sp_cache_key(app_id));
-        Ok(sp)
+        self.invalidate_sp_cache();
+        Ok((sp, true))
     }
 
     /// Display-name **term** search over `/servicePrincipals` via Graph
@@ -368,7 +386,9 @@ impl GraphClient {
         let path = format!("/servicePrincipals/{object_id}");
         let body = serde_json::json!({ "tags": tags });
         self.send_no_content(Method::PATCH, &path, Some(&body))
-            .await
+            .await?;
+        self.invalidate_sp_cache();
+        Ok(())
     }
 
     /// DELETE `/servicePrincipals/{id}`. Removes the enterprise application's
@@ -378,7 +398,9 @@ impl GraphClient {
     pub async fn delete_service_principal(&self, object_id: &str) -> Result<()> {
         let path = format!("/servicePrincipals/{object_id}");
         self.send_no_content::<()>(Method::DELETE, &path, None)
-            .await
+            .await?;
+        self.invalidate_sp_cache();
+        Ok(())
     }
 
     /// PATCH `/servicePrincipals/{id}` with a caller-built body. Used to set
@@ -391,7 +413,10 @@ impl GraphClient {
         body: &B,
     ) -> Result<()> {
         let path = format!("/servicePrincipals/{object_id}");
-        self.send_no_content(Method::PATCH, &path, Some(body)).await
+        self.send_no_content(Method::PATCH, &path, Some(body))
+            .await?;
+        self.invalidate_sp_cache();
+        Ok(())
     }
 
     /// GET `/servicePrincipals/{id}?$select=appRoles`, returning the raw
