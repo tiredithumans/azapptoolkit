@@ -14,6 +14,13 @@ use crate::hooks::use_grid_keynav::use_grid_keynav;
 /// taken by value — the rows at render time: reactive callers place this inside
 /// their own `move ||` so a fresh table builds when the row set changes; static
 /// callers (e.g. a post-await list) build it once.
+///
+/// **Intentionally uncapped** (no render-limit / "Show more"): every caller —
+/// a principal's held grants, an app's published scopes, an SP's assignees — is
+/// admin-bounded data that realistically numbers in the handful, so a cap would
+/// never engage. The large, genuinely-unbounded lists (App Registrations,
+/// Enterprise Apps) use the windowed `VirtualList` instead. Add a cap here only
+/// if a real tenant is shown to stall on one of these tables.
 #[component]
 pub fn DataTable<T, RowFn>(
     headers: Vec<&'static str>,

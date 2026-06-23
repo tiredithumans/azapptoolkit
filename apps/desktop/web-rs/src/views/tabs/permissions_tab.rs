@@ -382,8 +382,11 @@ pub fn PermissionsTab(
                     >
                         "Grant access"
                     </Button>
+                    // Secondary so "Grant access" (the wizard) reads as the
+                    // primary action; this in-place consent of already-declared
+                    // permissions is the alternate path, not the default one.
                     <Button
-                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
                         on_click=Box::new(grant)
                         disabled=Signal::derive(move || consenting.get())
                     >

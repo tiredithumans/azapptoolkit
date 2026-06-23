@@ -9,6 +9,11 @@ the project adheres to
 
 ### Added
 
+- **Typed "DELETE" confirmation for the dangerous SP deletes.** Deleting a
+  foreign-tenant or Microsoft first-party enterprise application's service
+  principal (which can break tenant-wide sign-in) now requires typing `DELETE` to
+  confirm, matching the bulk-delete guard; an ordinary in-tenant SP keeps the
+  one-click confirm.
 - **Detail panes now offer Retry when a load fails.** A transient 429 / network
   blip on an App Registration, Enterprise App, or Managed Identity detail load
   used to leave a static `error [code]: message` dead-end; it now shows the
@@ -21,6 +26,13 @@ the project adheres to
 
 ### Changed
 
+- **Permissions tab — clearer primary action.** "Grant access" (the wizard) is
+  now the sole primary button; "Grant admin consent" (in-place consent of
+  already-declared permissions) is demoted to a secondary action so the two are no
+  longer competing primaries.
+- **Grant-access wizard explains a disabled "Next".** Step 1 now shows a "Select
+  at least one permission to continue." hint while the cart is empty, instead of a
+  mutely-disabled button.
 - **Consistent loading skeletons.** The Managed Identity detail pane's permission
   and Azure-role tables now show a skeleton placeholder while loading, matching
   the other detail surfaces (was a bare spinner).

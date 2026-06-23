@@ -30,6 +30,7 @@ use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::pairing::jump_to_paired_app;
 use crate::views::tabs::activity_tab::ActivityPanel;
 use crate::views::tabs::conditional_access_tab::ConditionalAccessPanel;
+use crate::views::tabs::EnterpriseTab;
 
 mod access;
 mod app_roles;
@@ -160,20 +161,19 @@ fn EnterpriseAppPanel(
         .get_untracked()
         .unwrap_or_else(|| session.last_enterprise_tab.get_untracked());
     session.pending_enterprise_tab.set(None);
-    let restored = match restored.as_str() {
-        "insights" => "conditionalAccess".to_string(),
-        _ => restored,
-    };
-    let active_tab = RwSignal::new(restored);
+    // Clamp a stale persisted/deep-linked value to a live tab (e.g. the former
+    // merged "insights" → Conditional Access) via the typed enum.
+    let active_tab = RwSignal::new(EnterpriseTab::from_str(&restored).value().to_string());
     Effect::new(move |_| session.last_enterprise_tab.set(active_tab.get()));
 
     // Derive a read-only signal from the RwSignal for easier access.
     let ro_signal = Signal::derive(move || detail_signal.get());
 
     // Deleting a service principal is destructive and has no app-reg equivalent
-    // for managed identities (their lifecycle is owned by the Azure resource),
-    // so this lives only on the enterprise detail and is gated behind a typed
-    // confirmation with an extra warning for foreign-tenant / first-party SPs.
+    // for managed identities (their lifecycle is owned by the Azure resource), so
+    // this lives only on the enterprise detail. Foreign-tenant / first-party SPs
+    // get a louder warning AND a typed-"DELETE" confirmation (the dangerous case);
+    // an ordinary in-tenant SP uses the plain one-click confirm.
     let delete_open = RwSignal::new(false);
     let deleting = RwSignal::new(false);
     let delete_error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -238,38 +238,41 @@ fn EnterpriseAppPanel(
                 }}
             </DetailHeader>
             <TabList selected_value=active_tab>
-                <Tab value="overview">"Overview"</Tab>
-                <Tab value="sso">"SSO"</Tab>
-                <Tab value="credentials">"Credentials"</Tab>
-                <Tab value="owners">"Owners"</Tab>
-                <Tab value="permissions">"Permissions"</Tab>
-                <Tab value="appRoles">"App roles"</Tab>
-                <Tab value="access">"Access"</Tab>
-                <Tab value="provisioning">"Provisioning"</Tab>
-                <Tab value="conditionalAccess">"Conditional Access"</Tab>
-                <Tab value="activity">"Activity"</Tab>
+                {EnterpriseTab::ALL
+                    .iter()
+                    .map(|t| view! { <Tab value=t.value()>{t.label()}</Tab> })
+                    .collect_view()}
             </TabList>
             <div class="app-detail__pane">
-                {move || match active_tab.get().as_str() {
-                    "overview" => view! { <OverviewContent signal=ro_signal /> }.into_any(),
-                    "sso" => view! { <SsoContent signal=ro_signal /> }.into_any(),
-                    "credentials" => view! { <CredentialsContent signal=ro_signal /> }.into_any(),
-                    "owners" => {
+                {move || match EnterpriseTab::from_str(&active_tab.get()) {
+                    EnterpriseTab::Overview => {
+                        view! { <OverviewContent signal=ro_signal /> }.into_any()
+                    }
+                    EnterpriseTab::Sso => view! { <SsoContent signal=ro_signal /> }.into_any(),
+                    EnterpriseTab::Credentials => {
+                        view! { <CredentialsContent signal=ro_signal /> }.into_any()
+                    }
+                    EnterpriseTab::Owners => {
                         view! { <OwnersContent signal=ro_signal on_refresh=on_refresh /> }
                             .into_any()
                     }
-                    "permissions" => view! { <PermissionsContent signal=ro_signal /> }.into_any(),
-                    "appRoles" => {
+                    EnterpriseTab::Permissions => {
+                        view! { <PermissionsContent signal=ro_signal /> }.into_any()
+                    }
+                    EnterpriseTab::AppRoles => {
                         view! { <AppRolesContent signal=ro_signal on_refresh=on_refresh /> }
                             .into_any()
                     }
-                    "access" => view! { <AccessContent signal=ro_signal /> }.into_any(),
-                    "provisioning" => {
+                    EnterpriseTab::Access => view! { <AccessContent signal=ro_signal /> }.into_any(),
+                    EnterpriseTab::Provisioning => {
                         view! { <ProvisioningContent signal=ro_signal /> }.into_any()
                     }
-                    "conditionalAccess" => view! { <CaContent signal=ro_signal /> }.into_any(),
-                    "activity" => view! { <ActivityContent signal=ro_signal /> }.into_any(),
-                    _ => view! { <Body1>"Unknown tab"</Body1> }.into_any(),
+                    EnterpriseTab::ConditionalAccess => {
+                        view! { <CaContent signal=ro_signal /> }.into_any()
+                    }
+                    EnterpriseTab::Activity => {
+                        view! { <ActivityContent signal=ro_signal /> }.into_any()
+                    }
                 }}
             </div>
             {move || {
@@ -282,12 +285,18 @@ fn EnterpriseAppPanel(
                 } else {
                     "Delete this enterprise application's service principal? This removes the app from your tenant — sign-ins stop and its permission/consent grants are revoked immediately. It can be restored from the Entra admin center within 30 days."
                 };
+                // Foreign-tenant / first-party SPs are the dangerous case
+                // (deleting one can break tenant-wide sign-in), so require a typed
+                // "DELETE" confirmation — matching the bulk-delete guard. An
+                // ordinary in-tenant SP keeps the one-click confirm.
+                let require_keyword = if foreign { "DELETE" } else { "" };
                 view! {
                     <ConfirmDialog
                         open=Signal::derive(move || delete_open.get())
                         title="Delete this enterprise application?"
                         body=body
                         confirm_label="Delete"
+                        require_keyword=require_keyword
                         busy=Signal::derive(move || deleting.get())
                         error=Signal::derive(move || delete_error.get())
                         on_confirm=Callback::new(move |()| do_delete())
