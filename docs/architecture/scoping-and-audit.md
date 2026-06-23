@@ -119,25 +119,37 @@ to propagate (`Test-ServicePrincipalAuthorization` bypasses that cache). Creatin
 group needs the Exchange **Distribution Groups** role (Recipient Management / Organization
 Management — all covered by **Exchange Administrator**).
 
-## Restricting an *already-granted* org-wide permission ("Scope…" after the fact)
+## The scope registry + the mechanism-dispatched wizard
 
-The same scoping cores back a per-permission **"Scope…"** action in the detail view (app-reg
-Permissions tab `view_resolved_row`; MI detail permission row).
+Scoping is a **family of independent authorities**, unified behind one classifier and one UI shell:
 
-- **Exchange** reuses `grant_exchange_mailbox_access(Some([value]))` /
-  `grant_managed_identity_scoped_exchange_access` with `remove_unscoped=true`.
-- **SharePoint** converts an org-wide `Sites.*` to `Sites.Selected` via the **shared**
-  `commands::sharepoint::convert_site_access_to_selected` (works for an app SP *and* an MI — caller
-  passes the SP object id + app id): grant `Sites.Selected` (idempotent) → grant per-site access →
-  **only if ≥1 site grant landed** strip the broad `Sites.*` grant (`should_remove_orgwide`),
-  mirroring Exchange's grant-before-strip ordering so a failure never strands the principal with no
-  access. The MI SharePoint submit (new-grant *and* per-row) routes through this one command.
+- **Registry** (`azapptoolkit-core::scoping`): `ScopeKind` (Exchange / SharePoint, room to grow) +
+  `scope_kind(value) -> Option<ScopeKind>` (the single "what mechanism, if any?" decision) + metadata
+  (`target_noun` / `capability_key` / `admin_applicable`). `admin_applicable() == false` is the seam
+  for future owner-consented mechanisms (Teams/Chat RSC) — the UI renders guidance, not an apply.
+- **Wizard** (`web-rs/components/scope_wizard.rs`, the "Grant scoped access…" button on every
+  principal's Permissions surface; a held org-wide row's **"Scope…"** opens it *pre-seeded* to that
+  permission). Uniform shell — pick permissions → choose targets → review & grant — that **dispatches
+  Step 2's target panel and Step 3's apply by `ScopeKind`**. **One mechanism per run** (picking a
+  permission locks the checklist to its mechanism). A de-emphasized **org-wide** option falls back to
+  `grant_single_permission` / `grant_managed_identity_permission`.
+
+Per-mechanism apply (each does grant-before-strip, so a failure never strands the principal):
+
+- **Exchange** — declare-only: `declare_app_permission` per permission (manifest only, no runtime
+  grant) then `grant_exchange_mailbox_access(Some([…]))` /
+  `grant_managed_identity_scoped_exchange_access` with `remove_unscoped=true`. Targets:
+  `ManagedScopeGroupPanel` (mailbox group membership) or existing groups.
+- **SharePoint** — `commands::sharepoint::convert_site_access_to_selected` (works for an app SP *and*
+  an MI — caller passes the SP object id + app id): grant `Sites.Selected` (idempotent) → grant
+  per-site access → **only if ≥1 site grant landed** strip the broad `Sites.*` grant
+  (`should_remove_orgwide`). Targets: `SiteSelectionPanel` (site URLs + read/write). Graph has **no
+  reverse `appId → sites` lookup**, so the site URL(s) are user-supplied.
 
 Graph appRole id↔value resolution lives in `commands::graph_roles::graph_role_index` (shared by
-exchange + sharepoint); SharePoint org-wide detection is name-based (`is_sharepoint_orgwide`,
-defined once in `azapptoolkit-core::scoping` and re-exported by
-`web-rs/components/scope_badge.rs`). Graph has **no reverse `appId → sites` lookup**, so the site
-URL(s) must be supplied by the user.
+exchange + sharepoint); SharePoint org-wide detection is name-based (`is_sharepoint_orgwide`, defined
+once in `azapptoolkit-core::scoping`). **To teach the app a new mechanism**: add a `ScopeKind` variant
++ a target panel + a Step-3 apply arm — nothing else branches on the concrete mechanism.
 
 ## Audit remediations (one-click "Fix")
 
