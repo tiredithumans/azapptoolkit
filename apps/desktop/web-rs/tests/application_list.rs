@@ -74,7 +74,7 @@ async fn error_state_renders_message() {
 }
 
 #[wasm_bindgen_test]
-async fn empty_state_when_no_apps() {
+async fn empty_tenant_shows_create_cta() {
     ts::reset();
     ts::mock_ok("list_applications_with_pairing", &fixtures::no_apps());
 
@@ -82,6 +82,11 @@ async fn empty_state_when_no_apps() {
 
     ts::wait_for(|| ts::text(COUNT) == "0 app registrations").await;
     assert_eq!(ts::query_all(".app-list__row").len(), 0);
+    // A genuinely empty tenant gets an onboarding CTA, not the "adjust your
+    // filters" copy meant for a filtered-empty list.
+    ts::wait_for(|| ts::query(".ui-empty__title").is_some()).await;
+    assert_eq!(ts::text(".ui-empty__title"), "No app registrations yet");
+    assert!(ts::text(".ui-empty").contains("+ New app"));
 }
 
 #[wasm_bindgen_test]

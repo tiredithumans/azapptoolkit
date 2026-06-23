@@ -330,25 +330,50 @@ fn LoadedEnterpriseApps(
                 </div>
             }
         }}
-        <VirtualRows items=shown />
+        <VirtualRows items=shown total=total />
     }
 }
 
 /// Reactive wrapper around the shared `VirtualList`: the empty state when
 /// every row is filtered out, otherwise the keyed virtualized window.
 #[component]
-fn VirtualRows(items: Memo<Arc<Vec<EnterpriseApplicationDto>>>) -> impl IntoView {
+fn VirtualRows(
+    items: Memo<Arc<Vec<EnterpriseApplicationDto>>>,
+    // Pre-filter tenant count: 0 ⇒ no enterprise apps at all (onboarding CTA)
+    // rather than a filtered-empty list ("broaden your search").
+    total: usize,
+) -> impl IntoView {
     let session = use_session();
     view! {
         <Show
             when=move || items.with(|v| !v.is_empty())
-            fallback=|| {
-                view! {
-                    <EmptyState
-                        icon=IconName::Search
-                        title="No matching enterprise applications".to_string()
-                        body="Try a broader search term or clear the filters.".to_string()
-                    />
+            fallback=move || {
+                if total == 0 {
+                    view! {
+                        <EmptyState
+                            icon=IconName::Building
+                            title="No enterprise applications yet".to_string()
+                            body="Add one from the gallery in the portal, or start a new SSO application here."
+                                .to_string()
+                        >
+                            <Button
+                                appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                on_click=Box::new(move |_| session.sso_wizard_open.set(true))
+                            >
+                                "+ New SSO application"
+                            </Button>
+                        </EmptyState>
+                    }
+                        .into_any()
+                } else {
+                    view! {
+                        <EmptyState
+                            icon=IconName::Search
+                            title="No matching enterprise applications".to_string()
+                            body="Try a broader search term or clear the filters.".to_string()
+                        />
+                    }
+                        .into_any()
                 }
             }
         >
