@@ -4,7 +4,7 @@ use std::time::Duration;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cache::{Cache, CacheKind};
-use azapptoolkit_core::models::{Application, Organization, Paged, ServicePrincipal};
+use azapptoolkit_core::models::{Organization, ServicePrincipal};
 use azapptoolkit_graph::client::{AppListQuery, AppPatch, CreateApplicationRequest};
 
 use crate::dto::applications::{
@@ -171,24 +171,6 @@ pub async fn get_organization(
 ) -> Result<Organization, UiError> {
     let client = state.graph_for(&tenant_id);
     client.get_organization().await.map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn list_applications(
-    state: State<'_, AppState>,
-    tenant_id: String,
-    search: Option<String>,
-    top: Option<u32>,
-) -> Result<Paged<Application>, UiError> {
-    let mut query = AppListQuery::default();
-    if let Some(s) = search.filter(|s| !s.trim().is_empty()) {
-        query = query.with_search(s);
-    }
-    if let Some(t) = top {
-        query = query.with_top(t);
-    }
-    let client = state.graph_for(&tenant_id);
-    client.list_applications(query).await.map_err(Into::into)
 }
 
 /// `$select` for the App Registrations list rows. Drops `requiredResourceAccess`
@@ -718,7 +700,7 @@ mod detail_cache_tests {
 #[cfg(test)]
 mod export_tests {
     use super::*;
-    use azapptoolkit_core::models::PasswordCredential;
+    use azapptoolkit_core::models::{Application, PasswordCredential};
 
     fn row(name: &str, paired: Option<&str>) -> ApplicationListRowDto {
         let now = chrono::DateTime::parse_from_rfc3339("2024-06-01T00:00:00Z")

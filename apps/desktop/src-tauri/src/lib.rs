@@ -69,7 +69,6 @@ pub fn run() {
             commands::restore::restore_tenant,
             commands::restore::save_restore_report_to_file,
             commands::applications::get_organization,
-            commands::applications::list_applications,
             commands::applications::list_applications_with_pairing,
             commands::applications::save_applications_to_file,
             commands::applications::get_application_detail,

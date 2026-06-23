@@ -1,9 +1,7 @@
 //! Application-management IPC bindings: organization, list/get/create/update/
 //! delete applications, owners, password & certificate credentials, search.
 
-use azapptoolkit_core::models::{
-    Application, DirectoryObject, Organization, Paged, PasswordCredential,
-};
+use azapptoolkit_core::models::{DirectoryObject, Organization, PasswordCredential};
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
@@ -15,30 +13,6 @@ pub use azapptoolkit_dto::applications::*;
 
 pub async fn get_organization(tenant_id: &str) -> Result<Organization, UiError> {
     invoke_result("get_organization", TenantArg { tenant_id }).await
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ListApplicationsArgs<'a> {
-    tenant_id: &'a str,
-    search: Option<&'a str>,
-    top: Option<u32>,
-}
-
-pub async fn list_applications(
-    tenant_id: &str,
-    search: Option<&str>,
-    top: Option<u32>,
-) -> Result<Paged<Application>, UiError> {
-    invoke_result(
-        "list_applications",
-        ListApplicationsArgs {
-            tenant_id,
-            search,
-            top,
-        },
-    )
-    .await
 }
 
 /// Returns the full set of app registrations (paginated to completion on the
