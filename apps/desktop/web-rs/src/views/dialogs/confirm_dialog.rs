@@ -18,6 +18,12 @@ pub fn ConfirmDialog(
     body: &'static str,
     #[prop(default = "Confirm")] confirm_label: &'static str,
     #[prop(default = "Cancel")] cancel_label: &'static str,
+    /// When non-empty, the confirm button stays disabled until the user types
+    /// this exact keyword (e.g. `"DELETE"`) — a typed-confirmation guard for the
+    /// most dangerous actions, matching the bulk-delete flow. Empty (the default)
+    /// keeps the one-click confirm.
+    #[prop(default = "")]
+    require_keyword: &'static str,
     #[prop(into, optional)] busy: Signal<bool>,
     #[prop(into, optional)] error: Signal<Option<String>>,
     #[prop(into)] on_confirm: Callback<()>,
@@ -30,6 +36,18 @@ pub fn ConfirmDialog(
     let modal_ref: NodeRef<html::Div> = NodeRef::new();
     use_focus_trap(modal_ref, open);
 
+    // Typed-confirmation buffer (used only when `require_keyword` is set). Cleared
+    // whenever the dialog closes so a re-open always starts blank.
+    let typed = RwSignal::new(String::new());
+    Effect::new(move |_| {
+        if !open.get() {
+            typed.set(String::new());
+        }
+    });
+    let confirm_disabled = move || {
+        busy.get() || (!require_keyword.is_empty() && typed.get().trim() != require_keyword)
+    };
+
     view! {
         <Show when=move || open.get() fallback=|| view! { <></> }>
             <div
@@ -41,6 +59,21 @@ pub fn ConfirmDialog(
                 <div class="modal" node_ref=modal_ref>
                     <h3 id="confirm-dialog-title">{title}</h3>
                     <Body1>{body}</Body1>
+                    {(!require_keyword.is_empty())
+                        .then(|| {
+                            view! {
+                                <label class="confirm-dialog__keyword">
+                                    {format!("Type \"{require_keyword}\" to confirm:")}
+                                    <input
+                                        type="text"
+                                        autocomplete="off"
+                                        style="display:block;margin-top:4px;"
+                                        prop:value=move || typed.get()
+                                        on:input=move |ev| typed.set(event_target_value(&ev))
+                                    />
+                                </label>
+                            }
+                        })}
                     {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
                     <div class="actions-row">
                         <Button
@@ -54,7 +87,7 @@ pub fn ConfirmDialog(
                             class="button--danger"
                             appearance=Signal::derive(|| ButtonAppearance::Primary)
                             on_click=Box::new(move |_| on_confirm.run(()))
-                            disabled=Signal::derive(move || busy.get())
+                            disabled=Signal::derive(confirm_disabled)
                         >
                             {move || {
                                 if busy.get() {
