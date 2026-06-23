@@ -29,7 +29,7 @@ async fn loads_and_renders_detail() {
 }
 
 #[wasm_bindgen_test]
-async fn error_state_renders_message() {
+async fn error_state_offers_retry_that_reloads() {
     ts::reset();
     ts::mock_err(
         "get_application_detail",
@@ -41,4 +41,9 @@ async fn error_state_renders_message() {
     );
 
     ts::wait_for(|| ts::body_contains("Application not found")).await;
+    // The Err branch is no longer a dead-end: a Retry button re-runs the load.
+    ts::wait_for(|| ts::query(".detail-load-error button").is_some()).await;
+    let before = ts::call_count("get_application_detail");
+    ts::click(".detail-load-error button");
+    ts::wait_for(|| ts::call_count("get_application_detail") > before).await;
 }

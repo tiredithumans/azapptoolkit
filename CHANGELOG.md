@@ -7,8 +7,23 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Detail panes now offer Retry when a load fails.** A transient 429 / network
+  blip on an App Registration, Enterprise App, or Managed Identity detail load
+  used to leave a static `error [code]: message` dead-end; it now shows the
+  message with a Retry button (and a muted code), matching the list views. Shared
+  `DetailLoadError` component across the three panes.
+- **Empty tenants get an onboarding call-to-action.** An App Registrations /
+  Enterprise Applications list with no items shows a "Create your first…" empty
+  state with a primary create button, instead of the "adjust your search or
+  filters" copy meant for a filtered-empty list.
+
 ### Changed
 
+- **Consistent loading skeletons.** The Managed Identity detail pane's permission
+  and Azure-role tables now show a skeleton placeholder while loading, matching
+  the other detail surfaces (was a bare spinner).
 - **Bulk delete / grant-consent now run with bounded concurrency and adaptive
   throttling.** Both ran fully serially with a fixed 50 ms pause between items —
   slow on the healthy path yet with no back-off under throttling. They now fan out

@@ -357,7 +357,7 @@ fn LoadedApps(
                     </div>
                 }
             })}
-        <VirtualRows items=shown selected=selected />
+        <VirtualRows items=shown selected=selected total=total />
     }
 }
 
@@ -367,18 +367,40 @@ fn LoadedApps(
 fn VirtualRows(
     items: Memo<Arc<Vec<ApplicationListRowDto>>>,
     selected: RwSignal<Option<String>>,
+    // The pre-filter tenant count, so an empty tenant gets an onboarding CTA
+    // rather than the "adjust your filters" copy meant for a filtered-empty list.
+    total: usize,
 ) -> impl IntoView {
     let session = use_session();
     view! {
         <Show
             when=move || items.with(|v| !v.is_empty())
-            fallback=|| {
-                view! {
-                    <EmptyState
-                        icon=IconName::Search
-                        title="No matching apps".to_string()
-                        body="Adjust your search or filters to widen the result set.".to_string()
-                    />
+            fallback=move || {
+                if total == 0 {
+                    view! {
+                        <EmptyState
+                            icon=IconName::AppWindow
+                            title="No app registrations yet".to_string()
+                            body="Create your first app registration to get started.".to_string()
+                        >
+                            <Button
+                                appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                on_click=Box::new(move |_| session.open_create_app())
+                            >
+                                "+ New app"
+                            </Button>
+                        </EmptyState>
+                    }
+                        .into_any()
+                } else {
+                    view! {
+                        <EmptyState
+                            icon=IconName::Search
+                            title="No matching apps".to_string()
+                            body="Adjust your search or filters to widen the result set.".to_string()
+                        />
+                    }
+                        .into_any()
                 }
             }
         >
