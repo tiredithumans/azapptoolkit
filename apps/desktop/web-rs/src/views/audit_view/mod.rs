@@ -58,7 +58,11 @@ pub fn AuditView() -> impl IntoView {
         None => peak_cap.set(0),
     });
     let scan_error: RwSignal<Option<String>> = RwSignal::new(None);
-    let facet = RwSignal::new(String::from("all"));
+    // Facet lifted to the session so the Home "Security Posture" metrics can
+    // deep-link straight to e.g. the Critical or Unused rows; reset on tenant
+    // switch with the other per-list facets. The in-view posture cards and tab
+    // bar still drive it locally, unchanged.
+    let facet = session.audit_facet;
     let search = RwSignal::new(String::new());
     // Column sort: `None` keeps the backend's risk-ranked order. `Some((col,
     // desc))` sorts the filtered indices by that column.

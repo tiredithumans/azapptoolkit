@@ -38,6 +38,11 @@ pub fn AuditDashboard<T, Fetch, FetchFut, Export, ExportFut, Banner, Matches, Ro
     empty_message: String,
     /// `(value, label)` facet tabs; the first should be the catch-all `"all"`.
     facets: Vec<(&'static str, &'static str)>,
+    /// Optional external facet signal (lifted to `Session`) so a caller can seed
+    /// the active facet from outside — e.g. the Home dashboard drilling into a
+    /// specific Credential-expiry filter. Omitted → a fresh local `"all"` signal.
+    #[prop(optional)]
+    facet: Option<RwSignal<String>>,
     /// Column header labels (use `""` for an action column with no heading).
     headers: Vec<&'static str>,
     /// Fetches the rows for a tenant id.
@@ -68,7 +73,8 @@ where
     let loading = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let reload = RwSignal::new(0_u32);
-    let facet = RwSignal::new(String::from("all"));
+    // Use the caller-supplied (session-lifted) facet if given, else a local one.
+    let facet = facet.unwrap_or_else(|| RwSignal::new(String::from("all")));
     let search = RwSignal::new(String::new());
     let exporting = RwSignal::new(false);
     let export_msg: RwSignal<Option<String>> = RwSignal::new(None);

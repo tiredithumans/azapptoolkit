@@ -40,10 +40,11 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
     let raw_search = session.enterprise_search;
     let search = use_debounced(raw_search.into(), LIST_FILTER_DEBOUNCE_MS);
 
-    // Client-side facet over the loaded page: all | enabled | disabled | foreign.
-    // Credential status is the App Registration lens, not the enterprise-app
-    // lens, so it's not offered here.
-    let ent_filter = RwSignal::new("all".to_string());
+    // Facet over the loaded page (all | enabled | disabled | foreign), lifted to
+    // the session (like the search above) so the Home dashboard's Enterprise
+    // metrics can seed it. Credential status is the App Registration lens, not
+    // the enterprise-app lens, so it's not offered here.
+    let ent_filter = session.enterprise_facet;
     // Unset date picker (None) leaves that side of the creation-date range open;
     // together they bound creation date to an inclusive window.
     let created_after: RwSignal<Option<NaiveDate>> = RwSignal::new(None);
@@ -53,6 +54,16 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
     // chips); search stays outside it. Default collapsed to reclaim list space,
     // with the active-filter count badged on the toggle.
     let filters_open = RwSignal::new(false);
+    // A Home dashboard drill (open_enterprise_with_facet) lands here pre-filtered
+    // but with the drawer collapsed, hiding the active facet chip. Consume the
+    // one-shot flag to expand the drawer once so the chip is visible (this is the
+    // sole consumer, so no view-guard is needed).
+    Effect::new(move |_| {
+        if session.pending_open_filters.get() {
+            filters_open.set(true);
+            session.pending_open_filters.set(false);
+        }
+    });
     let active_filters = Signal::derive(move || {
         (ent_filter.get() != "all") as usize
             + created_after.get().is_some() as usize

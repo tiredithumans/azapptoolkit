@@ -63,8 +63,10 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
     // Enterprise Application lists.
     let raw_search = session.mi_search;
     let search = use_debounced(raw_search.into(), LIST_FILTER_DEBOUNCE_MS);
-    // Facet chip over the loaded list: all | system | user | enabled | disabled.
-    let mi_filter = RwSignal::new(String::from("all"));
+    // Facet chip over the loaded list (all | system | user | enabled | disabled),
+    // lifted to the session (like the search above) so the Home dashboard's
+    // Managed Identities metrics can seed it.
+    let mi_filter = session.mi_facet;
 
     // One shared command runner for every grant/revoke/scope mutation below —
     // they share a single busy + error (only one runs at a time; one error

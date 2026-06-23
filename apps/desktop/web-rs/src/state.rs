@@ -56,6 +56,25 @@ pub struct Session {
     pub apps_search: RwSignal<String>,
     pub enterprise_search: RwSignal<String>,
     pub mi_search: RwSignal<String>,
+    // Facet selection for each surface the Home dashboard drills INTO, lifted to
+    // the session for the same two reasons as the searches above: (1) a metric
+    // click seeds it via `open_*_with_facet` so the destination lands pre-filtered
+    // to that subset; (2) it MUST reset on tenant switch (see `set_active_tenant`)
+    // — a leftover facet silently narrowing the next tenant's list would be
+    // cross-tenant leakage. Defaults are each surface's "show all" sentinel
+    // ("all"). The App Registrations list keeps a local facet — no metric drills
+    // into it (its card's secret/cert counts have no matching facet).
+    pub enterprise_facet: RwSignal<String>,
+    pub mi_facet: RwSignal<String>,
+    pub audit_facet: RwSignal<String>,
+    pub credentials_facet: RwSignal<String>,
+    // One-shot "open the filter drawer on arrival" flag. The Enterprise list's
+    // facet chips live in a drawer collapsed by default, so a drill would land
+    // filtered with the active chip hidden; `open_enterprise_with_facet` sets this
+    // and the list consumes it once to expand the drawer (MI shows its chips
+    // unconditionally and the audit/credentials surfaces show tabs, so neither
+    // needs this). Reset on tenant switch with the facets.
+    pub pending_open_filters: RwSignal<bool>,
     pub view: RwSignal<ActiveView>,
     // Multi-select set of application object ids, distinct from the
     // single-select `selected_app_object_id` (which drives the detail pane).
@@ -124,6 +143,14 @@ impl Session {
         self.apps_search.set(String::new());
         self.enterprise_search.set(String::new());
         self.mi_search.set(String::new());
+        // Reset the lifted facets to their "show all" sentinel for the same
+        // cross-tenant-leakage reason as the searches above (the App Registrations
+        // facet is local, so it rides its own view's lifecycle).
+        self.enterprise_facet.set(String::from("all"));
+        self.mi_facet.set(String::from("all"));
+        self.audit_facet.set(String::from("all"));
+        self.credentials_facet.set(String::from("all"));
+        self.pending_open_filters.set(false);
         self.view.set(ActiveView::Home);
         self.cache_open.set(false);
         self.pending_app_tab.set(None);
@@ -212,6 +239,48 @@ impl Session {
         self.view.set(ActiveView::EnterpriseApps);
     }
 
+    /// Navigate to the Enterprise Applications list pre-filtered to a facet
+    /// (`"disabled"` | `"foreign"` | `"enabled"`). Used by the Home dashboard's
+    /// Enterprise metrics. Clears any lingering per-list search so the drilled
+    /// list matches the clicked metric, and trips `pending_open_filters` so the
+    /// list expands its (collapsed-by-default) drawer to show the active chip.
+    pub fn open_enterprise_with_facet(&self, facet: &str) {
+        self.enterprise_facet.set(facet.to_string());
+        self.enterprise_search.set(String::new());
+        self.pending_open_filters.set(true);
+        self.view.set(ActiveView::EnterpriseApps);
+    }
+
+    /// Navigate to the Managed Identities list pre-filtered to a facet
+    /// (`"system"` | `"user"` | `"enabled"` | `"disabled"`). Used by the Home
+    /// dashboard's Managed Identities metrics. (MI chips are always visible, so
+    /// no drawer needs expanding.)
+    pub fn open_managed_identities_with_facet(&self, facet: &str) {
+        self.mi_facet.set(facet.to_string());
+        self.mi_search.set(String::new());
+        self.view.set(ActiveView::ManagedIdentities);
+    }
+
+    /// Navigate to the Security surface's Posture (audit) sub-tab pre-filtered to
+    /// an audit facet (`"critical"` | `"high"` | `"ownership"` | `"unused"` | …).
+    /// Used by the Home dashboard's Security Posture metrics. The audit view
+    /// loads the cached run on mount, so the drilled facet lands on populated
+    /// data without re-running the scan.
+    pub fn open_posture_with_facet(&self, facet: &str) {
+        self.audit_facet.set(facet.to_string());
+        self.open_security("posture");
+    }
+
+    /// Navigate to the Security surface's Credential-expiry sub-tab pre-filtered
+    /// to a facet (`"expired"` | `"7"` | `"30"`). Used by the Home dashboard's
+    /// Credential Health metrics — that surface is per-credential (one row per
+    /// secret/cert), so the drilled count matches the clicked metric, unlike the
+    /// per-app App Registrations credential facet.
+    pub fn open_credentials_with_facet(&self, facet: &str) {
+        self.credentials_facet.set(facet.to_string());
+        self.open_security("credentials");
+    }
+
     /// Push a toast and return its id. `action_label` + `action` render an
     /// inline button (used for Retry on retryable errors). The id lets a
     /// caller dismiss the toast later.
@@ -272,6 +341,11 @@ pub fn provide_session() {
         apps_search: RwSignal::new(String::new()),
         enterprise_search: RwSignal::new(String::new()),
         mi_search: RwSignal::new(String::new()),
+        enterprise_facet: RwSignal::new(String::from("all")),
+        mi_facet: RwSignal::new(String::from("all")),
+        audit_facet: RwSignal::new(String::from("all")),
+        credentials_facet: RwSignal::new(String::from("all")),
+        pending_open_filters: RwSignal::new(false),
         selected_app_ids: RwSignal::new(HashSet::new()),
         apps_reload: RwSignal::new(0),
         view: RwSignal::new(ActiveView::Home),

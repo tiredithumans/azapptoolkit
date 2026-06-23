@@ -9,6 +9,18 @@ the project adheres to
 
 ### Added
 
+- **Home dashboard metrics drill into a pre-filtered list.** Clicking a count on
+  the Overview cards now jumps to the matching list/lens filtered to that subset,
+  instead of just landing on an unfiltered list: Enterprise Applications'
+  Disabled / Foreign and Managed Identities' System / User → their list's facet;
+  Credential Health's Expired / ≤7d / ≤30d → the per-credential Credential-expiry
+  lens (so the drilled count matches the clicked metric); Security Posture's
+  Critical / High / Ownership / Unused → the audit view's matching facet. Zero
+  counts stay muted and non-clickable (nothing to drill into). The facet of each
+  drilled surface (enterprise / managed-identity / audit / credential-expiry) is
+  lifted to the `Session` alongside the searches and reset on tenant switch so a
+  metric click can seed it; drilling into the Enterprise list also auto-expands
+  its filter drawer so the active chip is visible.
 - **`just clean` reclaims disk.** A new task-runner recipe that runs `cargo
   clean` against both independent build trees — the root workspace and the
   web-rs frontend (excluded from the workspace, so the root clean never reaches
