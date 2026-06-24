@@ -1,19 +1,31 @@
-//! The audit table's facet × search filter, as pure functions over the item set.
+//! The audit table's filter, as pure functions over the item set.
+//!
+//! The filter is two INDEPENDENT dimensions — risk **severity** and **finding**
+//! type — intersected with the name/appId search. They're split so an auditor
+//! can stack them (e.g. Critical apps *with* expiring credentials) instead of
+//! picking one flat facet at a time.
 
 use azapptoolkit_core::audit::{AuditItem, RiskLevel, issue};
 
 /// The audit table's filter, as a pure function over the item set: returns the
-/// indices (in original order) of items matching both the facet and the
-/// already-lowercased name/appId query. Extracted so the facet × search
-/// interplay is pinned by tests, and so the perf rewrite can window over these
-/// indices and clone only the rows it renders — instead of deep-cloning the
-/// whole multi-MB matching set on every keystroke. `query_lower` must already
-/// be lowercased (the caller lowercases once); an empty query matches all.
-pub(super) fn filter_indices(items: &[AuditItem], facet: &str, query_lower: &str) -> Vec<usize> {
+/// indices (in original order) of items matching the severity dimension AND the
+/// finding dimension AND the already-lowercased name/appId query. Extracted so
+/// the severity × finding × search interplay is pinned by tests, and so the
+/// renderer can window over these indices and clone only the rows it renders —
+/// instead of deep-cloning the whole multi-MB matching set on every keystroke.
+/// `query_lower` must already be lowercased (the caller lowercases once); an
+/// empty query matches all. Each dimension's `"all"` value matches everything.
+pub(super) fn filter_indices(
+    items: &[AuditItem],
+    severity: &str,
+    finding: &str,
+    query_lower: &str,
+) -> Vec<usize> {
     items
         .iter()
         .enumerate()
-        .filter(|(_, i)| matches_facet(i, facet))
+        .filter(|(_, i)| matches_severity(i, severity))
+        .filter(|(_, i)| matches_finding(i, finding))
         .filter(|(_, i)| {
             query_lower.is_empty()
                 || i.application_name.to_lowercase().contains(query_lower)
@@ -23,13 +35,22 @@ pub(super) fn filter_indices(items: &[AuditItem], facet: &str, query_lower: &str
         .collect()
 }
 
-pub(super) fn matches_facet(i: &AuditItem, facet: &str) -> bool {
-    match facet {
+/// Risk-severity dimension: `"all"` plus the four `RiskLevel` buckets.
+pub(super) fn matches_severity(i: &AuditItem, severity: &str) -> bool {
+    match severity {
         "all" => true,
         "critical" => matches!(i.risk_level, RiskLevel::Critical),
         "high" => matches!(i.risk_level, RiskLevel::High),
         "medium" => matches!(i.risk_level, RiskLevel::Medium),
         "low" => matches!(i.risk_level, RiskLevel::Low),
+        _ => true,
+    }
+}
+
+/// Finding-type dimension: `"all"` plus the structured/marker-driven findings.
+pub(super) fn matches_finding(i: &AuditItem, finding: &str) -> bool {
+    match finding {
+        "all" => true,
         "expiring" => {
             use azapptoolkit_core::audit::CredentialStatus;
             matches!(
@@ -45,12 +66,16 @@ pub(super) fn matches_facet(i: &AuditItem, facet: &str) -> bool {
             .issues
             .iter()
             .any(|x| x.starts_with(issue::HIGH_RISK_DELEGATED_PERMS)),
-        // Effective mailbox scoping facets. Scoping is resolved on every run, but
+        // Effective mailbox scoping findings. Scoping is resolved on every run, but
         // degrades to org-wide when the signed-in user lacks Exchange-admin rights.
         "orgwide_mailbox" => i
             .issues
             .iter()
             .any(|x| x.starts_with(issue::ORG_WIDE_MAILBOX)),
+        // Load-bearing asymmetry: `SCOPED_VIA_RBAC` is embedded MID-issue
+        // ("Mail.Read scoped via Exchange RBAC…"), not a prefix like its siblings,
+        // so this must stay `.contains` — a "normalize to starts_with" sweep would
+        // silently empty the Scoped-mailbox finding (pinned by the tests below).
         "scoped_mailbox" => i.issues.iter().any(|x| x.contains(issue::SCOPED_VIA_RBAC)),
         "orgwide_sharepoint" => i
             .issues
@@ -118,23 +143,24 @@ mod tests {
     }
 
     // ---- filter_indices characterization (T-M7) ----------------------------
-    // These pin the facet × search interplay before the at-scale perf rewrite
-    // (windowed, index-based rendering) so the rewrite is provably
-    // behavior-preserving. The query is passed already-lowercased, mirroring
-    // the call site (`search_debounced.get().to_lowercase()`).
+    // These pin the severity × finding × search interplay so the windowed,
+    // index-based renderer is provably behavior-preserving. The query is passed
+    // already-lowercased, mirroring the call site
+    // (`search_debounced.get().to_lowercase()`). Both dimension args take "all"
+    // to mean "no constraint".
 
     #[test]
-    fn filter_indices_empty_query_keeps_facet_matches_in_order() {
+    fn filter_indices_empty_query_keeps_severity_matches_in_order() {
         let items = vec![
             named("Alpha", "aaa", RiskLevel::Critical),
             named("Beta", "bbb", RiskLevel::Low),
             named("Gamma", "ccc", RiskLevel::Critical),
         ];
-        // "all" facet, empty query → every index, original order.
-        assert_eq!(filter_indices(&items, "all", ""), vec![0, 1, 2]);
-        // A risk facet keeps only its matches, preserving order.
-        assert_eq!(filter_indices(&items, "critical", ""), vec![0, 2]);
-        assert_eq!(filter_indices(&items, "low", ""), vec![1]);
+        // "all"/"all", empty query → every index, original order.
+        assert_eq!(filter_indices(&items, "all", "all", ""), vec![0, 1, 2]);
+        // A severity filter keeps only its matches, preserving order.
+        assert_eq!(filter_indices(&items, "critical", "all", ""), vec![0, 2]);
+        assert_eq!(filter_indices(&items, "low", "all", ""), vec![1]);
     }
 
     #[test]
@@ -144,50 +170,93 @@ mod tests {
             named("HR Sync", "2222-bbbb", RiskLevel::Low),
         ];
         // Name substring (caller lowercases the query; data is lowercased here).
-        assert_eq!(filter_indices(&items, "all", "payroll"), vec![0]);
+        assert_eq!(filter_indices(&items, "all", "all", "payroll"), vec![0]);
         // AppId substring also matches.
-        assert_eq!(filter_indices(&items, "all", "2222"), vec![1]);
+        assert_eq!(filter_indices(&items, "all", "all", "2222"), vec![1]);
         // No match → empty.
-        assert!(filter_indices(&items, "all", "zzz").is_empty());
+        assert!(filter_indices(&items, "all", "all", "zzz").is_empty());
     }
 
     #[test]
-    fn filter_indices_combines_facet_and_query_as_intersection() {
+    fn filter_indices_combines_severity_and_query_as_intersection() {
         let items = vec![
             named("Critical Payroll", "aaa", RiskLevel::Critical),
             named("Low Payroll", "bbb", RiskLevel::Low),
             named("Critical Other", "ccc", RiskLevel::Critical),
         ];
-        // Both predicates must hold: critical AND name contains "payroll".
-        assert_eq!(filter_indices(&items, "critical", "payroll"), vec![0]);
-        // Facet excludes the matching-name low-risk row.
+        // All predicates must hold: critical AND name contains "payroll".
         assert_eq!(
-            filter_indices(&items, "high", "payroll"),
+            filter_indices(&items, "critical", "all", "payroll"),
+            vec![0]
+        );
+        // Severity excludes the matching-name low-risk row.
+        assert_eq!(
+            filter_indices(&items, "high", "all", "payroll"),
             Vec::<usize>::new()
         );
     }
 
     #[test]
+    fn filter_indices_intersects_severity_and_finding() {
+        use azapptoolkit_core::audit::CredentialStatus;
+        let expiring_critical = AuditItem {
+            risk_level: RiskLevel::Critical,
+            credential_status: CredentialStatus::Expired,
+            ..blank()
+        };
+        let active_critical = AuditItem {
+            risk_level: RiskLevel::Critical,
+            credential_status: CredentialStatus::Active,
+            ..blank()
+        };
+        let expiring_low = AuditItem {
+            risk_level: RiskLevel::Low,
+            credential_status: CredentialStatus::ExpiringSoon,
+            ..blank()
+        };
+        let items = vec![expiring_critical, active_critical, expiring_low];
+        // The two dimensions intersect: only the critical AND expiring row.
+        assert_eq!(filter_indices(&items, "critical", "expiring", ""), vec![0]);
+        // Either dimension alone is broader.
+        assert_eq!(filter_indices(&items, "critical", "all", ""), vec![0, 1]);
+        assert_eq!(filter_indices(&items, "all", "expiring", ""), vec![0, 2]);
+    }
+
+    #[test]
     fn filter_indices_indices_address_the_original_slice() {
-        // The rewrite renders `items[idx]`, so every returned index must be a
+        // The renderer indexes `items[idx]`, so every returned index must be a
         // valid, correct address into the *unfiltered* slice.
         let items = vec![
             named("keep me", "aaa", RiskLevel::Low),
             named("skip", "bbb", RiskLevel::Low),
             named("keep me too", "ccc", RiskLevel::Low),
         ];
-        let idx = filter_indices(&items, "all", "keep");
+        let idx = filter_indices(&items, "all", "all", "keep");
         assert_eq!(idx, vec![0, 2]);
         for i in idx {
             assert!(items[i].application_name.contains("keep"));
         }
     }
 
+    #[test]
+    fn matches_severity_matches_only_its_own_bucket() {
+        let crit = named("c", "c", RiskLevel::Critical);
+        // "all" matches every level; each named level matches only its bucket.
+        assert!(matches_severity(&crit, "all"));
+        assert!(matches_severity(&crit, "critical"));
+        assert!(!matches_severity(&crit, "high"));
+        assert!(!matches_severity(&crit, "medium"));
+        assert!(!matches_severity(&crit, "low"));
+        let low = named("l", "l", RiskLevel::Low);
+        assert!(matches_severity(&low, "low"));
+        assert!(!matches_severity(&low, "critical"));
+    }
+
     // Consumer half of the structured-signals invariant: the producer side is
     // pinned by core's `emitted_issue_markers_are_stable`; this pins that each
-    // marker-driven facet matches exactly its own marker and no sibling's.
+    // marker-driven finding matches exactly its own marker and no sibling's.
     #[test]
-    fn issue_marker_facets_match_exactly_their_facet() {
+    fn issue_marker_findings_match_exactly_their_finding() {
         let cases = [
             (
                 format!("{} something", issue::HIGH_RISK_APP_PERMS),
@@ -211,7 +280,7 @@ mod tests {
             ),
             (format!("{} something", issue::NO_OWNERS), "ownership"),
         ];
-        let marker_facets = [
+        let marker_findings = [
             "high_risk_perms",
             "high_risk_delegated",
             "orgwide_mailbox",
@@ -222,25 +291,25 @@ mod tests {
         ];
         for (text, expect) in &cases {
             let item = with_issue(text.clone());
-            for f in marker_facets {
+            for f in marker_findings {
                 assert_eq!(
-                    matches_facet(&item, f),
+                    matches_finding(&item, f),
                     f == *expect,
-                    "issue {text:?} vs facet {f}"
+                    "issue {text:?} vs finding {f}"
                 );
             }
         }
     }
 
     #[test]
-    fn scoped_mailbox_facet_matches_the_mid_string_marker() {
+    fn scoped_mailbox_finding_matches_the_mid_string_marker() {
         // SCOPED_VIA_RBAC is deliberately matched with `.contains` — the
         // scorer embeds it mid-issue ("Mail.Read scoped via Exchange RBAC…"),
         // not as a prefix like every sibling marker. Load-bearing asymmetry:
         // a well-meaning "make them all starts_with" sweep would silently
-        // empty the Scoped-mailbox facet.
+        // empty the Scoped-mailbox finding.
         let item = with_issue(format!("Mail.Read {} (Sales Team)", issue::SCOPED_VIA_RBAC));
-        assert!(matches_facet(&item, "scoped_mailbox"));
-        assert!(!matches_facet(&item, "orgwide_mailbox"));
+        assert!(matches_finding(&item, "scoped_mailbox"));
+        assert!(!matches_finding(&item, "orgwide_mailbox"));
     }
 }
