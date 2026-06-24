@@ -1,8 +1,8 @@
 //! Debounce a string signal.
 
 use leptos::prelude::*;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 /// Returns a `Signal<String>` that lags `source` by `delay_ms`. Each new value
 /// cancels the pending timeout and starts a fresh one.

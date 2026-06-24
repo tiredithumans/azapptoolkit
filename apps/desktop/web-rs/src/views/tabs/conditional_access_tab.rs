@@ -93,8 +93,7 @@ fn ca_row(p: ConditionalAccessPolicyDto) -> impl IntoView {
     let controls = if p.grant_controls.is_empty() {
         "—".to_string()
     } else {
-        let joined = p
-            .grant_controls
+        p.grant_controls
             .iter()
             .map(|c| control_label(c))
             .collect::<Vec<_>>()
@@ -102,8 +101,7 @@ fn ca_row(p: ConditionalAccessPolicyDto) -> impl IntoView {
                 " or "
             } else {
                 " and "
-            });
-        joined
+            })
     };
     view! {
         <tr>

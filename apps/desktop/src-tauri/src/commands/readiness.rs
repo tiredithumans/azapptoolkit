@@ -15,10 +15,10 @@ use std::collections::{HashMap, HashSet};
 use tauri::State;
 
 use azapptoolkit_auth::AuthError;
-use azapptoolkit_core::capabilities::{Capability, RoleDetect, CAPABILITIES};
+use azapptoolkit_core::capabilities::{CAPABILITIES, Capability, RoleDetect};
 
-use crate::dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use crate::dto::UiError;
+use crate::dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use crate::state::AppState;
 
 /// Builds the readiness report for `tenant_id`. Never cached — the whole point is

@@ -33,9 +33,9 @@ use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
 use crate::util::parse_lines;
-use azapptoolkit_core::scoping::{scope_kind, ScopeKind};
-use azapptoolkit_dto::permissions::PermissionKind;
+use azapptoolkit_core::scoping::{ScopeKind, scope_kind};
 use azapptoolkit_dto::UiError;
+use azapptoolkit_dto::permissions::PermissionKind;
 
 /// Everything the wizard needs about the principal, across mechanisms.
 /// `object_id` is the app-registration object id (drives the Exchange
@@ -345,17 +345,17 @@ pub fn ScopeWizard(
     // Pre-seed on open: a row "Scope…" opens the wizard with one permission
     // already in the cart, jumping to the choose-access step for its mechanism.
     Effect::new(move |_| {
-        if open.get() {
-            if let Some(sel) = preseed.get_untracked() {
-                if let Some(k) = scope_kind(&sel.permission_value) {
-                    if k == ScopeKind::SharePoint {
-                        site_write.set(sel.permission_value != "Sites.Read.All");
-                    }
-                    scope_mode.set(default_mode(k));
+        if open.get()
+            && let Some(sel) = preseed.get_untracked()
+        {
+            if let Some(k) = scope_kind(&sel.permission_value) {
+                if k == ScopeKind::SharePoint {
+                    site_write.set(sel.permission_value != "Sites.Read.All");
                 }
-                selected.set(vec![sel]);
-                step.set(1);
+                scope_mode.set(default_mode(k));
             }
+            selected.set(vec![sel]);
+            step.set(1);
         }
     });
 
@@ -415,10 +415,11 @@ pub fn ScopeWizard(
             };
             match (kind, mode) {
                 (ScopeKind::Exchange, ScopeMode::Managed) => match group_state.get_untracked() {
-                    Some(Ok(g)) if g.exists => Plan::ExchangeScoped(vec![g
-                        .primary_smtp_address
-                        .clone()
-                        .unwrap_or(g.group_name.clone())]),
+                    Some(Ok(g)) if g.exists => Plan::ExchangeScoped(vec![
+                        g.primary_smtp_address
+                            .clone()
+                            .unwrap_or(g.group_name.clone()),
+                    ]),
                     _ => {
                         error.set(Some(
                             "Add at least one mailbox to the managed group first — that creates the group to scope to.".into(),

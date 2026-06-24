@@ -11,9 +11,9 @@ use thaw::{Body1, Button, ButtonAppearance, Input, Select, Spinner, SpinnerSize,
 
 use azapptoolkit_core::audit::MailPermissionScope;
 
+use crate::bindings::TenantContext;
 use crate::bindings::auth as auth_bindings;
 use crate::bindings::managed_identity::{self, AppRoleGrantDto, ManagedIdentityDto};
-use crate::bindings::TenantContext;
 use crate::components::detail_header::DetailHeader;
 use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
 use crate::components::held_permissions_panel::HeldPermissionsPanel;

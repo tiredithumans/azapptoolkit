@@ -19,11 +19,11 @@ use azapptoolkit_core::scoping::is_sharepoint_orgwide;
 use crate::commands::applications::invalidate_app_lists;
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::graph_roles::graph_role_index;
+use crate::dto::UiError;
 use crate::dto::sharepoint::{
     GrantSiteAccessResult, SiteAppGrantRow, SiteGrantDto, SitePermissionDto, SiteScopeResult,
     SiteSweepProgress, SiteSweepResult,
 };
-use crate::dto::UiError;
 use crate::state::AppState;
 
 /// Whether to strip the broad org-wide grant: only when the caller asked for it
@@ -41,11 +41,10 @@ fn should_remove_orgwide(remove_orgwide: bool, any_site_granted: bool) -> bool {
 /// lives in the capability catalog.
 fn sharepoint_err(err: azapptoolkit_graph::GraphError) -> UiError {
     let mut ui = UiError::from(err);
-    if ui.code == "forbidden" {
-        if let Some(cap) = azapptoolkit_core::capabilities::capability("sharepoint_sites_selected")
-        {
-            ui.message = cap.remediation.to_string();
-        }
+    if ui.code == "forbidden"
+        && let Some(cap) = azapptoolkit_core::capabilities::capability("sharepoint_sites_selected")
+    {
+        ui.message = cap.remediation.to_string();
     }
     ui
 }
@@ -602,9 +601,11 @@ mod tests {
 
         invalidate_site_sweep(&cache, "t1");
 
-        assert!(cache
-            .get::<SiteSweepResult>(CacheKind::Audit, &sweep_cache_key("t1"))
-            .is_none());
+        assert!(
+            cache
+                .get::<SiteSweepResult>(CacheKind::Audit, &sweep_cache_key("t1"))
+                .is_none()
+        );
         assert!(
             cache
                 .get::<SiteSweepResult>(CacheKind::Audit, &sweep_cache_key("t2"))

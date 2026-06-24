@@ -1,6 +1,6 @@
 //! The audit table's facet × search filter, as pure functions over the item set.
 
-use azapptoolkit_core::audit::{issue, AuditItem, RiskLevel};
+use azapptoolkit_core::audit::{AuditItem, RiskLevel, issue};
 
 /// The audit table's filter, as a pure function over the item set: returns the
 /// indices (in original order) of items matching both the facet and the

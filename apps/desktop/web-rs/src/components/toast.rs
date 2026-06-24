@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use leptos::prelude::*;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 use crate::components::icon::{Icon, IconName};
 use crate::state::use_session;

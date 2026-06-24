@@ -29,7 +29,7 @@ use crate::components::saved_views::SavedViews;
 use crate::constants::*;
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
-use crate::hooks::use_filtered_list::{use_filtered_list, Facet, FilteredListSpec};
+use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::managed_identity_detail_pane::ManagedIdentityDetailPane;

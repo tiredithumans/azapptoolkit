@@ -8,8 +8,8 @@
 //! backend (already in the tree via rustls), which keeps the `rsa` crate
 //! (RUSTSEC-2023-0071) out of the dependency graph.
 
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 use zeroize::Zeroize;
@@ -124,10 +124,11 @@ mod tests {
         assert!(!c.cert_der_base64.is_empty());
         // SHA-256 thumbprint is 32 bytes -> 64 hex chars, uppercase.
         assert_eq!(c.thumbprint.len(), 64);
-        assert!(c
-            .thumbprint
-            .chars()
-            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_lowercase()));
+        assert!(
+            c.thumbprint
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_lowercase())
+        );
         assert!(c.not_after > OffsetDateTime::now_utc());
     }
 

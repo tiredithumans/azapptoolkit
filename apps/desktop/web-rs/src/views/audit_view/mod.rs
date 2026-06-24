@@ -7,7 +7,7 @@ mod row;
 mod sort;
 
 use crate::hooks::use_progress_stream::use_progress_stream;
-use azapptoolkit_core::audit::{issue, AuditItem, RiskLevel};
+use azapptoolkit_core::audit::{AuditItem, RiskLevel, issue};
 use leptos::prelude::*;
 use thaw::{
     Body1, Button, ButtonAppearance, Menu, MenuItem, MenuPosition, MenuTrigger, ProgressBar,
@@ -39,10 +39,10 @@ pub fn AuditView() -> impl IntoView {
     // server-side; scores refresh on the next manual re-run).
     let on_remediated = Callback::new(move |object_id: String| {
         result.update(|opt| {
-            if let Some(r) = opt.as_mut() {
-                if let Some(item) = r.items.iter_mut().find(|i| i.object_id == object_id) {
-                    item.remediations.clear();
-                }
+            if let Some(r) = opt.as_mut()
+                && let Some(item) = r.items.iter_mut().find(|i| i.object_id == object_id)
+            {
+                item.remediations.clear();
             }
         });
     });
@@ -121,11 +121,7 @@ pub fn AuditView() -> impl IntoView {
                                 SortCol::Score => ia.risk_score.cmp(&ib.risk_score),
                                 SortCol::LastSignIn => ia.last_sign_in.cmp(&ib.last_sign_in),
                             };
-                            if desc {
-                                ord.reverse()
-                            } else {
-                                ord
-                            }
+                            if desc { ord.reverse() } else { ord }
                         });
                     }
                     idx

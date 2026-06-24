@@ -11,8 +11,8 @@
 //! Extracted from the audit command so the backup gets the same proven
 //! back-off behaviour rather than a second, subtly different copy.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use azapptoolkit_graph::{GraphClient, ThrottleObserver};
 

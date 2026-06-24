@@ -16,8 +16,8 @@ use std::sync::Arc;
 use leptos::ev;
 use leptos::html::Div;
 use leptos::prelude::*;
-use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 use web_sys::{HtmlElement, ResizeObserver};
 
 #[component]
@@ -131,13 +131,13 @@ where
     });
 
     let on_scroll = move |ev: ev::Event| {
-        if let Some(target) = ev.current_target() {
-            if let Ok(el) = target.dyn_into::<HtmlElement>() {
-                scroll_top.set(el.scroll_top() as f64);
-                let h = el.client_height() as f64;
-                if h > 0.0 {
-                    viewport_height.set(h);
-                }
+        if let Some(target) = ev.current_target()
+            && let Ok(el) = target.dyn_into::<HtmlElement>()
+        {
+            scroll_top.set(el.scroll_top() as f64);
+            let h = el.client_height() as f64;
+            if h > 0.0 {
+                viewport_height.set(h);
             }
         }
     };

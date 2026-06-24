@@ -82,25 +82,31 @@ mod tests {
 
     #[test]
     fn only_throttle_server_network_are_retryable() {
-        assert!(ArmError::Throttled {
-            retry_after_secs: Some(5)
-        }
-        .is_retryable());
-        assert!(ArmError::Server {
-            status: 503,
-            body: String::new()
-        }
-        .is_retryable());
+        assert!(
+            ArmError::Throttled {
+                retry_after_secs: Some(5)
+            }
+            .is_retryable()
+        );
+        assert!(
+            ArmError::Server {
+                status: 503,
+                body: String::new()
+            }
+            .is_retryable()
+        );
         assert!(ArmError::Network("reset".into()).is_retryable());
 
         assert!(!ArmError::Unauthorized.is_retryable());
         assert!(!ArmError::Forbidden(String::new()).is_retryable());
         assert!(!ArmError::NotFound(String::new()).is_retryable());
-        assert!(!ArmError::Api {
-            status: 400,
-            body: String::new()
-        }
-        .is_retryable());
+        assert!(
+            !ArmError::Api {
+                status: 400,
+                body: String::new()
+            }
+            .is_retryable()
+        );
         assert!(!ArmError::Deserialize("bad".into()).is_retryable());
         assert!(!ArmError::Token("expired".into()).is_retryable());
     }

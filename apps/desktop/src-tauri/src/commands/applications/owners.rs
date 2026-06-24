@@ -4,8 +4,8 @@ use tauri::State;
 
 use azapptoolkit_core::models::DirectoryObject;
 
-use crate::dto::applications::{OwnerChangeFailure, SetOwnersResult};
 use crate::dto::UiError;
+use crate::dto::applications::{OwnerChangeFailure, SetOwnersResult};
 use crate::state::AppState;
 
 use super::invalidate_app_detail_state;

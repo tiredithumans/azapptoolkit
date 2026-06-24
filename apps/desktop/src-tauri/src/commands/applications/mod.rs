@@ -7,11 +7,11 @@ use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Organization, ServicePrincipal};
 use azapptoolkit_graph::client::{AppListQuery, AppPatch, CreateApplicationRequest};
 
+use crate::dto::UiError;
 use crate::dto::applications::{
     ApplicationDetail, ApplicationListRowDto, CreateApplicationInput, CreateApplicationResult,
     UpdateApplicationInput,
 };
-use crate::dto::UiError;
 use crate::state::AppState;
 
 mod authentication;
@@ -602,9 +602,11 @@ mod detail_cache_tests {
             &"audit".to_string(),
         );
         invalidate_app_lists(&cache, "t1");
-        assert!(cache
-            .get::<String>(CacheKind::Audit, &audit_cache_key("t1"))
-            .is_none());
+        assert!(
+            cache
+                .get::<String>(CacheKind::Audit, &audit_cache_key("t1"))
+                .is_none()
+        );
         assert!(
             cache
                 .get::<String>(CacheKind::Audit, &audit_cache_key("t2"))

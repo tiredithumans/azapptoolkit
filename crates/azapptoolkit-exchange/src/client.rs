@@ -1,18 +1,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use azapptoolkit_core::http_retry::{
-    next_backoff_ms, parse_retry_after_seconds, sleep_before_retry, sleep_with_jitter,
-    BASE_DELAY_MS, MAX_RETRIES,
+    BASE_DELAY_MS, MAX_RETRIES, next_backoff_ms, parse_retry_after_seconds, sleep_before_retry,
+    sleep_with_jitter,
 };
 use azapptoolkit_core::token::BearerProvider;
 
 use crate::error::{
-    is_already_member_body, is_not_a_member_body, is_not_found_body, ExchangeError, Result,
+    ExchangeError, Result, is_already_member_body, is_not_a_member_body, is_not_found_body,
 };
 use crate::models::{
     ExoAppAccessPolicyTestResult, ExoApplicationAccessPolicy, ExoAuthorizationResult, ExoGroup,
@@ -631,10 +631,10 @@ fn compose_error_detail(
         _ => sanitize_error_body(raw_body),
     };
     let mut out = format!("[{cmdlet}] {reason}");
-    if let Some(id) = request_id.as_deref().map(str::trim) {
-        if !id.is_empty() {
-            out.push_str(&format!(" (request-id: {id})"));
-        }
+    if let Some(id) = request_id.as_deref().map(str::trim)
+        && !id.is_empty()
+    {
+        out.push_str(&format!(" (request-id: {id})"));
     }
     out
 }

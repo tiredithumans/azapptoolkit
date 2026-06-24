@@ -30,10 +30,10 @@ fn set_roving(rows: &NodeList, target: Option<u32>) {
             let _ = tr.set_attribute("tabindex", if i == focusable { "0" } else { "-1" });
         }
     }
-    if let Some(t) = target {
-        if let Some(tr) = row_at(rows, t) {
-            let _ = tr.focus();
-        }
+    if let Some(t) = target
+        && let Some(tr) = row_at(rows, t)
+    {
+        let _ = tr.focus();
     }
 }
 
@@ -49,10 +49,10 @@ pub fn use_grid_keynav(
     // post-render, so `query_selector_all` sees the current rows.
     Effect::new(move |_| {
         rerender();
-        if let Some(body) = tbody.get() {
-            if let Some(rows) = rows_of(&body) {
-                set_roving(&rows, None);
-            }
+        if let Some(body) = tbody.get()
+            && let Some(rows) = rows_of(&body)
+        {
+            set_roving(&rows, None);
         }
     });
 
@@ -91,15 +91,13 @@ pub fn use_grid_keynav(
             "Enter" => {
                 // Only when the row itself is focused — a focused button keeps
                 // its native Enter so activation can't fire twice.
-                if let Some(c) = exact {
-                    if let Some(tr) = row_at(&rows, c) {
-                        if let Ok(Some(btn)) = tr.query_selector("button") {
-                            if let Ok(btn) = btn.dyn_into::<HtmlElement>() {
-                                ev.prevent_default();
-                                btn.click();
-                            }
-                        }
-                    }
+                if let Some(c) = exact
+                    && let Some(tr) = row_at(&rows, c)
+                    && let Ok(Some(btn)) = tr.query_selector("button")
+                    && let Ok(btn) = btn.dyn_into::<HtmlElement>()
+                {
+                    ev.prevent_default();
+                    btn.click();
                 }
                 return;
             }

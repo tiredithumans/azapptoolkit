@@ -89,8 +89,8 @@ mod tests {
     // pass if the cap were ignored and all 50 tasks spawned at once.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn in_flight_never_exceeds_the_cap() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let in_flight = Arc::new(AtomicUsize::new(0));
         let high_water = Arc::new(AtomicUsize::new(0));
         let mut got = 0usize;

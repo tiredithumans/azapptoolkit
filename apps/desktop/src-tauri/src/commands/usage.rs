@@ -14,8 +14,8 @@ use azapptoolkit_arm::LogsQueryTable;
 use azapptoolkit_core::cache::CacheKind;
 use tauri::State;
 
-use crate::dto::usage::{GraphUsageResult, GraphUsageRow};
 use crate::dto::UiError;
+use crate::dto::usage::{GraphUsageResult, GraphUsageRow};
 use crate::state::AppState;
 
 /// Result-row cap per query — keeps the IPC payload and the panel readable;

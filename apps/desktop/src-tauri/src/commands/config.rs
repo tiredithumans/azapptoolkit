@@ -6,8 +6,8 @@ use tauri::{AppHandle, State};
 
 use azapptoolkit_core::settings::UserSettings;
 
-use crate::dto::config::AuthConfigStatus;
 use crate::dto::UiError;
+use crate::dto::config::AuthConfigStatus;
 use crate::state::AppState;
 
 /// Reports whether the app has usable client/tenant IDs and what they are (so

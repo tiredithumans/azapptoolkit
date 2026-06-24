@@ -17,6 +17,6 @@ pub mod error;
 pub mod models;
 pub mod roles;
 
-pub use client::{member_of_group_filter, ExchangeClient, EXCHANGE_BASE};
+pub use client::{EXCHANGE_BASE, ExchangeClient, member_of_group_filter};
 pub use error::{ExchangeError, Result};
 pub use roles::{exchange_role_for_graph_permission, is_scopable_exchange_permission};

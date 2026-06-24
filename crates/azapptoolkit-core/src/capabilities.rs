@@ -136,8 +136,7 @@ pub static CAPABILITIES: &[Capability] = &[
             "DelegatedPermissionGrant.ReadWrite.All",
         ],
         scope_feature: Some("write"),
-        remediation:
-            "Restoring creates app registrations and grants their permissions: it needs an \
+        remediation: "Restoring creates app registrations and grants their permissions: it needs an \
                       app-management role (Application Administrator or Cloud Application \
                       Administrator) to create apps and credentials, and re-granting admin consent \
                       to sensitive Graph permissions additionally needs Privileged Role \

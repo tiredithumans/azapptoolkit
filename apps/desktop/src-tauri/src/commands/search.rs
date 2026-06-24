@@ -17,8 +17,8 @@ use azapptoolkit_graph::GraphClient;
 use tauri::State;
 
 use crate::commands::applications::{app_name_index_key, search_corpus_key, sp_index_key};
-use crate::dto::search::{GlobalSearchResults, SearchHit};
 use crate::dto::UiError;
+use crate::dto::search::{GlobalSearchResults, SearchHit};
 use crate::state::AppState;
 
 /// Per-kind cap on rows returned to the dropdown. Keeps the response small

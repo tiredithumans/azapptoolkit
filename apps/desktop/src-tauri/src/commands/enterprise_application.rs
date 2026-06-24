@@ -15,11 +15,11 @@ use azapptoolkit_core::models::{ServicePrincipal, SynchronizationJob};
 use azapptoolkit_graph::GraphError;
 
 use crate::commands::applications::{invalidate_app_lists, sp_index_key};
+use crate::dto::UiError;
 use crate::dto::enterprise_application::{
     AppAssignmentDto, EnterpriseApplicationDetail, EnterpriseApplicationDto, GroupMembershipDto,
     ProvisioningJobDto,
 };
-use crate::dto::UiError;
 use crate::state::AppState;
 
 fn enterprise_key(tenant_id: &str) -> String {
@@ -294,10 +294,9 @@ pub async fn remove_sp_from_group(
 fn group_membership_err(e: GraphError) -> UiError {
     let forbidden = matches!(e, GraphError::Forbidden(_));
     let mut err = UiError::from(e);
-    if forbidden {
-        if let Some(cap) = azapptoolkit_core::capabilities::capability("group_membership") {
-            err.message = format!("{} {}", err.message, cap.remediation);
-        }
+    if forbidden && let Some(cap) = azapptoolkit_core::capabilities::capability("group_membership")
+    {
+        err.message = format!("{} {}", err.message, cap.remediation);
     }
     err
 }

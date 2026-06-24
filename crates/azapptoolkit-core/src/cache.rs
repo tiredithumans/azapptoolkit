@@ -458,9 +458,11 @@ mod tests {
         let cache = Cache::new();
         // Wrong type for a typed entry → miss (not a panic).
         cache.put_typed(CacheKind::Lists, "k".into(), Arc::new(vec![1u32]));
-        assert!(cache
-            .get_typed::<Vec<String>>(CacheKind::Lists, "k")
-            .is_none());
+        assert!(
+            cache
+                .get_typed::<Vec<String>>(CacheKind::Lists, "k")
+                .is_none()
+        );
         // A value stored via the untyped `put` has no typed slot → typed miss.
         cache.put(CacheKind::Lists, "u".into(), &Sample("v".into()));
         assert!(cache.get_typed::<Sample>(CacheKind::Lists, "u").is_none());
@@ -472,12 +474,16 @@ mod tests {
         cache.put_typed(CacheKind::Lists, "t1|corpus".into(), Arc::new(vec![1u32]));
         cache.put_typed(CacheKind::Lists, "t2|corpus".into(), Arc::new(vec![2u32]));
         cache.invalidate_tenant("t1");
-        assert!(cache
-            .get_typed::<Vec<u32>>(CacheKind::Lists, "t1|corpus")
-            .is_none());
-        assert!(cache
-            .get_typed::<Vec<u32>>(CacheKind::Lists, "t2|corpus")
-            .is_some());
+        assert!(
+            cache
+                .get_typed::<Vec<u32>>(CacheKind::Lists, "t1|corpus")
+                .is_none()
+        );
+        assert!(
+            cache
+                .get_typed::<Vec<u32>>(CacheKind::Lists, "t2|corpus")
+                .is_some()
+        );
     }
 
     #[test]

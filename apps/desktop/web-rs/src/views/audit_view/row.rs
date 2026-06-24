@@ -1,7 +1,7 @@
 //! Per-row actions for an audit finding: the "Open" deep-link plus any
 //! one-click remediation the scorer attached.
 
-use azapptoolkit_core::audit::{issue, AuditItem, RemediationAction, RemediationKind};
+use azapptoolkit_core::audit::{AuditItem, RemediationAction, RemediationKind, issue};
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 

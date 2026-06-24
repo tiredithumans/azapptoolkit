@@ -2,11 +2,11 @@ use tauri::State;
 
 use azapptoolkit_core::models::{NewKeyCredential, PasswordCredential};
 
+use crate::dto::UiError;
 use crate::dto::applications::{
     AddCertificateInput, AddPasswordInput, GenerateCertificateInput, GeneratedCertificateResult,
     KeyFailure, RemoveExpiredResult,
 };
-use crate::dto::UiError;
 use crate::state::AppState;
 
 use super::invalidate_app_credentials;
@@ -162,8 +162,8 @@ pub async fn remove_certificate_credential(
 /// the `key` field on Graph's `keyCredentials`. Performs minimal validation:
 /// strips headers/whitespace and confirms the remainder is valid base64.
 fn normalize_cert_blob(input: &str) -> std::result::Result<String, String> {
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
 
     let stripped: String = input
         .lines()
@@ -222,7 +222,7 @@ pub async fn remove_expired_passwords(
 
 #[cfg(test)]
 mod password_window_tests {
-    use super::{resolve_password_window, AddPasswordInput};
+    use super::{AddPasswordInput, resolve_password_window};
 
     fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
         chrono::DateTime::parse_from_rfc3339(s)

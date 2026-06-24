@@ -16,15 +16,15 @@ use std::collections::HashMap;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::audit::{
-    is_risky_delegated_scope, HIGH_RISK_APP_PERMISSIONS, MEDIUM_RISK_APP_PERMISSIONS,
+    HIGH_RISK_APP_PERMISSIONS, MEDIUM_RISK_APP_PERMISSIONS, is_risky_delegated_scope,
 };
 use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_core::models::ServicePrincipal;
 
 use crate::commands::applications::sp_index_key;
 use crate::commands::audit::csv_field;
-use crate::dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};
 use crate::dto::UiError;
+use crate::dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};
 use crate::state::AppState;
 
 /// High-value first-party resource APIs scanned for application-permission

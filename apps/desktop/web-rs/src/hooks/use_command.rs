@@ -14,7 +14,7 @@
 
 use leptos::prelude::*;
 
-use crate::state::{use_session, Session};
+use crate::state::{Session, use_session};
 
 /// Busy/error state plus a runner for tenant-scoped command mutations. `Copy`,
 /// so a component creates one and reuses the handle for every mutation.

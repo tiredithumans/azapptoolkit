@@ -3,7 +3,7 @@
 //! at a glance (credential expiry + security posture). Each card loads
 //! independently so the page renders immediately.
 
-use azapptoolkit_core::audit::{issue, CredentialStatus, RiskLevel};
+use azapptoolkit_core::audit::{CredentialStatus, RiskLevel, issue};
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 
@@ -11,7 +11,7 @@ use crate::bindings::managed_identity::MiSubtype;
 use crate::bindings::{applications, audit, credentials, enterprise_application, managed_identity};
 use crate::components::icon::{Icon, IconName};
 use crate::components::ui::SectionHeader;
-use crate::state::{use_session, ActiveView};
+use crate::state::{ActiveView, use_session};
 
 #[component]
 pub fn HomeDashboard() -> impl IntoView {

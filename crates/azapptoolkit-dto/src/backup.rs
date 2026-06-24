@@ -508,9 +508,11 @@ mod tests {
         // camelCase keys on the wire.
         assert_eq!(json["schemaVersion"], BACKUP_SCHEMA_VERSION);
         assert_eq!(json["sourceTenantId"], "tenant-src");
-        assert!(json["appRegistrations"][0]["adminConsentGranted"]
-            .as_bool()
-            .unwrap());
+        assert!(
+            json["appRegistrations"][0]["adminConsentGranted"]
+                .as_bool()
+                .unwrap()
+        );
 
         // A backup file must never carry a secret value, even when one existed.
         let raw = serde_json::to_string(&backup).unwrap();

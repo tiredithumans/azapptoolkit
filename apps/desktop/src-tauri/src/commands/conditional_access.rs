@@ -11,8 +11,8 @@ use azapptoolkit_core::models::{CaApplications, ConditionalAccessPolicy};
 use azapptoolkit_graph::GraphError;
 
 use crate::commands::graph_err;
-use crate::dto::conditional_access::ConditionalAccessPolicyDto;
 use crate::dto::UiError;
+use crate::dto::conditional_access::ConditionalAccessPolicyDto;
 use crate::state::AppState;
 
 /// Conditional Access policies that apply to `app_id` (the application's appId /
@@ -106,14 +106,14 @@ fn applies_reason(apps: &CaApplications, app_id: &str) -> Option<&'static str> {
     // "may apply" — but the *mode* flips the bias, so report it: an `include`
     // filter applies only to the matching subset, while an `exclude` filter
     // applies to everything *except* a matching subset (so it likely applies).
-    if inc.is_empty() {
-        if let Some(f) = &apps.application_filter {
-            return Some(if f.mode.as_deref() == Some("exclude") {
-                "filterExclude"
-            } else {
-                "filter"
-            });
-        }
+    if inc.is_empty()
+        && let Some(f) = &apps.application_filter
+    {
+        return Some(if f.mode.as_deref() == Some("exclude") {
+            "filterExclude"
+        } else {
+            "filter"
+        });
     }
     // Empty include with user actions (or nothing) → not app-targeting.
     None

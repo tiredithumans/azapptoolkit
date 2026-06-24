@@ -14,13 +14,13 @@
 
 use std::collections::HashMap;
 
-use azapptoolkit_core::audit::{classify_app_permission_risk, MailPermissionScope};
+use azapptoolkit_core::audit::{MailPermissionScope, classify_app_permission_risk};
 use azapptoolkit_dto::managed_identity::AppRoleGrantDto;
 use azapptoolkit_dto::permissions::PermissionKind;
 use leptos::prelude::*;
 
 use crate::components::icon::IconName;
-use crate::components::permission_picker::{PickerSelection, MICROSOFT_GRAPH_APP_ID};
+use crate::components::permission_picker::{MICROSOFT_GRAPH_APP_ID, PickerSelection};
 use crate::components::scope_badge::{
     app_permission_risk_badge, is_sharepoint_orgwide, permission_scope_cell,
 };

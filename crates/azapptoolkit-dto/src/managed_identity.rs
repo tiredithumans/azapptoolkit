@@ -134,9 +134,8 @@ mod tests {
 
     #[test]
     fn non_user_assigned_marker_falls_back_to_system_assigned() {
-        let names = [
-            "/subscriptions/x/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm-1",
-        ];
+        let names =
+            ["/subscriptions/x/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm-1"];
         assert_eq!(
             MiSubtype::from_alternative_names(&names),
             MiSubtype::SystemAssigned

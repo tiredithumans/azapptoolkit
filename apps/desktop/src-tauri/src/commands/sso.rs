@@ -25,12 +25,12 @@ use azapptoolkit_graph::client::{
 use azapptoolkit_graph::{GraphClient, GraphError};
 
 use crate::commands::applications::invalidate_app_lists;
+use crate::dto::UiError;
 use crate::dto::sso::{
     ClaimSchemaEntryDto, ClaimsPolicyDto, ClaimsTransformationDto, OidcSsoConfigInput,
     OidcSsoSummary, SamlSsoConfigInput, SamlSsoSummary, SsoConfigDto, TransformInputClaimDto,
     TransformOutputClaimDto, TransformParamDto,
 };
-use crate::dto::UiError;
 use crate::state::AppState;
 
 /// The Microsoft Entra generic **custom** (non-gallery) application template.
@@ -1089,9 +1089,11 @@ mod tests {
         assert_eq!(schema[0]["ID"], "userprincipalname");
         assert_eq!(schema[0]["JwtClaimType"], "upn");
         // No transformations ⇒ the key is omitted entirely.
-        assert!(parsed["ClaimsMappingPolicy"]
-            .get("ClaimsTransformation")
-            .is_none());
+        assert!(
+            parsed["ClaimsMappingPolicy"]
+                .get("ClaimsTransformation")
+                .is_none()
+        );
     }
 
     #[test]

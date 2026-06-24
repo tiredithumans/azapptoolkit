@@ -73,8 +73,8 @@ pub fn no_tenant() -> azapptoolkit_dto::UiError {
 /// continuation byte) is base64-encoded. Double-encoding a base64 text file
 /// would make Graph see text bytes instead of the certificate.
 pub fn cert_payload_from_bytes(bytes: &[u8]) -> String {
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
 
     let is_bare_base64 = |text: &str| {
         let stripped: String = text.chars().filter(|c| !c.is_whitespace()).collect();
@@ -90,8 +90,8 @@ pub fn cert_payload_from_bytes(bytes: &[u8]) -> String {
 /// bytes) as the uppercase hex string the portal shows in its Thumbprint
 /// column. Returns `None` when the value isn't valid base64.
 pub fn thumbprint_hex(custom_key_identifier_b64: &str) -> Option<String> {
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
 
     let bytes = STANDARD.decode(custom_key_identifier_b64).ok()?;
     Some(bytes.iter().map(|b| format!("{b:02X}")).collect())
@@ -170,8 +170,8 @@ mod tests {
         // Text that is neither PEM nor base64 falls through to the binary
         // path; the backend's decode then rejects it loudly either way.
         let payload = cert_payload_from_bytes(b"not a certificate!");
-        use base64::engine::general_purpose::STANDARD;
         use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
         assert_eq!(STANDARD.decode(payload).unwrap(), b"not a certificate!");
     }
 

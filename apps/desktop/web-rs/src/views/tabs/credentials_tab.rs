@@ -236,10 +236,10 @@ pub fn CredentialsTab(
             .get()
             .map(|t| t.tenant_id)
             .unwrap_or_default();
-        if rotate_vault.get_untracked().trim().is_empty() {
-            if let Some(last) = ls_get(&last_vault_key(&tid)) {
-                rotate_vault.set(last);
-            }
+        if rotate_vault.get_untracked().trim().is_empty()
+            && let Some(last) = ls_get(&last_vault_key(&tid))
+        {
+            rotate_vault.set(last);
         }
         if rotate_secret_name.get_untracked().trim().is_empty() {
             rotate_secret_name.set(sanitize_secret_name(&app_name.get_untracked()));
@@ -1012,23 +1012,27 @@ mod tests {
     #[test]
     fn custom_requires_end_after_start_and_caps_at_24_months() {
         assert!(resolve_expiry_fields(CUSTOM_PRESET, None, None, d(TODAY)).is_err());
-        assert!(resolve_expiry_fields(
-            CUSTOM_PRESET,
-            Some(d("2026-06-01")),
-            Some(d("2026-06-01")),
-            d(TODAY),
-        )
-        .is_err());
+        assert!(
+            resolve_expiry_fields(
+                CUSTOM_PRESET,
+                Some(d("2026-06-01")),
+                Some(d("2026-06-01")),
+                d(TODAY),
+            )
+            .is_err()
+        );
         // Without an explicit start, "today" anchors the window.
         assert!(
             resolve_expiry_fields(CUSTOM_PRESET, None, Some(d("2025-12-01")), d(TODAY)).is_err()
         );
-        assert!(resolve_expiry_fields(
-            CUSTOM_PRESET,
-            Some(d("2026-01-01")),
-            Some(d("2028-06-01")),
-            d(TODAY),
-        )
-        .is_err());
+        assert!(
+            resolve_expiry_fields(
+                CUSTOM_PRESET,
+                Some(d("2026-01-01")),
+                Some(d("2028-06-01")),
+                d(TODAY),
+            )
+            .is_err()
+        );
     }
 }

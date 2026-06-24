@@ -29,7 +29,7 @@ pub mod views;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
-use state::{provide_session, use_session, ActiveView};
+use state::{ActiveView, provide_session, use_session};
 use util::keep_alive;
 use views::{
     applications_view::ApplicationsView, bulk_actions_view::BulkActionsView,
@@ -168,9 +168,5 @@ fn initial_theme() -> Theme {
         .and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok().flatten())
         .map(|m| m.matches())
         .unwrap_or(false);
-    if dark {
-        Theme::dark()
-    } else {
-        Theme::light()
-    }
+    if dark { Theme::dark() } else { Theme::light() }
 }

@@ -14,6 +14,6 @@ pub mod error;
 pub mod models;
 pub mod validate;
 
-pub use client::{KeyVaultClient, DEFAULT_API_VERSION};
+pub use client::{DEFAULT_API_VERSION, KeyVaultClient};
 pub use error::{KeyVaultError, Result};
 pub use models::{SecretItem, SecretProperties, SecretSetRequest, SecretValue};

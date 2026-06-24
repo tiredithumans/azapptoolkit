@@ -13,7 +13,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, 
 use wasm_bindgen::JsCast;
 
 use crate::bindings::permission_tester::{self, PermissionTestResult};
-use crate::bindings::{auth, search, TenantContext};
+use crate::bindings::{TenantContext, auth, search};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::SectionHeader;
 use crate::hooks::use_debounced::use_debounced;
@@ -97,10 +97,10 @@ pub fn PermissionTesterView() -> impl IntoView {
             ];
             for (hits, kind) in groups {
                 for h in hits {
-                    if let Some(app_id) = h.app_id {
-                        if seen.insert(app_id.clone()) {
-                            out.push((app_id, h.display_name, kind));
-                        }
+                    if let Some(app_id) = h.app_id
+                        && seen.insert(app_id.clone())
+                    {
+                        out.push((app_id, h.display_name, kind));
                     }
                 }
             }

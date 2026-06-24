@@ -5,9 +5,9 @@ use tauri::State;
 use azapptoolkit_core::models::ServicePrincipal;
 use azapptoolkit_permissions::PermissionsCatalog;
 
+use crate::dto::UiError;
 use crate::dto::applications::PermissionDescriptor;
 use crate::dto::permissions::{PermissionKind, ResolvedPermission};
-use crate::dto::UiError;
 use crate::state::AppState;
 
 /// Resolves one declared permission to a [`ResolvedPermission`] through the

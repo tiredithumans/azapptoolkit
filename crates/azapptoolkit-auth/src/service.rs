@@ -17,8 +17,8 @@
 //! refreshes lazily 60s ahead of expiry under a single shared mutex, and caches
 //! per scope set so the read and write tokens coexist.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Duration, Utc};
 use oauth2::{CsrfToken, PkceCodeChallenge, PkceCodeVerifier};
 use parking_lot::Mutex;
@@ -35,8 +35,8 @@ use azapptoolkit_core::identity::{SignInOutcome, TenantContext};
 
 use crate::error::{AuthError, Result};
 use crate::token_cache::{
-    delete_refresh_token, load_refresh_token, save_refresh_token, scope_key, AccessToken,
-    TokenCache,
+    AccessToken, TokenCache, delete_refresh_token, load_refresh_token, save_refresh_token,
+    scope_key,
 };
 
 const REFRESH_LEEWAY_SECS: i64 = 60;
@@ -828,22 +828,20 @@ impl EntraAuthService {
         claims: Option<&str>,
         bypass_cache: bool,
     ) -> Result<AccessToken> {
-        if !bypass_cache {
-            if let Some(existing) = self.cache.get(tenant_id, scopes) {
-                if !existing.needs_refresh(REFRESH_LEEWAY_SECS) {
-                    return Ok(existing);
-                }
-            }
+        if !bypass_cache
+            && let Some(existing) = self.cache.get(tenant_id, scopes)
+            && !existing.needs_refresh(REFRESH_LEEWAY_SECS)
+        {
+            return Ok(existing);
         }
 
         let lock = self.refresh_lock_for(tenant_id, scopes);
         let _guard = lock.lock().await;
-        if !bypass_cache {
-            if let Some(fresh) = self.cache.get(tenant_id, scopes) {
-                if !fresh.needs_refresh(REFRESH_LEEWAY_SECS) {
-                    return Ok(fresh);
-                }
-            }
+        if !bypass_cache
+            && let Some(fresh) = self.cache.get(tenant_id, scopes)
+            && !fresh.needs_refresh(REFRESH_LEEWAY_SECS)
+        {
+            return Ok(fresh);
         }
 
         let tenant = self
@@ -984,7 +982,7 @@ fn decode_claims_challenge(b64: &str) -> Option<Vec<u8>> {
 /// supplied, its decoded claims are merged under `access_token` so the re-minted
 /// token also satisfies the resource's new requirement.
 fn build_cae_claims(challenge_b64: Option<&str>) -> String {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     let mut claims: Value = challenge_b64
         .and_then(decode_claims_challenge)
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -1209,9 +1207,11 @@ mod tests {
     fn read_scopes_are_read_only_with_offline_access() {
         let scopes = EntraAuthService::new("c", "t").default_graph_read_scopes();
         assert!(scopes.iter().any(|s| s == "offline_access"));
-        assert!(scopes
-            .iter()
-            .any(|s| s == "https://graph.microsoft.com/Directory.Read.All"));
+        assert!(
+            scopes
+                .iter()
+                .any(|s| s == "https://graph.microsoft.com/Directory.Read.All")
+        );
         assert!(
             !scopes.iter().any(|s| s.contains("ReadWrite")),
             "sign-in must not request any write scope"
@@ -1227,18 +1227,22 @@ mod tests {
             "AppRoleAssignment.ReadWrite.All",
             "DelegatedPermissionGrant.ReadWrite.All",
         ] {
-            assert!(scopes
-                .iter()
-                .any(|s| s == &format!("https://graph.microsoft.com/{perm}")));
+            assert!(
+                scopes
+                    .iter()
+                    .any(|s| s == &format!("https://graph.microsoft.com/{perm}"))
+            );
         }
     }
 
     #[test]
     fn exchange_scopes_target_outlook_audience_with_offline_access() {
         let scopes = EntraAuthService::new("c", "t").default_exchange_scopes();
-        assert!(scopes
-            .iter()
-            .any(|s| s == "https://outlook.office365.com/Exchange.Manage"));
+        assert!(
+            scopes
+                .iter()
+                .any(|s| s == "https://outlook.office365.com/Exchange.Manage")
+        );
         assert!(scopes.iter().any(|s| s == "offline_access"));
         // Must not leak any Graph scope into the Exchange token request.
         assert!(!scopes.iter().any(|s| s.contains("graph.microsoft.com")));
@@ -1247,9 +1251,11 @@ mod tests {
     #[test]
     fn resource_default_scopes_appends_default_suffix() {
         let scopes = EntraAuthService::resource_default_scopes("https://vault.azure.net");
-        assert!(scopes
-            .iter()
-            .any(|s| s == "https://vault.azure.net/.default"));
+        assert!(
+            scopes
+                .iter()
+                .any(|s| s == "https://vault.azure.net/.default")
+        );
         assert!(scopes.iter().any(|s| s == "offline_access"));
     }
 
@@ -1312,10 +1318,12 @@ mod tests {
             query.get("code_challenge_method").map(String::as_str),
             Some("S256")
         );
-        assert!(query
-            .get("scope")
-            .unwrap()
-            .contains("https://graph.microsoft.com/Directory.Read.All"));
+        assert!(
+            query
+                .get("scope")
+                .unwrap()
+                .contains("https://graph.microsoft.com/Directory.Read.All")
+        );
         assert!(!query.get("scope").unwrap().contains("ReadWrite"));
         assert!(query.get("scope").unwrap().contains("offline_access"));
         // No login_hint when none is passed (the sign-in case).
@@ -1346,9 +1354,11 @@ mod tests {
             query.get("login_hint").map(String::as_str),
             Some("admin@contoso.com")
         );
-        assert!(query
-            .get("scope")
-            .unwrap()
-            .contains("https://management.azure.com/.default"));
+        assert!(
+            query
+                .get("scope")
+                .unwrap()
+                .contains("https://management.azure.com/.default")
+        );
     }
 }
