@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-24
+
 ### Changed
 
 - **Security Audit revamp — the audit is now the hero of the Security surface.**
