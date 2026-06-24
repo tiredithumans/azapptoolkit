@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-24
+
 ### Added
 
 - **Home dashboard metrics drill into a pre-filtered list.** Clicking a count on
