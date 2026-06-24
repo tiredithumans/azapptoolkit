@@ -100,3 +100,75 @@ pub async fn bulk_create_applications(
     )
     .await
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkObjectIdsArgs<'a> {
+    tenant_id: &'a str,
+    object_ids: &'a [String],
+}
+
+pub async fn bulk_remove_redundant_permissions(
+    tenant_id: &str,
+    object_ids: &[String],
+) -> Result<BulkRemoveRedundantResult, UiError> {
+    invoke_result(
+        "bulk_remove_redundant_permissions",
+        BulkObjectIdsArgs {
+            tenant_id,
+            object_ids,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkScopeMailboxArgs<'a> {
+    tenant_id: &'a str,
+    object_ids: &'a [String],
+    groups: &'a [String],
+}
+
+pub async fn bulk_scope_mailbox_access(
+    tenant_id: &str,
+    object_ids: &[String],
+    groups: &[String],
+) -> Result<BulkScopeResult, UiError> {
+    invoke_result(
+        "bulk_scope_mailbox_access",
+        BulkScopeMailboxArgs {
+            tenant_id,
+            object_ids,
+            groups,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkScopeSharePointArgs<'a> {
+    tenant_id: &'a str,
+    object_ids: &'a [String],
+    site_urls: &'a [String],
+    role: &'a str,
+}
+
+pub async fn bulk_scope_sharepoint_access(
+    tenant_id: &str,
+    object_ids: &[String],
+    site_urls: &[String],
+    role: &str,
+) -> Result<BulkScopeResult, UiError> {
+    invoke_result(
+        "bulk_scope_sharepoint_access",
+        BulkScopeSharePointArgs {
+            tenant_id,
+            object_ids,
+            site_urls,
+            role,
+        },
+    )
+    .await
+}

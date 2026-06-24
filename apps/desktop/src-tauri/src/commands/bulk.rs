@@ -29,6 +29,7 @@ use crate::dto::applications::CreateApplicationInput;
 use crate::dto::bulk::{
     AppRemovalSummary, BulkCreateOutcome, BulkCreateResult, BulkCreateSpec, BulkDeleteFailure,
     BulkDeleteResult, BulkGrantOutcome, BulkGrantResult, BulkProgress, BulkRemoveExpiredResult,
+    BulkRemoveRedundantOutcome, BulkRemoveRedundantResult, BulkScopeOutcome, BulkScopeResult,
 };
 use crate::state::AppState;
 
@@ -521,6 +522,206 @@ pub async fn bulk_create_applications(
     }
     Ok(BulkCreateResult {
         validate_only,
+        outcomes,
+        cancelled: cancel.is_cancelled(),
+    })
+}
+
+/// Removes each selected app's *redundant* application permissions, reusing the
+/// single-app remediation core ([`remediation::remediate_remove_redundant_permissions`])
+/// so the live re-resolution + safety rules + per-app cache invalidation are
+/// identical to the one-click fix. Runs sequentially (each call is a multi-read
+/// manifest re-plan, and the selection is the admin's hand-picked set), polling
+/// the shared cancel flag between apps and degrading to a per-app `error` rather
+/// than aborting. No `in_flight_cap` — there's no concurrent fan-out to back off.
+#[tauri::command]
+pub async fn bulk_remove_redundant_permissions(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    tenant_id: String,
+    object_ids: Vec<String>,
+) -> Result<BulkRemoveRedundantResult, UiError> {
+    state.audit_cancel.reset();
+    let cancel = state.audit_cancel.clone();
+    let total = object_ids.len();
+    let mut outcomes = Vec::new();
+
+    for (i, object_id) in object_ids.into_iter().enumerate() {
+        if cancel.is_cancelled() {
+            break;
+        }
+        emit(
+            &app_handle,
+            BulkProgress {
+                done: i,
+                total,
+                current_app: Some(object_id.clone()),
+                cancelled: false,
+                in_flight_cap: None,
+            },
+        );
+        let outcome = match super::remediation::remediate_remove_redundant_permissions(
+            state.clone(),
+            tenant_id.clone(),
+            object_id.clone(),
+        )
+        .await
+        {
+            Ok(r) => BulkRemoveRedundantOutcome {
+                object_id,
+                removed: r.removed,
+                skipped: r.skipped,
+                error: None,
+            },
+            Err(e) => BulkRemoveRedundantOutcome {
+                object_id,
+                removed: Vec::new(),
+                skipped: Vec::new(),
+                error: Some(e.message),
+            },
+        };
+        outcomes.push(outcome);
+    }
+
+    emit(
+        &app_handle,
+        BulkProgress {
+            done: total,
+            total,
+            current_app: None,
+            cancelled: cancel.is_cancelled(),
+            in_flight_cap: None,
+        },
+    );
+    Ok(BulkRemoveRedundantResult {
+        outcomes,
+        cancelled: cancel.is_cancelled(),
+    })
+}
+
+/// Confines each selected app's org-wide mailbox permissions to the supplied
+/// `groups` via Exchange RBAC, reusing the shared scoping core
+/// ([`exchange::grant_exchange_mailbox_access`]) with `permissions: None` so
+/// **every** mail permission the app holds is scoped (the bulk semantic — one
+/// uniform group set across the whole selection). Grant-before-strip keeps each
+/// app reachable; the core busts caches per app. Sequential + cancel-aware;
+/// degrades to a per-app `error` (e.g. the signed-in user isn't an Exchange
+/// admin) instead of aborting the run.
+#[tauri::command]
+pub async fn bulk_scope_mailbox_access(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    tenant_id: String,
+    object_ids: Vec<String>,
+    groups: Vec<String>,
+) -> Result<BulkScopeResult, UiError> {
+    state.audit_cancel.reset();
+    let cancel = state.audit_cancel.clone();
+    let total = object_ids.len();
+    let mut outcomes = Vec::new();
+
+    for (i, object_id) in object_ids.into_iter().enumerate() {
+        if cancel.is_cancelled() {
+            break;
+        }
+        emit(
+            &app_handle,
+            BulkProgress {
+                done: i,
+                total,
+                current_app: Some(object_id.clone()),
+                cancelled: false,
+                in_flight_cap: None,
+            },
+        );
+        let error = super::exchange::grant_exchange_mailbox_access(
+            state.clone(),
+            tenant_id.clone(),
+            object_id.clone(),
+            None,
+            groups.clone(),
+            true,
+        )
+        .await
+        .err()
+        .map(|e| e.message);
+        outcomes.push(BulkScopeOutcome { object_id, error });
+    }
+
+    emit(
+        &app_handle,
+        BulkProgress {
+            done: total,
+            total,
+            current_app: None,
+            cancelled: cancel.is_cancelled(),
+            in_flight_cap: None,
+        },
+    );
+    Ok(BulkScopeResult {
+        outcomes,
+        cancelled: cancel.is_cancelled(),
+    })
+}
+
+/// Converts each selected app's org-wide `Sites.*` access to the
+/// `Sites.Selected` model on the supplied `site_urls` + `role`, reusing the
+/// single-app remediation ([`remediation::remediate_scope_sharepoint_access`])
+/// so the SP resolution, grant-before-strip, and cache busting match the
+/// one-click fix. Sequential + cancel-aware; per-app `error` on failure (e.g.
+/// `consent_required` when the SharePoint scope isn't consented).
+#[tauri::command]
+pub async fn bulk_scope_sharepoint_access(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    tenant_id: String,
+    object_ids: Vec<String>,
+    site_urls: Vec<String>,
+    role: String,
+) -> Result<BulkScopeResult, UiError> {
+    state.audit_cancel.reset();
+    let cancel = state.audit_cancel.clone();
+    let total = object_ids.len();
+    let mut outcomes = Vec::new();
+
+    for (i, object_id) in object_ids.into_iter().enumerate() {
+        if cancel.is_cancelled() {
+            break;
+        }
+        emit(
+            &app_handle,
+            BulkProgress {
+                done: i,
+                total,
+                current_app: Some(object_id.clone()),
+                cancelled: false,
+                in_flight_cap: None,
+            },
+        );
+        let error = super::remediation::remediate_scope_sharepoint_access(
+            state.clone(),
+            tenant_id.clone(),
+            object_id.clone(),
+            site_urls.clone(),
+            role.clone(),
+        )
+        .await
+        .err()
+        .map(|e| e.message);
+        outcomes.push(BulkScopeOutcome { object_id, error });
+    }
+
+    emit(
+        &app_handle,
+        BulkProgress {
+            done: total,
+            total,
+            current_app: None,
+            cancelled: cancel.is_cancelled(),
+            in_flight_cap: None,
+        },
+    );
+    Ok(BulkScopeResult {
         outcomes,
         cancelled: cancel.is_cancelled(),
     })

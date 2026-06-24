@@ -91,3 +91,38 @@ pub struct BulkCreateResult {
     pub outcomes: Vec<BulkCreateOutcome>,
     pub cancelled: bool,
 }
+
+// ---------------- Bulk remove redundant permissions ----------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkRemoveRedundantOutcome {
+    pub object_id: String,
+    /// Permission values actually removed (the narrower, fully-covered ones).
+    pub removed: Vec<String>,
+    /// Permission values left in place because removing them would have lost a
+    /// load-bearing grant (re-resolved live, per the single-app safety rules).
+    pub skipped: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkRemoveRedundantResult {
+    pub outcomes: Vec<BulkRemoveRedundantOutcome>,
+    pub cancelled: bool,
+}
+
+// ---------------- Bulk scope access (Exchange mailbox / SharePoint) ----------
+
+/// One app's outcome from a bulk scoping run. `error: None` = scoped OK.
+/// Shared by the mailbox and SharePoint bulk commands (same shape).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkScopeOutcome {
+    pub object_id: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkScopeResult {
+    pub outcomes: Vec<BulkScopeOutcome>,
+    pub cancelled: bool,
+}
