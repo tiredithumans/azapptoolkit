@@ -29,4 +29,5 @@ pub mod sso_summary;
 pub mod toast;
 pub mod type_chip;
 pub mod ui;
+pub mod update_splash;
 pub mod virtual_list;

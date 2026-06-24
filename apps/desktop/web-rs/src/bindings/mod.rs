@@ -40,6 +40,7 @@ pub mod remediation;
 pub mod search;
 pub mod sharepoint;
 pub mod sso;
+pub mod updater;
 pub mod usage;
 
 // Identity types are shared via azapptoolkit-core (the frontend can't depend on

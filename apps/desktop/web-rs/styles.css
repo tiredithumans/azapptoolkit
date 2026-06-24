@@ -490,6 +490,35 @@ h3 {
 .shell__user-signout {
   width: 100%;
 }
+.shell__user-check-updates {
+  width: 100%;
+}
+/* Changelog splash for a pending app update. */
+.update-splash {
+  display: grid;
+  gap: var(--space-3);
+}
+.update-splash__meta {
+  color: var(--text-muted);
+}
+.update-splash__notes {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.update-splash__progress {
+  display: grid;
+  gap: var(--space-1);
+}
 .shell__user-name {
   font-size: var(--text-base);
   font-weight: var(--weight-semibold);
