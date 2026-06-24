@@ -51,12 +51,11 @@ pub(super) fn matches_severity(i: &AuditItem, severity: &str) -> bool {
 pub(super) fn matches_finding(i: &AuditItem, finding: &str) -> bool {
     match finding {
         "all" => true,
-        "expiring" => {
+        // Already-expired credentials only — proactive "expiring soon" rotation
+        // lead-time lives in the Credential-expiry lens (≤7d / ≤30d facets).
+        "expired" => {
             use azapptoolkit_core::audit::CredentialStatus;
-            matches!(
-                i.credential_status,
-                CredentialStatus::ExpiringSoon | CredentialStatus::Expired
-            )
+            matches!(i.credential_status, CredentialStatus::Expired)
         }
         "high_risk_perms" => i
             .issues
@@ -199,7 +198,7 @@ mod tests {
     #[test]
     fn filter_indices_intersects_severity_and_finding() {
         use azapptoolkit_core::audit::CredentialStatus;
-        let expiring_critical = AuditItem {
+        let expired_critical = AuditItem {
             risk_level: RiskLevel::Critical,
             credential_status: CredentialStatus::Expired,
             ..blank()
@@ -209,17 +208,30 @@ mod tests {
             credential_status: CredentialStatus::Active,
             ..blank()
         };
-        let expiring_low = AuditItem {
+        let expired_low = AuditItem {
             risk_level: RiskLevel::Low,
+            credential_status: CredentialStatus::Expired,
+            ..blank()
+        };
+        // ExpiringSoon must NOT match the "expired" finding (narrowed to already
+        // expired only — expiring-soon lives in the Credential-expiry lens).
+        let expiring_soon_critical = AuditItem {
+            risk_level: RiskLevel::Critical,
             credential_status: CredentialStatus::ExpiringSoon,
             ..blank()
         };
-        let items = vec![expiring_critical, active_critical, expiring_low];
-        // The two dimensions intersect: only the critical AND expiring row.
-        assert_eq!(filter_indices(&items, "critical", "expiring", ""), vec![0]);
+        let items = vec![
+            expired_critical,
+            active_critical,
+            expired_low,
+            expiring_soon_critical,
+        ];
+        // The two dimensions intersect: only the critical AND expired row.
+        assert_eq!(filter_indices(&items, "critical", "expired", ""), vec![0]);
         // Either dimension alone is broader.
-        assert_eq!(filter_indices(&items, "critical", "all", ""), vec![0, 1]);
-        assert_eq!(filter_indices(&items, "all", "expiring", ""), vec![0, 2]);
+        assert_eq!(filter_indices(&items, "critical", "all", ""), vec![0, 1, 3]);
+        // "expired" matches only the two already-expired rows, not the soon one.
+        assert_eq!(filter_indices(&items, "all", "expired", ""), vec![0, 2]);
     }
 
     #[test]

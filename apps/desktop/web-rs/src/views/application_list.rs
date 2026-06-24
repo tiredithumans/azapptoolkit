@@ -17,7 +17,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::bindings::applications::{self, ApplicationListRowDto};
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
-use crate::components::bulk_action_bar::BulkActionBar;
+use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::date_range_filter::DateRangeFilter;
 use crate::components::filter_chip::FilterChip;
 use crate::components::icon::IconName;
@@ -356,6 +356,9 @@ fn LoadedApps(
         // Bulk Actions page remains for Create-apps).
         <BulkActionBar
             selection=session.selected_app_ids
+            actions=Signal::derive(|| {
+                vec![BulkAction::Grant, BulkAction::RemoveExpired, BulkAction::Delete]
+            })
             on_done=Callback::new(move |_| session.bump_apps_reload())
         />
         {capped

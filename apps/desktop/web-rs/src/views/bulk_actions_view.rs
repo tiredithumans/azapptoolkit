@@ -16,7 +16,7 @@ use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize, Textarea};
 
 use crate::bindings::bulk;
 use crate::bindings::events;
-use crate::components::bulk_action_bar::{BulkActionBar, BulkFailure};
+use crate::components::bulk_action_bar::{BulkAction, BulkActionBar, BulkFailure};
 use crate::components::icon::IconName;
 use crate::components::ui::{EmptyState, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
@@ -242,7 +242,17 @@ pub fn BulkActionsView() -> impl IntoView {
                         // a result on screen); the hint shows whenever nothing is
                         // checked, including right after a run clears the selection.
                         view! {
-                            <BulkActionBar selection=session.selected_app_ids on_done=on_done />
+                            <BulkActionBar
+                                selection=session.selected_app_ids
+                                actions=Signal::derive(|| {
+                                    vec![
+                                        BulkAction::Grant,
+                                        BulkAction::RemoveExpired,
+                                        BulkAction::Delete,
+                                    ]
+                                })
+                                on_done=on_done
+                            />
                             <Show when=move || session.selected_app_ids.with(|s| s.is_empty()) fallback=|| ()>
                                 <EmptyState
                                     icon=IconName::AppWindow

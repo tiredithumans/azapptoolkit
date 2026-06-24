@@ -344,6 +344,24 @@ pub fn HomeDashboard() -> impl IntoView {
                                 Some(r) => {
                                     let crit = count_level(&r.items, RiskLevel::Critical);
                                     let high = count_level(&r.items, RiskLevel::High);
+                                    let medium = count_level(&r.items, RiskLevel::Medium);
+                                    // Already-expired credentials — matches the audit's
+                                    // "Expired" finding (narrowed to expired, not expiring-soon).
+                                    let expired = r
+                                        .items
+                                        .iter()
+                                        .filter(|i| {
+                                            matches!(i.credential_status, CredentialStatus::Expired)
+                                        })
+                                        .count();
+                                    // High-risk application permissions — the audit's
+                                    // "Over-privileged" finding.
+                                    let over_privileged =
+                                        count_issue(&r.items, issue::HIGH_RISK_APP_PERMS);
+                                    let orgwide_mailbox =
+                                        count_issue(&r.items, issue::ORG_WIDE_MAILBOX);
+                                    let orgwide_sharepoint =
+                                        count_issue(&r.items, issue::ORG_WIDE_SHAREPOINT);
                                     // Match the audit "Ownership" facet this metric drills into:
                                     // apps with no owners OR a single owner (both are ownership
                                     // risks; the two markers are disjoint, so the sum is exact).
@@ -368,8 +386,43 @@ pub fn HomeDashboard() -> impl IntoView {
                                                 move || session.open_posture_with_facet("high"),
                                             )}
                                             {metric_link(
+                                                medium,
+                                                "Medium",
+                                                "warning",
+                                                move || session.open_posture_with_facet("medium"),
+                                            )}
+                                            {metric_link(
+                                                expired,
+                                                "Expired",
+                                                "warning",
+                                                move || session.open_posture_with_facet("expired"),
+                                            )}
+                                            {metric_link(
+                                                over_privileged,
+                                                "Over-privileged",
+                                                "danger",
+                                                move || session.open_posture_with_facet("high_risk_perms"),
+                                            )}
+                                            {metric_link(
+                                                orgwide_mailbox,
+                                                "Org-wide mailbox",
+                                                "warning",
+                                                move || {
+                                                    session.open_posture_with_facet("orgwide_mailbox")
+                                                },
+                                            )}
+                                            {metric_link(
+                                                orgwide_sharepoint,
+                                                "Org-wide SharePoint",
+                                                "warning",
+                                                move || {
+                                                    session
+                                                        .open_posture_with_facet("orgwide_sharepoint")
+                                                },
+                                            )}
+                                            {metric_link(
                                                 ownership,
-                                                "Ownership",
+                                                "Unowned",
                                                 "warning",
                                                 move || session.open_posture_with_facet("ownership"),
                                             )}

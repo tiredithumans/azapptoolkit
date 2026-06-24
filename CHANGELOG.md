@@ -10,30 +10,43 @@ the project adheres to
 ### Changed
 
 - **Security Audit revamp — the audit is now the hero of the Security surface.**
-  The four co-equal Security sub-tabs (Posture / Credential expiry / Delegated
-  grants / App permissions) are reframed: the audit is the default, full-width
-  view, and the three inventory lenses move behind a subordinate "Detailed
-  inventories" selector (all deep-links and keep-alive panes are preserved). The
-  audit's flat 14-item facet tab bar is replaced by **two combinable filters** —
-  a primary risk-severity selector (All / Critical / High / Medium / Low) and a
-  collapsible finding-type chip drawer (Expiring, Unused, Over-privileged,
-  High-risk delegated, Org-wide mailbox, Scoped mailbox, Org-wide SharePoint,
-  Scoped sites, Unowned) — that **intersect** (e.g. "Critical apps with expiring
-  credentials"). The posture scorecard is regrouped into Risk and Findings rows;
-  each card seeds its own dimension and composes with the other.
+  The Security sub-tabs are reframed: the audit is the default, full-width view,
+  and the inventory lenses (Credential expiry, Delegated grants) move behind a
+  subordinate "Detailed inventories" selector (all deep-links and keep-alive
+  panes are preserved). The **App permissions** lens is removed — its data was
+  redundant with the audit's findings. The audit's flat 14-item facet tab bar is
+  replaced by **two combinable filters** — a primary risk-severity selector (All
+  / Critical / High / Medium / Low) and a collapsible finding-type chip drawer
+  (Expired, Unused, Over-privileged, High-risk delegated, Org-wide mailbox,
+  Scoped mailbox, Org-wide SharePoint, Scoped sites, Unowned) — that
+  **intersect** (e.g. "Critical apps with an expired credential"). The
+  **Expired** finding matches only already-expired credentials (proactive
+  "expiring soon" rotation lead-time stays in the Credential-expiry lens). The
+  posture scorecard is regrouped into Risk and Findings rows; each card seeds its
+  own dimension and composes with the other.
+- **The Home dashboard's Security Posture card surfaces more drill-ins** —
+  Critical / High / Medium / Expired / Over-privileged / Org-wide mailbox /
+  Org-wide SharePoint / Unowned / Unused — each jumping to the audit pre-filtered
+  to that subset.
 
 ### Added
 
-- **Multi-select + inline bulk actions on the Security Audit table and App
-  Registrations list.** Check rows to reveal an inline bar offering Grant consent
-  / Remove expired credentials / Delete (destructive actions gate behind a typed
-  REMOVE / DELETE confirmation), with live progress, cancel, and a per-item
-  result summary — without leaving the list. Reuses the existing bulk backend
-  commands; the audit table keeps its own selection set, separate from the App
-  Registrations list's, so a selection in one never leaks into the other. The
-  Bulk Actions page now hosts the same shared bar plus the Create-apps form. The
-  Enterprise Applications list is intentionally excluded (its rows are service
-  principals, which the app-registration bulk commands can't target).
+- **Multi-select + context-aware inline bulk actions on the Security Audit table
+  and App Registrations list.** Check rows to reveal an inline bar; on the audit
+  it offers the remediation matching the active finding filter — **Remove expired
+  credentials** (Expired), **Remove redundant permissions** (Over-privileged),
+  **Scope mailbox access** to chosen groups (Org-wide mailbox), **Scope SharePoint
+  access** to chosen sites (Org-wide SharePoint) — plus Delete, with live
+  progress, cancel, typed confirmation for destructive actions, and a per-item
+  result summary. The App Registrations list / Bulk Actions page keep the
+  management set (Grant consent / Remove expired / Delete). The new bulk
+  remediations (`bulk_remove_redundant_permissions`, `bulk_scope_mailbox_access`,
+  `bulk_scope_sharepoint_access`) reuse the single-app remediation cores, so each
+  app's live re-resolution, grant-before-strip safety, and cache invalidation
+  match the one-click fixes. The audit table keeps its own selection set, separate
+  from the App Registrations list's. The Enterprise Applications list is
+  intentionally excluded (its rows are service principals, which the
+  app-registration bulk commands can't target).
 
 ## [0.6.0] - 2026-06-24
 

@@ -17,7 +17,7 @@ use thaw::{
 use crate::bindings::audit::{self, AuditProgress, AuditRunResult};
 use crate::bindings::auth;
 use crate::bindings::events;
-use crate::components::bulk_action_bar::BulkActionBar;
+use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::filter_chip::FilterChip;
 use crate::components::filter_toggle::FilterToggle;
 use crate::components::saved_views::SavedViews;
@@ -109,7 +109,7 @@ pub fn AuditView() -> impl IntoView {
                     high: count_level(items, RiskLevel::High),
                     medium: count_level(items, RiskLevel::Medium),
                     low: count_level(items, RiskLevel::Low),
-                    expiring: count_expiring(items),
+                    expired: count_expired(items),
                     unused: items.iter().filter(|i| i.unused).count(),
                     over_privileged: count_issue_prefix(items, issue::HIGH_RISK_APP_PERMS),
                     high_risk_delegated: count_issue_prefix(
@@ -476,9 +476,9 @@ pub fn AuditView() -> impl IntoView {
                                         facet=finding
                                     />
                                     <FilterChip
-                                        label="Expiring"
-                                        value="expiring"
-                                        count=c.expiring
+                                        label="Expired"
+                                        value="expired"
+                                        count=c.expired
                                         facet=finding
                                     />
                                     <FilterChip
@@ -557,7 +557,7 @@ pub fn AuditView() -> impl IntoView {
                                 <div class="audit-scorecard__group">
                                     <span class="audit-scorecard__label">"Findings"</span>
                                     <div class="dash-metrics audit-cards">
-                                        {posture_card("Expiring", c.expiring, "warning", "expiring", finding)}
+                                        {posture_card("Expired", c.expired, "warning", "expired", finding)}
                                         {posture_card("Unused", c.unused, "warning", "unused", finding)}
                                         {posture_card(
                                             "Over-privileged",
@@ -630,8 +630,14 @@ pub fn AuditView() -> impl IntoView {
                     <div>
                         // Inline bulk-action bar — self-gating: visible once ≥1
                         // row is checked, and stays to show the result summary
-                        // after a run clears the selection.
-                        <BulkActionBar selection=selection on_done=on_bulk_done />
+                        // after a run clears the selection. Context-aware: the
+                        // offered remediation tracks the active finding filter
+                        // (Delete always; no Grant consent — not an audit action).
+                        <BulkActionBar
+                            selection=selection
+                            actions=Signal::derive(move || audit_bulk_actions(&finding.get()))
+                            on_done=on_bulk_done
+                        />
                         // Tri-state select-all + result count. `visible_ids` is the
                         // object_ids of every row matching the active filters (not
                         // just the rendered window), so "select all visible" covers
@@ -846,6 +852,23 @@ pub fn AuditView() -> impl IntoView {
     }
 }
 
+/// The bulk actions the audit's inline bar offers for the active finding filter
+/// — the remediation that matches what's being audited, plus Delete (always).
+/// No Grant consent: granting more access isn't a security-audit remediation.
+fn audit_bulk_actions(finding: &str) -> Vec<BulkAction> {
+    let primary = match finding {
+        "expired" => Some(BulkAction::RemoveExpired),
+        "high_risk_perms" => Some(BulkAction::RemoveRedundant),
+        "orgwide_mailbox" => Some(BulkAction::ScopeMailbox),
+        "orgwide_sharepoint" => Some(BulkAction::ScopeSharePoint),
+        _ => None,
+    };
+    primary
+        .into_iter()
+        .chain(std::iter::once(BulkAction::Delete))
+        .collect()
+}
+
 fn risk_class(level: &RiskLevel) -> &'static str {
     match level {
         RiskLevel::Critical => "badge--critical",
@@ -864,7 +887,7 @@ struct PostureCounts {
     high: usize,
     medium: usize,
     low: usize,
-    expiring: usize,
+    expired: usize,
     unused: usize,
     over_privileged: usize,
     high_risk_delegated: usize,
@@ -879,16 +902,11 @@ fn count_level(items: &[AuditItem], level: RiskLevel) -> usize {
     items.iter().filter(|i| i.risk_level == level).count()
 }
 
-fn count_expiring(items: &[AuditItem]) -> usize {
+fn count_expired(items: &[AuditItem]) -> usize {
     use azapptoolkit_core::audit::CredentialStatus;
     items
         .iter()
-        .filter(|i| {
-            matches!(
-                i.credential_status,
-                CredentialStatus::ExpiringSoon | CredentialStatus::Expired
-            )
-        })
+        .filter(|i| matches!(i.credential_status, CredentialStatus::Expired))
         .count()
 }
 
