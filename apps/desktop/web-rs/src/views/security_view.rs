@@ -21,7 +21,6 @@ use leptos::prelude::*;
 
 use crate::state::use_session;
 use crate::util::keep_alive;
-use crate::views::app_permissions_view::AppPermissionsView;
 use crate::views::audit_view::AuditView;
 use crate::views::consent_grants_view::ConsentGrantsView;
 use crate::views::credentials_dashboard::CredentialsDashboard;
@@ -48,12 +47,10 @@ pub fn SecurityView() -> impl IntoView {
                 <span class="security-lenses__label">"Detailed inventories"</span>
                 {lens_btn(sub, "credentials", "Credential expiry", false)}
                 {lens_btn(sub, "grants", "Delegated grants", false)}
-                {lens_btn(sub, "permissions", "App permissions", false)}
             </div>
             {keep_alive(sub, visited, "posture", || view! { <AuditView /> })}
             {keep_alive(sub, visited, "credentials", || view! { <CredentialsDashboard /> })}
             {keep_alive(sub, visited, "grants", || view! { <ConsentGrantsView /> })}
-            {keep_alive(sub, visited, "permissions", || view! { <AppPermissionsView /> })}
         </div>
     }
 }

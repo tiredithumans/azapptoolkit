@@ -63,11 +63,6 @@ fn action_list() -> Vec<PaletteAction> {
             run: |s| s.open_security("grants"),
         },
         PaletteAction {
-            label: "Go to App permissions",
-            keywords: "application permissions app-only graph exchange sharepoint security",
-            run: |s| s.open_security("permissions"),
-        },
-        PaletteAction {
             label: "New app registration",
             keywords: "create add register",
             run: |s| {

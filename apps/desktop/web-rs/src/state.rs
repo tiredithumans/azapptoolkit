@@ -17,9 +17,9 @@ pub enum ActiveView {
     Apps,
     EnterpriseApps,
     ManagedIdentities,
-    /// Unified tenant-wide security surface: Posture (the audit), Credential
-    /// expiry, Delegated grants, and App permissions, switched by an internal
-    /// sub-tab (`security_tab`). Replaces four sibling nav destinations.
+    /// Unified tenant-wide security surface: the security audit (hero) plus the
+    /// Credential-expiry and Delegated-grants inventory lenses, switched by an
+    /// internal sub-tab (`security_tab`). Replaces sibling nav destinations.
     Security,
     PermissionTester,
     /// Tenant-wide resource → identities reverse lookups, one tab per plane:
@@ -129,9 +129,9 @@ pub struct Session {
     pub last_enterprise_tab: RwSignal<String>,
     pub last_mi_tab: RwSignal<String>,
     // Active sub-tab of the unified Security surface ("posture" | "credentials"
-    // | "grants" | "permissions"). Lifted to the session so the Home cards and
-    // command palette can deep-link straight to a sub-tab, and so the choice
-    // survives navigating away and back.
+    // | "grants"). Lifted to the session so the Home cards and command palette
+    // can deep-link straight to a sub-tab, and so the choice survives navigating
+    // away and back.
     pub security_tab: RwSignal<String>,
     // In-app toast stack + a monotonic id source. Rendered once by
     // `ToastHost` near the shell root; pushed via the helpers below.
@@ -240,9 +240,8 @@ impl Session {
     }
 
     /// Navigate to the unified Security surface on a specific sub-tab
-    /// (`"posture"` | `"credentials"` | `"grants"` | `"permissions"`). Used by
-    /// the Home cards and command palette to deep-link past the default Posture
-    /// tab.
+    /// (`"posture"` | `"credentials"` | `"grants"`). Used by the Home cards and
+    /// command palette to deep-link past the default Posture tab.
     pub fn open_security(&self, tab: &str) {
         self.security_tab.set(tab.to_string());
         self.view.set(ActiveView::Security);
