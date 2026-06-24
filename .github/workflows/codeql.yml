@@ -28,7 +28,7 @@ jobs:
     name: Analyze (rust)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       # Rust is supported only in build-mode `none`. The prep below (pinned
       # toolchain, wasm32 target for the excluded web-rs crate, native deps,
@@ -49,7 +49,7 @@ jobs:
           workspaces: |
             .
             apps/desktop/web-rs
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
         with:
           tool: just
       - name: Install system deps (Linux)
