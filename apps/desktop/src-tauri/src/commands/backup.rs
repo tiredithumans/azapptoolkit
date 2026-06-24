@@ -32,13 +32,13 @@ use azapptoolkit_graph::{GraphClient, GraphError};
 use crate::commands::applications::{extract_auth_fields, sp_index_key};
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::throttle::ConcurrencyThrottle;
+use crate::dto::UiError;
 use crate::dto::backup::{
-    AppRegistrationBackup, AppRoleAssigneeRef, AppRoleGrantRef, CredentialMeta,
-    EnterpriseAppBackup, ManagedIdentityBackup, PrincipalRef, TenantBackup, BACKUP_SCHEMA_VERSION,
+    AppRegistrationBackup, AppRoleAssigneeRef, AppRoleGrantRef, BACKUP_SCHEMA_VERSION,
+    CredentialMeta, EnterpriseAppBackup, ManagedIdentityBackup, PrincipalRef, TenantBackup,
 };
 use crate::dto::bulk::BulkProgress;
 use crate::dto::managed_identity::MiSubtype;
-use crate::dto::UiError;
 use crate::state::{AppState, CancelFlag};
 
 /// Objects per `$batch` POST. Graph's hard cap is 20 sub-requests per batch, so
@@ -920,12 +920,13 @@ mod tests {
         ];
         assert_eq!(
             user_assigned_arm_id(&names).as_deref(),
-            Some("/subscriptions/s/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/mi-1")
+            Some(
+                "/subscriptions/s/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/mi-1"
+            )
         );
         // System-assigned (host resource id, no userAssignedIdentities marker).
-        let sys = [
-            "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm-1",
-        ];
+        let sys =
+            ["/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm-1"];
         assert_eq!(user_assigned_arm_id(&sys), None);
     }
 

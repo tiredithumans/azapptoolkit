@@ -15,10 +15,10 @@ use tauri::{AppHandle, State};
 use azapptoolkit_arm::RoleAssignment;
 use azapptoolkit_core::cache::CacheKind;
 
+use crate::dto::UiError;
 use crate::dto::managed_identity::{
     AzureRoleDto, AzureRolesResult, GrantManagedIdentityResult, ManagedIdentityDto, MiSubtype,
 };
-use crate::dto::UiError;
 use crate::state::AppState;
 
 /// Broadly-privileged built-in Azure roles flagged in the MI RBAC view.
@@ -328,7 +328,22 @@ fn new_role_assignment_guid() -> String {
     b[8] = (b[8] & 0x3f) | 0x80; // variant 1 (RFC 4122)
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
     )
 }
 

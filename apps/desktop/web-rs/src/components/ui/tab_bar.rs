@@ -27,15 +27,13 @@ pub fn TabBar(items: Vec<TabBarItem>, selected: RwSignal<String>) -> impl IntoVi
     let activate_at = move |idx: usize, values: &[String]| {
         if let Some(v) = values.get(idx) {
             selected.set(v.clone());
-            if let Some(list) = tablist_ref.get_untracked() {
-                if let Ok(buttons) = list.query_selector_all("[role=tab]") {
-                    if let Some(btn) = buttons
-                        .item(idx as u32)
-                        .and_then(|n| n.dyn_into::<HtmlElement>().ok())
-                    {
-                        let _ = btn.focus();
-                    }
-                }
+            if let Some(list) = tablist_ref.get_untracked()
+                && let Ok(buttons) = list.query_selector_all("[role=tab]")
+                && let Some(btn) = buttons
+                    .item(idx as u32)
+                    .and_then(|n| n.dyn_into::<HtmlElement>().ok())
+            {
+                let _ = btn.focus();
             }
         }
     };

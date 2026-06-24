@@ -18,8 +18,8 @@ use azapptoolkit_core::models::{
 };
 use azapptoolkit_graph::client::{ApiApplicationPatch, ApplicationExposeApiPatch};
 
-use crate::dto::expose_api::{ExposeApiDto, SetPreAuthorizedAppInput, UpsertApiScopeInput};
 use crate::dto::UiError;
+use crate::dto::expose_api::{ExposeApiDto, SetPreAuthorizedAppInput, UpsertApiScopeInput};
 use crate::state::AppState;
 
 use super::applications::invalidate_app_details;
@@ -35,7 +35,22 @@ fn new_scope_guid() -> String {
     b[8] = (b[8] & 0x3f) | 0x80; // variant 1 (RFC 4122)
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
     )
 }
 
@@ -553,12 +568,14 @@ mod tests {
         assert_eq!(merged[0].value, "Files.ReadAll");
 
         // Duplicate value (other id, case-insensitive) is rejected.
-        assert!(merge_scope(
-            existing.clone(),
-            scope("b", "files.read", Some(true)),
-            false
-        )
-        .is_err());
+        assert!(
+            merge_scope(
+                existing.clone(),
+                scope("b", "files.read", Some(true)),
+                false
+            )
+            .is_err()
+        );
 
         // Editing an id Graph no longer has is a not-found, not a silent append.
         assert!(merge_scope(existing, scope("gone", "New.Scope", Some(true)), true).is_err());
@@ -593,20 +610,24 @@ mod tests {
             oauth2_permission_scopes: vec![scope("a", "Files.Read", None)],
             pre_authorized_applications: vec![],
         };
-        assert!(plan_scope_removal(&api, "a")
-            .unwrap()
-            .disable_first
-            .is_some());
+        assert!(
+            plan_scope_removal(&api, "a")
+                .unwrap()
+                .disable_first
+                .is_some()
+        );
 
         // An already-disabled scope removes in one PATCH.
         let api = ApiApplication {
             oauth2_permission_scopes: vec![scope("a", "Files.Read", Some(false))],
             pre_authorized_applications: vec![],
         };
-        assert!(plan_scope_removal(&api, "a")
-            .unwrap()
-            .disable_first
-            .is_none());
+        assert!(
+            plan_scope_removal(&api, "a")
+                .unwrap()
+                .disable_first
+                .is_none()
+        );
 
         // Already gone ⇒ nothing to do.
         assert!(plan_scope_removal(&api, "zz").is_none());

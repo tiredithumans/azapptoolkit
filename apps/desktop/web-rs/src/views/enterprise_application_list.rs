@@ -24,7 +24,7 @@ use crate::components::ui::{EmptyState, IconButton, SkeletonList};
 use crate::components::virtual_list::VirtualList;
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
-use crate::hooks::use_filtered_list::{use_filtered_list, Facet, FilteredListSpec};
+use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
 use crate::state::use_session;
 use crate::util::created_in_range;
 use crate::views::pairing::jump_to_paired_app;

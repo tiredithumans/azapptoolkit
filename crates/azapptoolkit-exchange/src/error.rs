@@ -102,7 +102,9 @@ impl ExchangeError {
             ExchangeError::Forbidden {
                 had_diagnostics: true,
                 ..
-            } => azapptoolkit_core::capabilities::capability("exchange_rbac").map(|c| c.remediation),
+            } => {
+                azapptoolkit_core::capabilities::capability("exchange_rbac").map(|c| c.remediation)
+            }
             // No diagnostic reason → don't assert a definite RBAC gap; lead with
             // the stale-token and propagation causes and the Refresh token lever.
             ExchangeError::Forbidden {
@@ -179,31 +181,40 @@ mod tests {
     #[test]
     fn missing_object_true_for_not_found_and_cmdlet_not_found_body() {
         assert!(ExchangeError::NotFound("object couldn't be found".into()).is_missing_object());
-        assert!(ExchangeError::Api {
-            status: 400,
-            body: "[Test-ServicePrincipalAuthorization] The operation couldn't be found...".into(),
-        }
-        .is_missing_object());
-        assert!(ExchangeError::Api {
-            status: 400,
-            body: "ManagementObjectNotFoundException".into(),
-        }
-        .is_missing_object());
+        assert!(
+            ExchangeError::Api {
+                status: 400,
+                body: "[Test-ServicePrincipalAuthorization] The operation couldn't be found..."
+                    .into(),
+            }
+            .is_missing_object()
+        );
+        assert!(
+            ExchangeError::Api {
+                status: 400,
+                body: "ManagementObjectNotFoundException".into(),
+            }
+            .is_missing_object()
+        );
     }
 
     #[test]
     fn missing_object_false_for_forbidden_unauthorized_and_unrelated_api() {
-        assert!(!ExchangeError::Forbidden {
-            detail: "RBAC denied".into(),
-            had_diagnostics: true,
-        }
-        .is_missing_object());
+        assert!(
+            !ExchangeError::Forbidden {
+                detail: "RBAC denied".into(),
+                had_diagnostics: true,
+            }
+            .is_missing_object()
+        );
         assert!(!ExchangeError::Unauthorized.is_missing_object());
-        assert!(!ExchangeError::Api {
-            status: 400,
-            body: "A parameter is invalid".into(),
-        }
-        .is_missing_object());
+        assert!(
+            !ExchangeError::Api {
+                status: 400,
+                body: "A parameter is invalid".into(),
+            }
+            .is_missing_object()
+        );
     }
 
     #[test]

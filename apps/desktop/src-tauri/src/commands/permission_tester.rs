@@ -31,18 +31,18 @@ use tokio::sync::Mutex;
 
 use azapptoolkit_core::audit::MailPermissionScope;
 use azapptoolkit_core::scoping::{is_scopable_exchange_permission, is_sharepoint_orgwide};
+use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_exchange::models::{
     ExoApplicationAccessPolicy, ExoAuthorizationResult, ExoServicePrincipal,
 };
-use azapptoolkit_exchange::ExchangeClient;
 
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::exchange::{aap_verdict_for, exchange_client, is_org_wide_auth_row};
 use crate::commands::graph_roles::graph_role_index;
+use crate::dto::UiError;
 use crate::dto::permission_tester::{
     MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult, PermissionTestResult,
 };
-use crate::dto::UiError;
 use crate::state::AppState;
 
 /// The Entra layer's input: the mail-scopable Graph application permissions
@@ -742,16 +742,15 @@ pub async fn test_site_access(
     // app-roles, and flag any broad `Sites.*`. A failure here is non-fatal — fall
     // through to the per-site check.
     let mut orgwide_roles: Vec<String> = Vec::new();
-    if let Ok(Some(sp)) = client.get_service_principal_by_app_id(&app_id).await {
-        if let Ok((_, role_value_by_id)) = graph_role_index(&client).await {
-            if let Ok(assignments) = client.list_app_role_assignments(&sp.id).await {
-                for a in &assignments {
-                    if let Some(value) = role_value_by_id.get(&a.app_role_id) {
-                        if is_sharepoint_orgwide(value) {
-                            orgwide_roles.push(value.clone());
-                        }
-                    }
-                }
+    if let Ok(Some(sp)) = client.get_service_principal_by_app_id(&app_id).await
+        && let Ok((_, role_value_by_id)) = graph_role_index(&client).await
+        && let Ok(assignments) = client.list_app_role_assignments(&sp.id).await
+    {
+        for a in &assignments {
+            if let Some(value) = role_value_by_id.get(&a.app_role_id)
+                && is_sharepoint_orgwide(value)
+            {
+                orgwide_roles.push(value.clone());
             }
         }
     }
@@ -936,10 +935,12 @@ mod tests {
         );
         assert!(!result.has_access);
         assert_eq!(result.verdict, "no_access");
-        assert!(result
-            .detail
-            .unwrap()
-            .contains("blocked for “a@x.com” by a legacy Application Access Policy"));
+        assert!(
+            result
+                .detail
+                .unwrap()
+                .contains("blocked for “a@x.com” by a legacy Application Access Policy")
+        );
     }
 
     #[test]

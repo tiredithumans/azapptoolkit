@@ -1,7 +1,7 @@
 //! Shared Microsoft Graph app-role IPC bindings.
 
-use azapptoolkit_dto::managed_identity::AppRoleGrantDto;
 use azapptoolkit_dto::UiError;
+use azapptoolkit_dto::managed_identity::AppRoleGrantDto;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 

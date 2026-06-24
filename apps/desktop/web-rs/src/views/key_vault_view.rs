@@ -14,7 +14,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 use crate::bindings::keyvault::{self, KvSecretItemDto, KvSecretValueDto};
 use crate::components::requires_role::RequiresRole;
 use crate::components::ui::{DataTable, SectionHeader};
-use crate::state::{use_session, ActiveView};
+use crate::state::{ActiveView, use_session};
 
 #[component]
 pub fn KeyVaultView() -> impl IntoView {

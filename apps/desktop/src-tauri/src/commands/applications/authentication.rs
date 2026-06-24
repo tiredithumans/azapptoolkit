@@ -5,8 +5,8 @@ use azapptoolkit_graph::client::{
     ApplicationWebPatch, ImplicitGrantSettingsPatch,
 };
 
-use crate::dto::applications::{ApplicationAuthenticationDto, SetApplicationAuthenticationInput};
 use crate::dto::UiError;
+use crate::dto::applications::{ApplicationAuthenticationDto, SetApplicationAuthenticationInput};
 use crate::state::AppState;
 
 use super::invalidate_app_detail_state;

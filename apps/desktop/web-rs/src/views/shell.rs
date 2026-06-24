@@ -9,7 +9,7 @@ use crate::bindings::applications;
 use crate::components::global_search::GlobalSearch;
 use crate::components::icon::{Icon, IconName};
 use crate::components::toast::ToastHost;
-use crate::state::{use_session, ActiveView};
+use crate::state::{ActiveView, use_session};
 use crate::views::dialogs::{
     cache_diagnostics_dialog::CacheDiagnosticsDialog, create_app_dialog::CreateAppDialog,
     sso_wizard_dialog::SsoWizardDialog,

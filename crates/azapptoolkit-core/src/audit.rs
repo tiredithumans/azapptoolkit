@@ -897,16 +897,15 @@ fn rule_sp_disabled(sp_enabled: Option<bool>) -> RuleContribution {
 /// Rule 10: stale application (created more than [`STALE_APP_DAYS`] ago).
 fn rule_stale_app(days_since_created: Option<i64>) -> RuleContribution {
     let mut c = RuleContribution::default();
-    if let Some(days) = days_since_created {
-        if days > STALE_APP_DAYS {
-            c.score += PTS_STALE_APP;
-            c.issues.push(format!(
-                "Application created {days} days ago - consider if still needed"
-            ));
-            c.recommendations.push(
-                "Review application usage and consider removal if no longer needed".to_string(),
-            );
-        }
+    if let Some(days) = days_since_created
+        && days > STALE_APP_DAYS
+    {
+        c.score += PTS_STALE_APP;
+        c.issues.push(format!(
+            "Application created {days} days ago - consider if still needed"
+        ));
+        c.recommendations
+            .push("Review application usage and consider removal if no longer needed".to_string());
     }
     c
 }
@@ -1806,12 +1805,14 @@ mod tests {
         // Report unavailable → never flag, regardless of age.
         assert!(unused_app_advisory(SignInStatus::Unavailable, created_old, now()).is_none());
         // Recent sign-in → not flagged.
-        assert!(unused_app_advisory(
-            SignInStatus::LastSeen(now() - Duration::days(10)),
-            created_old,
-            now()
-        )
-        .is_none());
+        assert!(
+            unused_app_advisory(
+                SignInStatus::LastSeen(now() - Duration::days(10)),
+                created_old,
+                now()
+            )
+            .is_none()
+        );
         // Old sign-in → flagged.
         let flagged = unused_app_advisory(
             SignInStatus::LastSeen(now() - Duration::days(200)),
@@ -1899,19 +1900,23 @@ mod tests {
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
         assert_eq!(item.risk_score, PTS_SCOPED_HIGH_RISK_MAIL);
-        assert!(item
-            .issues
-            .iter()
-            .any(|i| i.starts_with("High-risk mailbox permissions scoped via RBAC")));
-        assert!(item
-            .issues
-            .iter()
-            .any(|i| i.starts_with("Mailbox access scoped via RBAC for Applications:")));
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with("High-risk mailbox permissions scoped via RBAC"))
+        );
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with("Mailbox access scoped via RBAC for Applications:"))
+        );
         // No org-wide advisory once it's scoped.
-        assert!(!item
-            .issues
-            .iter()
-            .any(|i| i.starts_with("Organization-wide mailbox access")));
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|i| i.starts_with("Organization-wide mailbox access"))
+        );
     }
 
     #[test]
@@ -1945,10 +1950,11 @@ mod tests {
                 item.risk_score, PTS_HIGH_RISK_APP_PERM,
                 "verdict {verdict:?}"
             );
-            assert!(item
-                .issues
-                .iter()
-                .any(|i| i.starts_with("Organization-wide mailbox access")));
+            assert!(
+                item.issues
+                    .iter()
+                    .any(|i| i.starts_with("Organization-wide mailbox access"))
+            );
         }
     }
 
@@ -2173,20 +2179,22 @@ mod tests {
         assert!(perms.mail_scopes.is_empty());
         let item = score_application(&base_app(), Some(true), &perms, now());
         assert_eq!(item.risk_score, PTS_HIGH_RISK_APP_PERM);
-        assert!(item
-            .issues
-            .iter()
-            .any(|i| i.starts_with("Organization-wide mailbox access")));
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with("Organization-wide mailbox access"))
+        );
     }
 
     #[test]
     fn disabled_sp_adds_two() {
         let item = score_application(&base_app(), Some(false), &AppPermissions::default(), now());
         assert_eq!(item.risk_score, 2);
-        assert!(item
-            .issues
-            .iter()
-            .any(|i| i.contains("Service principal is disabled")));
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.contains("Service principal is disabled"))
+        );
     }
 
     #[test]
@@ -2361,11 +2369,12 @@ mod tests {
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
         assert_eq!(item.risk_score, 15, "redundancy must not add score");
-        assert!(item
-            .issues
-            .iter()
-            .any(|i| i.starts_with(issue::REDUNDANT_APP_PERMS)
-                && i.contains("Mail.Read (covered by Mail.ReadWrite)")));
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with(issue::REDUNDANT_APP_PERMS)
+                    && i.contains("Mail.Read (covered by Mail.ReadWrite)"))
+        );
 
         let r = item
             .remediations
@@ -2385,14 +2394,18 @@ mod tests {
             ..Default::default()
         };
         let item = score_application(&base_app(), Some(true), &scoped_perms, now());
-        assert!(!item
-            .issues
-            .iter()
-            .any(|i| i.starts_with(issue::REDUNDANT_APP_PERMS)));
-        assert!(!item
-            .remediations
-            .iter()
-            .any(|r| r.kind == RemediationKind::RemoveRedundantPermissions));
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::REDUNDANT_APP_PERMS))
+        );
+        assert!(
+            !item
+                .remediations
+                .iter()
+                .any(|r| r.kind == RemediationKind::RemoveRedundantPermissions)
+        );
     }
 
     #[test]
@@ -2444,10 +2457,12 @@ mod tests {
             "recommendations = {:?}",
             item.recommendations
         );
-        assert!(!item
-            .issues
-            .iter()
-            .any(|i| i.contains("Narrower alternatives")));
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|i| i.contains("Narrower alternatives"))
+        );
 
         // A risk-flagged permission with no narrower equivalent suggests nothing.
         let perms = AppPermissions {
@@ -2455,10 +2470,12 @@ mod tests {
             ..Default::default()
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
-        assert!(!item
-            .recommendations
-            .iter()
-            .any(|r| r.starts_with("Narrower alternatives exist")));
+        assert!(
+            !item
+                .recommendations
+                .iter()
+                .any(|r| r.starts_with("Narrower alternatives exist"))
+        );
     }
 
     #[test]
@@ -2583,29 +2600,34 @@ mod tests {
             ..Default::default()
         };
         let item = score_application(&app, Some(true), &perms, now());
-        assert!(item
-            .issues
-            .iter()
-            .any(|i| i.starts_with(issue::INSTANCE_LOCK_DISABLED)));
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with(issue::INSTANCE_LOCK_DISABLED))
+        );
         assert_eq!(item.risk_score, 0, "instance-lock advisory must not score");
 
         // A fully-set lock clears the advisory.
         app.service_principal_lock_configuration = Some(full_lock());
         let locked = score_application(&app, Some(true), &perms, now());
-        assert!(!locked
-            .issues
-            .iter()
-            .any(|i| i.starts_with(issue::INSTANCE_LOCK_DISABLED)));
+        assert!(
+            !locked
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::INSTANCE_LOCK_DISABLED))
+        );
     }
 
     #[test]
     fn instance_lock_not_flagged_for_app_with_nothing_to_protect() {
         // No permissions and no credentials → no advisory even with the lock off.
         let item = score_application(&base_app(), Some(true), &AppPermissions::default(), now());
-        assert!(!item
-            .issues
-            .iter()
-            .any(|i| i.starts_with(issue::INSTANCE_LOCK_DISABLED)));
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::INSTANCE_LOCK_DISABLED))
+        );
     }
 
     #[test]
@@ -2624,10 +2646,11 @@ mod tests {
             ..Default::default()
         };
         let item = score_application(&app, Some(true), &perms, now());
-        assert!(item
-            .issues
-            .iter()
-            .any(|i| i.starts_with(issue::INSTANCE_LOCK_DISABLED)));
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with(issue::INSTANCE_LOCK_DISABLED))
+        );
     }
 
     #[test]
@@ -2636,19 +2659,22 @@ mod tests {
         app.is_fallback_public_client = Some(true);
         app.password_credentials = vec![active_secret()];
         let item = score_application(&app, Some(true), &AppPermissions::default(), now());
-        assert!(item
-            .issues
-            .iter()
-            .any(|i| i.starts_with(issue::PUBLIC_CLIENT_CREDENTIALS)));
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with(issue::PUBLIC_CLIENT_CREDENTIALS))
+        );
 
         // A public client with no credentials is fine.
         let mut clean = base_app();
         clean.is_fallback_public_client = Some(true);
         let clean_item = score_application(&clean, Some(true), &AppPermissions::default(), now());
-        assert!(!clean_item
-            .issues
-            .iter()
-            .any(|i| i.starts_with(issue::PUBLIC_CLIENT_CREDENTIALS)));
+        assert!(
+            !clean_item
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::PUBLIC_CLIENT_CREDENTIALS))
+        );
     }
 
     #[test]
@@ -2656,10 +2682,11 @@ mod tests {
         let mut app = base_app();
         app.password_credentials = vec![active_secret()];
         let item = score_application(&app, Some(true), &AppPermissions::default(), now());
-        assert!(item
-            .issues
-            .iter()
-            .any(|i| i.starts_with(issue::PREFER_CERT_OVER_SECRET)));
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with(issue::PREFER_CERT_OVER_SECRET))
+        );
         assert_eq!(item.risk_score, 0, "cert/secret nudge must not score");
 
         // A certificate-only app gets no secret nudge.
@@ -2669,10 +2696,12 @@ mod tests {
             ..Default::default()
         }];
         let cert_item = score_application(&cert_app, Some(true), &AppPermissions::default(), now());
-        assert!(!cert_item
-            .issues
-            .iter()
-            .any(|i| i.starts_with(issue::PREFER_CERT_OVER_SECRET)));
+        assert!(
+            !cert_item
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::PREFER_CERT_OVER_SECRET))
+        );
     }
 
     #[test]
@@ -2731,14 +2760,16 @@ mod tests {
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
         assert_eq!(item.risk_score, 10);
-        assert!(item
-            .issues
-            .iter()
-            .any(|i| i.contains("Organization-wide mailbox access")));
-        assert!(item
-            .recommendations
-            .iter()
-            .any(|r| r.contains("RBAC for Applications")));
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.contains("Organization-wide mailbox access"))
+        );
+        assert!(
+            item.recommendations
+                .iter()
+                .any(|r| r.contains("RBAC for Applications"))
+        );
     }
 
     #[test]
@@ -2752,10 +2783,11 @@ mod tests {
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
         assert_eq!(item.risk_score, PTS_HIGH_RISK_APP_PERM);
-        assert!(item
-            .issues
-            .iter()
-            .any(|i| i.starts_with("Organization-wide SharePoint access")));
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with("Organization-wide SharePoint access"))
+        );
     }
 
     #[test]
@@ -2769,10 +2801,11 @@ mod tests {
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
         assert_eq!(item.risk_score, 0);
-        assert!(item
-            .issues
-            .iter()
-            .any(|i| i.starts_with("Organization-wide SharePoint access")));
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with("Organization-wide SharePoint access"))
+        );
     }
 
     #[test]
@@ -2786,13 +2819,16 @@ mod tests {
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
         assert_eq!(item.risk_score, 0);
-        assert!(!item
-            .issues
-            .iter()
-            .any(|i| i.starts_with("Organization-wide SharePoint access")));
-        assert!(item
-            .issues
-            .iter()
-            .any(|i| i.starts_with("SharePoint access scoped to selected sites")));
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|i| i.starts_with("Organization-wide SharePoint access"))
+        );
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with("SharePoint access scoped to selected sites"))
+        );
     }
 }

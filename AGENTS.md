@@ -1,7 +1,7 @@
 # Agent Instructions — azapptoolkit
 
 azapptoolkit is a **native Rust desktop app for managing Microsoft Entra ID app registrations** —
-the replacement for ad-hoc PowerShell. Tauri 2 + Leptos 0.8 (WASM) workspace, edition 2021,
+the replacement for ad-hoc PowerShell. Tauri 2 + Leptos 0.8 (WASM) workspace, edition 2024,
 MSRV **1.96** (`rust-toolchain.toml`).
 
 Deep subsystem detail lives in `docs/architecture/` — this file keeps the invariant + a pointer.
@@ -166,6 +166,8 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 - **Permissions catalog** is bundled at compile time from `azapptoolkit-permissions/data/`. Unknown resources fall back to `resolve_resource_sp()` Graph call.
 
 - **Full-collection PATCH for `appRoles` / `oauth2PermissionScopes`.** Both are not-nullable arrays Graph **full-replaces** — re-read live state, mutate, write the whole array back (never merge against a cached payload). Deleting an enabled entry needs two PATCHes: disable first, then remove (`commands/expose_api.rs`, `commands/app_roles.rs`). Exposed **app roles** (`commands/app_roles.rs`) edit the **paired application** when one exists (Entra mirrors onto the SP) else the SP directly, and round-trip roles as **raw JSON** so the `value: null` SAML default (`msiam_access`) survives byte-for-byte (a typed `AppRole` would rewrite it to `""`). Bust with `invalidate_app_details` only — these aren't on any list/audit payload.
+
+- **Crypto deps — no `rsa` crate; `rand`/`sha2` majors are pinned on purpose.** Self-signed cert generation (`src-tauri/src/cert.rs`) uses `rcgen` on the **`aws_lc_rs`** backend (already in-tree via rustls) *specifically* to keep the `rsa` crate (RUSTSEC-2023-0071) out of the dependency graph — **don't reintroduce `rsa`** (the `src-tauri/Cargo.toml` comment records why). The direct `rand = "0.8"` / `sha2 = "0.10"` pins in `src-tauri/Cargo.toml` (random bytes for client secrets in `expose_api`/`app_roles`/`managed_identity`; SHA-256 cert thumbprint) are held to match what **`oauth2` 5 + Tauri 2** already resolve; bumping to `rand` 0.10 / `sha2` 0.11 only stacks a **duplicate** version (neither held version carries an advisory), so leave them until oauth2/Tauri move first. Both lockfiles otherwise track the latest semver-compatible versions — `cargo update` is a no-op.
 
 ## Coding fundamentals
 

@@ -5,8 +5,8 @@
 //! capability catalog. Best-effort: anything unprovable comes back as
 //! `Verdict::Unknown`.
 
-use azapptoolkit_dto::readiness::ReadinessReport;
 use azapptoolkit_dto::UiError;
+use azapptoolkit_dto::readiness::ReadinessReport;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 

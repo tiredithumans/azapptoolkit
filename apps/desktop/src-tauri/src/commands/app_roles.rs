@@ -21,8 +21,8 @@ use tauri::State;
 
 use azapptoolkit_core::models::AppRole;
 
-use crate::dto::enterprise_application::{AppRoleInput, AppRolesView};
 use crate::dto::UiError;
+use crate::dto::enterprise_application::{AppRoleInput, AppRolesView};
 use crate::state::AppState;
 
 use super::applications::invalidate_app_details;
@@ -37,7 +37,22 @@ fn new_app_role_guid() -> String {
     b[8] = (b[8] & 0x3f) | 0x80; // variant 1 (RFC 4122)
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
     )
 }
 
@@ -288,10 +303,10 @@ fn plan_role_removal(roles: &[Value], target_id: &str) -> Result<Option<RoleRemo
             .iter()
             .cloned()
             .map(|mut r| {
-                if role_id(&r) == Some(target_id) {
-                    if let Some(obj) = r.as_object_mut() {
-                        obj.insert("isEnabled".into(), Value::Bool(false));
-                    }
+                if role_id(&r) == Some(target_id)
+                    && let Some(obj) = r.as_object_mut()
+                {
+                    obj.insert("isEnabled".into(), Value::Bool(false));
                 }
                 r
             })
@@ -500,24 +515,30 @@ mod tests {
 
         // A missing isEnabled means enabled (Graph default) — still two-step.
         let roles = vec![role("a", "admin", None)];
-        assert!(plan_role_removal(&roles, "a")
-            .unwrap()
-            .unwrap()
-            .disable_first
-            .is_some());
+        assert!(
+            plan_role_removal(&roles, "a")
+                .unwrap()
+                .unwrap()
+                .disable_first
+                .is_some()
+        );
 
         // An already-disabled role removes in one PATCH.
         let roles = vec![role("a", "admin", Some(false))];
-        assert!(plan_role_removal(&roles, "a")
-            .unwrap()
-            .unwrap()
-            .disable_first
-            .is_none());
+        assert!(
+            plan_role_removal(&roles, "a")
+                .unwrap()
+                .unwrap()
+                .disable_first
+                .is_none()
+        );
 
         // Already gone ⇒ nothing to do.
-        assert!(plan_role_removal(&[role("a", "admin", Some(false))], "zz")
-            .unwrap()
-            .is_none());
+        assert!(
+            plan_role_removal(&[role("a", "admin", Some(false))], "zz")
+                .unwrap()
+                .is_none()
+        );
 
         // The built-in default role can't be deleted.
         assert!(plan_role_removal(&[role("def", "", Some(true))], "def").is_err());

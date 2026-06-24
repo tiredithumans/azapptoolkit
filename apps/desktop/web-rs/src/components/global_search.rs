@@ -19,7 +19,7 @@ use crate::bindings::search::{self, GlobalSearchResults, SearchHit};
 use crate::components::icon::{Icon, IconName};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::hooks::use_debounced::use_debounced;
-use crate::state::{use_session, ActiveView, Session};
+use crate::state::{ActiveView, Session, use_session};
 
 /// One command-bar entry: a label, extra search keywords, and the side effect.
 /// `run` is a plain `fn` pointer (non-capturing) so the list is trivially `Copy`.
@@ -196,10 +196,10 @@ pub fn GlobalSearch() -> impl IntoView {
     Effect::new(move |_| record_hits.set(flatten_hits(results.get())));
 
     let on_input = move |ev: ev::Event| {
-        if let Some(target) = ev.target() {
-            if let Ok(input) = target.dyn_into::<HtmlInputElement>() {
-                raw_query.set(input.value());
-            }
+        if let Some(target) = ev.target()
+            && let Ok(input) = target.dyn_into::<HtmlInputElement>()
+        {
+            raw_query.set(input.value());
         }
     };
 

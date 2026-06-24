@@ -13,8 +13,8 @@ use azapptoolkit_core::models::{DirectoryAuditLog, ServicePrincipalSignInActivit
 use azapptoolkit_graph::GraphError;
 
 use crate::commands::graph_err;
-use crate::dto::activity::{ActivityLogItem, ModifiedPropertyDto, SignInActivityDto};
 use crate::dto::UiError;
+use crate::dto::activity::{ActivityLogItem, ModifiedPropertyDto, SignInActivityDto};
 use crate::state::AppState;
 
 // Graph keeps directory audit logs for only 30 days (longer with Entra ID P1/P2
@@ -154,9 +154,13 @@ fn map_sign_in_err(err: GraphError) -> SignInActivityDto {
     match &err {
         GraphError::Forbidden(body) => {
             if graph_err::looks_like_missing_license(body) {
-                sign_in_unavailable("Sign-in activity requires an Entra ID P1 or P2 license, which this tenant doesn't appear to have.")
+                sign_in_unavailable(
+                    "Sign-in activity requires an Entra ID P1 or P2 license, which this tenant doesn't appear to have.",
+                )
             } else {
-                sign_in_unavailable("Sign-in activity requires admin consent for AuditLog.Read.All and a supported reader role.")
+                sign_in_unavailable(
+                    "Sign-in activity requires admin consent for AuditLog.Read.All and a supported reader role.",
+                )
             }
         }
         GraphError::Token(_) => sign_in_unavailable(
@@ -166,7 +170,9 @@ fn map_sign_in_err(err: GraphError) -> SignInActivityDto {
             sign_in_unavailable("Your session expired. Sign in again to view sign-in activity.")
         }
         GraphError::Throttled { .. } | GraphError::Server { .. } | GraphError::Network(_) => {
-            sign_in_unavailable("Couldn't reach the sign-in activity report just now. Try Refresh in a moment.")
+            sign_in_unavailable(
+                "Couldn't reach the sign-in activity report just now. Try Refresh in a moment.",
+            )
         }
         _ => sign_in_unavailable("Sign-in activity is unavailable for this app right now."),
     }
@@ -406,9 +412,11 @@ mod tests {
             body: "secret-internal-detail".into(),
         });
         assert!(!transient.available);
-        assert!(!transient
-            .message
-            .unwrap()
-            .contains("secret-internal-detail"));
+        assert!(
+            !transient
+                .message
+                .unwrap()
+                .contains("secret-internal-detail")
+        );
     }
 }

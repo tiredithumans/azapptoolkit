@@ -14,27 +14,27 @@
 //! signalled via `AppState.audit_cancel`; the loop polls it between dispatches.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
-use azapptoolkit_core::audit::{score_application, unused_app_advisory, AppPermissions, AuditItem};
+use azapptoolkit_core::audit::{AppPermissions, AuditItem, score_application, unused_app_advisory};
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Application, RequiredResourceAccess};
 use azapptoolkit_core::scoping::is_scopable_exchange_permission;
 use azapptoolkit_exchange::{ExchangeClient, ExchangeError};
-use azapptoolkit_graph::client::AppListQuery;
 use azapptoolkit_graph::GraphClient;
+use azapptoolkit_graph::client::AppListQuery;
 use chrono::{DateTime, Utc};
 
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::exchange::{exchange_client, resolve_mail_scopes_audit_cached};
 use crate::commands::graph_roles::graph_role_index;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
-use crate::dto::audit::{AuditProgress, AuditRunResult};
 use crate::dto::UiError;
+use crate::dto::audit::{AuditProgress, AuditRunResult};
 use crate::state::AppState;
 
 /// Upper bound on in-flight per-app lookups when the tenant is healthy.
@@ -143,19 +143,19 @@ pub async fn run_audit(
                             if a.principal_type.as_deref() != Some("ServicePrincipal") {
                                 continue;
                             }
-                            if let Some(v) = role_value_by_id.get(&a.app_role_id) {
-                                if is_scopable_exchange_permission(v) {
-                                    m.entry(a.principal_id).or_default().insert(v.clone());
-                                }
+                            if let Some(v) = role_value_by_id.get(&a.app_role_id)
+                                && is_scopable_exchange_permission(v)
+                            {
+                                m.entry(a.principal_id).or_default().insert(v.clone());
                             }
                         }
                         m
                     }
                     Err(err) => {
                         tracing::info!(
-                                ?err,
-                                "audit: tenant-wide app-role assignments read failed; org-wide mail reconciliation unavailable"
-                            );
+                            ?err,
+                            "audit: tenant-wide app-role assignments read failed; org-wide mail reconciliation unavailable"
+                        );
                         HashMap::new()
                     }
                 }
@@ -396,7 +396,7 @@ pub async fn save_audit_to_file(
             return Err(UiError::validation(
                 "unsupported_format",
                 format!("unsupported export format: {other}"),
-            ))
+            ));
         }
     };
     let default_name = format!("audit-{}.{ext}", chrono::Utc::now().format("%Y%m%dT%H%M%S"));
@@ -535,7 +535,7 @@ pub(crate) async fn save_export_via_dialog(
             return Err(UiError::validation(
                 "unsupported_format",
                 format!("unsupported export format: {other}"),
-            ))
+            ));
         }
     };
     let default_name = format!(
@@ -762,9 +762,9 @@ async fn score_one(
                 ) {
                     exo_tripped.store(true, Ordering::Release);
                     tracing::info!(
-                            ?err,
-                            "audit: Exchange authorization failed; skipping mailbox-scope probes for the rest of the run"
-                        );
+                        ?err,
+                        "audit: Exchange authorization failed; skipping mailbox-scope probes for the rest of the run"
+                    );
                 }
                 HashMap::new()
             }

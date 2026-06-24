@@ -14,10 +14,10 @@ use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::pairing::jump_to_paired_enterprise;
 use crate::views::tabs::{
-    activity_tab::ActivityTab, authentication_tab::AuthenticationTab,
+    AppTab, activity_tab::ActivityTab, authentication_tab::AuthenticationTab,
     conditional_access_tab::ConditionalAccessTab, credentials_tab::CredentialsTab,
     expose_api_tab::ExposeApiTab, overview_tab::OverviewTab, owners_tab::OwnersTab,
-    permissions_tab::PermissionsTab, AppTab,
+    permissions_tab::PermissionsTab,
 };
 
 #[component]

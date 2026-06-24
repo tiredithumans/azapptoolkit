@@ -14,7 +14,7 @@ use reqwest::Method;
 use serde::de::DeserializeOwned;
 
 use azapptoolkit_core::http_retry::{
-    next_backoff_ms, parse_retry_after_seconds, sleep_before_retry, BASE_DELAY_MS, MAX_RETRIES,
+    BASE_DELAY_MS, MAX_RETRIES, next_backoff_ms, parse_retry_after_seconds, sleep_before_retry,
 };
 use azapptoolkit_core::models::Paged;
 

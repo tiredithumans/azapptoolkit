@@ -13,8 +13,8 @@ use tauri::State;
 use azapptoolkit_core::models::AppRoleAssignment;
 use azapptoolkit_graph::GraphClient;
 
-use crate::dto::managed_identity::AppRoleGrantDto;
 use crate::dto::UiError;
+use crate::dto::managed_identity::AppRoleGrantDto;
 use crate::state::AppState;
 
 /// Lists the application permissions a service principal **holds** — its granted

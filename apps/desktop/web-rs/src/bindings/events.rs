@@ -3,7 +3,7 @@
 //! auto-cleans its underlying listener when dropped.
 
 use futures::{Stream, StreamExt};
-use tauri_sys::event::{listen, Event};
+use tauri_sys::event::{Event, listen};
 
 use super::audit::AuditProgress;
 use super::bulk::BulkProgress;
@@ -53,8 +53,8 @@ pub async fn site_sweep_progress() -> Result<impl Stream<Item = SiteSweepProgres
     Ok(stream.map(|ev: Event<SiteSweepProgress>| ev.payload))
 }
 
-pub async fn mailbox_probe_progress(
-) -> Result<impl Stream<Item = MailboxProbeProgress>, JsErrString> {
+pub async fn mailbox_probe_progress()
+-> Result<impl Stream<Item = MailboxProbeProgress>, JsErrString> {
     let stream = listen::<MailboxProbeProgress>("mailbox-probe-progress")
         .await
         .map_err(|e| JsErrString(format!("{e:?}")))?;

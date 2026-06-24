@@ -57,18 +57,18 @@ pub fn use_focus_trap(container: NodeRef<html::Div>, active: Signal<bool>) {
         let now = active.get();
         let node = container.get();
         if now {
-            if let Some(c) = node {
-                if !grabbed.get_value() {
-                    prev.set_value(
-                        document()
-                            .active_element()
-                            .and_then(|e| e.dyn_into::<HtmlElement>().ok()),
-                    );
-                    if let Some(first) = focusable_in(&c).first() {
-                        let _ = first.focus();
-                    }
-                    grabbed.set_value(true);
+            if let Some(c) = node
+                && !grabbed.get_value()
+            {
+                prev.set_value(
+                    document()
+                        .active_element()
+                        .and_then(|e| e.dyn_into::<HtmlElement>().ok()),
+                );
+                if let Some(first) = focusable_in(&c).first() {
+                    let _ = first.focus();
                 }
+                grabbed.set_value(true);
             }
         } else if grabbed.get_value() {
             if let Some(el) = prev.get_value() {
@@ -83,10 +83,10 @@ pub fn use_focus_trap(container: NodeRef<html::Div>, active: Signal<bool>) {
     // dialogs that are mounted only while visible (so `active` never flips to
     // false). `try_*` since the StoredValues may already be disposing.
     on_cleanup(move || {
-        if grabbed.try_get_value().unwrap_or(false) {
-            if let Some(el) = prev.try_get_value().flatten() {
-                let _ = el.focus();
-            }
+        if grabbed.try_get_value().unwrap_or(false)
+            && let Some(el) = prev.try_get_value().flatten()
+        {
+            let _ = el.focus();
         }
     });
 

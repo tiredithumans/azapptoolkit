@@ -24,12 +24,12 @@ use azapptoolkit_graph::client::AppListQuery;
 
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
+use crate::dto::UiError;
 use crate::dto::applications::CreateApplicationInput;
 use crate::dto::bulk::{
     AppRemovalSummary, BulkCreateOutcome, BulkCreateResult, BulkCreateSpec, BulkDeleteFailure,
     BulkDeleteResult, BulkGrantOutcome, BulkGrantResult, BulkProgress, BulkRemoveExpiredResult,
 };
-use crate::dto::UiError;
 use crate::state::AppState;
 
 const CONCURRENCY: usize = 4;
@@ -460,16 +460,16 @@ pub async fn bulk_create_applications(
             });
             continue;
         }
-        if let Some(aud) = &spec.sign_in_audience {
-            if !VALID_AUDIENCES.contains(&aud.as_str()) {
-                outcomes.push(BulkCreateOutcome {
-                    display_name: spec.display_name,
-                    status: "invalid".into(),
-                    app_id: None,
-                    message: Some(format!("unrecognised signInAudience: {aud}")),
-                });
-                continue;
-            }
+        if let Some(aud) = &spec.sign_in_audience
+            && !VALID_AUDIENCES.contains(&aud.as_str())
+        {
+            outcomes.push(BulkCreateOutcome {
+                display_name: spec.display_name,
+                status: "invalid".into(),
+                app_id: None,
+                message: Some(format!("unrecognised signInAudience: {aud}")),
+            });
+            continue;
         }
         if validate_only {
             outcomes.push(BulkCreateOutcome {

@@ -19,7 +19,7 @@ use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::tabs::federated_scenarios::{
-    entra_issuer, github_subject, k8s_subject, GithubEntity, DEFAULT_AUDIENCE, GITHUB_ISSUER,
+    DEFAULT_AUDIENCE, GITHUB_ISSUER, GithubEntity, entra_issuer, github_subject, k8s_subject,
 };
 
 /// The portal's "Federated credential scenario" choices (key, label).

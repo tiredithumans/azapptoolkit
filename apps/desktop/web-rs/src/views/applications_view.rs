@@ -7,7 +7,7 @@ use thaw::{Button, ButtonAppearance};
 
 use crate::components::icon::IconName;
 use crate::components::ui::EmptyState;
-use crate::state::{use_session, ActiveView};
+use crate::state::{ActiveView, use_session};
 use crate::views::application_detail_pane::ApplicationDetailPane;
 use crate::views::application_list::ApplicationList;
 

@@ -11,7 +11,7 @@
 //!   so it needs no live lookup and is derived here from the value alone.
 
 use azapptoolkit_core::audit::{
-    risk_level_for_app_permission, MailPermissionScope, RiskLevel, ScopeMechanism,
+    MailPermissionScope, RiskLevel, ScopeMechanism, risk_level_for_app_permission,
 };
 use leptos::prelude::*;
 

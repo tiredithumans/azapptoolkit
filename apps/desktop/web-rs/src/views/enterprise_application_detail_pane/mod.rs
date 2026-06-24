@@ -28,9 +28,9 @@ use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::pairing::jump_to_paired_app;
+use crate::views::tabs::EnterpriseTab;
 use crate::views::tabs::activity_tab::ActivityPanel;
 use crate::views::tabs::conditional_access_tab::ConditionalAccessPanel;
-use crate::views::tabs::EnterpriseTab;
 
 mod access;
 mod app_roles;

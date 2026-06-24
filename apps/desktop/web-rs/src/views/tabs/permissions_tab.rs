@@ -29,11 +29,11 @@ use crate::components::toast::ToastAction;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::IconButton;
 use crate::hooks::use_command::use_command;
-use crate::state::{use_session, Session};
-use azapptoolkit_core::audit::{downgrade_alternatives, MailPermissionScope};
+use crate::state::{Session, use_session};
+use azapptoolkit_core::audit::{MailPermissionScope, downgrade_alternatives};
 use azapptoolkit_core::scoping::ScopeKind;
-use azapptoolkit_dto::permissions::{PermissionKind, ResolvedPermission};
 use azapptoolkit_dto::UiError;
+use azapptoolkit_dto::permissions::{PermissionKind, ResolvedPermission};
 
 /// A held broad application permission the user chose to swap for a documented
 /// narrower alternative. Held until the user picks the target (or cancels) —

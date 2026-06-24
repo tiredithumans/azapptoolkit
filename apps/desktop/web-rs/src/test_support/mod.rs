@@ -28,7 +28,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::bindings::TenantContext;
-use crate::state::{provide_session, use_session, Session};
+use crate::state::{Session, provide_session, use_session};
 
 pub mod fixtures;
 

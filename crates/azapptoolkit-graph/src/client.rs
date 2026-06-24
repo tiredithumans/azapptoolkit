@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Method;
-use serde::de::DeserializeOwned;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{
@@ -17,8 +17,8 @@ use azapptoolkit_core::models::{
 };
 
 use azapptoolkit_core::http_retry::{
-    next_backoff_ms, parse_retry_after_seconds, sleep_before_retry, sleep_with_jitter,
-    BASE_DELAY_MS, MAX_RETRIES,
+    BASE_DELAY_MS, MAX_RETRIES, next_backoff_ms, parse_retry_after_seconds, sleep_before_retry,
+    sleep_with_jitter,
 };
 use azapptoolkit_core::token::BearerProvider;
 
@@ -917,25 +917,24 @@ impl GraphClient {
             // (its `bearer_with_claims` falls back), so the single-retry guard
             // prevents a loop.
             if code == 401 {
-                if !cae_retried {
-                    if let Some(challenge) =
+                if !cae_retried
+                    && let Some(challenge) =
                         www_authenticate.as_deref().and_then(parse_claims_challenge)
-                    {
-                        match provider.bearer_with_claims(&challenge).await {
-                            Ok(bearer) => {
-                                headers.insert(
-                                    AUTHORIZATION,
-                                    HeaderValue::from_str(&format!("Bearer {bearer}"))
-                                        .map_err(|e| GraphError::Token(e.to_string()))?,
-                                );
-                                cae_retried = true;
-                                continue;
-                            }
-                            Err(e) => tracing::info!(
-                                detail = %e,
-                                "CAE claims challenge could not be satisfied silently; re-auth needed"
-                            ),
+                {
+                    match provider.bearer_with_claims(&challenge).await {
+                        Ok(bearer) => {
+                            headers.insert(
+                                AUTHORIZATION,
+                                HeaderValue::from_str(&format!("Bearer {bearer}"))
+                                    .map_err(|e| GraphError::Token(e.to_string()))?,
+                            );
+                            cae_retried = true;
+                            continue;
                         }
+                        Err(e) => tracing::info!(
+                            detail = %e,
+                            "CAE claims challenge could not be satisfied silently; re-auth needed"
+                        ),
                     }
                 }
                 return Err(GraphError::Unauthorized);
@@ -955,10 +954,10 @@ impl GraphClient {
 
             // 429 always notifies the observer, whether or not we end up
             // retrying successfully — the signal is about service pressure.
-            if code == 429 {
-                if let Some(observer) = self.throttle_observer.read().as_ref() {
-                    observer.on_throttle(retry_after);
-                }
+            if code == 429
+                && let Some(observer) = self.throttle_observer.read().as_ref()
+            {
+                observer.on_throttle(retry_after);
             }
 
             // Retryable (429, 5xx). An explicit `Retry-After` is waited exactly

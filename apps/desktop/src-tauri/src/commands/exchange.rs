@@ -20,18 +20,18 @@ use azapptoolkit_core::models::{AppRoleAssignment, Application};
 use azapptoolkit_core::scoping::is_scopable_exchange_permission;
 use azapptoolkit_exchange::models::{ExoApplicationAccessPolicy, ExoAuthorizationResult};
 use azapptoolkit_exchange::{
-    exchange_role_for_graph_permission, member_of_group_filter, ExchangeClient, ExchangeError,
+    ExchangeClient, ExchangeError, exchange_role_for_graph_permission, member_of_group_filter,
 };
 use azapptoolkit_graph::GraphClient;
 
 use crate::commands::applications::invalidate_app_lists;
-use crate::commands::graph_roles::{graph_role_index, MICROSOFT_GRAPH_APP_ID};
+use crate::commands::graph_roles::{MICROSOFT_GRAPH_APP_ID, graph_role_index};
+use crate::dto::UiError;
 use crate::dto::exchange::{
     AapMigrationItem, AapMigrationReport, ExchangeAccessRemovalResult, ExchangeAccessResult,
     ExchangeGroupMemberDto, ExchangeGroupRef, ExchangeMemberFailure, ExchangeMemberMutationResult,
     ExchangeRoleAssignmentDto, ExchangeScopeGroupDto, MailScopeEntry,
 };
-use crate::dto::UiError;
 use crate::state::AppState;
 
 /// Scope-name convention for management scopes this toolkit creates.
@@ -133,10 +133,10 @@ fn targets_from_declared(
             if access.r#type != "Role" {
                 continue;
             }
-            if let Some(value) = role_value_by_id.get(&access.id) {
-                if let Some(t) = exchange_target(access.id.clone(), value.clone()) {
-                    out.push(t);
-                }
+            if let Some(value) = role_value_by_id.get(&access.id)
+                && let Some(t) = exchange_target(access.id.clone(), value.clone())
+            {
+                out.push(t);
             }
         }
     }
@@ -212,10 +212,10 @@ fn targets_from_grants(
         if a.resource_id != graph_resource_sp_id {
             continue;
         }
-        if let Some(value) = role_value_by_id.get(&a.app_role_id) {
-            if let Some(t) = exchange_target(a.app_role_id.clone(), value.clone()) {
-                out.push(t);
-            }
+        if let Some(value) = role_value_by_id.get(&a.app_role_id)
+            && let Some(t) = exchange_target(a.app_role_id.clone(), value.clone())
+        {
+            out.push(t);
         }
     }
     out
@@ -405,17 +405,17 @@ async fn apply_exchange_mailbox_scope(
     // rewriting its filter. So if a different permission was already scoped to a
     // different group set, the groups requested *here* silently won't apply —
     // warn instead of misleading the user into thinking they took effect.
-    if let Ok(Some(existing)) = exo.get_management_scope(&scope_name).await {
-        if let Some(existing_filter) = existing.recipient_filter.as_deref() {
-            let wanted: std::collections::HashSet<&str> = dns.iter().map(String::as_str).collect();
-            let have = group_dns_in_filter(existing_filter);
-            if have != wanted {
-                warnings.push(format!(
+    if let Ok(Some(existing)) = exo.get_management_scope(&scope_name).await
+        && let Some(existing_filter) = existing.recipient_filter.as_deref()
+    {
+        let wanted: std::collections::HashSet<&str> = dns.iter().map(String::as_str).collect();
+        let have = group_dns_in_filter(existing_filter);
+        if have != wanted {
+            warnings.push(format!(
                     "a management scope “{scope_name}” already exists for this app with a different group set — \
                      Exchange keeps the existing scope, so the groups requested here were NOT applied to it. \
                      Edit or remove the scope in Exchange to change which mailboxes this app can reach."
                 ));
-            }
         }
     }
     exo.ensure_management_scope(&scope_name, &scope_filter)
@@ -851,10 +851,10 @@ pub(crate) async fn resolve_mail_scopes(
             .collect();
         let mut verdict = verdict_from_rows(&matching);
         // Apply the legacy-AAP fallback only when RBAC shows org-wide.
-        if matches!(verdict, MailPermissionScope::OrgWide) {
-            if let Some(aap) = &aap_override {
-                verdict = aap.clone();
-            }
+        if matches!(verdict, MailPermissionScope::OrgWide)
+            && let Some(aap) = &aap_override
+        {
+            verdict = aap.clone();
         }
         // Reconcile a scoped RBAC verdict against an un-stripped org-wide Entra
         // grant (the probe can't see Entra grants).
@@ -862,36 +862,35 @@ pub(crate) async fn resolve_mail_scopes(
         // Enrich an RBAC management scope with its recipient filter + group
         // count (display only). Legacy-AAP scopes carry no management scope, so
         // they are matched out here.
-        if enrich {
-            if let MailPermissionScope::Scoped {
+        if enrich
+            && let MailPermissionScope::Scoped {
                 scope_name: Some(name),
                 mechanism: ScopeMechanism::Rbac,
                 ..
             } = &verdict
-            {
-                let name = name.clone();
-                let resolved = match scope_cache.get(&name) {
-                    Some(hit) => hit.clone(),
-                    None => {
-                        let r = exo
-                            .get_management_scope(&name)
-                            .await
-                            .ok()
-                            .flatten()
-                            .and_then(|s| s.recipient_filter)
-                            .map(|f| (count_member_of_group(&f) as u32, f));
-                        scope_cache.insert(name.clone(), r.clone());
-                        r
-                    }
-                };
-                if let Some((count, filter)) = resolved {
-                    verdict = MailPermissionScope::Scoped {
-                        scope_name: Some(name),
-                        recipient_filter: Some(filter),
-                        group_count: Some(count),
-                        mechanism: ScopeMechanism::Rbac,
-                    };
+        {
+            let name = name.clone();
+            let resolved = match scope_cache.get(&name) {
+                Some(hit) => hit.clone(),
+                None => {
+                    let r = exo
+                        .get_management_scope(&name)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|s| s.recipient_filter)
+                        .map(|f| (count_member_of_group(&f) as u32, f));
+                    scope_cache.insert(name.clone(), r.clone());
+                    r
                 }
+            };
+            if let Some((count, filter)) = resolved {
+                verdict = MailPermissionScope::Scoped {
+                    scope_name: Some(name),
+                    recipient_filter: Some(filter),
+                    group_count: Some(count),
+                    mechanism: ScopeMechanism::Rbac,
+                };
             }
         }
         out.insert(perm.clone(), verdict);
@@ -1478,9 +1477,11 @@ mod tests {
         assert!(alias.len() <= 64);
         // Disallowed characters are dropped; length is capped.
         let messy = sanitize_alias(&format!("azapptoolkit_a b@c!{}", "x".repeat(80)));
-        assert!(messy
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')));
+        assert!(
+            messy
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        );
         assert_eq!(messy.len(), 64);
     }
 
@@ -1532,9 +1533,11 @@ mod tests {
         assert!(out.is_empty());
         // The whole audit discriminator for this app is absent (empty perm set).
         let key = mail_scopes_key("tenant-1", "audit|app-1|");
-        assert!(cache
-            .get::<HashMap<String, MailPermissionScope>>(CacheKind::Lists, &key)
-            .is_none());
+        assert!(
+            cache
+                .get::<HashMap<String, MailPermissionScope>>(CacheKind::Lists, &key)
+                .is_none()
+        );
     }
 
     #[test]

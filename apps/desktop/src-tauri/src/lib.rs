@@ -7,7 +7,7 @@ mod token_adapter;
 use azapptoolkit_core::settings::UserSettings;
 use tauri_plugin_updater::UpdaterExt;
 use tracing_appender::rolling;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 pub fn run() {
     let log_guards = install_tracing();

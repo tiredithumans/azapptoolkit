@@ -3,10 +3,10 @@ use tauri::State;
 use azapptoolkit_core::models::FederatedIdentityCredential;
 use azapptoolkit_graph::client::{FederatedCredentialPatch, FederatedCredentialRequest};
 
+use crate::dto::UiError;
 use crate::dto::applications::{
     AddFederatedCredentialInput, FederatedCredentialDto, UpdateFederatedCredentialInput,
 };
-use crate::dto::UiError;
 use crate::state::AppState;
 
 /// Maps a Graph [`FederatedIdentityCredential`] to its IPC DTO. Shared by the
@@ -112,7 +112,7 @@ pub async fn remove_federated_credential(
 
 #[cfg(test)]
 mod fic_audience_tests {
-    use super::{resolve_fic_audiences, DEFAULT_FIC_AUDIENCE};
+    use super::{DEFAULT_FIC_AUDIENCE, resolve_fic_audiences};
 
     #[test]
     fn absent_or_empty_falls_back_to_default() {

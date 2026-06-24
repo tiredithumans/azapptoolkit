@@ -322,16 +322,20 @@ async fn lean_and_full_sp_lookups_do_not_share_a_cache() {
         .mount(&server)
         .await;
     let client = make_client(&server.uri());
-    assert!(client
-        .get_service_principal_by_app_id_lean("app-1")
-        .await
-        .unwrap()
-        .is_some());
-    assert!(client
-        .get_service_principal_by_app_id("app-1")
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        client
+            .get_service_principal_by_app_id_lean("app-1")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        client
+            .get_service_principal_by_app_id("app-1")
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -1738,11 +1742,11 @@ fn site_lookup_path_strips_document_copy_link_decoration() {
     // The "Copy link" form that produced `Resource not found for the
     // segment ':x:'`: app token + redirect + library + file + query string.
     assert_eq!(
-            site_lookup_path(
-                "https://contoso.sharepoint.com/:x:/r/sites/Marketing/Shared%20Documents/Book.xlsx?d=w123&csf=1&web=1&e=abc"
-            ),
-            "/sites/contoso.sharepoint.com:/sites/Marketing"
-        );
+        site_lookup_path(
+            "https://contoso.sharepoint.com/:x:/r/sites/Marketing/Shared%20Documents/Book.xlsx?d=w123&csf=1&web=1&e=abc"
+        ),
+        "/sites/contoso.sharepoint.com:/sites/Marketing"
+    );
     // Word doc on a Teams-provisioned site.
     assert_eq!(
         site_lookup_path("https://contoso.sharepoint.com/:w:/r/teams/Sales/Docs/Plan.docx?web=1"),
@@ -1750,11 +1754,11 @@ fn site_lookup_path_strips_document_copy_link_decoration() {
     );
     // OneDrive (personal) sharing link.
     assert_eq!(
-            site_lookup_path(
-                "https://contoso-my.sharepoint.com/:b:/r/personal/user_contoso_com/Documents/Report.pdf?csf=1"
-            ),
-            "/sites/contoso-my.sharepoint.com:/personal/user_contoso_com"
-        );
+        site_lookup_path(
+            "https://contoso-my.sharepoint.com/:b:/r/personal/user_contoso_com/Documents/Report.pdf?csf=1"
+        ),
+        "/sites/contoso-my.sharepoint.com:/personal/user_contoso_com"
+    );
 }
 
 #[tokio::test]
@@ -2466,10 +2470,12 @@ async fn list_service_principal_groups_sends_cast_query_and_parses() {
     assert_eq!(groups[0].display_name.as_deref(), Some("PowerBI-SPs"));
     assert_eq!(groups[0].security_enabled, Some(true));
     assert!(groups[0].group_types.is_empty());
-    assert!(groups[1]
-        .group_types
-        .iter()
-        .any(|t| t == "DynamicMembership"));
+    assert!(
+        groups[1]
+            .group_types
+            .iter()
+            .any(|t| t == "DynamicMembership")
+    );
 }
 
 #[tokio::test]

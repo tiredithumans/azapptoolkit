@@ -6,8 +6,8 @@
 //! clients so SP lookups dedupe across tenant swaps.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 
@@ -81,10 +81,10 @@ fn resolve(
     baked: Option<&'static str>,
     default: &'static str,
 ) -> String {
-    if let Ok(v) = std::env::var(env_var) {
-        if !v.is_empty() {
-            return v;
-        }
+    if let Ok(v) = std::env::var(env_var)
+        && !v.is_empty()
+    {
+        return v;
     }
     if let Some(v) = settings.filter(|s| !s.is_empty()) {
         return v.to_string();

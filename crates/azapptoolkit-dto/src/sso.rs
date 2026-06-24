@@ -325,23 +325,29 @@ mod tests {
         // Default (basic set included, nothing custom) ⇒ removing the policy.
         assert!(ClaimsPolicyDto::default().is_empty());
         // Suppressing the basic set is a real policy even with no claims.
-        assert!(!ClaimsPolicyDto {
-            include_basic_claim_set: false,
-            ..Default::default()
-        }
-        .is_empty());
+        assert!(
+            !ClaimsPolicyDto {
+                include_basic_claim_set: false,
+                ..Default::default()
+            }
+            .is_empty()
+        );
         // A preserved advanced option (e.g. group filter) is a real policy.
-        assert!(!ClaimsPolicyDto {
-            preserved_options: Some("{\"GroupFilter\":{}}".into()),
-            ..Default::default()
-        }
-        .is_empty());
+        assert!(
+            !ClaimsPolicyDto {
+                preserved_options: Some("{\"GroupFilter\":{}}".into()),
+                ..Default::default()
+            }
+            .is_empty()
+        );
         // A schema entry is a real policy.
-        assert!(!ClaimsPolicyDto {
-            schema: vec![ClaimSchemaEntryDto::default()],
-            ..Default::default()
-        }
-        .is_empty());
+        assert!(
+            !ClaimsPolicyDto {
+                schema: vec![ClaimSchemaEntryDto::default()],
+                ..Default::default()
+            }
+            .is_empty()
+        );
     }
 
     #[test]

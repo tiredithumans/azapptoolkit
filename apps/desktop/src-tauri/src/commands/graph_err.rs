@@ -48,18 +48,24 @@ pub(crate) fn premium_feature_err(
             if looks_like_missing_license(body) {
                 msg(
                     false,
-                    format!("{title} requires an Entra ID P1 or P2 license, which this tenant doesn't appear to have."),
+                    format!(
+                        "{title} requires an Entra ID P1 or P2 license, which this tenant doesn't appear to have."
+                    ),
                 )
             } else {
                 msg(
                     false,
-                    format!("{title} requires admin consent for {scope}. Ask a Global Administrator to grant it, then reopen this tab."),
+                    format!(
+                        "{title} requires admin consent for {scope}. Ask a Global Administrator to grant it, then reopen this tab."
+                    ),
                 )
             }
         }
         GraphError::Token(_) => msg(
             false,
-            format!("Couldn't acquire {scope} consent for {feature}. It needs admin consent (and Entra ID P1/P2); the rest of the app is unaffected."),
+            format!(
+                "Couldn't acquire {scope} consent for {feature}. It needs admin consent (and Entra ID P1/P2); the rest of the app is unaffected."
+            ),
         ),
         GraphError::Unauthorized => msg(
             false,

@@ -7,8 +7,8 @@
 //! consistent: every jump switches view, selects the paired object, brings the
 //! selected list row into view, and lands the destination detail pane at its top.
 
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 use crate::state::{ActiveView, Session};
 
@@ -50,18 +50,17 @@ fn settle_scroll_after_jump() {
                 if let Some(row) = rows
                     .item(i)
                     .and_then(|n| n.dyn_into::<web_sys::HtmlElement>().ok())
+                    && row.offset_parent().is_some()
                 {
-                    if row.offset_parent().is_some() {
-                        row.scroll_into_view_with_bool(true);
-                    }
+                    row.scroll_into_view_with_bool(true);
                 }
             }
         }
         // 2. Land the destination at the top: reset the page content scroller…
-        if let Ok(Some(content)) = doc.query_selector(".shell__content") {
-            if let Some(content) = content.dyn_ref::<web_sys::HtmlElement>() {
-                content.set_scroll_top(0);
-            }
+        if let Ok(Some(content)) = doc.query_selector(".shell__content")
+            && let Some(content) = content.dyn_ref::<web_sys::HtmlElement>()
+        {
+            content.set_scroll_top(0);
         }
         // …and the visible detail pane (after the row scroll, so this wins).
         if let Ok(panes) = doc.query_selector_all(".app-detail__pane") {
@@ -69,10 +68,9 @@ fn settle_scroll_after_jump() {
                 if let Some(pane) = panes
                     .item(i)
                     .and_then(|n| n.dyn_into::<web_sys::HtmlElement>().ok())
+                    && pane.offset_parent().is_some()
                 {
-                    if pane.offset_parent().is_some() {
-                        pane.set_scroll_top(0);
-                    }
+                    pane.set_scroll_top(0);
                 }
             }
         }

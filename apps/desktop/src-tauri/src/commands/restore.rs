@@ -26,16 +26,17 @@ use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, State};
 
 use azapptoolkit_core::models::{PreAuthorizedApplication, RequiredResourceAccess};
+use azapptoolkit_graph::GraphClient;
 use azapptoolkit_graph::client::{
     ApiApplicationPatch, AppPatch, ApplicationAuthenticationPatch, ApplicationExposeApiPatch,
     ApplicationPublicClientPatch, ApplicationSpaPatch, ApplicationWebPatch,
     FederatedCredentialRequest, ImplicitGrantSettingsPatch,
 };
-use azapptoolkit_graph::GraphClient;
 
 use crate::commands::applications::{create_application_core, invalidate_app_lists};
 use crate::commands::managed_identity::grant_managed_identity_roles_core;
 use crate::commands::permissions::grant_admin_consent_core;
+use crate::dto::UiError;
 use crate::dto::applications::CreateApplicationInput;
 use crate::dto::backup::{
     AppRegistrationBackup, CloudMismatch, EnterpriseAppBackup, ManagedIdentityBackup, ManualItem,
@@ -43,7 +44,6 @@ use crate::dto::backup::{
     RestoredEnterpriseApp, RestoredManagedIdentity, TenantBackup,
 };
 use crate::dto::bulk::BulkProgress;
-use crate::dto::UiError;
 use crate::state::AppState;
 
 /// Lifetime for regenerated secrets — matches the app-creation default (180d).
@@ -462,10 +462,10 @@ async fn restore_enterprise_app(
     };
 
     // Settings (best-effort).
-    if !ent.tags.is_empty() {
-        if let Err(e) = client.set_service_principal_tags(&sp.id, &ent.tags).await {
-            out.warnings.push(format!("tags: {e}"));
-        }
+    if !ent.tags.is_empty()
+        && let Err(e) = client.set_service_principal_tags(&sp.id, &ent.tags).await
+    {
+        out.warnings.push(format!("tags: {e}"));
     }
     if let Some(required) = ent.app_role_assignment_required {
         let body = serde_json::json!({ "appRoleAssignmentRequired": required });
@@ -734,13 +734,13 @@ async fn resolve_principal_uncached(
         return None;
     }
     if let Some(name) = principal.display_name.as_deref().filter(|s| !s.is_empty()) {
-        if let Ok(hits) = client.search_groups(name).await {
-            if let Some(id) = hits.into_iter().find_map(|g| {
+        if let Ok(hits) = client.search_groups(name).await
+            && let Some(id) = hits.into_iter().find_map(|g| {
                 let matches = g.display_name.as_deref().is_some_and(|v| v == name);
                 matches.then_some(g.id)
-            }) {
-                return Some(id);
-            }
+            })
+        {
+            return Some(id);
         }
         if let Ok(hits) = client.search_users(name).await {
             return hits.into_iter().find_map(|u| {

@@ -168,12 +168,14 @@ mod tests {
         // The directory carries no per-permission data, so every lookup misses
         // and callers fall through to a live `resolve_resource_sp`.
         let catalog = PermissionsCatalog::bundled();
-        assert!(catalog
-            .lookup_permission(
-                "00000003-0000-0000-c000-000000000000",
-                "df021288-bdef-4463-88db-98f22de89214"
-            )
-            .is_none());
+        assert!(
+            catalog
+                .lookup_permission(
+                    "00000003-0000-0000-c000-000000000000",
+                    "df021288-bdef-4463-88db-98f22de89214"
+                )
+                .is_none()
+        );
     }
 
     #[test]

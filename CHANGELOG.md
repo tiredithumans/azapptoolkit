@@ -63,6 +63,13 @@ the project adheres to
   fields it reads (`passwordCredentials`) instead of full app payloads.
 - **Removed a dead, uncached `list_applications` command** that bypassed the
   cached app-list path and had no callers.
+- **Workspace upgraded to Rust edition 2024** (from 2021), across both the native
+  workspace and the excluded `web-rs` (WASM) frontend. `web-rs`'s declared MSRV
+  rises 1.82 → 1.96 to clear the edition's 1.85 floor and match the root workspace;
+  the pinned toolchain (`rust-toolchain.toml`, 1.96.0) and CI are unchanged. No
+  source edits were required — `cargo fix --edition` surfaced only benign
+  `tail_expr_drop_order` drop-order notes (HTTP-client and `JsValue` teardown),
+  which are allow-by-default on edition 2024.
 - **Tenant-wide reads are now cached, cutting redundant Graph traffic.** The
   service-principal sign-in activity report (a slow beta endpoint that paginates
   the whole tenant) is cached per tenant, so clicking through several apps' Activity

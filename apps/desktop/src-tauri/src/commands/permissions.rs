@@ -2,11 +2,11 @@ use tauri::State;
 
 use azapptoolkit_core::models::{RequiredResourceAccess, ResourceAccess, ServicePrincipal};
 
+use crate::dto::UiError;
 use crate::dto::permissions::{
     CatalogResourceSummary, DowngradeOutcome, GrantFailure, GrantResult, PermissionKind,
     ResourcePermissions, RevokeScopeOutcome, RoleEntry, ScopeEntry, ScopeGrantSummary, SkippedRole,
 };
-use crate::dto::UiError;
 use crate::state::AppState;
 
 // ---------------- Catalog browse ----------------
@@ -313,10 +313,10 @@ pub async fn grant_admin_consent(
 /// is wrong, so the hint points there.
 fn grant_failure_message(err: &azapptoolkit_graph::GraphError) -> String {
     let base = err.to_string();
-    if matches!(err, azapptoolkit_graph::GraphError::Forbidden(_)) {
-        if let Some(cap) = azapptoolkit_core::capabilities::capability("admin_consent") {
-            return format!("{base}\n\n{}", cap.remediation);
-        }
+    if matches!(err, azapptoolkit_graph::GraphError::Forbidden(_))
+        && let Some(cap) = azapptoolkit_core::capabilities::capability("admin_consent")
+    {
+        return format!("{base}\n\n{}", cap.remediation);
     }
     base
 }
@@ -944,10 +944,12 @@ mod tests {
             ["User.Read", "offline_access"]
         );
         // allowedMemberTypes is carried through for the picker's app-only filter.
-        assert!(perms.app_roles[1]
-            .allowed_member_types
-            .iter()
-            .any(|t| t == "Application"));
+        assert!(
+            perms.app_roles[1]
+                .allowed_member_types
+                .iter()
+                .any(|t| t == "Application")
+        );
     }
 
     fn access(id: &str, ty: &str) -> ResourceAccess {

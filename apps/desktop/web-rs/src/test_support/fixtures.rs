@@ -5,6 +5,7 @@
 
 use azapptoolkit_core::audit::ListCredentialStatus;
 use azapptoolkit_core::models::Application;
+use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::applications::{ApplicationDetail, ApplicationListRowDto};
 use azapptoolkit_dto::bulk::BulkProgress;
 use azapptoolkit_dto::config::AuthConfigStatus;
@@ -16,7 +17,6 @@ use azapptoolkit_dto::permission_tester::MailboxProbeProgress;
 use azapptoolkit_dto::permissions::{CatalogResourceSummary, ResourcePermissions, RoleEntry};
 use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use azapptoolkit_dto::sharepoint::SiteSweepProgress;
-use azapptoolkit_dto::UiError;
 
 /// A `UiError` with the given code and message (the error-path mock payload).
 pub fn ui_error(code: &str, message: &str) -> UiError {
