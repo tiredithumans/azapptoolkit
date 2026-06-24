@@ -2,13 +2,16 @@
 //! slot. The shell is mounted once per authenticated session so navigation
 //! state (active view, tool-dialog flags) stays alive across view switches.
 
+use std::rc::Rc;
+
 use leptos::prelude::*;
 use thaw::{Spinner, SpinnerSize};
 
-use crate::bindings::applications;
+use crate::bindings::{applications, updater};
 use crate::components::global_search::GlobalSearch;
 use crate::components::icon::{Icon, IconName};
-use crate::components::toast::ToastHost;
+use crate::components::toast::{ToastHost, ToastKind};
+use crate::components::update_splash::UpdateSplash;
 use crate::state::{ActiveView, use_session};
 use crate::views::dialogs::{
     cache_diagnostics_dialog::CacheDiagnosticsDialog, create_app_dialog::CreateAppDialog,
@@ -79,6 +82,54 @@ pub fn AppShell(children: Children) -> impl IntoView {
                 refreshing.set(false);
             });
         }
+    };
+
+    // Auto-update: the pending update (if any) + the changelog-splash open flag.
+    // The launch check (once on mount) toasts a notification whose action opens
+    // the splash; the nav "Check for updates" button opens it directly.
+    let update_info: RwSignal<Option<updater::UpdateInfo>> = RwSignal::new(None);
+    let update_open = RwSignal::new(false);
+    Effect::new(move |_| {
+        // Runs once (no tracked reads). A check failure — e.g. a dev build with
+        // no updater, or GitHub being unreachable — is swallowed silently; the
+        // user can still trigger a manual check from the nav.
+        leptos::task::spawn_local(async move {
+            if let Ok(Some(info)) = updater::check_for_update().await {
+                let version = info.version.clone();
+                update_info.set(Some(info));
+                session.push_toast(
+                    ToastKind::Info,
+                    format!("Update available: v{version}"),
+                    Some("View changelog".to_string()),
+                    Some(Rc::new(move || update_open.set(true))),
+                );
+            }
+        });
+    });
+
+    // Manual "Check for updates" — opens the splash when one's found, else a
+    // reassuring "up to date" toast; a real failure surfaces as an error toast.
+    let checking = RwSignal::new(false);
+    let on_check_updates = move |_| {
+        if checking.get() {
+            return;
+        }
+        checking.set(true);
+        leptos::task::spawn_local(async move {
+            match updater::check_for_update().await {
+                Ok(Some(info)) => {
+                    update_info.set(Some(info));
+                    update_open.set(true);
+                }
+                Ok(None) => {
+                    session.toast_success("You're on the latest version.");
+                }
+                Err(e) => {
+                    session.toast_error(format!("Update check failed: {}", e.message), None);
+                }
+            }
+            checking.set(false);
+        });
     };
 
     let nav_row_view = move |label: &'static str, icon: IconName, target: ActiveView| {
@@ -204,6 +255,29 @@ pub fn AppShell(children: Children) -> impl IntoView {
                         // in the user block. Reuses `nav_row_action` so it renders as
                         // a full-width `nav__item` matching the buttons around it.
                         {nav_row_action("Cache", IconName::Activity, session.cache_open)}
+                        // Manual update check — pairs with the version readout
+                        // below; opens the changelog splash if an update is found.
+                        <button
+                            class="nav__item shell__user-check-updates"
+                            type="button"
+                            title="Check for updates"
+                            disabled=move || checking.get()
+                            on:click=on_check_updates
+                        >
+                            <span class="nav__icon">
+                                {move || {
+                                    if checking.get() {
+                                        view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                            .into_any()
+                                    } else {
+                                        view! { <Icon name=IconName::Download size=18 /> }.into_any()
+                                    }
+                                }}
+                            </span>
+                            <span class="nav__label">
+                                {move || if checking.get() { "Checking…" } else { "Check for updates" }}
+                            </span>
+                        </button>
                         // Styled as a `nav__item` so it collapses to an icon-only
                         // button (hiding the label) when the rail narrows — the same
                         // way the nav links do — instead of disappearing.
@@ -240,6 +314,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                 open=Signal::derive(move || session.cache_open.get())
                 on_close=Callback::new(move |()| session.cache_open.set(false))
             />
+            <UpdateSplash open=update_open info=update_info />
             <ToastHost />
             // Lifted out of ApplicationsView so the dialog state survives view
             // switches (create_open is a signal here, not local to Apps).

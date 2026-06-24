@@ -9,6 +9,7 @@ use super::audit::AuditProgress;
 use super::bulk::BulkProgress;
 use super::permission_tester::MailboxProbeProgress;
 use super::sharepoint::SiteSweepProgress;
+use super::updater::UpdateProgress;
 
 /// Subscribes to `audit-progress`. Yields the payload directly (the
 /// surrounding `Event` envelope is unwrapped internally since callers don't
@@ -59,6 +60,15 @@ pub async fn mailbox_probe_progress()
         .await
         .map_err(|e| JsErrString(format!("{e:?}")))?;
     Ok(stream.map(|ev: Event<MailboxProbeProgress>| ev.payload))
+}
+
+/// Subscribes to `updater-progress` (download byte progress while an update
+/// installs).
+pub async fn updater_progress() -> Result<impl Stream<Item = UpdateProgress>, JsErrString> {
+    let stream = listen::<UpdateProgress>("updater-progress")
+        .await
+        .map_err(|e| JsErrString(format!("{e:?}")))?;
+    Ok(stream.map(|ev: Event<UpdateProgress>| ev.payload))
 }
 
 /// Lossy `String`-typed wrapper for `tauri_sys::Error`. The underlying error

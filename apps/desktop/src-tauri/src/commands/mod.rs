@@ -27,4 +27,5 @@ pub mod search;
 pub mod sharepoint;
 pub mod sso;
 pub(crate) mod throttle;
+pub mod updater;
 pub mod usage;

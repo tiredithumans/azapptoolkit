@@ -165,6 +165,8 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Build-time config baking.** `build.rs` reads `.env`, emits `AZAPPTOOLKIT_BUILD_*`; runtime env vars override.
 
+- **Auto-update is interactive (not silent).** The front-end checks once on launch (`commands::updater::check_for_update`, swallowed silently on failure / in dev) and, if an update waits, toasts a notification whose action opens the `UpdateSplash` (`web-rs/components/update_splash.rs`) — changelog notes + **Update & restart** (`perform_update`: download_and_install → `app.restart()`, byte progress on the `updater-progress` channel). There's also a manual "Check for updates" button by the nav version. The changelog text is the updater manifest's `notes`, which `release.yml` populates from the `CHANGELOG.md` section for the tag, so it only lights up for releases from **v0.8.0 onward** (v0.7.0's `latest.json` predates it). Don't reintroduce a silent background `download_and_install` in `lib.rs` setup — it was removed in favour of this flow and would race the prompt.
+
 - **CSP governs the *webview*, not backend egress.** `connect-src` in `tauri.conf.json`; only WASM frontend fetches are restricted. Backend reqwest calls to new hosts don't need a CSP change.
 
 - **Permissions catalog** is bundled at compile time from `azapptoolkit-permissions/data/`. Unknown resources fall back to `resolve_resource_sp()` Graph call.

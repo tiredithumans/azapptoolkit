@@ -31,6 +31,7 @@ pub mod remediation;
 pub mod search;
 pub mod sharepoint;
 pub mod sso;
+pub mod updater;
 pub mod usage;
 
 use serde::{Deserialize, Serialize};

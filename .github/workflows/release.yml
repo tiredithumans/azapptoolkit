@@ -138,12 +138,36 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart('v')
           $exe = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe `
             | Select-Object -First 1
           $sig = (Get-Content "$($exe.FullName).sig" -Raw).Trim()
           $url = "https://github.com/${{ github.repository }}/releases/download/$tag/$($exe.Name)"
+
+          # The updater's `notes` field powers the in-app changelog splash. Pull
+          # this version's CHANGELOG.md section: collect lines after the matching
+          # `## [X.Y.Z]` header until the next `## [` section header.
+          $notes = ""
+          if (Test-Path CHANGELOG.md) {
+            $collecting = $false
+            $buf = New-Object System.Collections.Generic.List[string]
+            foreach ($line in (Get-Content CHANGELOG.md)) {
+              if ($line -match '^##\s+\[') {
+                if ($collecting) { break }
+                if ($line -match "^##\s+\[$([regex]::Escape($version))\]") { $collecting = $true }
+                continue
+              }
+              if ($collecting) { $buf.Add($line) }
+            }
+            $notes = ($buf -join "`n").Trim()
+          }
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            $notes = "See the release notes on GitHub for what's new in v$version."
+          }
+
           $manifest = [ordered]@{
-            version   = $tag.TrimStart('v')
+            version   = $version
+            notes     = $notes
             pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
             platforms = [ordered]@{
               "windows-x86_64" = [ordered]@{ signature = $sig; url = $url }

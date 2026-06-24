@@ -7,6 +7,23 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Interactive auto-update with a changelog splash.** When a new release is
+  available, the app now shows a toast on launch ("Update available: vX.Y.Z —
+  View changelog") that opens a splash listing the version's release notes with
+  an **Update & restart** button (which downloads, installs, and relaunches,
+  showing download progress) and a **Later** dismiss. A manual **Check for
+  updates** button sits by the version in the nav. The release manifest
+  (`latest.json`) now carries the `CHANGELOG.md` section as its `notes`, so the
+  splash shows real changelog text.
+
+### Changed
+
+- **Updates are no longer installed silently in the background.** The former
+  silent download-and-install on launch is replaced by the interactive prompt
+  above, so the user sees what's changing and chooses when to restart.
+
 ## [0.7.0] - 2026-06-24
 
 ### Changed

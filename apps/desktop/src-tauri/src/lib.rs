@@ -4,8 +4,6 @@ mod dto;
 mod state;
 mod token_adapter;
 
-use azapptoolkit_core::settings::UserSettings;
-use tauri_plugin_updater::UpdaterExt;
 use tracing_appender::rolling;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -18,36 +16,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
+        .setup(|_app| {
+            // Ensure the config directory exists for the settings/keyring paths.
+            // The former silent background auto-install lived here; updates are
+            // now interactive — the front-end checks on launch and drives the
+            // changelog splash + "Update & restart" via `commands::updater`.
             let config_dir = config_directory();
             let _ = std::fs::create_dir_all(&config_dir);
-            let settings = UserSettings::load(&config_dir);
-            tracing::info!(auto_update = settings.auto_update, "loaded user settings");
-
-            if settings.auto_update {
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    match handle.updater() {
-                        Ok(updater) => match updater.check().await {
-                            Ok(Some(update)) => {
-                                tracing::info!(
-                                    version = %update.version,
-                                    "update available, downloading"
-                                );
-                                if let Err(e) = update.download_and_install(|_, _| {}, || {}).await
-                                {
-                                    tracing::warn!(error = %e, "auto-update failed");
-                                }
-                            }
-                            Ok(None) => tracing::debug!("no update available"),
-                            Err(e) => tracing::warn!(error = %e, "update check failed"),
-                        },
-                        Err(e) => tracing::warn!(error = %e, "updater unavailable"),
-                    }
-                });
-            } else {
-                tracing::info!("auto-update disabled by user settings");
-            }
             Ok(())
         })
         .manage(app_state)
@@ -56,6 +31,8 @@ pub fn run() {
             commands::config::get_auth_config,
             commands::config::set_auth_config,
             commands::config::restart_app,
+            commands::updater::check_for_update,
+            commands::updater::perform_update,
             commands::auth::sign_in,
             commands::auth::sign_out,
             commands::auth::current_tenants,
