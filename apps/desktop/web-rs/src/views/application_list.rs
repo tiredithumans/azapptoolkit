@@ -17,6 +17,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::bindings::applications::{self, ApplicationListRowDto};
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
+use crate::components::bulk_action_bar::BulkActionBar;
 use crate::components::date_range_filter::DateRangeFilter;
 use crate::components::filter_chip::FilterChip;
 use crate::components::icon::IconName;
@@ -349,6 +350,14 @@ fn LoadedApps(
                 />
             }
         }}
+        // Inline bulk-action bar — self-gating: appears once ≥1 app is checked
+        // (and stays to show the run summary), so the user can grant consent /
+        // remove expired creds / delete without leaving the list (the separate
+        // Bulk Actions page remains for Create-apps).
+        <BulkActionBar
+            selection=session.selected_app_ids
+            on_done=Callback::new(move |_| session.bump_apps_reload())
+        />
         {capped
             .then(|| {
                 view! {

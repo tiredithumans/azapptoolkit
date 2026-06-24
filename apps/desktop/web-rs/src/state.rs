@@ -66,7 +66,13 @@ pub struct Session {
     // into it (its card's secret/cert counts have no matching facet).
     pub enterprise_facet: RwSignal<String>,
     pub mi_facet: RwSignal<String>,
-    pub audit_facet: RwSignal<String>,
+    // The security audit's filter is two INDEPENDENT, intersecting dimensions
+    // (filter = severity AND finding), so the single old `audit_facet` is split
+    // in two. Both are lifted + reset on tenant switch for the same
+    // cross-tenant-leakage reason as the other facets; `open_posture_with_facet`
+    // routes a Home-dashboard metric to whichever dimension it belongs to.
+    pub audit_severity: RwSignal<String>,
+    pub audit_finding: RwSignal<String>,
     pub credentials_facet: RwSignal<String>,
     // One-shot "open the filter drawer on arrival" flag. The Enterprise list's
     // facet chips live in a drawer collapsed by default, so a drill would land
@@ -80,6 +86,12 @@ pub struct Session {
     // single-select `selected_app_object_id` (which drives the detail pane).
     // This set is what the bulk-actions dialog operates on.
     pub selected_app_ids: RwSignal<HashSet<String>>,
+    // Separate multi-select set for the Security Audit table's inline bulk bar.
+    // Kept distinct from `selected_app_ids` so checking rows in the audit doesn't
+    // surface a stale selection in the App Registrations list (and vice versa) —
+    // both hold app-registration object ids but they're independent working sets.
+    // Reset on tenant switch alongside `selected_app_ids`.
+    pub selected_audit_ids: RwSignal<HashSet<String>>,
     // Bumped to force the app-registrations list to refetch — e.g. after a
     // bulk delete / remove-expired sweep invalidates the backend cache.
     pub apps_reload: RwSignal<u32>,
@@ -138,6 +150,7 @@ impl Session {
         self.selected_enterprise_app_id.set(None);
         self.selected_managed_identity_id.set(None);
         self.selected_app_ids.update(HashSet::clear);
+        self.selected_audit_ids.update(HashSet::clear);
         // Clear per-list filters so a previous tenant's query never narrows the
         // next tenant's list (cross-tenant leakage is this repo's #1 footgun).
         self.apps_search.set(String::new());
@@ -148,7 +161,8 @@ impl Session {
         // facet is local, so it rides its own view's lifecycle).
         self.enterprise_facet.set(String::from("all"));
         self.mi_facet.set(String::from("all"));
-        self.audit_facet.set(String::from("all"));
+        self.audit_severity.set(String::from("all"));
+        self.audit_finding.set(String::from("all"));
         self.credentials_facet.set(String::from("all"));
         self.pending_open_filters.set(false);
         self.view.set(ActiveView::Home);
@@ -179,6 +193,27 @@ impl Session {
     /// Clear the bulk-selection set.
     pub fn clear_app_selection(&self) {
         self.selected_app_ids.update(HashSet::clear);
+    }
+
+    /// Toggle an application object id in the audit-table selection set (the
+    /// audit's inline bulk bar operates on this, kept separate from
+    /// `selected_app_ids`).
+    pub fn toggle_audit_selected(&self, id: String) {
+        self.selected_audit_ids.update(|ids| {
+            if !ids.remove(&id) {
+                ids.insert(id);
+            }
+        });
+    }
+
+    /// True if `id` is in the audit-table selection set — O(1).
+    pub fn is_audit_selected(&self, id: &str) -> bool {
+        self.selected_audit_ids.with(|ids| ids.contains(id))
+    }
+
+    /// Clear the audit-table selection set.
+    pub fn clear_audit_selection(&self) {
+        self.selected_audit_ids.update(HashSet::clear);
     }
 
     /// Force the app-registrations list to refetch.
@@ -266,8 +301,27 @@ impl Session {
     /// Used by the Home dashboard's Security Posture metrics. The audit view
     /// loads the cached run on mount, so the drilled facet lands on populated
     /// data without re-running the scan.
+    ///
+    /// The audit filter is now two intersecting dimensions (severity + finding),
+    /// so route the single metric string to whichever dimension it names and
+    /// reset the other to "all" — a Home metric seeds exactly its own subset.
     pub fn open_posture_with_facet(&self, facet: &str) {
-        self.audit_facet.set(facet.to_string());
+        match facet {
+            "critical" | "high" | "medium" | "low" => {
+                self.audit_severity.set(facet.to_string());
+                self.audit_finding.set(String::from("all"));
+            }
+            "all" => {
+                self.audit_severity.set(String::from("all"));
+                self.audit_finding.set(String::from("all"));
+            }
+            // Any other value is a finding-dimension facet (expiring, unused,
+            // ownership, orgwide_mailbox, …).
+            _ => {
+                self.audit_finding.set(facet.to_string());
+                self.audit_severity.set(String::from("all"));
+            }
+        }
         self.open_security("posture");
     }
 
@@ -343,10 +397,12 @@ pub fn provide_session() {
         mi_search: RwSignal::new(String::new()),
         enterprise_facet: RwSignal::new(String::from("all")),
         mi_facet: RwSignal::new(String::from("all")),
-        audit_facet: RwSignal::new(String::from("all")),
+        audit_severity: RwSignal::new(String::from("all")),
+        audit_finding: RwSignal::new(String::from("all")),
         credentials_facet: RwSignal::new(String::from("all")),
         pending_open_filters: RwSignal::new(false),
         selected_app_ids: RwSignal::new(HashSet::new()),
+        selected_audit_ids: RwSignal::new(HashSet::new()),
         apps_reload: RwSignal::new(0),
         view: RwSignal::new(ActiveView::Home),
         cache_open: RwSignal::new(false),

@@ -1282,6 +1282,9 @@ h3 {
 .dash-metric__num--warning {
   color: var(--warning);
 }
+.dash-metric__num--muted {
+  color: var(--text-muted);
+}
 .dash-metric__label {
   font-size: var(--text-xs);
   color: var(--text-muted);
@@ -1578,6 +1581,33 @@ h3 {
 .confirm-gate__label strong {
   font-family: var(--font-mono);
   letter-spacing: 0.04em;
+}
+
+/* Inline bulk-action bar (shared by the Security Audit table, the App
+   Registrations list, and the Bulk Actions page). Appears when ≥1 row is
+   checked; the destructive-action confirm gate expands inline beneath it. */
+.bulk-action-bar {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+}
+.bulk-action-bar__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.bulk-action-bar__count {
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
+  margin-right: auto;
+}
+.bulk-action-bar__confirm {
+  display: grid;
+  gap: var(--space-2);
 }
 
 /* ---------- Audit view ---------- */
@@ -2288,6 +2318,52 @@ h3 {
   to { transform: scaleX(1); opacity: 1; }
 }
 
+/* Security surface lens selector — the audit reads as the hero; the three
+   detailed-inventory lenses are subdued links grouped under a muted label. */
+.security-lenses {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+.security-lenses__label {
+  margin-left: var(--space-2);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.security-lens {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  padding: 6px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.security-lens:hover {
+  color: var(--text);
+}
+.security-lens--hero {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+}
+.security-lens--active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.security-lens:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 /* ---- SectionHeader ---- */
 .ui-section-header {
   display: flex;
@@ -2731,6 +2807,30 @@ h3 {
 .audit-card:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
+}
+/* Posture scorecard — the Risk + Findings card groups, each with a small
+   group label so the two filter dimensions read as distinct. */
+.audit-scorecard {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  margin-top: var(--space-2);
+}
+.audit-scorecard__group {
+  display: grid;
+  gap: var(--space-1);
+}
+.audit-scorecard__label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+/* Fixed-width checkbox column for the multi-select audit table. */
+.data-table__check {
+  width: 36px;
+  text-align: center;
 }
 
 /* Access-readiness checklist (role/scope readiness page). */

@@ -11,14 +11,18 @@ use azapptoolkit_core::audit::{AuditItem, RiskLevel, issue};
 use leptos::prelude::*;
 use thaw::{
     Body1, Button, ButtonAppearance, Menu, MenuItem, MenuPosition, MenuTrigger, ProgressBar,
-    Spinner, SpinnerSize, Tab, TabList,
+    Spinner, SpinnerSize,
 };
 
 use crate::bindings::audit::{self, AuditProgress, AuditRunResult};
 use crate::bindings::auth;
 use crate::bindings::events;
+use crate::components::bulk_action_bar::BulkActionBar;
+use crate::components::filter_chip::FilterChip;
+use crate::components::filter_toggle::FilterToggle;
 use crate::components::saved_views::SavedViews;
-use crate::components::ui::{SearchInput, SectionHeader};
+use crate::components::select_all_bar::SelectAllBar;
+use crate::components::ui::{SearchInput, SectionHeader, TabBar, TabBarItem};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
@@ -46,6 +50,12 @@ pub fn AuditView() -> impl IntoView {
             }
         });
     });
+    // After a successful inline bulk run, refetch the App Registrations list
+    // (a delete / remove-expired sweep busts its backend cache). The audit's own
+    // scan is a point-in-time snapshot — the bar clears the audit selection on
+    // delete; deleted rows linger until the next manual re-run, matching how the
+    // audit cache already works.
+    let on_bulk_done = Callback::new(move |_| session.bump_apps_reload());
     let scanning = RwSignal::new(false);
     let progress: RwSignal<Option<AuditProgress>> = RwSignal::new(None);
     // High-water concurrency cap. When the live cap later drops below this peak,
@@ -58,12 +68,22 @@ pub fn AuditView() -> impl IntoView {
         None => peak_cap.set(0),
     });
     let scan_error: RwSignal<Option<String>> = RwSignal::new(None);
-    // Facet lifted to the session so the Home "Security Posture" metrics can
-    // deep-link straight to e.g. the Critical or Unused rows; reset on tenant
-    // switch with the other per-list facets. The in-view posture cards and tab
-    // bar still drive it locally, unchanged.
-    let facet = session.audit_facet;
+    // Two INDEPENDENT, intersecting filter dimensions, both lifted to the session
+    // so the Home "Security Posture" metrics can deep-link straight to a subset
+    // (e.g. Critical rows, or Unused) and reset on tenant switch. The severity
+    // TabBar + the Risk scorecard cards drive `severity`; the finding FilterChip
+    // drawer + the Findings cards drive `finding`. Filter = severity AND finding.
+    let severity = session.audit_severity;
+    let finding = session.audit_finding;
+    // The audit table's own multi-select set (separate from the App
+    // Registrations list's `selected_app_ids`), feeding the inline bulk bar.
+    let selection = session.selected_audit_ids;
     let search = RwSignal::new(String::new());
+    // Collapsible drawer for the secondary "finding" chips, so the default view
+    // is just the severity tabs + search. Badged when a finding filter is active
+    // but hidden behind the collapsed drawer.
+    let filters_open = RwSignal::new(false);
+    let active_filters = Signal::derive(move || finding.with(|f| (f != "all") as usize));
     // Column sort: `None` keeps the backend's risk-ranked order. `Some((col,
     // desc))` sorts the filtered indices by that column.
     let sort: RwSignal<Option<(SortCol, bool)>> = RwSignal::new(None);
@@ -75,18 +95,44 @@ pub fn AuditView() -> impl IntoView {
     // deep-cloned it for the table, and the posture/consent closures cloned it
     // again for a handful of integers.
     let search_debounced = use_debounced(search.into(), LIST_FILTER_DEBOUNCE_MS);
+    // Per-bucket counts driving both the scorecard cards and the finding chip
+    // badges. Depends only on `result`, so it's computed once per scan (not per
+    // keystroke) and never clones the multi-MB run. Finding counts are
+    // tenant-wide totals (not intersected with the active severity) — they match
+    // the scorecard numbers and the chips' zero-count muting.
     let posture_counts = Memo::new(move |_| {
         result.with(|r| {
             r.as_ref().map(|r| {
                 let items = &r.items;
-                (
-                    count_level(items, RiskLevel::Critical),
-                    count_level(items, RiskLevel::High),
-                    count_expiring(items),
-                    items.iter().filter(|i| i.unused).count(),
-                    count_issue_prefix(items, issue::ORG_WIDE_MAILBOX),
-                    count_issue_prefix(items, issue::ORG_WIDE_SHAREPOINT),
-                )
+                PostureCounts {
+                    critical: count_level(items, RiskLevel::Critical),
+                    high: count_level(items, RiskLevel::High),
+                    medium: count_level(items, RiskLevel::Medium),
+                    low: count_level(items, RiskLevel::Low),
+                    expiring: count_expiring(items),
+                    unused: items.iter().filter(|i| i.unused).count(),
+                    over_privileged: count_issue_prefix(items, issue::HIGH_RISK_APP_PERMS),
+                    high_risk_delegated: count_issue_prefix(
+                        items,
+                        issue::HIGH_RISK_DELEGATED_PERMS,
+                    ),
+                    orgwide_mailbox: count_issue_prefix(items, issue::ORG_WIDE_MAILBOX),
+                    scoped_mailbox: items
+                        .iter()
+                        .filter(|i| i.issues.iter().any(|x| x.contains(issue::SCOPED_VIA_RBAC)))
+                        .count(),
+                    orgwide_sharepoint: count_issue_prefix(items, issue::ORG_WIDE_SHAREPOINT),
+                    scoped_sites: count_issue_prefix(items, issue::SCOPED_SHAREPOINT),
+                    unowned: items
+                        .iter()
+                        .filter(|i| {
+                            i.issues.iter().any(|x| {
+                                x.starts_with(issue::NO_OWNERS)
+                                    || x.starts_with(issue::SINGLE_OWNER)
+                            })
+                        })
+                        .count(),
+                }
             })
         })
     });
@@ -101,13 +147,14 @@ pub fn AuditView() -> impl IntoView {
     // matching item, and the `<For>` cloned the whole `Vec` again — twice the
     // multi-MB set per keystroke on a large tenant.
     let filtered = Memo::new(move |_| {
-        let f = facet.get();
+        let sev = severity.get();
+        let fnd = finding.get();
         let q = search_debounced.get().to_lowercase();
         let srt = sort.get();
         result.with(|r| {
             r.as_ref()
                 .map(|r| {
-                    let mut idx = filter_indices(&r.items, &f, &q);
+                    let mut idx = filter_indices(&r.items, &sev, &fnd, &q);
                     if let Some((col, desc)) = srt {
                         // Stable sort over indices — reads the column value from
                         // the items by index, never cloning a row.
@@ -168,7 +215,8 @@ pub fn AuditView() -> impl IntoView {
     // scan lands a different item set. Tracks facet/search/total — an in-place
     // remediation changes none of those, so an expanded window survives a Fix.
     Effect::new(move |prev: Option<()>| {
-        facet.track();
+        severity.track();
+        finding.track();
         search_debounced.track();
         total_items.track();
         sort.track();
@@ -396,50 +444,152 @@ pub fn AuditView() -> impl IntoView {
             {move || {
                 export_msg.get().map(|m| view! { <div class="alert alert--ok">{m}</div> })
             }}
-            <TabList selected_value=facet>
-                <Tab value="all">"All"</Tab>
-                <Tab value="critical">"Critical"</Tab>
-                <Tab value="high">"High"</Tab>
-                <Tab value="medium">"Medium"</Tab>
-                <Tab value="low">"Low"</Tab>
-                <Tab value="expiring">"Expiring/Expired"</Tab>
-                <Tab value="high_risk_perms">"High-risk app"</Tab>
-                <Tab value="high_risk_delegated">"High-risk delegated"</Tab>
-                <Tab value="orgwide_mailbox">"Org-wide mailbox"</Tab>
-                <Tab value="scoped_mailbox">"Scoped mailbox"</Tab>
-                <Tab value="orgwide_sharepoint">"Org-wide SharePoint"</Tab>
-                <Tab value="scoped_sites">"Scoped sites"</Tab>
-                <Tab value="ownership">"Ownership"</Tab>
-                <Tab value="unused">"Unused"</Tab>
-            </TabList>
+            // Primary filter dimension: risk severity, always visible.
+            <TabBar
+                selected=severity
+                items=vec![
+                    TabBarItem { value: "all", label: "All" },
+                    TabBarItem { value: "critical", label: "Critical" },
+                    TabBarItem { value: "high", label: "High" },
+                    TabBarItem { value: "medium", label: "Medium" },
+                    TabBarItem { value: "low", label: "Low" },
+                ]
+            />
             <SearchInput value=search placeholder="Filter by name or appId…" />
-            <SavedViews view_key="audit" facet=facet search=search />
-            // Posture cards — clickable summary counts that jump to the matching
-            // facet. Shown once an audit has populated `result`.
+            // Secondary filter dimension: finding type, behind a collapsible
+            // drawer so the default view stays the severity tabs + search. The
+            // chips intersect with the active severity (filter = severity AND
+            // finding); counts are tenant-wide totals matching the scorecard.
+            <FilterToggle open=filters_open active_count=active_filters />
+            <Show when=move || filters_open.get()>
+                <SavedViews view_key="audit" facet=severity search=search />
+                {move || {
+                    posture_counts
+                        .get()
+                        .map(|c| {
+                            view! {
+                                <div class="filter-chips">
+                                    <FilterChip
+                                        label="All"
+                                        value="all"
+                                        count=total_items.get().unwrap_or(0)
+                                        facet=finding
+                                    />
+                                    <FilterChip
+                                        label="Expiring"
+                                        value="expiring"
+                                        count=c.expiring
+                                        facet=finding
+                                    />
+                                    <FilterChip
+                                        label="Unused"
+                                        value="unused"
+                                        count=c.unused
+                                        facet=finding
+                                    />
+                                    <FilterChip
+                                        label="Over-privileged"
+                                        value="high_risk_perms"
+                                        count=c.over_privileged
+                                        facet=finding
+                                    />
+                                    <FilterChip
+                                        label="High-risk delegated"
+                                        value="high_risk_delegated"
+                                        count=c.high_risk_delegated
+                                        facet=finding
+                                    />
+                                    <FilterChip
+                                        label="Org-wide mailbox"
+                                        value="orgwide_mailbox"
+                                        count=c.orgwide_mailbox
+                                        facet=finding
+                                    />
+                                    <FilterChip
+                                        label="Scoped mailbox"
+                                        value="scoped_mailbox"
+                                        count=c.scoped_mailbox
+                                        facet=finding
+                                    />
+                                    <FilterChip
+                                        label="Org-wide SharePoint"
+                                        value="orgwide_sharepoint"
+                                        count=c.orgwide_sharepoint
+                                        facet=finding
+                                    />
+                                    <FilterChip
+                                        label="Scoped sites"
+                                        value="scoped_sites"
+                                        count=c.scoped_sites
+                                        facet=finding
+                                    />
+                                    <FilterChip
+                                        label="Unowned"
+                                        value="ownership"
+                                        count=c.unowned
+                                        facet=finding
+                                    />
+                                </div>
+                            }
+                        })
+                }}
+            </Show>
+            // Posture scorecard — clickable summary counts grouped by Risk
+            // (seed `severity`) and Findings (seed `finding`). Each card sets its
+            // own dimension and leaves the sibling untouched, so a Risk card and a
+            // Findings card compose (e.g. Critical + Over-privileged). Shown once
+            // an audit has populated `result`.
             {move || {
                 posture_counts
                     .get()
-                    .map(|(crit, high, expiring, unused, owm, ows)| {
+                    .map(|c| {
                         view! {
-                            <div class="dash-metrics audit-cards">
-                                {posture_card("Critical", crit, "danger", "critical", facet)}
-                                {posture_card("High", high, "danger", "high", facet)}
-                                {posture_card("Expiring", expiring, "warning", "expiring", facet)}
-                                {posture_card("Unused", unused, "warning", "unused", facet)}
-                                {posture_card(
-                                    "Org-wide mailbox",
-                                    owm,
-                                    "warning",
-                                    "orgwide_mailbox",
-                                    facet,
-                                )}
-                                {posture_card(
-                                    "Org-wide SharePoint",
-                                    ows,
-                                    "warning",
-                                    "orgwide_sharepoint",
-                                    facet,
-                                )}
+                            <div class="audit-scorecard">
+                                <div class="audit-scorecard__group">
+                                    <span class="audit-scorecard__label">"Risk"</span>
+                                    <div class="dash-metrics audit-cards">
+                                        {posture_card("Critical", c.critical, "danger", "critical", severity)}
+                                        {posture_card("High", c.high, "danger", "high", severity)}
+                                        {posture_card("Medium", c.medium, "warning", "medium", severity)}
+                                        {posture_card("Low", c.low, "muted", "low", severity)}
+                                    </div>
+                                </div>
+                                <div class="audit-scorecard__group">
+                                    <span class="audit-scorecard__label">"Findings"</span>
+                                    <div class="dash-metrics audit-cards">
+                                        {posture_card("Expiring", c.expiring, "warning", "expiring", finding)}
+                                        {posture_card("Unused", c.unused, "warning", "unused", finding)}
+                                        {posture_card(
+                                            "Over-privileged",
+                                            c.over_privileged,
+                                            "danger",
+                                            "high_risk_perms",
+                                            finding,
+                                        )}
+                                        {posture_card(
+                                            "High-risk delegated",
+                                            c.high_risk_delegated,
+                                            "warning",
+                                            "high_risk_delegated",
+                                            finding,
+                                        )}
+                                        {posture_card(
+                                            "Org-wide mailbox",
+                                            c.orgwide_mailbox,
+                                            "warning",
+                                            "orgwide_mailbox",
+                                            finding,
+                                        )}
+                                        {posture_card(
+                                            "Org-wide SharePoint",
+                                            c.orgwide_sharepoint,
+                                            "warning",
+                                            "orgwide_sharepoint",
+                                            finding,
+                                        )}
+                                        {posture_card("Unowned", c.unowned, "warning", "ownership", finding)}
+                                    </div>
+                                </div>
                             </div>
                         }
                     })
@@ -478,21 +628,50 @@ pub fn AuditView() -> impl IntoView {
                 // down the whole <tbody>.
                 view! {
                     <div>
-                        <Body1>
-                            {move || {
-                                format!(
-                                    "{} of {} apps match",
-                                    filtered.with(|f| f.len()),
-                                    total_items.get().unwrap_or(0),
-                                )
-                            }}
-                        </Body1>
+                        // Inline bulk-action bar — self-gating: visible once ≥1
+                        // row is checked, and stays to show the result summary
+                        // after a run clears the selection.
+                        <BulkActionBar selection=selection on_done=on_bulk_done />
+                        // Tri-state select-all + result count. `visible_ids` is the
+                        // object_ids of every row matching the active filters (not
+                        // just the rendered window), so "select all visible" covers
+                        // the whole filtered set. Rebuilt when the filter changes.
+                        {move || {
+                            let (count_label, visible_ids) = filtered
+                                .with(|idx| {
+                                    let label = format!(
+                                        "{} of {} apps match",
+                                        idx.len(),
+                                        total_items.get().unwrap_or(0),
+                                    );
+                                    let ids = result
+                                        .with(|r| {
+                                            r.as_ref()
+                                                .map(|r| {
+                                                    idx.iter()
+                                                        .filter_map(|&i| {
+                                                            r.items.get(i).map(|it| it.object_id.clone())
+                                                        })
+                                                        .collect::<Vec<_>>()
+                                                })
+                                                .unwrap_or_default()
+                                        });
+                                    (label, ids)
+                                });
+                            view! {
+                                <SelectAllBar
+                                    count_label=count_label
+                                    visible_ids=visible_ids
+                                    selected=selection
+                                />
+                            }
+                        }}
                         {move || {
                             filtered
                                 .with(|f| f.is_empty())
                                 .then(|| {
                                     let msg = empty_facet_message(
-                                        &facet.get(),
+                                        &finding.get(),
                                         report_available.get(),
                                     );
                                     view! { <div class="alert">{msg}</div> }
@@ -501,6 +680,7 @@ pub fn AuditView() -> impl IntoView {
                         <table class="data-table">
                             <thead>
                                 <tr>
+                                    <th class="data-table__check" aria-label="Select"></th>
                                     <th>
                                         <button
                                             class="th-sort"
@@ -576,8 +756,24 @@ pub fn AuditView() -> impl IntoView {
                                     }
                                     key=|(_, i)| (i.object_id.clone(), i.remediations.len())
                                     children=move |(_, i)| {
+                                        let oid = i.object_id.clone();
+                                        let oid_change = oid.clone();
+                                        let check_label = format!(
+                                            "Select {} for bulk actions",
+                                            i.application_name,
+                                        );
                                         view! {
                                             <tr>
+                                                <td class="data-table__check">
+                                                    <input
+                                                        type="checkbox"
+                                                        aria-label=check_label
+                                                        prop:checked=move || session.is_audit_selected(&oid)
+                                                        on:change=move |_| {
+                                                            session.toggle_audit_selected(oid_change.clone())
+                                                        }
+                                                    />
+                                                </td>
                                                 <td>{i.application_name.clone()}</td>
                                                 <td class="mono">{i.app_id.clone()}</td>
                                                 <td>
@@ -659,6 +855,26 @@ fn risk_class(level: &RiskLevel) -> &'static str {
     }
 }
 
+/// Per-bucket counts for the posture scorecard and the finding chips, computed
+/// once per scan from the audit run (never per keystroke). Finding counts are
+/// tenant-wide totals — not intersected with the active severity.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PostureCounts {
+    critical: usize,
+    high: usize,
+    medium: usize,
+    low: usize,
+    expiring: usize,
+    unused: usize,
+    over_privileged: usize,
+    high_risk_delegated: usize,
+    orgwide_mailbox: usize,
+    scoped_mailbox: usize,
+    orgwide_sharepoint: usize,
+    scoped_sites: usize,
+    unowned: usize,
+}
+
 fn count_level(items: &[AuditItem], level: RiskLevel) -> usize {
     items.iter().filter(|i| i.risk_level == level).count()
 }
@@ -684,13 +900,15 @@ fn count_issue_prefix(items: &[AuditItem], prefix: &str) -> usize {
 }
 
 /// One clickable posture card. Zero counts render muted; non-zero use the tone
-/// colour. Clicking jumps the table to the matching facet.
+/// colour. Clicking seeds the given filter dimension (`dim`) with `target` and
+/// leaves the other dimension untouched, so a Risk card and a Findings card
+/// compose.
 fn posture_card(
     label: &'static str,
     n: usize,
     tone: &'static str,
     target: &'static str,
-    facet: RwSignal<String>,
+    dim: RwSignal<String>,
 ) -> impl IntoView {
     let num_class = if n == 0 {
         "dash-metric__num".to_string()
@@ -701,7 +919,7 @@ fn posture_card(
         <button
             class="dash-metric audit-card"
             type="button"
-            on:click=move |_| facet.set(target.to_string())
+            on:click=move |_| dim.set(target.to_string())
         >
             <span class=num_class>{n}</span>
             <span class="dash-metric__label">{label}</span>
@@ -723,10 +941,10 @@ fn last_sign_in_cell(i: &AuditItem) -> AnyView {
     }
 }
 
-/// Contextual message when a facet yields no rows — most importantly explaining
-/// why the Unused tab is empty when the sign-in report wasn't available.
-fn empty_facet_message(facet: &str, sign_in_report_available: bool) -> &'static str {
-    if facet == "unused" && !sign_in_report_available {
+/// Contextual message when a filter yields no rows — most importantly explaining
+/// why the Unused finding is empty when the sign-in report wasn't available.
+fn empty_facet_message(finding: &str, sign_in_report_available: bool) -> &'static str {
+    if finding == "unused" && !sign_in_report_available {
         "No unused apps to show: the sign-in activity report wasn't available. It needs the AuditLog.Read.All permission and Entra ID P1 or P2 — grant consent above and re-run to enable unused-app detection."
     } else {
         "No applications match this filter."

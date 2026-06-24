@@ -7,6 +7,34 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **Security Audit revamp — the audit is now the hero of the Security surface.**
+  The four co-equal Security sub-tabs (Posture / Credential expiry / Delegated
+  grants / App permissions) are reframed: the audit is the default, full-width
+  view, and the three inventory lenses move behind a subordinate "Detailed
+  inventories" selector (all deep-links and keep-alive panes are preserved). The
+  audit's flat 14-item facet tab bar is replaced by **two combinable filters** —
+  a primary risk-severity selector (All / Critical / High / Medium / Low) and a
+  collapsible finding-type chip drawer (Expiring, Unused, Over-privileged,
+  High-risk delegated, Org-wide mailbox, Scoped mailbox, Org-wide SharePoint,
+  Scoped sites, Unowned) — that **intersect** (e.g. "Critical apps with expiring
+  credentials"). The posture scorecard is regrouped into Risk and Findings rows;
+  each card seeds its own dimension and composes with the other.
+
+### Added
+
+- **Multi-select + inline bulk actions on the Security Audit table and App
+  Registrations list.** Check rows to reveal an inline bar offering Grant consent
+  / Remove expired credentials / Delete (destructive actions gate behind a typed
+  REMOVE / DELETE confirmation), with live progress, cancel, and a per-item
+  result summary — without leaving the list. Reuses the existing bulk backend
+  commands; the audit table keeps its own selection set, separate from the App
+  Registrations list's, so a selection in one never leaks into the other. The
+  Bulk Actions page now hosts the same shared bar plus the Create-apps form. The
+  Enterprise Applications list is intentionally excluded (its rows are service
+  principals, which the app-registration bulk commands can't target).
+
 ## [0.6.0] - 2026-06-24
 
 ### Added
