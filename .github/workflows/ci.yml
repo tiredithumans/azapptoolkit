@@ -29,7 +29,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Match the pinned MSRV in rust-toolchain.toml (which rustup honors for the
       # actual build regardless of this line) so the installed toolchain is not
       # misleadingly older than what compiles.
@@ -37,7 +37,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
         with:
           tool: just
       - name: Install system deps (Linux)
@@ -56,7 +56,7 @@ jobs:
     name: Frontend (Leptos/WASM)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
         with:
           targets: wasm32-unknown-unknown
@@ -64,7 +64,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: apps/desktop/web-rs
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
         with:
           tool: just,trunk,wasm-pack
       # web-rs is excluded from the root workspace, so the `rust` job's
@@ -91,7 +91,7 @@ jobs:
     name: actionlint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Workflow-file syntax gate. release.yml sat unparseable for ~7 weeks
       # (`secrets` context in a step-level `if`) with no signal beyond 0-second
       # "workflow file issue" runs — actionlint turns that into a failing PR
@@ -108,12 +108,12 @@ jobs:
     name: cargo-audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # RustSec advisory scan via the same `just` recipes run locally (ignore
       # list in .cargo/audit.toml). Covers BOTH lockfiles: the root workspace
       # and the frontend's own Cargo.lock (web-rs is excluded from the
       # workspace, so the root scan never sees it).
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
         with:
           tool: just,cargo-audit
       - name: audit (workspace)
@@ -125,12 +125,12 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # License policy + crate-source gating (see deny.toml). Complements the
       # advisory-only `audit` job above. Flags live in the `deny`/`web-deny`
       # justfile recipes; web-deny gates the frontend tree the root check
       # can't reach.
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
         with:
           tool: just,cargo-deny
       - name: deny (workspace)
