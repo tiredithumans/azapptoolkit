@@ -381,6 +381,55 @@ impl Session {
     pub fn dismiss_toast(&self, id: u64) {
         self.toasts.update(|list| list.retain(|t| t.id != id));
     }
+
+    /// Interactively re-authenticate the signed-in account in place — one browser
+    /// round trip — when the session has gone dead, so the user skips the manual
+    /// Sign Out → Sign In (which would also wipe the cached lists + audit run).
+    /// The tenant id is unchanged (the backend validates the returned identity
+    /// matches), so this deliberately does **not** call `set_active_tenant`:
+    /// re-setting it would needlessly reset the user's filters and selection.
+    /// Used by the smart Refresh button's fallback and the
+    /// [`Self::report_command_error`] "Re-authenticate" toast action.
+    pub fn spawn_reauth(&self) {
+        let session = *self;
+        leptos::task::spawn_local(async move {
+            let Some(tenant) = session.active_tenant.get_untracked() else {
+                return;
+            };
+            match crate::bindings::auth::reauthenticate(&tenant).await {
+                Ok(_) => {
+                    session.toast_success("Re-authenticated — retry the action that failed.");
+                }
+                Err(e) => {
+                    session.toast_error(format!("Couldn't re-authenticate: {}", e.message), None);
+                }
+            }
+        });
+    }
+
+    /// Surface a failed command. When the error means the **session is dead** —
+    /// the refresh token expired/revoked (`refresh_missing`) or there's no
+    /// session at all (`not_signed_in`) — show a persistent error toast whose
+    /// action re-authenticates in place (see [`Self::spawn_reauth`]) instead of a
+    /// dead-end message, so the user recovers without the manual Sign Out → Sign
+    /// In. Every other error falls back to a plain `toast_error`.
+    ///
+    /// The two codes are the wire contract from `azapptoolkit_dto`'s
+    /// `From<AuthError>`: `InvalidGrant`/`RefreshTokenMissing` → `refresh_missing`,
+    /// `NotSignedIn` → `not_signed_in`.
+    pub fn report_command_error(&self, e: &azapptoolkit_dto::UiError) {
+        if matches!(e.code.as_str(), "refresh_missing" | "not_signed_in") {
+            let session = *self;
+            self.push_toast(
+                ToastKind::Error,
+                "Your session has expired — re-authenticate to continue.",
+                Some("Re-authenticate".to_string()),
+                Some(std::rc::Rc::new(move || session.spawn_reauth())),
+            );
+        } else {
+            self.toast_error(e.message.clone(), None);
+        }
+    }
 }
 
 /// Provide a fresh `Session` into the current Leptos context. Call once at
@@ -426,4 +475,55 @@ pub fn provide_session() {
 /// provider.
 pub fn use_session() -> Session {
     use_context::<Session>().expect("Session not provided — wrap your tree in <App />")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use azapptoolkit_dto::UiError;
+
+    // `Session` holds `RwSignal`s, so a reactive owner must be active.
+    fn with_session<R>(f: impl FnOnce(Session) -> R) -> R {
+        Owner::new().with(|| {
+            provide_session();
+            f(use_session())
+        })
+    }
+
+    #[test]
+    fn report_command_error_offers_reauth_on_dead_session() {
+        // Both `refresh_missing` (expired/revoked or absent refresh token) and
+        // `not_signed_in` are the wire codes that mean "interactive re-auth
+        // required"; each must surface a "Re-authenticate" toast action.
+        for code in ["refresh_missing", "not_signed_in"] {
+            with_session(|session| {
+                session.report_command_error(&UiError::new(code, "boom", false));
+                session.toasts.with_untracked(|list| {
+                    assert_eq!(list.len(), 1, "code {code}");
+                    let t = &list[0];
+                    assert!(matches!(t.kind, ToastKind::Error));
+                    assert_eq!(t.action_label.as_deref(), Some("Re-authenticate"));
+                    assert!(
+                        t.action.is_some(),
+                        "code {code} should carry a re-auth action"
+                    );
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn report_command_error_plain_toast_for_other_codes() {
+        with_session(|session| {
+            session.report_command_error(&UiError::new("network", "down", true));
+            session.toasts.with_untracked(|list| {
+                assert_eq!(list.len(), 1);
+                let t = &list[0];
+                assert!(matches!(t.kind, ToastKind::Error));
+                assert_eq!(t.message, "down");
+                assert!(t.action_label.is_none(), "non-auth error needs no action");
+                assert!(t.action.is_none());
+            });
+        });
+    }
 }

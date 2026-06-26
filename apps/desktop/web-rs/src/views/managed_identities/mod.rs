@@ -113,7 +113,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    session.toast_error(e.message, None);
+                    session.report_command_error(&e);
                 }
             }
             exporting.set(false);

@@ -41,6 +41,17 @@ pub async fn refresh_session(tenant_id: &str) -> Result<(), UiError> {
     invoke_result("refresh_session", RefreshSessionArgs { tenant_id }).await
 }
 
+/// Interactively re-authenticates the signed-in account in place — one browser
+/// round trip (`prompt=login`, pinned to the current account) that mints a fresh
+/// refresh + access token without ending the session or wiping the data caches.
+/// The recovery path for a dead session (a `refresh_missing` / `not_signed_in`
+/// failure) that the silent [`refresh_session`] can't fix. Reuses the
+/// `{ tenant }` args shape because the backend needs the full context (the
+/// in-memory tenant entry may have been purged when the token was rejected).
+pub async fn reauthenticate(tenant: &TenantContext) -> Result<SignInOutcome, UiError> {
+    invoke_result("reauthenticate", SignOutArgs { tenant }).await
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConsentArgs<'a> {

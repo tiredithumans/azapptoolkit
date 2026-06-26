@@ -250,7 +250,7 @@ fn ExposeApiLoaded(
             },
             move |e| {
                 pending_delete_scope.set(None);
-                session.toast_error(e.message, None);
+                session.report_command_error(&e);
             },
             move |tenant_id| {
                 let id = object_id.get_value();
@@ -325,7 +325,7 @@ fn ExposeApiLoaded(
             },
             move |e| {
                 pending_remove_pre.set(None);
-                session.toast_error(e.message, None);
+                session.report_command_error(&e);
             },
             move |tenant_id| {
                 let id = object_id.get_value();

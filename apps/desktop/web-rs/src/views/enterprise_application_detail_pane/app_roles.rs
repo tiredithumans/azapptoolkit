@@ -208,7 +208,7 @@ pub(super) fn AppRolesContent(
             },
             move |e| {
                 pending_delete.set(None);
-                session.toast_error(e.message, None);
+                session.report_command_error(&e);
             },
             move |tenant_id| async move {
                 enterprise_application::delete_enterprise_app_role(&tenant_id, &sp, &app, &id).await

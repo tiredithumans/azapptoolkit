@@ -214,7 +214,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 if e.code == "consent_required" {
                     needs_consent.set(true);
                 }
-                session.toast_error(e.message, None);
+                session.report_command_error(&e);
             },
             move |tenant_id| {
                 let sp_id = sp_id.get_value();
