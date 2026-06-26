@@ -39,6 +39,16 @@ web-build-release:
 web-build:
     trunk build --locked
 
+# Frontend demo build for GitHub Pages. Release build + the `demo` feature (mock
+# IPC bridge + curated sample data, so the full UI runs with no Tauri backend) +
+# a subpath base-href so the hashed JS/WASM/CSS resolve under the Pages subpath
+# (`https://<user>.github.io/<repo>/`). The desktop build keeps the default `/`;
+# the `demo` feature is never enabled there. Default `BASE` matches the repo name;
+# the Pages workflow passes it explicitly.
+[working-directory('apps/desktop/web-rs')]
+web-build-pages BASE="/azapptoolkit/":
+    trunk build --release --locked --features demo --public-url {{BASE}}
+
 # GUI functionality tests: mount real Leptos views in a headless browser with
 # the Tauri IPC bridge mocked (no tenant, no backend), then assert on rendered
 # DOM + recorded commands. Needs Chrome + a chromedriver. Pass the driver path

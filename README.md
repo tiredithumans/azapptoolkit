@@ -16,6 +16,11 @@ thing you install on the machine is the installer itself — no Az
 PowerShell, no Microsoft Graph PowerShell SDK, no Azure CLI, and no
 toolkit-owned service principal storing tokens you cannot audit.
 
+> **🔎 [Try the live demo →](https://tiredithumans.github.io/azapptoolkit/)**
+> The full UI with sample data, right in your browser — no install, no
+> sign-in. (Read-only: live Graph queries, mutations, and exports are
+> disabled in the hosted demo.)
+
 ## Table of contents
 
 - [Features](#features)

@@ -3092,3 +3092,29 @@ h3 {
   font-size: var(--text-md);
   font-weight: 600;
 }
+
+/* GitHub Pages demo banner. The element only exists in the `demo` build, so the
+   `:has()` rule that inserts an extra grid row above the top bar is inert in the
+   shipped desktop bundle (no `.demo-banner` is ever rendered there). */
+.shell__main:has(.demo-banner) {
+  grid-template-rows: auto var(--topbar-height) 1fr;
+}
+.demo-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  background: var(--accent);
+  color: #fff;
+  font-size: var(--text-sm);
+  text-align: center;
+  z-index: 11;
+}
+.demo-banner__link {
+  color: #fff;
+  font-weight: 600;
+  text-decoration: underline;
+  white-space: nowrap;
+}

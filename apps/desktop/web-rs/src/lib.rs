@@ -23,11 +23,23 @@ pub mod state;
 pub mod util;
 pub mod views;
 
+// Shared mock Tauri IPC bridge (installs `window.__TAURI_INTERNALS__` + a route
+// registry of canned fixtures). Compiled only for the test harness and the demo
+// build — never the shipped desktop bundle.
+#[cfg(feature = "mock-ipc")]
+pub mod ipc_mock;
+
 // Browser test harness: mounts real views with the Tauri IPC bridge mocked, so
 // GUI behaviour is exercised without a live tenant. Behind a feature so it is
 // never compiled into the shipped Trunk bundle (`web-build` doesn't enable it).
 #[cfg(feature = "test-support")]
 pub mod test_support;
+
+// GitHub Pages demo: pre-loads the mock IPC bridge with curated sample data and
+// signs into a demo tenant, so the full UI runs in a plain browser. Enabled only
+// by `just web-build-pages`.
+#[cfg(feature = "demo")]
+pub mod demo;
 
 use state::{ActiveView, provide_session, use_session};
 use util::keep_alive;
@@ -45,12 +57,20 @@ use views::{
 /// document body. Called by the `main.rs` binary.
 pub fn run() {
     console_error_panic_hook::set_once();
+    // Demo build: install the mock IPC bridge + sample data before the app mounts
+    // so the first resource fires against fixtures, not a (missing) backend.
+    #[cfg(feature = "demo")]
+    demo::install();
     mount_to_body(App);
 }
 
 #[component]
 fn App() -> impl IntoView {
     provide_session();
+    // Demo build: start already signed in to the demo tenant so the config and
+    // sign-in gates fall through to the authenticated shell.
+    #[cfg(feature = "demo")]
+    use_session().set_active_tenant(Some(demo::demo_tenant()));
     let theme = RwSignal::new(initial_theme());
 
     view! {
@@ -70,7 +90,14 @@ fn Root() -> impl IntoView {
     // topology unchanged. An app-wide Suspense around the whole shell can
     // surface write-during-render bugs in nested panes (it did — the enterprise
     // detail pane looped). `None` = the fast local-IPC check is still in flight.
-    let configured = RwSignal::new(None::<bool>);
+    // Demo build short-circuits to "configured" (no first-run config screen); the
+    // live build probes the backend.
+    let configured = RwSignal::new(if cfg!(feature = "demo") {
+        Some(true)
+    } else {
+        None::<bool>
+    });
+    #[cfg(not(feature = "demo"))]
     leptos::task::spawn_local(async move {
         configured.set(Some(bindings::config::get_auth_config().await.configured));
     });

@@ -67,11 +67,13 @@ apps/desktop/
     ├── components/                  # reusable UI components
     ├── hooks/                       # Leptos Effect/Signal helpers (e.g. use_debounced)
     ├── bindings/                    # typed Tauri IPC stubs — mirror backend commands
+    ├── ipc_mock/                    # shared mock Tauri IPC bridge + fixtures (test-support + demo)
+    ├── demo/                        # GitHub Pages demo: mock IPC + curated sample data (feature `demo`)
     └── Trunk.toml                   # WASM build/serve (127.0.0.1:5173)
 
 docs/DEVELOPMENT.md                  # build, test, package, release, updater keys
 docs/architecture/                   # deep-dives: auth-consent, caching-search, scoping-audit
-.github/workflows/                   # ci.yml · release.yml (Windows MSI+NSIS) · codeql.yml
+.github/workflows/                   # ci.yml · release.yml (Windows MSI+NSIS) · codeql.yml · pages.yml (GitHub Pages demo)
 ```
 
 ## Common patterns
@@ -104,6 +106,10 @@ just fmt-check | clippy | test | web-fmt-check | web-clippy | web-test | web-bui
 # Frontend GUI tests (browser-gated, NOT in `verify`):
 just web-itest       # real Leptos views in a headless browser, Tauri IPC mocked
                      # (no tenant/backend). Needs a browser + driver; CI uses Chrome.
+
+# GitHub Pages demo build (deploy-only, NOT in `verify`):
+just web-build-pages [BASE]   # release + `demo` feature (mock IPC + sample data,
+                              # no backend) + subpath base-href; published by pages.yml.
 
 # Dependency policy (CI also runs these):
 just audit          # RustSec advisories (root workspace)
@@ -166,6 +172,8 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 - **Bulk remediations reuse the single-app cores, run sequentially.** `bulk_remove_redundant_permissions` / `bulk_scope_mailbox_access` / `bulk_scope_sharepoint_access` (`commands/bulk.rs`) loop the per-app remediation paths (`remediation::remediate_remove_redundant_permissions`, `exchange::grant_exchange_mailbox_access` with `permissions: None` = all, `remediation::remediate_scope_sharepoint_access`) — **not** the `dispatch_capped` spawn fan-out, because those cores take `State` (not `Send` into a spawn) and the selection is a small admin-chosen set. They `reset()` + poll `audit_cancel`, emit `bulk-progress` (no `in_flight_cap`), and degrade to a per-app `error` rather than aborting; each per-app core busts its own cache. The scope targets (mailbox groups / site URLs + role) are **uniform across the selection**.
 
 - **Build-time config baking.** `build.rs` reads `.env`, emits `AZAPPTOOLKIT_BUILD_*`; runtime env vars override.
+
+- **GitHub Pages demo = the WASM frontend with the Tauri backend mocked.** `just web-build-pages` builds `web-rs` with the `demo` feature, deployed by `.github/workflows/pages.yml` (needs Settings → Pages → Source = "GitHub Actions"). It installs the shared `ipc_mock` bridge — the same `window.__TAURI_INTERNALS__` mock the GUI test harness uses, **extracted out of `test_support` into `web-rs/src/ipc_mock/`** (gated by the internal `mock-ipc` feature that both `test-support` and `demo` enable) — pre-loaded with curated fixtures (`demo/mod.rs`), seeds a demo tenant so the config/sign-in gates fall through to the shell (`lib.rs`), and shows a read-only banner (`shell.rs`, `.demo-banner`). Unregistered commands (every mutation + any unfixtured read) degrade to a friendly `demo_unsupported` error via `ipc_mock::Unmocked::DemoFriendly`. **Footgun:** the infallible `invoke()` reads (`get_cached_audit`/`cache_stats`/`export_audit_csv`/`get_auth_config`) and the `()`-returning ones (`invalidate_list_cache` — fired by every list Refresh — `clear_cache`, `cancel_*`, …) must be registered in `demo::register_fixtures`, or they **panic** on the rejected-promise fallback. Adding a new infallible `invoke()`/`invoke::<()>` reachable in the demo → register a fixture for it. The `demo` feature is off in `web-build`/desktop, so the mock + fixtures + banner never ship in releases. Nav is signal-based (no router), so no `404.html` SPA fallback is needed — only the `--public-url` subpath base-href.
 
 - **Auto-update is interactive (not silent).** The front-end checks once on launch (`commands::updater::check_for_update`, swallowed silently on failure / in dev) and, if an update waits, toasts a notification whose action opens the `UpdateSplash` (`web-rs/components/update_splash.rs`) — changelog notes + **Update & restart** (`perform_update`: download_and_install → `app.restart()`, byte progress on the `updater-progress` channel). There's also a manual "Check for updates" button by the nav version. The changelog text is the updater manifest's `notes`, which `release.yml` populates from the `CHANGELOG.md` section for the tag, so it only lights up for releases from **v0.8.0 onward** (v0.7.0's `latest.json` predates it). Don't reintroduce a silent background `download_and_install` in `lib.rs` setup — it was removed in favour of this flow and would race the prompt.
 

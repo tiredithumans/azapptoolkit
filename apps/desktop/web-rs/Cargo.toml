@@ -31,21 +31,33 @@ futures = "0.3"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Only used by the `test-support` harness to build/read mock IPC payloads. Pinned
-# to the version tauri-sys deserializes with so fixtures round-trip identically.
+# Used by the `mock-ipc` bridge (test harness + GitHub Pages demo) to build/read
+# mock IPC payloads. Pinned to the version tauri-sys deserializes with so fixtures
+# round-trip identically.
 serde-wasm-bindgen = { version = "0.6.5", optional = true }
 
 chrono = { version = "0.4", features = ["serde", "wasmbind"] }
 tracing = "0.1"
 
 [features]
+# The shared mock Tauri IPC bridge (`src/ipc_mock/`): installs a fake
+# `window.__TAURI_INTERNALS__` + a route registry of canned fixtures. Internal —
+# enabled transitively by `test-support` and `demo`, never on its own.
+mock-ipc = ["dep:serde-wasm-bindgen"]
+
 # Compiles the `test_support` browser-test harness (mock IPC + view mounting).
 # Off by default so it never enters the shipped Trunk bundle; enabled by
 # `just web-itest`.
 # `web-sys/KeyboardEvent` (press_key) and `web-sys/HtmlTextAreaElement`
 # (set_textarea_value) are only needed by the test harness, so they ride the
 # test-support feature and stay out of the shipped bundle.
-test-support = ["dep:serde-wasm-bindgen", "web-sys/KeyboardEvent", "web-sys/KeyboardEventInit", "web-sys/HtmlTextAreaElement"]
+test-support = ["mock-ipc", "web-sys/KeyboardEvent", "web-sys/KeyboardEventInit", "web-sys/HtmlTextAreaElement"]
+
+# Standalone browser demo for GitHub Pages: installs the mock IPC bridge
+# pre-loaded with curated sample data and signs into a demo tenant, so the full
+# UI runs with no Tauri backend. Enabled only by `just web-build-pages`; never
+# the desktop build, so the mock + fixtures + demo banner stay out of releases.
+demo = ["mock-ipc"]
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

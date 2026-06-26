@@ -1,0 +1,67 @@
+name: Demo (GitHub Pages)
+
+# Builds the Leptos/WASM frontend with the `demo` feature (mock IPC + curated
+# sample data, no Tauri backend) and publishes it to GitHub Pages, so the full UI
+# is browsable at https://tiredithumans.github.io/azapptoolkit/ with no install
+# and no sign-in. Requires Settings → Pages → Source = "GitHub Actions".
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/desktop/web-rs/**"
+      - "justfile"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Pages deploy needs to write the Pages artifact and mint an OIDC token; the
+# build only reads the repo. Declared explicitly so a repo-default change can't
+# silently re-broaden them.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel an in-flight deploy (it can leave Pages half-published); queue
+# instead. Independent of the CI concurrency group.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build demo bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: apps/desktop/web-rs
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
+        with:
+          tool: just,trunk
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      # The base href must match the Pages subpath so the hashed JS/WASM/CSS
+      # resolve under https://<user>.github.io/<repo>/.
+      - name: Build demo bundle
+        run: just web-build-pages "/azapptoolkit/"
+      # GitHub Pages runs Jekyll by default, which can drop files; opt out. Emit
+      # it into the (gitignored) dist rather than committing it.
+      - name: Disable Jekyll
+        run: touch apps/desktop/web-rs/dist/.nojekyll
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: apps/desktop/web-rs/dist
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
