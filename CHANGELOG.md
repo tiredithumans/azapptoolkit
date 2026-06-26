@@ -9,6 +9,15 @@ the project adheres to
 
 ### Added
 
+- **Force re-authenticate in place when a session expires — no manual sign-out.**
+  When the stored refresh token is expired or revoked, the **Refresh Token**
+  button now falls back from the silent re-mint to one interactive browser
+  round trip (pinned to the current account), restoring the session without
+  signing out — so the cached lists and audit run survive. Additionally, any
+  command that fails because the session is dead now surfaces an error toast
+  with a **Re-authenticate** action, so recovery appears exactly when it's
+  needed instead of leaving the user stuck. New `reauthenticate` command.
+
 - **Interactive auto-update with a changelog splash.** When a new release is
   available, the app now shows a toast on launch ("Update available: vX.Y.Z —
   View changelog") that opens a splash listing the version's release notes with

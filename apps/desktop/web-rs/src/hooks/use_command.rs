@@ -101,7 +101,10 @@ impl CommandState {
         self.run_with(
             on_ok,
             move |e| {
-                session.toast_error(e.message, None);
+                // Routes through `report_command_error` so a dead session
+                // (`refresh_missing` / `not_signed_in`) gets a "Re-authenticate"
+                // action instead of a dead-end error toast.
+                session.report_command_error(&e);
             },
             op,
         );

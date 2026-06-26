@@ -348,7 +348,7 @@ fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl Int
                     });
                 }
                 Err(e) => {
-                    session.toast_error(e.message, None);
+                    session.report_command_error(&e);
                 }
             }
             toggling.set(false);

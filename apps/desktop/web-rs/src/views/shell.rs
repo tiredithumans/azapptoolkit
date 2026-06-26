@@ -58,8 +58,14 @@ pub fn AppShell(children: Children) -> impl IntoView {
 
     // Re-mints the session's tokens in place (no sign-out) so a role activated
     // after sign-in — e.g. an "Exchange Administrator" PIM role — takes effect.
-    // The in-flight guard prevents a double-click from racing two refreshes.
+    // Tries the silent refresh first; if the session is dead (an expired/revoked
+    // or missing refresh token, surfaced as `refresh_missing`/`not_signed_in`),
+    // it falls back to one interactive browser round trip — still no sign-out, so
+    // the cached lists + audit run survive. The in-flight guard prevents a
+    // double-click from racing two refreshes; `reauthing` flips the label while
+    // the browser flow is open.
     let refreshing = RwSignal::new(false);
+    let reauthing = RwSignal::new(false);
     let on_refresh_token = move |_| {
         let session = session;
         if refreshing.get() {
@@ -74,6 +80,21 @@ pub fn AppShell(children: Children) -> impl IntoView {
                             "Token refreshed — roles activated since sign-in now apply. \
                              Retry the action that failed.",
                         );
+                    }
+                    Err(e) if matches!(e.code.as_str(), "refresh_missing" | "not_signed_in") => {
+                        // Silent re-mint can't fix a dead refresh token; re-auth
+                        // interactively in place rather than dumping the user to
+                        // the sign-in screen.
+                        reauthing.set(true);
+                        match crate::bindings::auth::reauthenticate(&t).await {
+                            Ok(_) => session
+                                .toast_success("Re-authenticated — retry the action that failed."),
+                            Err(e) => session.toast_error(
+                                format!("Couldn't re-authenticate: {}", e.message),
+                                None,
+                            ),
+                        };
+                        reauthing.set(false);
                     }
                     Err(e) => {
                         session.toast_error(format!("Couldn't refresh token: {}", e.message), None);
@@ -228,12 +249,13 @@ pub fn AppShell(children: Children) -> impl IntoView {
                             <span class="nav__label">"Readiness"</span>
                         </button>
                         // Re-mint tokens without dropping the session, e.g. to pick
-                        // up a PIM role activated after sign-in. Styled as a
-                        // `nav__item` so it collapses to icon-only on a narrow rail.
+                        // up a PIM role activated after sign-in — and, if the
+                        // session has expired, re-authenticate in place. Styled as
+                        // a `nav__item` so it collapses to icon-only on a narrow rail.
                         <button
                             class="nav__item shell__user-refresh"
                             type="button"
-                            title="Refresh token — re-applies roles activated since sign-in (e.g. an active PIM role) without signing out"
+                            title="Refresh token — re-applies roles activated since sign-in (e.g. an active PIM role) without signing out; if your session has expired, opens a browser to re-authenticate in place"
                             disabled=move || refreshing.get()
                             on:click=on_refresh_token
                         >
@@ -248,7 +270,15 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                 }}
                             </span>
                             <span class="nav__label">
-                                {move || if refreshing.get() { "Refreshing…" } else { "Refresh Token" }}
+                                {move || {
+                                    if reauthing.get() {
+                                        "Re-authenticating…"
+                                    } else if refreshing.get() {
+                                        "Refreshing…"
+                                    } else {
+                                        "Refresh Token"
+                                    }
+                                }}
                             </span>
                         </button>
                         // Cache diagnostics inspector — sits directly above Sign Out

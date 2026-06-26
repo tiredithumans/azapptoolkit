@@ -948,6 +948,73 @@ impl EntraAuthService {
         Ok(())
     }
 
+    /// Interactively re-authenticates the already-signed-in account, minting a
+    /// fresh refresh + access token *without* ending the session or dropping the
+    /// tenant's data caches. This is the recovery path for a **dead** session —
+    /// an expired/revoked refresh token (surfaced as [`AuthError::InvalidGrant`],
+    /// re-mapped to [`AuthError::RefreshTokenMissing`] after the stale token is
+    /// purged) or a missing one — which the silent [`Self::refresh_session`]
+    /// can't fix, sparing the user a full sign-out/sign-in (the latter would also
+    /// wipe the cached lists + audit run).
+    ///
+    /// Runs one browser round trip with `prompt=login` (forcing a fresh
+    /// credential entry — the right behaviour for a revoked session) pinned to
+    /// the current account via `login_hint`. Like [`Self::consent_for_scopes`],
+    /// it refuses to cache a token for a different identity: re-authenticating as
+    /// another tenant/account would let that operator read this session's
+    /// tenant-keyed data caches, so a mismatch errors and the user is told to
+    /// Sign Out to switch accounts.
+    ///
+    /// Takes the full [`TenantContext`] rather than a bare id because the
+    /// `InvalidGrant` that sends the user here purges the `known_tenants` entry
+    /// (see [`Self::access_token_inner`]), so the caller — which still holds the
+    /// context — must supply the `login_hint`/identity to match against.
+    pub async fn reauthenticate(&self, tenant: &TenantContext) -> Result<SignInOutcome> {
+        let initial_scopes = self.default_graph_read_scopes();
+        let (token, claims) = self
+            .run_auth_code_flow(&initial_scopes, "login", tenant.username.as_deref())
+            .await?;
+
+        // Defense-in-depth (mirrors `consent_for_scopes`): a login screen can
+        // switch tenant/account even with a login_hint. Refuse to re-establish
+        // the session under a different identity — it would cross this tenant's
+        // data caches with another operator's view.
+        if claims.tid.as_deref() != Some(tenant.tenant_id.as_str()) {
+            return Err(AuthError::Authorization(
+                "re-authenticated for a different tenant — use Sign Out to switch".into(),
+            ));
+        }
+        if claims.oid.as_deref() != Some(tenant.account_oid.as_str()) {
+            return Err(AuthError::Authorization(
+                "re-authenticated as a different account — use Sign Out to switch".into(),
+            ));
+        }
+
+        let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
+        let scopes = parse_scopes(token.scope.as_deref(), &initial_scopes);
+
+        if let Some(refresh) = token.refresh_token {
+            save_refresh_token(&tenant.tenant_id, &tenant.account_oid, &refresh)?;
+        }
+        self.cache.put(
+            tenant.tenant_id.clone(),
+            &initial_scopes,
+            AccessToken {
+                token: token.access_token,
+                expires_at,
+                scopes,
+            },
+        );
+        // Restore the (validated) context: a prior `InvalidGrant` removed it, and
+        // `tenants()` / consent lookups read `known_tenants`.
+        self.known_tenants
+            .lock()
+            .insert(tenant.tenant_id.clone(), tenant.clone());
+        Ok(SignInOutcome {
+            tenant: tenant.clone(),
+        })
+    }
+
     pub async fn tenants(&self) -> Vec<TenantContext> {
         self.known_tenants.lock().values().cloned().collect()
     }

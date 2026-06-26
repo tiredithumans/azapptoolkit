@@ -45,6 +45,26 @@ pub async fn refresh_session(state: State<'_, AppState>, tenant_id: String) -> R
         .map_err(UiError::from)
 }
 
+/// Interactively re-authenticates the signed-in account *without* ending the
+/// session: runs one browser round trip (`prompt=login`, pinned to the current
+/// account) to mint a fresh refresh + access token, leaving the per-tenant data
+/// caches intact. The recovery path for a dead refresh token — what the silent
+/// [`refresh_session`] can't fix — so the user skips the manual sign-out/sign-in
+/// (which would also wipe the cached lists + audit run). Takes the full
+/// `TenantContext` because an `InvalidGrant` purges the in-memory tenant entry,
+/// but the front-end still holds it in `active_tenant`.
+#[tauri::command]
+pub async fn reauthenticate(
+    state: State<'_, AppState>,
+    tenant: TenantContext,
+) -> Result<SignInOutcome, UiError> {
+    state
+        .auth
+        .reauthenticate(&tenant)
+        .await
+        .map_err(UiError::from)
+}
+
 /// Runs interactive incremental consent for an optional `feature`'s scopes
 /// (e.g. `"arm"`, `"audit_log"`, `"write"`). The recovery path the UI invokes
 /// after a command fails with the `consent_required` code: it takes the user

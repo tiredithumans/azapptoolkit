@@ -139,7 +139,7 @@ fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
                                     {
                                         Ok(()) => reload.update(|n| *n += 1),
                                         Err(e) => {
-                                            session.toast_error(e.message, None);
+                                            session.report_command_error(&e);
                                         }
                                     }
                                 });

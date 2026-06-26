@@ -37,6 +37,7 @@ pub fn run() {
             commands::auth::sign_out,
             commands::auth::current_tenants,
             commands::auth::refresh_session,
+            commands::auth::reauthenticate,
             commands::auth::request_scope_consent,
             commands::backup::backup_tenant,
             commands::backup::save_backup_to_file,
