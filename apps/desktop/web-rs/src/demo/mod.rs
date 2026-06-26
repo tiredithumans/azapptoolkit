@@ -40,6 +40,16 @@ fn app_id(name: &str) -> String {
     f::guid(&format!("{name}:app"))
 }
 
+/// Deterministically pick one of `n` fixture variants from an id, so per-id
+/// reads (held grants, Azure roles) differ across principals but stay stable
+/// across reloads for a given principal.
+fn variant_index(id: &str, n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    id.bytes().map(usize::from).sum::<usize>() % n
+}
+
 /// The signed-in tenant the demo presents (presentable copy; mirrors
 /// `test_support::test_tenant`). `App` seeds this as the active tenant so the
 /// config + sign-in gates fall through straight to the authenticated shell.
@@ -302,6 +312,18 @@ fn register_fixtures() {
         .collect();
     mock_ok("list_enterprise_applications", &enterprise);
 
+    let owners = vec![
+        f::directory_object(
+            "owner:alex",
+            "Alex Johnson",
+            "alex.johnson@contoso.onmicrosoft.com",
+        ),
+        f::directory_object(
+            "owner:sam",
+            "Sam Patel",
+            "sam.patel@contoso.onmicrosoft.com",
+        ),
+    ];
     let ent_detail_by_id: HashMap<String, EnterpriseApplicationDetail> = enterprise
         .iter()
         .map(|e| {
@@ -309,7 +331,7 @@ fn register_fixtures() {
                 e.id.clone(),
                 EnterpriseApplicationDetail {
                     service_principal: e.clone(),
-                    owners: Vec::new(),
+                    owners: owners.clone(),
                 },
             )
         })
@@ -323,6 +345,62 @@ fn register_fixtures() {
             .get(id)
             .cloned()
             .unwrap_or_else(|| f::enterprise_application_detail(id, "Demo Enterprise App"))
+    });
+
+    // Enterprise detail sub-tabs — representative sample data shown for every SP.
+    mock_ok(
+        "list_enterprise_app_assignments",
+        &vec![
+            f::app_assignment("Sales Team", "Group"),
+            f::app_assignment("Ava Martinez", "User"),
+            f::app_assignment("Liam Chen", "User"),
+        ],
+    );
+    mock_ok(
+        "list_enterprise_app_roles",
+        &f::app_roles_view(vec![
+            f::exposed_app_role("User", "User", "Standard application user."),
+            f::exposed_app_role("Admin", "Administrator", "Full administrative access."),
+            f::exposed_app_role(
+                "msiam_access",
+                "msiam_access",
+                "Default single sign-on access.",
+            ),
+        ]),
+    );
+    mock_ok(
+        "list_sp_group_memberships",
+        &vec![
+            f::group_membership("All Company", true, true),
+            f::group_membership("SaaS Applications", true, false),
+        ],
+    );
+    mock_ok(
+        "get_enterprise_app_provisioning",
+        &vec![f::provisioning_job(
+            "Active",
+            "Succeeded",
+            "2026-06-25T02:14:00Z",
+        )],
+    );
+
+    // Held Microsoft Graph app-role grants — the Permissions/"granted" tab on
+    // BOTH enterprise apps and managed identities (shared command). Varied per id
+    // so different principals show different grants.
+    let held_variants: Vec<Vec<_>> = vec![
+        vec![
+            f::held_grant("User.Read.All"),
+            f::held_grant("Group.Read.All"),
+        ],
+        vec![f::held_grant("Mail.Send"), f::held_grant("Files.Read.All")],
+        vec![f::held_grant("Directory.Read.All")],
+    ];
+    mock_each("list_held_app_role_grants", move |args| {
+        let id = args
+            .get("servicePrincipalId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        held_variants[variant_index(id, held_variants.len())].clone()
     });
 
     // ---- Managed Identities ----
@@ -340,6 +418,39 @@ fn register_fixtures() {
     managed[0].mi_subtype = MiSubtype::SystemAssigned;
     managed[2].mi_subtype = MiSubtype::SystemAssigned;
     mock_ok("list_managed_identities", &managed);
+
+    // Azure RBAC roles held by each managed identity (Azure roles tab), varied
+    // per id. (Held Graph grants are covered by `list_held_app_role_grants` above.)
+    let azure_variants: Vec<_> = vec![
+        f::azure_roles(vec![
+            f::azure_role("Reader", "Subscription", "Production", false),
+            f::azure_role(
+                "Storage Blob Data Reader",
+                "Resource group",
+                "Production",
+                false,
+            ),
+        ]),
+        f::azure_roles(vec![f::azure_role(
+            "Contributor",
+            "Resource group",
+            "Production",
+            true,
+        )]),
+        f::azure_roles(vec![f::azure_role(
+            "Key Vault Secrets User",
+            "Resource",
+            "Production",
+            false,
+        )]),
+    ];
+    mock_each("list_managed_identity_azure_roles", move |args| {
+        let id = args
+            .get("principalId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        azure_variants[variant_index(id, azure_variants.len())].clone()
+    });
 
     // ---- Security / health ----
     mock_ok("list_credential_expirations", &f::credential_expirations());
