@@ -8,7 +8,9 @@ use azapptoolkit_core::audit::{
     RiskLevel, ScopeMechanism, issue,
 };
 use azapptoolkit_core::identity::{SignInOutcome, TenantContext};
-use azapptoolkit_core::models::{Application, KeyCredential, Organization, PasswordCredential};
+use azapptoolkit_core::models::{
+    AppRole, Application, DirectoryObject, KeyCredential, Organization, PasswordCredential,
+};
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::applications::{ApplicationDetail, ApplicationListRowDto};
 use azapptoolkit_dto::audit::AuditRunResult;
@@ -17,11 +19,14 @@ use azapptoolkit_dto::config::AuthConfigStatus;
 use azapptoolkit_dto::credentials::CredentialRowDto;
 use azapptoolkit_dto::diagnostics::CacheStatsDto;
 use azapptoolkit_dto::enterprise_application::{
-    EnterpriseApplicationDetail, EnterpriseApplicationDto,
+    AppAssignmentDto, AppRolesView, EnterpriseApplicationDetail, EnterpriseApplicationDto,
+    GroupMembershipDto, ProvisioningJobDto,
 };
 use azapptoolkit_dto::exchange::{ExchangeAccessResult, MailScopeEntry};
 use azapptoolkit_dto::keyvault::{KvSecretItemDto, KvSecretValueDto};
-use azapptoolkit_dto::managed_identity::{ManagedIdentityDto, MiSubtype};
+use azapptoolkit_dto::managed_identity::{
+    AppRoleGrantDto, AzureRoleDto, AzureRolesResult, ManagedIdentityDto, MiSubtype,
+};
 use azapptoolkit_dto::permission_tester::MailboxProbeProgress;
 use azapptoolkit_dto::permissions::{
     CatalogResourceSummary, PermissionKind, ResolvedPermission, ResourcePermissions, RoleEntry,
@@ -674,5 +679,110 @@ pub fn mail_scope_scoped(
             group_count: Some(group_count),
             mechanism: ScopeMechanism::Rbac,
         },
+    }
+}
+
+// ---------------- Enterprise-app & managed-identity detail tabs ----------------
+
+/// A directory object (user/group) — an enterprise-app owner or assigned principal.
+pub fn directory_object(id_seed: &str, display_name: &str, upn: &str) -> DirectoryObject {
+    DirectoryObject {
+        id: guid(id_seed),
+        display_name: Some(display_name.to_string()),
+        user_principal_name: Some(upn.to_string()),
+        odata_type: Some("#microsoft.graph.user".to_string()),
+    }
+}
+
+/// A held Microsoft Graph app-role grant — the Permissions/"granted" tab on an
+/// enterprise application or managed identity (`list_held_app_role_grants`).
+pub fn held_grant(value: &str) -> AppRoleGrantDto {
+    AppRoleGrantDto {
+        assignment_id: guid(&format!("held:{value}")),
+        resource_id: guid("graph-sp"),
+        resource_display_name: Some("Microsoft Graph".to_string()),
+        app_role_id: guid(&format!("role:{value}")),
+        app_role_value: Some(value.to_string()),
+    }
+}
+
+/// A principal assigned to an enterprise app's app role ("Users and groups").
+pub fn app_assignment(principal: &str, principal_type: &str) -> AppAssignmentDto {
+    AppAssignmentDto {
+        assignment_id: guid(&format!("assign:{principal}")),
+        principal_display_name: Some(principal.to_string()),
+        principal_type: Some(principal_type.to_string()),
+        // All-zero GUID = "default access" (no specific role).
+        app_role_id: "00000000-0000-0000-0000-000000000000".to_string(),
+    }
+}
+
+/// A group the service principal is a direct member of ("Group memberships").
+pub fn group_membership(name: &str, security_enabled: bool, m365: bool) -> GroupMembershipDto {
+    GroupMembershipDto {
+        id: guid(&format!("group:{name}")),
+        display_name: name.to_string(),
+        security_enabled: Some(security_enabled),
+        group_types: if m365 {
+            vec!["Unified".to_string()]
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+/// A SCIM provisioning job for an enterprise application (Provisioning tab).
+pub fn provisioning_job(status: &str, last_state: &str, last_run: &str) -> ProvisioningJobDto {
+    ProvisioningJobDto {
+        id: guid(&format!("prov:{status}")),
+        template_id: Some("scim".to_string()),
+        status_code: Some(status.to_string()),
+        last_state: Some(last_state.to_string()),
+        last_run: Some(last_run.to_string()),
+        quarantine_reason: None,
+    }
+}
+
+/// An exposed app role on the SP (App roles tab).
+pub fn exposed_app_role(value: &str, display_name: &str, description: &str) -> AppRole {
+    AppRole {
+        id: guid(&format!("approle:{value}")),
+        allowed_member_types: vec!["User".to_string()],
+        display_name: display_name.to_string(),
+        description: Some(description.to_string()),
+        value: value.to_string(),
+        is_enabled: Some(true),
+    }
+}
+
+pub fn app_roles_view(roles: Vec<AppRole>) -> AppRolesView {
+    AppRolesView {
+        target_kind: "servicePrincipal".to_string(),
+        roles,
+    }
+}
+
+/// One Azure RBAC role assignment held by a managed identity (Azure roles tab).
+pub fn azure_role(
+    role_name: &str,
+    scope_level: &str,
+    subscription: &str,
+    high_privilege: bool,
+) -> AzureRoleDto {
+    AzureRoleDto {
+        role_name: role_name.to_string(),
+        scope: format!("/subscriptions/{}/resourceGroups/rg-prod", guid("sub")),
+        scope_level: scope_level.to_string(),
+        subscription: subscription.to_string(),
+        high_privilege,
+    }
+}
+
+pub fn azure_roles(roles: Vec<AzureRoleDto>) -> AzureRolesResult {
+    AzureRolesResult {
+        roles,
+        scanned: 2,
+        total: 2,
+        skipped: 0,
     }
 }
