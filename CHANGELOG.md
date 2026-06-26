@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-26
+
 ### Added
 
 - **macOS and Linux release packages.** The release workflow now builds for all
@@ -17,7 +19,8 @@ the project adheres to
   unsigned for now (first launch needs a one-time Gatekeeper bypass — see the
   README); Apple notarization can be layered on later like the optional Windows
   Authenticode signing. New `just build-macos-updater` / `build-linux-updater`
-  recipes; `bundle.targets` is now `"all"`.
+  recipes; `bundle.targets` is now `"all"`. The GitHub release page groups the
+  downloads by OS (Windows / macOS / Linux) in its notes.
 
 - **Live web demo on GitHub Pages.** The full Leptos/Thaw UI now runs in a plain
   browser with curated sample data and no Tauri backend — try it at
