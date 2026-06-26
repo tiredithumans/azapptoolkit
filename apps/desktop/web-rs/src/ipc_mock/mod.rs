@@ -68,8 +68,15 @@ impl RecordedCall {
 
 type IpcClosure = Closure<dyn Fn(JsValue, JsValue) -> JsValue>;
 
+/// An args-aware route: given a call's arguments (camelCase JSON), produce the
+/// already-serialized reply. Registered by [`mock_each`] for per-id fixtures.
+type DynRoute = Box<dyn Fn(&serde_json::Value) -> JsValue>;
+
 thread_local! {
     static ROUTES: RefCell<HashMap<String, RouteResult>> = RefCell::new(HashMap::new());
+    /// Args-aware handlers, checked before [`ROUTES`] so a detail command can
+    /// return a different fixture per selected object.
+    static FN_ROUTES: RefCell<HashMap<String, DynRoute>> = RefCell::new(HashMap::new());
     static CALLS: RefCell<Vec<RecordedCall>> = const { RefCell::new(Vec::new()) };
     /// `transformCallback`-registered JS callbacks, keyed by the id we hand back.
     static CALLBACKS: RefCell<HashMap<u64, Function>> = RefCell::new(HashMap::new());
@@ -108,7 +115,7 @@ pub fn ensure_installed() {
         CALLS.with(|c| {
             c.borrow_mut().push(RecordedCall {
                 cmd: cmd.clone(),
-                args: json,
+                args: json.clone(),
             })
         });
 
@@ -140,6 +147,11 @@ pub fn ensure_installed() {
                 return Promise::resolve(&JsValue::UNDEFINED).into();
             }
             _ => {}
+        }
+
+        // Args-aware handlers (per-id fixtures) win over static routes.
+        if let Some(v) = FN_ROUTES.with(|r| r.borrow().get(&cmd).map(|h| h(&json))) {
+            return Promise::resolve(&v).into();
         }
 
         match ROUTES.with(|r| {
@@ -229,6 +241,7 @@ pub fn ensure_installed() {
 pub fn reset() {
     ensure_installed();
     ROUTES.with(|r| r.borrow_mut().clear());
+    FN_ROUTES.with(|r| r.borrow_mut().clear());
     CALLS.with(|c| c.borrow_mut().clear());
     LISTENERS.with(|l| l.borrow_mut().clear());
     UNMOCKED.with(|u| *u.borrow_mut() = Unmocked::LoudReject);
@@ -255,6 +268,21 @@ pub fn mock_err(cmd: &str, err: &azapptoolkit_dto::UiError) {
     ensure_installed();
     let e = swb::to_value(err).expect("serialize UiError");
     ROUTES.with(|r| r.borrow_mut().insert(cmd.to_string(), RouteResult::Err(e)));
+}
+
+/// Mock `cmd` with an **args-aware** handler: `f` receives the call's arguments
+/// (camelCase JSON) and returns the typed value to resolve with — so a detail
+/// command can return a different fixture per selected object id. Takes
+/// precedence over a static [`mock_ok`]/[`mock_err`] route for the same command.
+pub fn mock_each<T, F>(cmd: &str, f: F)
+where
+    T: Serialize,
+    F: Fn(&serde_json::Value) -> T + 'static,
+{
+    ensure_installed();
+    let handler: DynRoute =
+        Box::new(move |args| swb::to_value(&f(args)).expect("serialize mock value"));
+    FN_ROUTES.with(|r| r.borrow_mut().insert(cmd.to_string(), handler));
 }
 
 /// How many times `cmd` has been invoked since the last [`reset`].
