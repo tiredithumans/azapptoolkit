@@ -188,6 +188,23 @@ build-windows:
 build-windows-updater:
     cargo tauri build --target x86_64-pc-windows-msvc --config updater-build.json -- --locked
 
+# macOS bundles (.dmg download + .app.tar.gz updater payload) with signed updater
+# artifacts. Native Apple Silicon (aarch64) — a universal binary is deliberately
+# NOT built (it's the historically-flaky bundling step on this stack; an Intel
+# leg can be added later). `--bundles app,dmg` keeps deb/rpm/etc. off the macOS
+# leg. Same updater-key contract as `build-windows-updater`.
+[working-directory('apps/desktop/src-tauri')]
+build-macos-updater:
+    cargo tauri build --target aarch64-apple-darwin --config updater-build.json --bundles app,dmg -- --locked
+
+# Linux bundles (.AppImage download + updater payload, .deb for Debian/Ubuntu)
+# with signed updater artifacts. Needs the GTK/WebKit/AppIndicator dev libs +
+# patchelf on the build host (CI installs them). `--bundles appimage,deb` — rpm
+# is omitted for now. Same updater-key contract as `build-windows-updater`.
+[working-directory('apps/desktop/src-tauri')]
+build-linux-updater:
+    cargo tauri build --target x86_64-unknown-linux-gnu --config updater-build.json --bundles appimage,deb -- --locked
+
 # Regenerate every bundled icon format from icons/icon.svg.
 [working-directory('apps/desktop/src-tauri')]
 icon:

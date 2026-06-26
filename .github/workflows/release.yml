@@ -1,4 +1,4 @@
-name: Release (Windows installers)
+name: Release (installers)
 
 on:
   push:
@@ -17,58 +17,48 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-installers:
-    runs-on: windows-latest
-    env:
-      # The `secrets` context is not allowed in a step-level `if` (it made this
-      # whole workflow unparseable — every run failed in 0s with "workflow file
-      # issue"); route the presence check through job env instead.
-      HAS_AUTHENTICODE_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+  # Fail fast (before the long cross-platform build) on a mis-tagged release:
+  # version drift between the tag and the manifests, or a placeholder updater
+  # key. Re-runs the RustSec scan against the exact lockfile this tag builds.
+  guard:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      # Fail fast (before the long build) if a tag was pushed without bumping the
-      # app version: the installer/updater take their version from
-      # tauri.conf.json, but latest.json takes it from the tag — a mismatch makes
-      # the updater advertise an upgrade that installs the same bytes (a loop).
-      - name: Guard tag matches manifest version
+      # The installer/updater take their version from tauri.conf.json, but
+      # latest.json takes it from the tag — a mismatch makes the updater
+      # advertise an upgrade that installs the same bytes (a loop). The runbook
+      # bumps three manifests in lockstep; enforce all three so the binary's
+      # crate version can't drift from the installer/updater version.
+      - name: Guard tag matches manifest versions
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
-          $conf = Get-Content apps/desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
           $tag = "${{ github.ref_name }}".TrimStart('v')
+          $conf = Get-Content apps/desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
           if ($conf.version -ne $tag) {
-            Write-Error "release tag v$tag does not match tauri.conf.json version $($conf.version) — bump the manifest (and the Cargo workspace version) before tagging"
+            Write-Error "release tag v$tag does not match tauri.conf.json version $($conf.version) — bump the manifest (and both Cargo versions) before tagging"
             exit 1
           }
-          # The runbook says to bump BOTH versions; enforce both so the binary's
-          # crate version can't drift from the installer/updater version.
-          $cargo = Get-Content Cargo.toml -Raw
-          if ($cargo -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
-            Write-Error "could not find the workspace version in Cargo.toml"
+          function Get-CargoVersion($path) {
+            $raw = Get-Content $path -Raw
+            if ($raw -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+              Write-Error "could not find the package/workspace version in $path"
+              exit 1
+            }
+            return $Matches[1]
+          }
+          $ws = Get-CargoVersion 'Cargo.toml'
+          if ($ws -ne $tag) {
+            Write-Error "release tag v$tag does not match the Cargo workspace version $ws — bump [workspace.package] version before tagging"
             exit 1
           }
-          $wsVersion = $Matches[1]
-          if ($wsVersion -ne $tag) {
-            Write-Error "release tag v$tag does not match the Cargo workspace version $wsVersion — bump [workspace.package] version before tagging"
+          $web = Get-CargoVersion 'apps/desktop/web-rs/Cargo.toml'
+          if ($web -ne $tag) {
+            Write-Error "release tag v$tag does not match the web-rs crate version $web — bump it before tagging"
             exit 1
           }
-          Write-Host "version $($conf.version) matches tag and workspace — ok"
-
-      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
-        with:
-          targets: x86_64-pc-windows-msvc, wasm32-unknown-unknown
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-
-      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
-        with:
-          tool: just,trunk,cargo-audit
-
-      - name: Install Tauri CLI
-        # Pinned to the exact `tauri` runtime version (Cargo.lock) for reproducible
-        # release tooling; bump in lockstep with the crate. --locked pins its deps.
-        run: cargo install tauri-cli --locked --version "=2.11.2"
+          Write-Host "version $tag matches tauri.conf, workspace Cargo, and web-rs — ok"
 
       - name: Guard updater pubkey
         shell: pwsh
@@ -79,22 +69,76 @@ jobs:
             exit 1
           }
 
-      # Re-run the RustSec advisory scan against the shipped bytes. main-branch
-      # CI runs `just audit` per-merge, but an advisory filed after the last
-      # merge (or against the exact lockfile this tag builds) would otherwise
-      # ship unscanned — gate it here, before the build, so a new advisory fails
-      # the release instead of riding into an installer. Same recipe CI uses.
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
+        with:
+          tool: just,cargo-audit
+      # main-branch CI runs `just audit` per-merge, but an advisory filed after
+      # the last merge (or against this tag's exact lockfile) would otherwise
+      # ship unscanned — gate it here so a new advisory fails the release.
       - name: audit (workspace)
         run: just audit
 
-      - name: Build installers (with updater artifacts)
+  # Per-platform bundles + signed updater artifacts. Each leg uploads its whole
+  # bundle/ tree as an artifact; the `release` job assembles one cross-platform
+  # latest.json from them (a single assembler — no latest.json write races).
+  build:
+    needs: guard
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            recipe: build-windows-updater
+            artifact: windows
+          # Native Apple Silicon (aarch64); Intel/universal is a future addition.
+          - os: macos-latest
+            rust_target: aarch64-apple-darwin
+            recipe: build-macos-updater
+            artifact: macos
+          - os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+            recipe: build-linux-updater
+            artifact: linux
+    runs-on: ${{ matrix.os }}
+    env:
+      # The `secrets` context is not allowed in a step-level `if`; route the
+      # Authenticode-cert presence check through job env instead.
+      HAS_AUTHENTICODE_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          targets: ${{ matrix.rust_target }}, wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
+        with:
+          tool: just,trunk
+
+      - name: Install Tauri CLI
+        # Pinned to the exact `tauri` runtime version (Cargo.lock) for reproducible
+        # release tooling; bump in lockstep with the crate. --locked pins its deps.
+        run: cargo install tauri-cli --locked --version "=2.11.2"
+
+      - name: Build bundles (with updater artifacts)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY_PASSWORD }}
-        run: just build-windows-updater
+        run: just ${{ matrix.recipe }}
 
       - name: Sign installers (optional Authenticode)
-        if: ${{ env.HAS_AUTHENTICODE_CERT == 'true' }}
+        if: matrix.os == 'windows-latest' && env.HAS_AUTHENTICODE_CERT == 'true'
         shell: powershell
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
@@ -113,14 +157,11 @@ jobs:
               /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
           }
 
-      # The auto-updater target is the NSIS -setup.exe (per-user, no admin —
-      # the MSI needs elevation and is kept only as a manual/enterprise
-      # download). Authenticode signing above rewrites the installer bytes,
-      # which invalidates the updater signature emitted during the build, so
-      # regenerate it over the FINAL artifact. (No-op-safe when no cert is set:
-      # it just re-signs the unchanged binary.)
+      # Authenticode signing rewrites the installer bytes, invalidating the
+      # updater signature emitted during the build — regenerate it over the FINAL
+      # NSIS artifact (the updater target). Only needed when we actually signed.
       - name: Refresh updater signature (NSIS)
-        if: startsWith(github.ref, 'refs/tags/')
+        if: matrix.os == 'windows-latest' && env.HAS_AUTHENTICODE_CERT == 'true'
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
@@ -130,22 +171,53 @@ jobs:
             | Select-Object -First 1
           cargo tauri signer sign "$($exe.FullName)"
 
-      # cargo tauri build does NOT emit latest.json (that is tauri-action's
-      # job); assemble the one the updater endpoint serves ourselves. signature
-      # is the literal contents of the .sig; url points at the release asset.
-      - name: Generate update manifest (latest.json)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bundle-${{ matrix.artifact }}
+          path: target/${{ matrix.rust_target }}/release/bundle/
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble the cross-platform update manifest + checksums and publish a draft.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+
+      # cargo tauri build does NOT emit latest.json (that is tauri-action's job);
+      # assemble the one the updater endpoint serves ourselves, from each
+      # platform's updater bundle + its `.sig`. macOS ships aarch64 only.
+      - name: Assemble update manifest (latest.json)
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           $version = $tag.TrimStart('v')
-          $exe = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe `
-            | Select-Object -First 1
-          $sig = (Get-Content "$($exe.FullName).sig" -Raw).Trim()
-          $url = "https://github.com/${{ github.repository }}/releases/download/$tag/$($exe.Name)"
+          $repo = "${{ github.repository }}"
+
+          function Updater-Platform($glob) {
+            $f = Get-ChildItem $glob -ErrorAction Stop | Select-Object -First 1
+            $sigPath = "$($f.FullName).sig"
+            if (-not (Test-Path $sigPath)) { Write-Error "missing updater signature for $($f.Name)"; exit 1 }
+            return [ordered]@{
+              signature = (Get-Content $sigPath -Raw).Trim()
+              url       = "https://github.com/$repo/releases/download/$tag/$($f.Name)"
+            }
+          }
+
+          $platforms = [ordered]@{
+            "windows-x86_64" = Updater-Platform "artifacts/bundle-windows/nsis/*-setup.exe"
+            "darwin-aarch64" = Updater-Platform "artifacts/bundle-macos/macos/*.app.tar.gz"
+            "linux-x86_64"   = Updater-Platform "artifacts/bundle-linux/appimage/*.AppImage"
+          }
 
           # The updater's `notes` field powers the in-app changelog splash. Pull
-          # this version's CHANGELOG.md section: collect lines after the matching
+          # this version's CHANGELOG.md section: lines after the matching
           # `## [X.Y.Z]` header until the next `## [` section header.
           $notes = ""
           if (Test-Path CHANGELOG.md) {
@@ -169,23 +241,22 @@ jobs:
             version   = $version
             notes     = $notes
             pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-            platforms = [ordered]@{
-              "windows-x86_64" = [ordered]@{ signature = $sig; url = $url }
-            }
+            platforms = $platforms
           }
           $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path latest.json -Encoding utf8
           Get-Content latest.json
 
-      # The MSI (the enterprise/SCCM/Intune artifact) carries no integrity
-      # artifact at all when the optional Authenticode cert is absent — publish
-      # hashes so IT can pin what they deploy. Covers every uploaded asset.
+      # Publish hashes so IT can pin what they deploy (the MSI carries no
+      # integrity artifact when the optional Authenticode cert is absent).
       - name: Generate SHA256SUMS
-        if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
           $assets = @(
-            Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
-            Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+            Get-ChildItem artifacts/bundle-windows/msi/*.msi
+            Get-ChildItem artifacts/bundle-windows/nsis/*-setup.exe
+            Get-ChildItem artifacts/bundle-macos/dmg/*.dmg
+            Get-ChildItem artifacts/bundle-linux/appimage/*.AppImage
+            Get-ChildItem artifacts/bundle-linux/deb/*.deb
             Get-Item latest.json
           )
           $assets | ForEach-Object {
@@ -198,18 +269,22 @@ jobs:
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           files: |
-            target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
-            target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
-            target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe.sig
+            artifacts/bundle-windows/msi/*.msi
+            artifacts/bundle-windows/nsis/*-setup.exe
+            artifacts/bundle-windows/nsis/*-setup.exe.sig
+            artifacts/bundle-macos/dmg/*.dmg
+            artifacts/bundle-macos/macos/*.app.tar.gz
+            artifacts/bundle-macos/macos/*.app.tar.gz.sig
+            artifacts/bundle-linux/appimage/*.AppImage
+            artifacts/bundle-linux/appimage/*.AppImage.sig
+            artifacts/bundle-linux/deb/*.deb
             latest.json
             SHA256SUMS
-          # Draft first, human publishes. Three reasons: (1) a review checkpoint
-          # for the auto-generated notes (paste the CHANGELOG entry) before any
-          # installed app can see the release; (2) drafts are not "latest", so
-          # the floating latest.json endpoint never 404s while assets attach;
-          # (3) a bad build is caught before the silent auto-updater ships it.
+          # Draft first, human publishes: a review checkpoint for the notes; the
+          # floating latest.json endpoint never 404s while assets attach; a bad
+          # build is caught before the silent auto-updater ships it.
           draft: true
           generate_release_notes: true
-          # Every glob above is mandatory: a renamed bundle path must fail the
-          # release, not silently publish without the installer/.sig/manifest.
+          # Every glob is mandatory: a renamed bundle path must fail the release,
+          # not silently publish without an installer/.sig/manifest.
           fail_on_unmatched_files: true

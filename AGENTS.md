@@ -73,7 +73,7 @@ apps/desktop/
 
 docs/DEVELOPMENT.md                  # build, test, package, release, updater keys
 docs/architecture/                   # deep-dives: auth-consent, caching-search, scoping-audit
-.github/workflows/                   # ci.yml · release.yml (Windows MSI+NSIS) · codeql.yml · pages.yml (GitHub Pages demo)
+.github/workflows/                   # ci.yml · release.yml (Win MSI+NSIS · macOS dmg · Linux AppImage+deb, matrix) · codeql.yml · pages.yml (GitHub Pages demo)
 ```
 
 ## Common patterns
@@ -117,9 +117,11 @@ just web-audit      # RustSec (web-rs lockfile, separate from root)
 just deny           # license + crate-source + bans (deny.toml)
 just web-deny       # same policy, web-rs tree
 
-# Release (Windows) + icons:
-just build-windows  # MSI + NSIS installers
-just icon           # regenerate from icons/icon.svg
+# Release builds (per-host; the release.yml matrix runs all three) + icons:
+just build-windows           # Windows MSI + NSIS installers
+just build-macos-updater     # macOS .dmg + .app updater payload (Apple Silicon)
+just build-linux-updater     # Linux .AppImage + .deb
+just icon                    # regenerate from icons/icon.svg
 
 # Housekeeping:
 just clean          # cargo clean BOTH build trees (root + excluded web-rs) to reclaim disk
@@ -176,6 +178,8 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 - **GitHub Pages demo = the WASM frontend with the Tauri backend mocked.** `just web-build-pages` builds `web-rs` with the `demo` feature, deployed by `.github/workflows/pages.yml` (needs Settings → Pages → Source = "GitHub Actions"). It installs the shared `ipc_mock` bridge — the same `window.__TAURI_INTERNALS__` mock the GUI test harness uses, **extracted out of `test_support` into `web-rs/src/ipc_mock/`** (gated by the internal `mock-ipc` feature that both `test-support` and `demo` enable) — pre-loaded with curated fixtures (`demo/mod.rs`), seeds a demo tenant so the config/sign-in gates fall through to the shell (`lib.rs`), and shows a read-only banner (`shell.rs`, `.demo-banner`). Unregistered commands (every mutation + any unfixtured read) degrade to a friendly `demo_unsupported` error via `ipc_mock::Unmocked::DemoFriendly`. Detail commands (`get_application_detail` / `get_enterprise_application_detail` / `get_mail_permission_scopes`) are registered **args-aware** with `ipc_mock::mock_each` (handler reads the call's camelCase args → returns a per-id fixture) so the detail pane switches per selection; a plain `mock_ok` returns one payload for every id (the bug the user hit). Ids are synthetic-but-realistic GUIDs from `fixtures::guid(seed)`. **Footgun:** the infallible `invoke()` reads (`get_cached_audit`/`cache_stats`/`export_audit_csv`/`get_auth_config`) and the `()`-returning ones (`invalidate_list_cache` — fired by every list Refresh — `clear_cache`, `cancel_*`, …) must be registered in `demo::register_fixtures`, or they **panic** on the rejected-promise fallback. Adding a new infallible `invoke()`/`invoke::<()>` reachable in the demo → register a fixture for it. The `demo` feature is off in `web-build`/desktop, so the mock + fixtures + banner never ship in releases. Nav is signal-based (no router), so no `404.html` SPA fallback is needed — only the `--public-url` subpath base-href.
 
 - **Auto-update is interactive (not silent).** The front-end checks once on launch (`commands::updater::check_for_update`, swallowed silently on failure / in dev) and, if an update waits, toasts a notification whose action opens the `UpdateSplash` (`web-rs/components/update_splash.rs`) — changelog notes + **Update & restart** (`perform_update`: download_and_install → `app.restart()`, byte progress on the `updater-progress` channel). There's also a manual "Check for updates" button by the nav version. The changelog text is the updater manifest's `notes`, which `release.yml` populates from the `CHANGELOG.md` section for the tag, so it only lights up for releases from **v0.8.0 onward** (v0.7.0's `latest.json` predates it). Don't reintroduce a silent background `download_and_install` in `lib.rs` setup — it was removed in favour of this flow and would race the prompt.
+
+- **Release is a 3-OS matrix → one aggregated `latest.json`.** `release.yml` runs `guard` (version/pubkey/audit, fails fast) → `build` matrix (`windows-latest` `just build-windows-updater` · `macos-latest` `build-macos-updater`, native **aarch64** only · `ubuntu-latest` `build-linux-updater`, needs the GTK/WebKit + `patchelf` apt deps), each uploading its `bundle/` tree as an artifact → `release` job downloads all and assembles ONE `latest.json` with `windows-x86_64` (NSIS `-setup.exe`) + `darwin-aarch64` (`.app.tar.gz`) + `linux-x86_64` (`.AppImage`) updater entries from each platform's `.sig`, plus SHA256SUMS, into a single draft. `bundle.targets` is `"all"`; the mac/Linux recipes pin formats via `--bundles` (`app,dmg` / `appimage,deb`). macOS ships **unsigned** (Gatekeeper bypass documented in README) — Authenticode (Windows) and notarization (macOS) are both optional, secret-gated, never blocking. Adding a platform/arch = a matrix leg + a `latest.json` platform key + a justfile recipe.
 
 - **CSP governs the *webview*, not backend egress.** `connect-src` in `tauri.conf.json`; only WASM frontend fetches are restricted. Backend reqwest calls to new hosts don't need a CSP change.
 

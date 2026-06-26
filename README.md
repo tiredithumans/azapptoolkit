@@ -167,8 +167,12 @@ toolkit-owned service principal storing tokens you cannot audit.
 
 ## Install
 
-Download the latest installer from the
+Download the latest package for your platform from the
 [Releases page](https://github.com/tiredithumans/azapptoolkit/releases).
+Builds are published for **Windows, macOS, and Linux**.
+
+### Windows
+
 Two formats are published, for two different audiences. **Pick one and
 stick with it** — installing one type and later updating with the other
 leaves two conflicting entries in Windows (see [Updates](#updates)):
@@ -190,14 +194,42 @@ downloads WebView2 from Microsoft during setup. After install, the only
 runtime azapptoolkit depends on is Windows itself plus that WebView2
 runtime.
 
+### macOS (Apple Silicon)
+
+Download **`azapptoolkit_<version>_aarch64.dmg`**, open it, and drag the
+app to Applications. The builds are **not yet notarized by Apple**, so on
+first launch Gatekeeper blocks the app ("can't be opened because Apple
+cannot check it for malicious software"). Clear it once, either way:
+
+- **Right-click → Open** in Finder, then confirm **Open** in the dialog; or
+- run `xattr -dr com.apple.quarantine "/Applications/azapptoolkit.app"`.
+
+After that it launches normally and **auto-updates in place** like the
+Windows NSIS build. Apple Silicon (M-series) only for now; Intel builds
+aren't published yet.
+
+### Linux (x86_64)
+
+Two formats:
+
+- **`azapptoolkit_<version>_amd64.AppImage`** — portable, runs on most
+  distributions; `chmod +x` it and run. This is the format the in-app
+  **auto-updater** manages.
+- **`azapptoolkit_<version>_amd64.deb`** — for Debian/Ubuntu and
+  derivatives (`sudo apt install ./azapptoolkit_<version>_amd64.deb`).
+
+Needs a WebKitGTK runtime (`libwebkit2gtk-4.1`), present on most modern
+desktops and pulled in automatically by the `.deb`.
+
 ## Updates
 
-The in-app auto-updater targets the **NSIS (`-setup.exe`) per-user
-install**. On launch, azapptoolkit checks the configured release endpoint
-for a newer signed build. If one is available, it is downloaded and
-applied **automatically** — there is no prompt; a brief Windows installer
-progress window may appear, and the new version runs the next time the
-app starts. Update payloads are verified against a public key baked
+The in-app auto-updater manages the **NSIS (`-setup.exe`) install** on
+Windows, the **`.app`** on macOS, and the **`.AppImage`** on Linux (the
+MSI and `.deb` are not auto-updated — manage those through your packaging
+tooling). On launch, azapptoolkit checks the configured release endpoint
+for a newer signed build for your platform. If one is available, it is
+downloaded and applied **automatically** — there is no prompt; the new
+version runs the next time the app starts. Update payloads are verified against a public key baked
 into the build at release time — a payload that fails signature
 verification is rejected before any bytes touch disk. A failed update
 check or install never blocks the app; it is logged (see
@@ -233,9 +265,9 @@ the updater endpoint at any point in the session.
 
 ## Requirements
 
-- Windows 10 or newer (primary target). macOS and Linux builds are
-  supported for development but not currently published — see
-  [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md).
+- Windows 10 or newer (primary target), macOS on Apple Silicon, or a
+  modern x86_64 Linux desktop with WebKitGTK — installers for all three
+  are on the [Releases page](https://github.com/tiredithumans/azapptoolkit/releases).
 - A Microsoft Entra ID account with at least the
   `Application Administrator` role, or the equivalent delegated
   consent for the permissions listed below.

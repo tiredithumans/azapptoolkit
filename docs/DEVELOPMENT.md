@@ -117,7 +117,14 @@ a matching table-driven test that cites the PowerShell source
 `file:line` it was ported from — this is how rule-for-rule parity with
 the legacy module is maintained.
 
-## Packaging a Windows installer
+## Packaging installers
+
+The release workflow builds packages for all three platforms — Windows
+(MSI + NSIS), macOS (`.dmg` + `.app` updater payload), and Linux
+(`.AppImage` + `.deb`) — each on its native GitHub-hosted runner. Locally
+you can build for your own host with the per-platform recipes below.
+
+### Windows
 
 The build produces both an MSI and an NSIS installer in one pass.
 WebView2 is provisioned via Tauri's `downloadBootstrapper` mode: it ships
@@ -155,6 +162,30 @@ JSON parses as invalid — a file path has no quoting to mangle.) `cargo tauri b
 `latest.json` — the workflow assembles it (see [CI](#ci) below). The
 auto-update target is the **NSIS `-setup.exe`** (per-user, no admin);
 the MSI is published for manual/enterprise download only.
+
+### macOS
+
+`just build-macos-updater` runs `cargo tauri build --target
+aarch64-apple-darwin --config updater-build.json --bundles app,dmg` and
+writes a `.dmg` (under `bundle/dmg/`) plus the `.app.tar.gz` updater
+payload + `.sig` (under `bundle/macos/`). **Apple Silicon only** — a
+universal binary is deliberately not built (it's the historically-flaky
+bundling step on this stack; an Intel `macos-13` matrix leg can be added
+later). The builds are **unsigned / not notarized**, so first launch hits
+Gatekeeper — see the README's [Install → macOS](../README.md#install) note
+for the one-time `xattr` / right-click-Open workaround. (Apple notarization
+can be layered on later by adding the Developer-ID secrets + `APPLE_*` env
+to the macOS leg, exactly as Authenticode is optional on Windows.)
+
+### Linux
+
+`just build-linux-updater` runs `cargo tauri build --target
+x86_64-unknown-linux-gnu --config updater-build.json --bundles
+appimage,deb` and writes a `.AppImage` (+ `.sig`, the updater payload) and
+a `.deb`. The build host needs the GTK/WebKit dev libraries + `patchelf`
+(`libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+libssl-dev patchelf`); the release runner installs them. `rpm` is omitted
+for now (add it to the recipe's `--bundles` when needed).
 
 ### Which installer to ship
 
