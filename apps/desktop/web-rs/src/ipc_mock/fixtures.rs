@@ -4,10 +4,11 @@
 //! `serde-wasm-bindgen` round-trip the real IPC uses validates them.
 
 use azapptoolkit_core::audit::{
-    AuditItem, CredentialKind, CredentialStatus, ListCredentialStatus, RiskLevel, issue,
+    AuditItem, CredentialKind, CredentialStatus, ListCredentialStatus, MailPermissionScope,
+    RiskLevel, ScopeMechanism, issue,
 };
 use azapptoolkit_core::identity::{SignInOutcome, TenantContext};
-use azapptoolkit_core::models::{Application, Organization};
+use azapptoolkit_core::models::{Application, KeyCredential, Organization, PasswordCredential};
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::applications::{ApplicationDetail, ApplicationListRowDto};
 use azapptoolkit_dto::audit::AuditRunResult;
@@ -18,13 +19,16 @@ use azapptoolkit_dto::diagnostics::CacheStatsDto;
 use azapptoolkit_dto::enterprise_application::{
     EnterpriseApplicationDetail, EnterpriseApplicationDto,
 };
-use azapptoolkit_dto::exchange::ExchangeAccessResult;
+use azapptoolkit_dto::exchange::{ExchangeAccessResult, MailScopeEntry};
 use azapptoolkit_dto::keyvault::{KvSecretItemDto, KvSecretValueDto};
 use azapptoolkit_dto::managed_identity::{ManagedIdentityDto, MiSubtype};
 use azapptoolkit_dto::permission_tester::MailboxProbeProgress;
-use azapptoolkit_dto::permissions::{CatalogResourceSummary, ResourcePermissions, RoleEntry};
+use azapptoolkit_dto::permissions::{
+    CatalogResourceSummary, PermissionKind, ResolvedPermission, ResourcePermissions, RoleEntry,
+};
 use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use azapptoolkit_dto::sharepoint::SiteSweepProgress;
+use chrono::{DateTime, TimeZone, Utc};
 
 /// A `UiError` with the given code and message (the error-path mock payload).
 pub fn ui_error(code: &str, message: &str) -> UiError {
@@ -289,6 +293,21 @@ pub fn audit_run_result() -> AuditRunResult {
             issue::HIGH_RISK_APP_PERMS
         )],
     );
+    // Scoped (well-configured) counterparts to the org-wide findings above —
+    // demonstrate mailbox access confined via Exchange RBAC and SharePoint
+    // confined to selected sites. The `issues` strings carry the
+    // `SCOPED_VIA_RBAC` / `SCOPED_SHAREPOINT` markers the audit facets key off.
+    let scoped_mailbox = audit_item(
+        "Margie's Travel Portal",
+        RiskLevel::Low,
+        &["Mailbox access scoped via RBAC for Applications: Mail.Read".to_string()],
+    );
+    let scoped_sharepoint = audit_item(
+        "Alpine Ski House Booking",
+        RiskLevel::Low,
+        &["SharePoint access scoped to selected sites: Sites.Selected".to_string()],
+    );
+
     let clean_a = audit_item("Proseware Sync", RiskLevel::Low, &[]);
     let clean_b = audit_item("Litware Analytics", RiskLevel::Low, &[]);
 
@@ -302,6 +321,8 @@ pub fn audit_run_result() -> AuditRunResult {
             no_owners,
             single_owner,
             second_over,
+            scoped_mailbox,
+            scoped_sharepoint,
             clean_a,
             clean_b,
         ],
@@ -543,5 +564,115 @@ pub fn exchange_access_result() -> ExchangeAccessResult {
         roles_skipped: Vec::new(),
         removed_entra_grants: vec!["Mail.Read".to_string()],
         warnings: Vec::new(),
+    }
+}
+
+// ---------------- Detail-pane atoms (credentials, held permissions, scope) ----------------
+
+/// A fixed UTC date — demo data is deterministic (no runtime clock).
+pub fn date(year: i32, month: u32, day: u32) -> Option<DateTime<Utc>> {
+    Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).single()
+}
+
+/// A deterministic, synthetic v4-shaped GUID from a seed string: stable across
+/// reloads (no RNG) so detail lookups by id are reproducible, while *looking*
+/// like a real Entra object/app id (`8-4-4-4-12` hex, version+variant nibbles set).
+pub fn guid(seed: &str) -> String {
+    // FNV-1a 64-bit of the seed, expanded to 128 bits via two splitmix64 draws.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in seed.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    fn mix(mut z: u64) -> u64 {
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    let hi = mix(h);
+    let lo = mix(h ^ 0xd1b5_4a32_d192_ed03);
+    let mut s = format!("{hi:016x}{lo:016x}").into_bytes();
+    s[12] = b'4'; // version nibble
+    s[16] = [b'8', b'9', b'a', b'b'][(lo & 3) as usize]; // variant nibble
+    let s = String::from_utf8(s).expect("hex is ascii");
+    format!(
+        "{}-{}-{}-{}-{}",
+        &s[0..8],
+        &s[8..12],
+        &s[12..16],
+        &s[16..20],
+        &s[20..32]
+    )
+}
+
+/// A client secret with a display name, masked hint, and expiry (Credentials tab).
+pub fn password_credential(
+    display_name: &str,
+    hint: &str,
+    end: Option<DateTime<Utc>>,
+) -> PasswordCredential {
+    PasswordCredential {
+        key_id: guid(&format!("secret:{display_name}")),
+        display_name: Some(display_name.to_string()),
+        hint: Some(hint.to_string()),
+        start_date_time: date(2024, 6, 1),
+        end_date_time: end,
+        secret_text: None,
+    }
+}
+
+/// A certificate (key) credential with a display name and expiry (Credentials tab).
+pub fn key_credential(display_name: &str, end: Option<DateTime<Utc>>) -> KeyCredential {
+    KeyCredential {
+        key_id: guid(&format!("cert:{display_name}")),
+        display_name: Some(display_name.to_string()),
+        usage: Some("Verify".to_string()),
+        r#type: Some("AsymmetricX509Cert".to_string()),
+        start_date_time: date(2024, 6, 1),
+        end_date_time: end,
+        custom_key_identifier: Some("0f7a2c9b1e4d6a8f3b5c2e1d9a4f6b8c0e2d4a6f".to_string()),
+    }
+}
+
+/// A resolved (held) permission row for the Permissions tab. SharePoint scope
+/// badges are name-based off `value` (`Sites.Selected` → scoped, `Sites.*` →
+/// org-wide); Exchange mailbox scope comes from [`mail_scope_scoped`] via
+/// `get_mail_permission_scopes`.
+pub fn resolved_permission(
+    resource_app_id: &str,
+    resource_display_name: &str,
+    value: &str,
+    display_name: &str,
+    kind: PermissionKind,
+) -> ResolvedPermission {
+    ResolvedPermission {
+        resource_app_id: resource_app_id.to_string(),
+        resource_display_name: Some(resource_display_name.to_string()),
+        permission_id: guid(&format!("perm:{value}")),
+        permission_value: Some(value.to_string()),
+        permission_display_name: Some(display_name.to_string()),
+        permission_kind: kind,
+        runtime_assignment_id: Some(guid(&format!("assign:{value}"))),
+        runtime_grant_id: None,
+    }
+}
+
+/// A `get_mail_permission_scopes` entry confining a Graph mail permission to a
+/// named group via Exchange RBAC for Applications — drives the "Scoped: N
+/// group(s)" mailbox badge on the Permissions tab.
+pub fn mail_scope_scoped(
+    graph_permission: &str,
+    scope_name: &str,
+    group_count: u32,
+) -> MailScopeEntry {
+    MailScopeEntry {
+        graph_permission: graph_permission.to_string(),
+        exchange_role: format!("Application {graph_permission}"),
+        scope: MailPermissionScope::Scoped {
+            scope_name: Some(scope_name.to_string()),
+            recipient_filter: Some(format!("MemberOfGroup -eq '{scope_name}'")),
+            group_count: Some(group_count),
+            mechanism: ScopeMechanism::Rbac,
+        },
     }
 }

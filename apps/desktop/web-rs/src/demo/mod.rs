@@ -9,14 +9,36 @@
 //! [`Unmocked::DemoFriendly`]. The handful of infallible `invoke()` commands
 //! (which would *panic* on a rejected promise) are registered explicitly.
 //!
+//! Detail commands are registered **args-aware** ([`mock_each`]) so each selected
+//! app/SP returns its own payload (otherwise the detail pane wouldn't switch).
+//! All ids are deterministic synthetic GUIDs ([`fixtures::guid`]) so they look
+//! like real Entra ids while staying stable across reloads.
+//!
 //! Compiled only under the `demo` feature, so none of this — nor the mock bridge
 //! or fixtures it pulls in — ever enters the shipped desktop Trunk bundle.
 
+use std::collections::HashMap;
+
 use azapptoolkit_core::audit::ListCredentialStatus;
 use azapptoolkit_core::identity::TenantContext;
+use azapptoolkit_core::models::{Application, KeyCredential, PasswordCredential};
+use azapptoolkit_dto::applications::{ApplicationDetail, ApplicationListRowDto};
+use azapptoolkit_dto::enterprise_application::EnterpriseApplicationDetail;
+use azapptoolkit_dto::exchange::MailScopeEntry;
 use azapptoolkit_dto::managed_identity::MiSubtype;
+use azapptoolkit_dto::permissions::{PermissionKind, ResolvedPermission};
 
-use crate::ipc_mock::{self, Unmocked, fixtures as f, mock_ok};
+use crate::ipc_mock::{self, Unmocked, fixtures as f, mock_each, mock_ok};
+
+/// Microsoft Graph — the resource every demo held-permission is exposed by.
+const GRAPH: &str = f::MICROSOFT_GRAPH_APP_ID;
+
+fn obj_id(name: &str) -> String {
+    f::guid(&format!("{name}:obj"))
+}
+fn app_id(name: &str) -> String {
+    f::guid(&format!("{name}:app"))
+}
 
 /// The signed-in tenant the demo presents (presentable copy; mirrors
 /// `test_support::test_tenant`). `App` seeds this as the active tenant so the
@@ -24,7 +46,7 @@ use crate::ipc_mock::{self, Unmocked, fixtures as f, mock_ok};
 pub fn demo_tenant() -> TenantContext {
     TenantContext {
         tenant_id: "demo-tenant".to_string(),
-        account_oid: "00000000-0000-0000-0000-0000000000de".to_string(),
+        account_oid: f::guid("demo:admin"),
         username: Some("admin@contoso.onmicrosoft.com".to_string()),
         display_name: Some("Contoso Ltd (demo)".to_string()),
     }
@@ -39,6 +61,178 @@ pub fn install() {
     register_fixtures();
 }
 
+/// One curated app registration: its display name, credentials, held permissions,
+/// and (optional) Exchange mailbox scoping. Ids are derived from the name.
+struct DemoApp {
+    name: &'static str,
+    secrets: Vec<PasswordCredential>,
+    certs: Vec<KeyCredential>,
+    perms: Vec<ResolvedPermission>,
+    mail_scopes: Vec<MailScopeEntry>,
+    cred_status: ListCredentialStatus,
+}
+
+/// An Application-kind held permission on Microsoft Graph.
+fn app_perm(value: &str, display: &str) -> ResolvedPermission {
+    f::resolved_permission(
+        GRAPH,
+        "Microsoft Graph",
+        value,
+        display,
+        PermissionKind::Application,
+    )
+}
+/// A Delegated-kind held permission on Microsoft Graph.
+fn deleg_perm(value: &str, display: &str) -> ResolvedPermission {
+    f::resolved_permission(
+        GRAPH,
+        "Microsoft Graph",
+        value,
+        display,
+        PermissionKind::Delegated,
+    )
+}
+
+/// The curated app-registration catalog. The first few are "showcase" apps with
+/// credentials + scoped/org-wide permissions; the rest are lean but realistic.
+fn catalog() -> Vec<DemoApp> {
+    use ListCredentialStatus as S;
+    vec![
+        // Mailbox permission scoped to a group via Exchange RBAC + a SharePoint
+        // site-scoped permission + an org-wide one, plus secrets and a cert.
+        DemoApp {
+            name: "Contoso CRM",
+            secrets: vec![
+                f::password_credential("crm-prod-secret", "Hq9", f::date(2025, 8, 30)),
+                f::password_credential("crm-legacy-secret", "a1Z", f::date(2024, 2, 1)),
+            ],
+            certs: vec![f::key_credential("crm-signing-cert", f::date(2026, 11, 15))],
+            perms: vec![
+                app_perm("Mail.Read", "Read mail in all mailboxes"),
+                app_perm("Sites.Selected", "Access selected SharePoint sites"),
+                app_perm("User.Read.All", "Read all users' full profiles"),
+            ],
+            mail_scopes: vec![f::mail_scope_scoped("Mail.Read", "Finance Mailboxes", 2)],
+            cred_status: S::Expiring,
+        },
+        // Org-wide mailbox access (contrast: no scope entry → "Org-wide" badge).
+        DemoApp {
+            name: "Fabrikam Mail Sync",
+            secrets: vec![f::password_credential(
+                "mailsync-secret",
+                "7Kp",
+                f::date(2025, 7, 9),
+            )],
+            certs: vec![],
+            perms: vec![
+                app_perm("Mail.ReadWrite", "Read and write mail in all mailboxes"),
+                app_perm("Mail.Send", "Send mail as any user"),
+            ],
+            mail_scopes: vec![],
+            cred_status: S::Expiring,
+        },
+        // SharePoint: site-scoped (Sites.Selected) vs org-wide (Sites.FullControl.All).
+        DemoApp {
+            name: "Northwind SharePoint Bot",
+            secrets: vec![],
+            certs: vec![f::key_credential("spbot-cert", f::date(2026, 5, 20))],
+            perms: vec![
+                app_perm("Sites.Selected", "Access selected SharePoint sites"),
+                app_perm(
+                    "Sites.FullControl.All",
+                    "Full control of all SharePoint sites",
+                ),
+            ],
+            mail_scopes: vec![],
+            cred_status: S::Active,
+        },
+        DemoApp {
+            name: "Adventure Works API",
+            secrets: vec![f::password_credential(
+                "aw-api-secret",
+                "Mn3",
+                f::date(2025, 9, 28),
+            )],
+            certs: vec![],
+            perms: vec![
+                deleg_perm("User.Read", "Sign in and read user profile"),
+                app_perm("Directory.Read.All", "Read directory data"),
+            ],
+            mail_scopes: vec![],
+            cred_status: S::Active,
+        },
+        DemoApp {
+            name: "Tailspin Reporting",
+            secrets: vec![],
+            certs: vec![f::key_credential(
+                "tailspin-cert-2024",
+                f::date(2026, 6, 30),
+            )],
+            perms: vec![app_perm("Reports.Read.All", "Read all usage reports")],
+            mail_scopes: vec![],
+            cred_status: S::Active,
+        },
+    ]
+    .into_iter()
+    // Lean-but-realistic filler apps so the list looks populated.
+    .chain(
+        [
+            "Wingtip Toys Connector",
+            "Proseware Sync",
+            "Litware Analytics",
+            "Margie's Travel Portal",
+            "Alpine Ski House Booking",
+            "Blue Yonder Airlines API",
+            "Coho Vineyard Storefront",
+        ]
+        .into_iter()
+        .map(|name| DemoApp {
+            name,
+            secrets: vec![f::password_credential(
+                "app-secret",
+                "x2Q",
+                f::date(2026, 1, 31),
+            )],
+            certs: vec![],
+            perms: vec![app_perm("User.Read.All", "Read all users' full profiles")],
+            mail_scopes: vec![],
+            cred_status: ListCredentialStatus::Active,
+        }),
+    )
+    .collect()
+}
+
+fn list_row(a: &DemoApp) -> ApplicationListRowDto {
+    let oid = obj_id(a.name);
+    let mut row = f::app_row(&oid, a.name);
+    row.app_id = app_id(a.name);
+    row.password_credential_count = a.secrets.len();
+    row.key_credential_count = a.certs.len();
+    row.credential_status = a.cred_status;
+    row
+}
+
+fn app_detail(a: &DemoApp) -> ApplicationDetail {
+    ApplicationDetail {
+        application: Application {
+            id: obj_id(a.name),
+            app_id: app_id(a.name),
+            display_name: a.name.to_string(),
+            sign_in_audience: Some("AzureADMyOrg".to_string()),
+            description: Some(format!("{} — sample app shown in the live demo.", a.name)),
+            created_date_time: f::date(2023, 3, 14),
+            password_credentials: a.secrets.clone(),
+            key_credentials: a.certs.clone(),
+            ..Default::default()
+        },
+        service_principal: None,
+        owners: Vec::new(),
+        app_role_assignments: Vec::new(),
+        oauth2_permission_grants: Vec::new(),
+        resolved_permissions: a.perms.clone(),
+    }
+}
+
 fn register_fixtures() {
     // ---- Startup / shell ----
     mock_ok("get_auth_config", &f::configured());
@@ -49,56 +243,87 @@ fn register_fixtures() {
     mock_ok("reauthenticate", &f::sign_in_outcome(demo_tenant()));
     mock_ok("current_tenants", &vec![demo_tenant()]);
 
-    // ---- App Registrations ----
-    let mut apps = f::apps(&[
-        "Contoso CRM",
-        "Fabrikam Mail Sync",
-        "Northwind SharePoint Bot",
-        "Adventure Works API",
-        "Tailspin Reporting",
-        "Wingtip Toys Connector",
-        "Proseware Sync",
-        "Litware Analytics",
-        "Margie's Travel Portal",
-        "Alpine Ski House Booking",
-        "Blue Yonder Airlines API",
-        "Coho Vineyard Storefront",
-    ]);
-    // Enrich a few rows so the Home "With secrets / With certs" metrics are
-    // non-zero and the credential-status column shows variety.
-    apps[0].password_credential_count = 2;
-    apps[0].credential_status = ListCredentialStatus::Expired;
-    apps[1].password_credential_count = 1;
-    apps[1].credential_status = ListCredentialStatus::Expiring;
-    apps[2].key_credential_count = 1;
-    apps[4].key_credential_count = 1;
-    apps[5].password_credential_count = 1;
-    mock_ok("list_applications_with_pairing", &apps);
-    mock_ok(
-        "get_application_detail",
-        &f::application_detail("obj-0", "obj-0-appid", "Contoso CRM"),
-    );
+    // ---- App Registrations: list + per-id detail + per-id mailbox scopes ----
+    let apps = catalog();
+    let rows: Vec<ApplicationListRowDto> = apps.iter().map(list_row).collect();
+    mock_ok("list_applications_with_pairing", &rows);
 
-    // ---- Enterprise Applications ----
-    let mut enterprise = f::enterprise_apps(&[
-        "Salesforce",
-        "ServiceNow",
-        "Datadog (foreign tenant)",
-        "GitHub Enterprise",
-        "Zoom",
-        "Slack",
-        "Workday",
-        "Atlassian Cloud",
-    ]);
-    enterprise[1].account_enabled = Some(false);
-    enterprise[2].is_foreign_tenant = true;
-    enterprise[2].app_owner_organization_id =
-        Some("ffffffff-ffff-ffff-ffff-ffffffffffff".to_string());
+    let detail_by_id: HashMap<String, ApplicationDetail> = apps
+        .iter()
+        .map(|a| (obj_id(a.name), app_detail(a)))
+        .collect();
+    mock_each("get_application_detail", move |args| {
+        let oid = args
+            .get("objectId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        detail_by_id
+            .get(oid)
+            .cloned()
+            .unwrap_or_else(|| f::application_detail(oid, oid, "Demo App"))
+    });
+
+    let scopes_by_id: HashMap<String, Vec<MailScopeEntry>> = apps
+        .iter()
+        .map(|a| (obj_id(a.name), a.mail_scopes.clone()))
+        .collect();
+    mock_each("get_mail_permission_scopes", move |args| {
+        let oid = args
+            .get("objectId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        scopes_by_id.get(oid).cloned().unwrap_or_default()
+    });
+
+    // ---- Enterprise Applications: list + per-id detail ----
+    let ent_specs: &[(&str, bool, bool)] = &[
+        // (name, account_enabled, is_foreign_tenant)
+        ("Salesforce", true, false),
+        ("ServiceNow", false, false),
+        ("Datadog", true, true),
+        ("GitHub Enterprise", true, false),
+        ("Zoom", true, false),
+        ("Slack", true, false),
+        ("Workday", true, false),
+        ("Atlassian Cloud", true, false),
+    ];
+    let enterprise: Vec<_> = ent_specs
+        .iter()
+        .map(|&(name, enabled, foreign)| {
+            let mut e = f::enterprise_app(&obj_id(name), name);
+            e.app_id = app_id(name);
+            e.account_enabled = Some(enabled);
+            e.is_foreign_tenant = foreign;
+            if foreign {
+                e.app_owner_organization_id = Some(f::guid(&format!("{name}:org")));
+            }
+            e
+        })
+        .collect();
     mock_ok("list_enterprise_applications", &enterprise);
-    mock_ok(
-        "get_enterprise_application_detail",
-        &f::enterprise_application_detail("sp-0", "Salesforce"),
-    );
+
+    let ent_detail_by_id: HashMap<String, EnterpriseApplicationDetail> = enterprise
+        .iter()
+        .map(|e| {
+            (
+                e.id.clone(),
+                EnterpriseApplicationDetail {
+                    service_principal: e.clone(),
+                    owners: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    mock_each("get_enterprise_application_detail", move |args| {
+        let id = args
+            .get("servicePrincipalId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        ent_detail_by_id
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| f::enterprise_application_detail(id, "Demo Enterprise App"))
+    });
 
     // ---- Managed Identities ----
     let mut managed = f::managed_identities(&[
@@ -108,6 +333,10 @@ fn register_fixtures() {
         "logic-app-connector",
         "data-factory-mi",
     ]);
+    for mi in managed.iter_mut() {
+        mi.id = obj_id(&mi.display_name);
+        mi.app_id = app_id(&mi.display_name);
+    }
     managed[0].mi_subtype = MiSubtype::SystemAssigned;
     managed[2].mi_subtype = MiSubtype::SystemAssigned;
     mock_ok("list_managed_identities", &managed);
@@ -145,12 +374,12 @@ fn register_fixtures() {
     );
 
     // ---- Permissions catalog (Grant-access wizard picker) ----
-    let catalog = vec![f::graph_resource_summary()];
-    mock_ok("list_catalog_resources", &catalog);
-    mock_ok("list_resource_permission_counts", &catalog);
+    let resources = vec![f::graph_resource_summary()];
+    mock_ok("list_catalog_resources", &resources);
+    mock_ok("list_resource_permission_counts", &resources);
     mock_ok(
         "list_resource_permissions",
-        &f::graph_resource_permissions(&["User.Read.All", "Mail.Read", "Directory.Read.All"]),
+        &f::graph_resource_permissions(&["User.Read.All", "Mail.Read", "Sites.Selected"]),
     );
 
     // ---- Infallible `invoke()` commands: must resolve or they panic on the
