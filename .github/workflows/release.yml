@@ -264,6 +264,53 @@ jobs:
           } | Set-Content -Path SHA256SUMS -Encoding utf8
           Get-Content SHA256SUMS
 
+      # GitHub release assets are a flat list (no folders), so group the downloads
+      # by OS in the release body instead. Cosmetic only — the updater keys off
+      # latest.json's URLs, not this table, so it can't affect auto-update.
+      # generate_release_notes appends GitHub's auto "What's Changed" below this.
+      - name: Build download table (release body)
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $repo = "${{ github.repository }}"
+          function Row($glob, $notes) {
+            $f = Get-ChildItem $glob -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $f) { return $null }
+            return "| [``$($f.Name)``](https://github.com/$repo/releases/download/$tag/$($f.Name)) | $notes |"
+          }
+          $body = New-Object System.Collections.Generic.List[string]
+          $body.Add("## Downloads")
+          $body.Add("")
+          $body.Add("### Windows")
+          $body.Add("")
+          $body.Add("| File | Notes |")
+          $body.Add("| --- | --- |")
+          @(
+            (Row "artifacts/bundle-windows/nsis/*-setup.exe" "Installer (per-user, **auto-updates**) — most people want this."),
+            (Row "artifacts/bundle-windows/msi/*.msi" "MSI for enterprise rollout (SCCM/Intune); not auto-updated.")
+          ) | Where-Object { $_ } | ForEach-Object { $body.Add($_) }
+          $body.Add("")
+          $body.Add("### macOS (Apple Silicon)")
+          $body.Add("")
+          $body.Add("| File | Notes |")
+          $body.Add("| --- | --- |")
+          @(
+            (Row "artifacts/bundle-macos/dmg/*.dmg" "Disk image. Unsigned — first launch needs a one-time Gatekeeper bypass (see the README).")
+          ) | Where-Object { $_ } | ForEach-Object { $body.Add($_) }
+          $body.Add("")
+          $body.Add("### Linux (x86_64)")
+          $body.Add("")
+          $body.Add("| File | Notes |")
+          $body.Add("| --- | --- |")
+          @(
+            (Row "artifacts/bundle-linux/appimage/*.AppImage" "Portable, runs on most distros (**auto-updates**); ``chmod +x`` then run."),
+            (Row "artifacts/bundle-linux/deb/*.deb" "Debian / Ubuntu package.")
+          ) | Where-Object { $_ } | ForEach-Object { $body.Add($_) }
+          $body.Add("")
+          $body.Add("SHA-256 checksums for every file are in ``SHA256SUMS``.")
+          $body -join "`n" | Set-Content -Path release-body.md -Encoding utf8
+          Get-Content release-body.md
+
       - name: Upload release assets
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
@@ -284,6 +331,9 @@ jobs:
           # floating latest.json endpoint never 404s while assets attach; a bad
           # build is caught before the silent auto-updater ships it.
           draft: true
+          # OS-grouped download table on top; GitHub's auto "What's Changed" is
+          # appended below it by generate_release_notes.
+          body_path: release-body.md
           generate_release_notes: true
           # Every glob is mandatory: a renamed bundle path must fail the release,
           # not silently publish without an installer/.sig/manifest.
