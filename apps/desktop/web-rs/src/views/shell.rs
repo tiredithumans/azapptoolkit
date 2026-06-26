@@ -331,6 +331,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                 </div>
             </nav>
             <div class="shell__main">
+                {demo_banner()}
                 <header class="shell__topbar">
                     <div class="shell__topbar-left"></div>
                     <div class="shell__topbar-center">
@@ -402,5 +403,34 @@ pub fn AppShell(children: Children) -> impl IntoView {
                 }}
             </Show>
         </div>
+    }
+}
+
+/// A persistent "this is a demo" strip, rendered only in the GitHub Pages `demo`
+/// build (compiled out of the desktop bundle). Sits above the top bar, spanning
+/// the content column, so it reads as a global notice without disturbing the nav.
+fn demo_banner() -> impl IntoView {
+    #[cfg(feature = "demo")]
+    {
+        view! {
+            <div class="demo-banner" role="status">
+                <span class="demo-banner__text">
+                    "Live demo — sample data, no sign-in. Mutations and exports are disabled."
+                </span>
+                <a
+                    class="demo-banner__link"
+                    href="https://github.com/tiredithumans/azapptoolkit"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >
+                    "Get the app"
+                </a>
+            </div>
+        }
+        .into_any()
+    }
+    #[cfg(not(feature = "demo"))]
+    {
+        ().into_any()
     }
 }

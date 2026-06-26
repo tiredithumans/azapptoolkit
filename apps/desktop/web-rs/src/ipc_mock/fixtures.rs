@@ -1,15 +1,23 @@
-//! Typed fixture builders for the test harness. Built from the shared DTO types
-//! (not hand-written JSON), so they can't drift from the wire format the
-//! bindings deserialize — the same `serde-wasm-bindgen` round-trip the real IPC
-//! uses validates them.
+//! Typed fixture builders for the mock IPC bridge (the GUI test harness and the
+//! GitHub Pages demo). Built from the shared DTO types (not hand-written JSON),
+//! so they can't drift from the wire format the bindings deserialize — the same
+//! `serde-wasm-bindgen` round-trip the real IPC uses validates them.
 
-use azapptoolkit_core::audit::ListCredentialStatus;
-use azapptoolkit_core::models::Application;
+use azapptoolkit_core::audit::{
+    AuditItem, CredentialKind, CredentialStatus, ListCredentialStatus, RiskLevel, issue,
+};
+use azapptoolkit_core::identity::{SignInOutcome, TenantContext};
+use azapptoolkit_core::models::{Application, Organization};
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::applications::{ApplicationDetail, ApplicationListRowDto};
+use azapptoolkit_dto::audit::AuditRunResult;
 use azapptoolkit_dto::bulk::BulkProgress;
 use azapptoolkit_dto::config::AuthConfigStatus;
-use azapptoolkit_dto::enterprise_application::EnterpriseApplicationDto;
+use azapptoolkit_dto::credentials::CredentialRowDto;
+use azapptoolkit_dto::diagnostics::CacheStatsDto;
+use azapptoolkit_dto::enterprise_application::{
+    EnterpriseApplicationDetail, EnterpriseApplicationDto,
+};
 use azapptoolkit_dto::exchange::ExchangeAccessResult;
 use azapptoolkit_dto::keyvault::{KvSecretItemDto, KvSecretValueDto};
 use azapptoolkit_dto::managed_identity::{ManagedIdentityDto, MiSubtype};
@@ -70,6 +78,21 @@ pub fn configured() -> AuthConfigStatus {
     }
 }
 
+/// The signed-in tenant's organization (its display name shows in the nav user
+/// block).
+pub fn organization(display_name: &str) -> Organization {
+    Organization {
+        id: "22222222-2222-2222-2222-222222222222".to_string(),
+        display_name: display_name.to_string(),
+        verified_domains: Vec::new(),
+    }
+}
+
+/// Wraps a tenant in the `sign_in` / `reauthenticate` return shape.
+pub fn sign_in_outcome(tenant: TenantContext) -> SignInOutcome {
+    SignInOutcome { tenant }
+}
+
 // ---------------- Enterprise applications ----------------
 
 /// One Enterprise Application (service principal) list row.
@@ -100,6 +123,14 @@ pub fn enterprise_apps(display_names: &[&str]) -> Vec<EnterpriseApplicationDto> 
         .enumerate()
         .map(|(i, name)| enterprise_app(&format!("sp-{i}"), name))
         .collect()
+}
+
+/// An Enterprise Application detail payload (service principal + owners).
+pub fn enterprise_application_detail(id: &str, display_name: &str) -> EnterpriseApplicationDetail {
+    EnterpriseApplicationDetail {
+        service_principal: enterprise_app(id, display_name),
+        owners: Vec::new(),
+    }
 }
 
 // ---------------- Managed identities ----------------
@@ -168,6 +199,8 @@ pub fn application_detail(object_id: &str, app_id: &str, display_name: &str) -> 
             id: object_id.to_string(),
             app_id: app_id.to_string(),
             display_name: display_name.to_string(),
+            sign_in_audience: Some("AzureADMyOrg".to_string()),
+            description: Some("Sample application shown in the live demo.".to_string()),
             ..Default::default()
         },
         service_principal: None,
@@ -176,6 +209,163 @@ pub fn application_detail(object_id: &str, app_id: &str, display_name: &str) -> 
         oauth2_permission_grants: Vec::new(),
         resolved_permissions: Vec::new(),
     }
+}
+
+// ---------------- Security audit ----------------
+
+/// One audit row at `risk` carrying the given free-text `issues` (the home tiles
+/// and audit facets key off issue prefixes from [`issue`]). Other fields take
+/// benign defaults; callers mutate `credential_status` / `unused` as needed.
+pub fn audit_item(name: &str, risk: RiskLevel, issues: &[String]) -> AuditItem {
+    let risk_score = match risk {
+        RiskLevel::Critical => 92,
+        RiskLevel::High => 71,
+        RiskLevel::Medium => 44,
+        RiskLevel::Low => 12,
+    };
+    AuditItem {
+        application_name: name.to_string(),
+        app_id: format!("{name}-appid"),
+        object_id: format!("obj-{name}"),
+        created_date: None,
+        publisher: None,
+        sign_in_audience: Some("AzureADMyOrg".to_string()),
+        risk_score,
+        risk_level: risk,
+        issues: issues.to_vec(),
+        recommendations: Vec::new(),
+        remediations: Vec::new(),
+        credential_status: CredentialStatus::Active,
+        permission_count: 3,
+        service_principal_enabled: Some(true),
+        days_since_created: Some(180),
+        certificates: Vec::new(),
+        secrets: Vec::new(),
+        last_sign_in: None,
+        unused: false,
+        sign_in_report_available: true,
+    }
+}
+
+/// A populated cached audit run spanning every severity + the main finding kinds
+/// (over-privileged, expired, org-wide mailbox/SharePoint, ownership, unused), so
+/// the Home posture tile and the Security audit facets all light up.
+pub fn audit_run_result() -> AuditRunResult {
+    let mut over_privileged = audit_item(
+        "Contoso CRM",
+        RiskLevel::Critical,
+        &[format!("{} Mail.ReadWrite.All", issue::HIGH_RISK_APP_PERMS)],
+    );
+    over_privileged.credential_status = CredentialStatus::Expired;
+
+    let mailbox = audit_item(
+        "Fabrikam Mail Sync",
+        RiskLevel::High,
+        &[issue::ORG_WIDE_MAILBOX.to_string()],
+    );
+    let sharepoint = audit_item(
+        "Northwind SharePoint Bot",
+        RiskLevel::High,
+        &[issue::ORG_WIDE_SHAREPOINT.to_string()],
+    );
+
+    let mut no_owners = audit_item(
+        "Adventure Works API",
+        RiskLevel::Medium,
+        &[issue::NO_OWNERS.to_string()],
+    );
+    no_owners.unused = true;
+
+    let single_owner = audit_item(
+        "Tailspin Reporting",
+        RiskLevel::Medium,
+        &[issue::SINGLE_OWNER.to_string()],
+    );
+    let second_over = audit_item(
+        "Wingtip Toys Connector",
+        RiskLevel::Medium,
+        &[format!(
+            "{} Directory.ReadWrite.All",
+            issue::HIGH_RISK_APP_PERMS
+        )],
+    );
+    let clean_a = audit_item("Proseware Sync", RiskLevel::Low, &[]);
+    let clean_b = audit_item("Litware Analytics", RiskLevel::Low, &[]);
+
+    AuditRunResult {
+        tenant_id: "demo-tenant".to_string(),
+        total_apps: 12,
+        items: vec![
+            over_privileged,
+            mailbox,
+            sharepoint,
+            no_owners,
+            single_owner,
+            second_over,
+            clean_a,
+            clean_b,
+        ],
+        cancelled: false,
+        sign_in_report_available: true,
+        sign_in_consent_required: false,
+    }
+}
+
+// ---------------- Credential expiry ----------------
+
+pub fn credential_row(
+    app: &str,
+    name: &str,
+    kind: CredentialKind,
+    days_to_expiry: Option<i64>,
+    status: CredentialStatus,
+) -> CredentialRowDto {
+    CredentialRowDto {
+        app_object_id: format!("obj-{app}"),
+        app_id: format!("{app}-appid"),
+        app_display_name: app.to_string(),
+        credential_name: name.to_string(),
+        kind,
+        start_date_time: None,
+        end_date_time: None,
+        days_to_expiry,
+        status,
+    }
+}
+
+/// A credential-expiry list spanning expired / ≤7-day / ≤30-day / healthy, so the
+/// Home Credential-Health tile shows non-zero counts in each bucket.
+pub fn credential_expirations() -> Vec<CredentialRowDto> {
+    vec![
+        credential_row(
+            "Contoso CRM",
+            "client-secret",
+            CredentialKind::Secret,
+            Some(-12),
+            CredentialStatus::Expired,
+        ),
+        credential_row(
+            "Fabrikam Mail Sync",
+            "rotation-key",
+            CredentialKind::Secret,
+            Some(3),
+            CredentialStatus::ExpiringSoon,
+        ),
+        credential_row(
+            "Tailspin Reporting",
+            "signing-cert-2024",
+            CredentialKind::Certificate,
+            Some(21),
+            CredentialStatus::ExpiringSoon,
+        ),
+        credential_row(
+            "Wingtip Toys Connector",
+            "legacy-secret",
+            CredentialKind::Secret,
+            Some(190),
+            CredentialStatus::Active,
+        ),
+    ]
 }
 
 // ---------------- Key Vault ----------------
@@ -200,6 +390,29 @@ pub fn kv_secret_value(name: &str, value: &str) -> KvSecretValueDto {
         value: value.to_string(),
         content_type: None,
         expires: None,
+    }
+}
+
+// ---------------- Diagnostics ----------------
+
+/// Plausible cache hit/miss counters + TTL config for the Cache diagnostics
+/// dialog (an infallible `invoke`, so it must resolve in the demo).
+pub fn cache_stats() -> CacheStatsDto {
+    CacheStatsDto {
+        service_principal_hits: 128,
+        service_principal_misses: 12,
+        permissions_hits: 64,
+        permissions_misses: 8,
+        audit_hits: 4,
+        audit_misses: 1,
+        lists_hits: 32,
+        lists_misses: 5,
+        enabled: true,
+        service_principal_ttl_secs: 300,
+        permissions_ttl_secs: 3600,
+        audit_ttl_secs: 600,
+        lists_ttl_secs: 120,
+        max_cache_size: 512,
     }
 }
 
@@ -300,7 +513,7 @@ pub fn graph_resource_permissions(role_values: &[&str]) -> ResourcePermissions {
             })
             .collect(),
         oauth2_permission_scopes: Vec::new(),
-        source: "test".to_string(),
+        source: "demo".to_string(),
     }
 }
 

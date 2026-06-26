@@ -7,6 +7,18 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Live web demo on GitHub Pages.** The full Leptos/Thaw UI now runs in a plain
+  browser with curated sample data and no Tauri backend — try it at
+  <https://tiredithumans.github.io/azapptoolkit/> with no install and no sign-in.
+  The demo reuses the GUI test harness's mock IPC bridge (extracted to a shared
+  `ipc_mock` module): a new `demo` Cargo feature pre-loads it with fixtures and
+  signs into a demo tenant, and a banner marks it as read-only (mutations and
+  exports are disabled). Built with `just web-build-pages` and published by a new
+  `pages.yml` workflow; the desktop build is unaffected (the feature is off by
+  default, so the mock and fixtures never enter the shipped bundle).
+
 ## [0.8.0] - 2026-06-26
 
 ### Added
