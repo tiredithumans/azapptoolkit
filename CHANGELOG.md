@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-26
+
 ### Added
 
 - **Force re-authenticate in place when a session expires — no manual sign-out.**
