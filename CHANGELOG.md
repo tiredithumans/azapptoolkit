@@ -7,6 +7,15 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Detail-pane tabs are reachable on narrow panes.** Thaw's `<TabList>` (the App
+  Registration / Enterprise / Managed Identity detail tabs) doesn't scroll, so
+  when the tab row was wider than the pane — a narrow screen, or the many-tab App
+  Registration detail — the overflowing tabs were clipped by the pane's
+  `overflow-x: hidden` and couldn't be reached. The tab strip now scrolls
+  horizontally (`.thaw-tab-list { overflow-x: auto }`).
+
 ### Changed
 
 - **Mobile-friendly responsive layout.** The web UI (and the GitHub Pages demo)
