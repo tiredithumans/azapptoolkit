@@ -9,6 +9,15 @@ the project adheres to
 
 ### Changed
 
+- **Mobile-friendly responsive layout.** The web UI (and the GitHub Pages demo)
+  now reads well on a phone: fixed a page-level horizontal-scroll bug where a
+  wide child (data table, long id) could stretch the main column past the
+  viewport (`.shell__main` now pins `min-width: 0`); the list/detail split stacks
+  with the detail given the larger share instead of an even 50/50; dashboard
+  cards drop to a single overflow-proof column; and a new ≤560px breakpoint
+  narrows the icon rail, tightens padding, near-full-bleeds dialogs, and wraps or
+  stacks dense headers, action clusters, and editor grids.
+
 - **CI: bump SHA-pinned GitHub Actions to their latest releases.**
   `Swatinem/rust-cache` (`v2` → `v2.9.1`) and `taiki-e/install-action`
   (`v2.82.3` → `v2.82.5`) across `ci.yml`, `codeql.yml`, `pages.yml`, and

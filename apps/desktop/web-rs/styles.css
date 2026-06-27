@@ -560,6 +560,11 @@ h3 {
   display: grid;
   grid-template-rows: var(--topbar-height) 1fr;
   min-height: 0;
+  /* Grid items default to `min-width: auto`, so a wide child (a data table, a
+     long unbroken id) can stretch this 1fr track past the viewport and scroll
+     the whole page sideways — the #1 "broken on mobile" symptom. Pin it to 0 so
+     the column stays within its share and inner panes scroll instead. */
+  min-width: 0;
 }
 .shell__topbar {
   display: flex;
@@ -1256,7 +1261,9 @@ h3 {
 }
 .dash-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  /* `min(100%, 280px)` keeps the track from ever exceeding its column, so on a
+     phone the cards drop to one column instead of forcing horizontal overflow. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
   gap: var(--space-4);
   margin-top: var(--space-4);
 }
@@ -2475,7 +2482,13 @@ h3 {
   .apps-view__body,
   .mi-view__body {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(220px, 1fr) 1fr;
+    /* Stack list over detail, but give the detail the larger share so a selected
+       record isn't squeezed into half a phone screen. The list stays a compact,
+       scrollable strip on top — it doubles as the way back to sibling records,
+       so no separate "back" control is needed. Both tracks bound their height
+       (`minmax(0, …)`) so the virtualized list and the detail scroll internally
+       rather than growing the page. */
+    grid-template-rows: minmax(160px, 38vh) minmax(0, 1fr);
   }
   .shell__topbar {
     padding: 0 var(--space-3);
@@ -2483,6 +2496,64 @@ h3 {
   .shell__topbar-left { display: none; }
   .shell__content { padding: var(--space-3); }
   .global-search { width: 100%; }
+  /* Let a crowded header (title + selection bar + primary action) wrap onto a
+     second row instead of overflowing. */
+  .view-header { flex-wrap: wrap; }
+  .dashboard { padding: var(--space-4); }
+}
+
+/* Phones: narrow the icon rail further, drop cards to one column, near-full-bleed
+   dialogs, and let dense editor grids / action clusters stack instead of
+   overflowing the row. */
+@media (max-width: 560px) {
+  :root {
+    --nav-width: 48px;
+  }
+  .nav__item {
+    padding: 10px 6px;
+  }
+  .shell__content {
+    padding: var(--space-2);
+  }
+  .dashboard {
+    padding: var(--space-3);
+  }
+  .dash-grid {
+    grid-template-columns: 1fr;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+  }
+  .view-header__title {
+    font-size: var(--text-md);
+  }
+  .view-header__actions,
+  .selection-bar,
+  .list-header-actions {
+    flex-wrap: wrap;
+  }
+  /* Dialogs take nearly the full width with tighter padding so their content
+     isn't boxed into a sliver. */
+  .modal,
+  .modal--wide {
+    width: 96vw;
+    padding: var(--space-4);
+    max-height: 92vh;
+  }
+  /* Multi-column editor rows collapse to a single stacked column. */
+  .sso-claims__row,
+  .claims-editor__basic-ref-grid {
+    grid-template-columns: 1fr;
+  }
+  /* Denser table cells so more columns fit before the text squeezes. */
+  .data-table th,
+  .data-table td {
+    padding: 5px 6px;
+    font-size: var(--text-xs);
+  }
+  .demo-banner {
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-xs);
+  }
 }
 
 /* =====================================================================
