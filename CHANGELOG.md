@@ -7,6 +7,15 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **CI: bump SHA-pinned GitHub Actions to their latest releases.**
+  `Swatinem/rust-cache` (`v2` → `v2.9.1`) and `taiki-e/install-action`
+  (`v2.82.3` → `v2.82.5`) across `ci.yml`, `codeql.yml`, `pages.yml`, and
+  `release.yml`. All other actions were already at their latest release SHA;
+  `dtolnay/rust-toolchain` stays pinned to the MSRV `1.96.0` and
+  `github/codeql-action` to `codeql-bundle-v2.25.6` (both intentional pins).
+
 ## [0.9.0] - 2026-06-26
 
 ### Added
