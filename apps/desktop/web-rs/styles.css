@@ -2312,6 +2312,18 @@ h3 {
   line-height: 1.2;
 }
 
+/* Thaw's <TabList> powers the App Registration / Enterprise / Managed Identity
+   detail-pane tabs. It is `flex-wrap: nowrap` with no overflow handling, and each
+   `.thaw-tab` is `flex-shrink: 0`, so when the tab row is wider than the pane —
+   a narrow screen, or the many-tab App Registration detail even on desktop — the
+   tabs past the edge spill out and get clipped by `.app-detail`'s
+   `overflow-x: hidden`, leaving them unreachable. Let the strip scroll
+   horizontally within the pane instead (thin scrollbar; swipe on touch). */
+.thaw-tab-list {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
 /* ---- TabBar (underline) ---- */
 .ui-tabs {
   display: flex;
