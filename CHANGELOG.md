@@ -7,6 +7,15 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **Trimmed redundant CI work.** CodeQL no longer runs on pull requests — it's not
+  a required check and the current extractor doesn't expand Rust macros, so PR-level
+  alerts add little; it still runs on `main` (Security tab) and the weekly re-scan.
+  The weekly `ci.yml` cron now runs only the dependency-advisory jobs (`cargo-audit`
+  / `cargo-deny`) instead of re-running the full 3-OS build matrix. Every job now has
+  a `timeout-minutes` backstop so a hung runner is killed in minutes, not hours.
+
 ## [0.10.0] - 2026-06-29
 
 ### Added

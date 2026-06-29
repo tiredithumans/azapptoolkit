@@ -7,6 +7,9 @@ on:
     branches: [main]
   schedule:
     # Weekly RustSec database refresh so we catch advisories filed after merge.
+    # Only the dependency-advisory jobs (audit/deny) run on this tick — the
+    # compile-heavy jobs are gated off `schedule` (see their `if:`), so the cron
+    # doesn't re-run a full 3-OS matrix it never needed.
     - cron: "0 6 * * 1"
 
 # A new push to the same branch/PR supersedes the in-flight run — without this
@@ -23,7 +26,10 @@ permissions:
 jobs:
   rust:
     name: Rust workspace (${{ matrix.os }})
+    # The weekly cron only needs audit/deny; skip the compile-heavy matrix on it.
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -54,7 +60,10 @@ jobs:
 
   web:
     name: Frontend (Leptos/WASM)
+    # The weekly cron only needs audit/deny; skip the WASM build/GUI tests on it.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
@@ -89,7 +98,10 @@ jobs:
 
   actionlint:
     name: actionlint
+    # The weekly cron only needs audit/deny; the workflow-syntax gate isn't useful on it.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Workflow-file syntax gate. release.yml sat unparseable for ~7 weeks
@@ -107,6 +119,7 @@ jobs:
   audit:
     name: cargo-audit
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # RustSec advisory scan via the same `just` recipes run locally (ignore
@@ -124,6 +137,7 @@ jobs:
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # License policy + crate-source gating (see deny.toml). Complements the
