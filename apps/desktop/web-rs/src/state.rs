@@ -369,7 +369,13 @@ impl Session {
         })
     }
 
+    /// Navigate to `view`. Collapses the open-items workspace overlay back to the
+    /// dock — the open items stay as chips, only the on-top detail panes are
+    /// dismissed — so the destination view is visible instead of hidden behind
+    /// them. (The two callers that navigate *and* open a detail — pairing jumps
+    /// and Global Search — call this first, then `open_item`, which re-shows.)
     pub fn set_view(&self, view: ActiveView) {
+        self.shown_items.set(Vec::new());
         self.view.set(view);
     }
 
@@ -745,6 +751,27 @@ mod tests {
             session
                 .shown_items
                 .with_untracked(|s| assert!(s.is_empty()));
+        });
+    }
+
+    #[test]
+    fn set_view_collapses_workspace_but_keeps_the_dock() {
+        with_session(|session| {
+            let a = session.open_item(OpenItemKind::AppReg, "app-1", "A");
+            session.focus_item(a, false);
+            session
+                .shown_items
+                .with_untracked(|s| assert_eq!(s, &vec![a]));
+            // Navigating dismisses the overlay (shown cleared) but the item stays
+            // in the dock and the view changes.
+            session.set_view(ActiveView::ManagedIdentities);
+            session
+                .shown_items
+                .with_untracked(|s| assert!(s.is_empty()));
+            session
+                .open_items
+                .with_untracked(|list| assert_eq!(list.len(), 1));
+            assert_eq!(session.view.get_untracked(), ActiveView::ManagedIdentities);
         });
     }
 
