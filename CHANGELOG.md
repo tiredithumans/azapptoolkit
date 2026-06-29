@@ -16,10 +16,11 @@ the project adheres to
   shared across all three entity types) holds everything you've opened — your
   working set — so you can switch between items without re-finding them, and pin
   **two side-by-side to compare**. Chip click shows an item full-width;
-  `Cmd`/`Ctrl`-click (or a second pin) opens it alongside the first; `Esc`
-  collapses the workspace back to the list; the chip × closes an item and a
-  **Close all** button clears the whole working set. The dock persists across
-  navigation (Home, Security, …) and resets on tenant switch.
+  `Cmd`/`Ctrl`-click (or a second pin) opens it alongside the first; `Esc` — or
+  navigating to another view from the nav rail — collapses the workspace back to
+  the list; the chip × closes an item and a **Close all** button clears the whole
+  working set. The dock persists across navigation (Home, Security, …) and resets
+  on tenant switch.
 
 ### Fixed
 
