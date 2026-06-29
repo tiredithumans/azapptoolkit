@@ -66,6 +66,9 @@ fn open_item_window(session: Session, item: OpenItem) -> impl IntoView {
     let id = item.id;
     let entity_id = item.entity_id;
     let shown = move || session.shown_items.with(|s| s.contains(&id));
+    // Two panes are shown side-by-side — only then does "Full" (collapse to just
+    // this pane) do anything, so it's hidden in the single-pane view.
+    let comparing = move || session.shown_items.with(|s| s.len() == 2);
     // The pane corrects the dock chip's label to the real name once its detail
     // loads — so opens that lacked a name (pairing jumps, deep-links) self-fix.
     let on_title = Callback::new(move |t: String| session.set_open_item_title(id, t));
@@ -104,19 +107,21 @@ fn open_item_window(session: Session, item: OpenItem) -> impl IntoView {
     view! {
         <div class="workspace__pane" style:display=move || if shown() { "flex" } else { "none" }>
             <div class="workspace__pane-bar">
-                <button
-                    type="button"
-                    class="workspace__pane-full"
-                    title="Show full-width"
-                    on:click=move |_| session.focus_item(id, false)
-                >
-                    "⤢ Full"
-                </button>
+                <Show when=comparing>
+                    <button
+                        type="button"
+                        class="workspace__pane-full"
+                        title="Collapse to just this pane (full width)"
+                        on:click=move |_| session.focus_item(id, false)
+                    >
+                        "⤢ Full"
+                    </button>
+                </Show>
                 <button
                     type="button"
                     class="workspace__pane-close"
-                    aria-label="Close pane"
-                    title="Close pane"
+                    aria-label="Hide this pane"
+                    title="Hide this pane (it stays in the Open dock)"
                     on:click=move |_| {
                         session.shown_items.update(|s| s.retain(|x| *x != id));
                     }

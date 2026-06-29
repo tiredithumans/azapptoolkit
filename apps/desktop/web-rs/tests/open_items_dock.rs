@@ -15,10 +15,10 @@ use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 
 wasm_bindgen_test_configure!(run_in_browser);
 
-/// Count `.workspace__pane` elements that are actually visible (the hidden ones
-/// are `display:none`, so they have no offset parent).
-fn visible_panes() -> usize {
-    ts::query_all(".workspace__pane")
+/// Count elements matching `selector` that are actually visible (hidden ones are
+/// `display:none`, so they have no offset parent).
+fn visible_count(selector: &str) -> usize {
+    ts::query_all(selector)
         .into_iter()
         .filter(|el| {
             el.clone()
@@ -27,6 +27,10 @@ fn visible_panes() -> usize {
                 .is_some()
         })
         .count()
+}
+
+fn visible_panes() -> usize {
+    visible_count(".workspace__pane")
 }
 
 /// Mount the dock + workspace with the App Reg / Enterprise detail commands
@@ -68,6 +72,12 @@ async fn open_focus_compare_close() {
     );
     ts::wait_for(|| ts::query_all(".open-dock__chip").len() == 1).await;
     ts::wait_for(|| visible_panes() == 1).await;
+    // Single pane: the "Full" control would be a no-op, so it isn't shown.
+    assert_eq!(
+        visible_count(".workspace__pane-full"),
+        0,
+        "no Full button in single-pane view"
+    );
 
     // Open an enterprise app (cross-entity) → two chips; focus replaces, so still
     // one pane shown.
@@ -102,6 +112,8 @@ async fn open_focus_compare_close() {
         !ts::query_all(".workspace__panes--two").is_empty(),
         "side-by-side compare applies the two-up modifier"
     );
+    // Comparing two panes: each shows a "Full" button to collapse to itself.
+    ts::wait_for(|| visible_count(".workspace__pane-full") == 2).await;
 
     // A third pin stays capped at two visible panes.
     m.session.focus_item(app_id, true);
