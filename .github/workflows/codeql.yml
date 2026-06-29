@@ -3,8 +3,10 @@ name: CodeQL
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  # PRs no longer trigger CodeQL: it's not a required check, and the 2.25.6
+  # extractor doesn't expand Rust macros (~39% call-target resolution), so
+  # PR-level alerts add little. Default-branch coverage (push) + the weekly
+  # re-scan below keep the Security tab current.
   schedule:
     # Weekly re-scan so new CodeQL query/extractor releases reach old code.
     # Wednesday, a distinct slot from ci.yml's Monday cron, so the two heavy
@@ -27,6 +29,7 @@ jobs:
   analyze:
     name: Analyze (rust)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
