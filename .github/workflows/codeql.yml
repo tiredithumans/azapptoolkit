@@ -3,6 +3,15 @@ name: CodeQL
 on:
   push:
     branches: [main]
+    # Docs-only pushes have no code to analyze; skip them. Safe to path-filter
+    # here (unlike ci.yml) because CodeQL is not a required status check, so a
+    # skipped run can't leave a required check pending.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - "LICENSE.*"
+      - ".claude/**"
   # PRs no longer trigger CodeQL: it's not a required check, and the 2.25.6
   # extractor doesn't expand Rust macros (~39% call-target resolution), so
   # PR-level alerts add little. Default-branch coverage (push) + the weekly

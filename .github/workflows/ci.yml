@@ -24,10 +24,63 @@ permissions:
   contents: read
 
 jobs:
+  # Detect whether anything that affects a build/test/lint actually changed.
+  # Docs-only changes (Markdown, docs/, LICENSE, .claude/) set code=false, which
+  # the downstream jobs use to skip their work WITHOUT skipping the job — so every
+  # required status check still reports (a path-filtered *workflow* would instead
+  # leave required checks pending forever and block the merge). Non-PR/push events
+  # (schedule, manual dispatch) always report code=true so audit/deny still run.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - id: detect
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -uo pipefail
+          # Default to running the full suite. Only an event with a diff that we
+          # can read AND that turns out to be entirely docs flips this to false,
+          # so any unexpected path (unknown event, failed diff) is fail-safe.
+          code=true
+          if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "push" ]; then
+            if [ "$EVENT" = "pull_request" ]; then
+              range=("$BASE_SHA...HEAD")
+            elif [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+              range=("HEAD~1" "HEAD")
+            else
+              range=("$BEFORE_SHA" "$GITHUB_SHA")
+            fi
+            if files=$(git diff --name-only "${range[@]}" 2>/dev/null); then
+              echo "Changed files:"; printf '%s\n' "$files"
+              code=false
+              while IFS= read -r f; do
+                if [ -z "$f" ]; then continue; fi
+                case "$f" in
+                  *.md|docs/*|LICENSE|LICENSE.*|.claude/*) : ;;  # docs / non-build
+                  *) code=true ;;                               # anything else → build
+                esac
+              done <<< "$files"
+            else
+              echo "diff failed for range '${range[*]}' — running full CI"
+            fi
+          fi
+          echo "code=$code"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   rust:
     name: Rust workspace (${{ matrix.os }})
     # The weekly cron only needs audit/deny; skip the compile-heavy matrix on it.
     if: github.event_name != 'schedule'
+    needs: changes
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -36,32 +89,46 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # Docs-only change: skip every build/test step below but let the job
+      # succeed, so the required "Rust workspace (...)" contexts still report.
+      - name: Skip notice (docs-only change)
+        if: needs.changes.outputs.code != 'true'
+        run: echo "Docs-only change — backend build/test skipped."
       # Match the pinned MSRV in rust-toolchain.toml (which rustup honors for the
       # actual build regardless of this line) so the installed toolchain is not
       # misleadingly older than what compiles.
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        if: needs.changes.outputs.code == 'true'
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        if: needs.changes.outputs.code == 'true'
       - uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
+        if: needs.changes.outputs.code == 'true'
         with:
           tool: just
       - name: Install system deps (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && needs.changes.outputs.code == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
       - name: fmt
+        if: needs.changes.outputs.code == 'true'
         run: just fmt-check
       - name: clippy
+        if: needs.changes.outputs.code == 'true'
         run: just clippy
       - name: test
+        if: needs.changes.outputs.code == 'true'
         run: just test
 
   web:
     name: Frontend (Leptos/WASM)
-    # The weekly cron only needs audit/deny; skip the WASM build/GUI tests on it.
-    if: github.event_name != 'schedule'
+    # Skipped on the weekly cron (audit/deny only) and on docs-only changes. A
+    # skipped job reports its required check as satisfied, so the merge gate stays
+    # green without running the WASM build / GUI tests.
+    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -98,8 +165,10 @@ jobs:
 
   actionlint:
     name: actionlint
-    # The weekly cron only needs audit/deny; the workflow-syntax gate isn't useful on it.
-    if: github.event_name != 'schedule'
+    # Skipped on the weekly cron and on docs-only changes (no workflow files
+    # touched). Skipped job ⇒ the required check still reports satisfied.
+    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -118,6 +187,11 @@ jobs:
 
   audit:
     name: cargo-audit
+    # Runs on code/dependency changes and on the weekly cron (the change-detection
+    # job reports code=true for schedule events). Docs-only changes skip it — no
+    # dependencies changed — and the skipped job keeps the required check satisfied.
+    if: needs.changes.outputs.code == 'true'
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -136,6 +210,10 @@ jobs:
 
   deny:
     name: cargo-deny
+    # Same gating as audit: code/dependency changes and the weekly cron run it;
+    # docs-only changes skip it, leaving the required check satisfied.
+    if: needs.changes.outputs.code == 'true'
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
