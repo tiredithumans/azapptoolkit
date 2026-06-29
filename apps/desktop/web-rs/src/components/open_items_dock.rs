@@ -15,9 +15,24 @@ pub fn OpenItemsDock() -> impl IntoView {
     view! {
         <Show when=move || session.open_items.with(|l| !l.is_empty())>
             <div class="open-dock" aria-label="Open items">
-                <For each=move || session.open_items.get() key=|it| it.id let:item>
-                    {dock_chip(session, item)}
-                </For>
+                // Chips scroll; the "Close all" control stays pinned beside them.
+                <div class="open-dock__chips">
+                    <For each=move || session.open_items.get() key=|it| it.id let:item>
+                        {dock_chip(session, item)}
+                    </For>
+                </div>
+                // Only meaningful with more than one open — a lone chip's × already
+                // closes it.
+                <Show when=move || session.open_items.with(|l| l.len() > 1)>
+                    <button
+                        type="button"
+                        class="open-dock__clear"
+                        title="Close all open items"
+                        on:click=move |_| session.close_all_items()
+                    >
+                        "Close all"
+                    </button>
+                </Show>
             </div>
         </Show>
     }

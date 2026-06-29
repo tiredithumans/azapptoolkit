@@ -126,6 +126,39 @@ async fn open_focus_compare_close() {
 }
 
 #[wasm_bindgen_test]
+async fn close_all_clears_the_dock() {
+    let m = mount();
+    // One open item: no "Close all" (its chip × already closes it).
+    m.session.open_item(
+        OpenItemKind::AppReg,
+        "app-1".to_string(),
+        "Contoso API".to_string(),
+    );
+    ts::wait_for(|| ts::query_all(".open-dock__chip").len() == 1).await;
+    assert!(
+        ts::query(".open-dock__clear").is_none(),
+        "no Close all for one item"
+    );
+
+    // A second open item surfaces the "Close all" button.
+    m.session.open_item(
+        OpenItemKind::Enterprise,
+        "sp-1".to_string(),
+        "Fabrikam Web".to_string(),
+    );
+    ts::wait_for(|| ts::query(".open-dock__clear").is_some()).await;
+
+    // Clicking it empties the dock and collapses the workspace.
+    ts::click(".open-dock__clear");
+    ts::wait_for(|| ts::query_all(".open-dock__chip").is_empty()).await;
+    assert_eq!(
+        visible_panes(),
+        0,
+        "workspace collapses when all items close"
+    );
+}
+
+#[wasm_bindgen_test]
 async fn chip_title_self_corrects_to_loaded_name() {
     let m = mount();
     // Open with a placeholder label (the id) — as pairing jumps / deep-links do.

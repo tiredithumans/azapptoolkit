@@ -327,6 +327,14 @@ impl Session {
         self.shown_items.update(|shown| shown.retain(|s| *s != id));
     }
 
+    /// Close the entire working set — empties the dock and the workspace. (Tenant
+    /// switch does the same via `set_active_tenant`; this is the explicit, in-
+    /// tenant "Close all".)
+    pub fn close_all_items(&self) {
+        self.open_items.set(Vec::new());
+        self.shown_items.set(Vec::new());
+    }
+
     /// Close the open item identified by `(kind, entity_id)` — for detail-pane
     /// delete handlers, which know the entity id but not the synthetic open id.
     pub fn close_item_by_entity(&self, kind: OpenItemKind, entity_id: &str) {
@@ -714,6 +722,23 @@ mod tests {
                 .with_untracked(|s| assert_eq!(s, &vec![b]));
             // close_item_by_entity resolves the synthetic id from (kind, entity).
             session.close_item_by_entity(OpenItemKind::AppReg, "app-2");
+            session
+                .open_items
+                .with_untracked(|list| assert!(list.is_empty()));
+            session
+                .shown_items
+                .with_untracked(|s| assert!(s.is_empty()));
+        });
+    }
+
+    #[test]
+    fn close_all_items_empties_the_working_set() {
+        with_session(|session| {
+            let a = session.open_item(OpenItemKind::AppReg, "app-1", "A");
+            let b = session.open_item(OpenItemKind::Enterprise, "sp-1", "B");
+            session.focus_item(a, false);
+            session.focus_item(b, true);
+            session.close_all_items();
             session
                 .open_items
                 .with_untracked(|list| assert!(list.is_empty()));

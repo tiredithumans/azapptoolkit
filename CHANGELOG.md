@@ -17,8 +17,9 @@ the project adheres to
   working set — so you can switch between items without re-finding them, and pin
   **two side-by-side to compare**. Chip click shows an item full-width;
   `Cmd`/`Ctrl`-click (or a second pin) opens it alongside the first; `Esc`
-  collapses the workspace back to the list; the chip × closes an item. The dock
-  persists across navigation (Home, Security, …) and resets on tenant switch.
+  collapses the workspace back to the list; the chip × closes an item and a
+  **Close all** button clears the whole working set. The dock persists across
+  navigation (Home, Security, …) and resets on tenant switch.
 
 ### Fixed
 
