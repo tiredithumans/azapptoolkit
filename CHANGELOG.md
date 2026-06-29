@@ -7,6 +7,14 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **The in-app update changelog renders as formatted text, not raw Markdown.** The
+  "Update available" splash showed the release notes as a raw `**…**` / `- ` / `###`
+  Markdown dump in a monospace block. A small renderer (`components/changelog_notes.rs`)
+  now formats the subset our changelog uses — headings, bullet lists (nested +
+  wrapped), bold, inline code, and links — so the notes read like the GitHub release.
+
 ### Changed
 
 - **Trimmed redundant CI work.** CodeQL no longer runs on pull requests — it's not

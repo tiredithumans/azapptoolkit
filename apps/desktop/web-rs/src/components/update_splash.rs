@@ -8,6 +8,7 @@ use thaw::{Body1, Button, ButtonAppearance, ProgressBar};
 
 use crate::bindings::events;
 use crate::bindings::updater::{self, UpdateInfo, UpdateProgress};
+use crate::components::changelog_notes::ChangelogNotes;
 use crate::components::modal_shell::ModalShell;
 use crate::hooks::use_progress_stream::use_progress_stream;
 
@@ -77,7 +78,7 @@ pub fn UpdateSplash(open: RwSignal<bool>, info: RwSignal<Option<UpdateInfo>>) ->
                                         i.version,
                                     )}
                                 </Body1>
-                                <pre class="update-splash__notes">{notes}</pre>
+                                <ChangelogNotes notes=notes />
                                 {move || {
                                     progress
                                         .get()
