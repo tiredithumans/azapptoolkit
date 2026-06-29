@@ -4,25 +4,28 @@
 //! Previously each of the four call sites hand-rolled `set_view` +
 //! `set_selected_*`, and only the list-row enterprise→app jump scrolled the
 //! target into view — so behaviour drifted. Centralizing it here keeps all four
-//! consistent: every jump switches view, selects the paired object, brings the
-//! selected list row into view, and lands the destination detail pane at its top.
+//! consistent: every jump switches view, opens the paired object in the
+//! workspace, brings the open list row into view, and lands the detail pane at
+//! its top.
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
-use crate::state::{ActiveView, Session};
+use crate::state::{ActiveView, OpenItemKind, Session};
 
-/// Switch to the App Registrations view, select `app_obj_id`, and land at the top.
+/// Switch to the App Registrations view, open `app_obj_id`, and land at the top.
 pub fn jump_to_paired_app(session: Session, app_obj_id: String) {
     session.set_view(ActiveView::Apps);
-    session.set_selected_app(Some(app_obj_id));
+    // The chip starts labelled with the id; the detail pane corrects it to the
+    // real name once it loads (the workspace passes a title setter).
+    session.open_item(OpenItemKind::AppReg, app_obj_id.clone(), app_obj_id);
     settle_scroll_after_jump();
 }
 
-/// Switch to the Enterprise Applications view, select `sp_id`, and land at the top.
+/// Switch to the Enterprise Applications view, open `sp_id`, and land at the top.
 pub fn jump_to_paired_enterprise(session: Session, sp_id: String) {
     session.set_view(ActiveView::EnterpriseApps);
-    session.set_selected_enterprise_app(Some(sp_id));
+    session.open_item(OpenItemKind::Enterprise, sp_id.clone(), sp_id);
     settle_scroll_after_jump();
 }
 

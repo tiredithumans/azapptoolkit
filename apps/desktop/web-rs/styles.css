@@ -558,7 +558,8 @@ h3 {
 }
 .shell__main {
   display: grid;
-  grid-template-rows: var(--topbar-height) 1fr;
+  /* topbar · content (the workspace overlays this row) · open-items dock */
+  grid-template-rows: var(--topbar-height) 1fr auto;
   min-height: 0;
   /* Grid items default to `min-width: auto`, so a wide child (a data table, a
      long unbroken id) can stretch this 1fr track past the viewport and scroll
@@ -603,10 +604,127 @@ h3 {
 .shell__topbar-right > :last-child {
   flex-shrink: 0;
 }
-.shell__content {
+.shell__content-wrap {
+  /* Positioning context for the workspace overlay; takes the `1fr` row of
+     `.shell__main` and lets the scrollable content fill it. */
+  position: relative;
   min-height: 0;
+  min-width: 0;
+  display: flex;
+}
+.shell__content {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
   overflow: auto;
   padding: var(--space-4) var(--space-5);
+}
+
+/* ---------- Open-items dock + workspace ---------- */
+/* The dock is the bottom row of `.shell__main`; the workspace is an overlay that
+   covers the content area when 1–2 items are shown — above page dropdowns
+   (z 50) but below modal dialogs (z 1000), so a pane's ConfirmDialog still wins. */
+.open-dock {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  animation: ui-fade-in var(--motion-base) var(--ease-decel);
+}
+.open-dock__chip {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  max-width: 220px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  overflow: hidden;
+}
+.open-dock__chip--active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.open-dock__chip-main {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 4px 8px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.open-dock__chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.open-dock__close {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: none;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--text-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+.open-dock__close:hover {
+  background: var(--surface);
+  color: var(--danger);
+}
+.workspace {
+  position: absolute;
+  inset: 0;
+  z-index: 500;
+  padding: var(--space-3);
+  background: var(--canvas);
+  animation: ui-pop-in var(--motion-slow) var(--ease-decel);
+}
+.workspace__panes {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-3);
+  height: 100%;
+  min-height: 0;
+}
+.workspace__panes--two {
+  grid-template-columns: 1fr 1fr;
+}
+.workspace__pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.workspace__pane-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+}
+.workspace__pane-bar button {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.workspace__pane-bar button:hover {
+  color: var(--text);
+  border-color: var(--accent);
 }
 
 /* ---------- Nav items ---------- */
@@ -693,22 +811,12 @@ h3 {
   min-height: 0;
 }
 .apps-view__body {
+  /* Full-width list — a selected item opens in the shell's workspace overlay,
+     not a side detail pane. */
   display: grid;
-  /* Responsive master pane: at least 400px so long display names stay legible,
-     growing with the window up to 720px (capped so the detail pane keeps the
-     majority of the width). Replaces the old hard 480px ceiling that truncated
-     names on wide displays. The <740px media query stacks these instead. */
-  grid-template-columns: minmax(400px, min(38%, 720px)) 1fr;
+  grid-template-columns: 1fr;
   gap: var(--space-3);
   min-height: 0;
-}
-.apps-view__placeholder {
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-lg);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--surface);
 }
 
 /* ---------- App list ---------- */
@@ -886,7 +994,9 @@ h3 {
    and `margin: auto` would win — capping the pane width and vertically
    centering it, leaving the details floating low in the grid cell. The
    descendant selector raises specificity to 0-2-0 so we deterministically win. */
-.apps-view__body .app-detail {
+.workspace__pane .app-detail {
+  /* Fills the pane below its control bar. */
+  flex: 1 1 auto;
   border-radius: var(--radius-lg);
   padding: var(--space-4);
   background: var(--surface);
@@ -936,10 +1046,10 @@ h3 {
   color: var(--text-muted);
 }
 .mi-view__body {
+  /* Full-width list — a selected identity opens in the shell's workspace
+     overlay (a self-contained ManagedIdentityDetailWindow), not a side pane. */
   display: grid;
-  /* Match the App Registration / Enterprise list panes: responsive master pane
-     (>=400px, up to min(38%, 720px)) so managed-identity names aren't truncated. */
-  grid-template-columns: minmax(400px, min(38%, 720px)) 1fr;
+  grid-template-columns: 1fr;
   gap: var(--space-3);
   min-height: 0;
 }
@@ -956,11 +1066,14 @@ h3 {
   min-height: 0;
   padding: var(--space-2);
 }
-.mi-view__detail {
+/* The managed-identity detail window in the workspace pane. Mirrors the old
+   `.mi-view__detail` card (whole-card scroll), filling the pane below its bar. */
+.workspace__pane .mi-window {
+  flex: 1 1 auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-4);
   overflow: auto;
   min-height: 0;
   padding: var(--space-4);
@@ -2489,18 +2602,12 @@ h3 {
   .nav__item--selected::before { left: 0; }
 }
 
-/* Below 740px: stack list and detail; tighten topbar */
+/* Below 740px: tighten topbar; collapse side-by-side compare to one pane.
+   (All three lists are full-width now — detail opens in the workspace overlay.) */
 @media (max-width: 740px) {
-  .apps-view__body,
-  .mi-view__body {
+  /* One pane at a time on narrow screens — side-by-side compare needs width. */
+  .workspace__panes--two {
     grid-template-columns: 1fr;
-    /* Stack list over detail, but give the detail the larger share so a selected
-       record isn't squeezed into half a phone screen. The list stays a compact,
-       scrollable strip on top — it doubles as the way back to sibling records,
-       so no separate "back" control is needed. Both tracks bound their height
-       (`minmax(0, …)`) so the virtualized list and the detail scroll internally
-       rather than growing the page. */
-    grid-template-rows: minmax(160px, 38vh) minmax(0, 1fr);
   }
   .shell__topbar {
     padding: 0 var(--space-3);
@@ -3180,7 +3287,7 @@ h3 {
    `:has()` rule that inserts an extra grid row above the top bar is inert in the
    shipped desktop bundle (no `.demo-banner` is ever rendered there). */
 .shell__main:has(.demo-banner) {
-  grid-template-rows: auto var(--topbar-height) 1fr;
+  grid-template-rows: auto var(--topbar-height) 1fr auto;
 }
 .demo-banner {
   display: flex;

@@ -10,7 +10,7 @@ use crate::components::detail_header::DetailHeader;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{DetailLoadError, DetailSkeleton};
 use crate::hooks::use_command::use_command;
-use crate::state::use_session;
+use crate::state::{OpenItemKind, use_session};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::pairing::jump_to_paired_enterprise;
 use crate::views::tabs::{
@@ -21,7 +21,12 @@ use crate::views::tabs::{
 };
 
 #[component]
-pub fn ApplicationDetailPane(#[prop(into)] object_id: Signal<String>) -> impl IntoView {
+pub fn ApplicationDetailPane(
+    #[prop(into)] object_id: Signal<String>,
+    // Reports the resolved display name to the dock chip once the detail loads
+    // (the workspace passes a setter). `None` for standalone uses (e.g. tests).
+    #[prop(optional)] on_title: Option<Callback<String>>,
+) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
 
@@ -91,7 +96,7 @@ pub fn ApplicationDetailPane(#[prop(into)] object_id: Signal<String>) -> impl In
         delete_cmd.run(
             move |()| {
                 delete_open.set(false);
-                session.set_selected_app(None);
+                session.close_item_by_entity(OpenItemKind::AppReg, &object_id.get_untracked());
                 session.toast_success("Application deleted.");
             },
             move |tenant_id| {
@@ -113,6 +118,9 @@ pub fn ApplicationDetailPane(#[prop(into)] object_id: Signal<String>) -> impl In
                 {move || Suspend::new(async move {
                     match detail.await {
                         Ok(d) => {
+                            if let Some(cb) = on_title {
+                                cb.run(d.application.display_name.clone());
+                            }
                             // Wrap in `Arc` so the (non-memoized) derive's per-read
                             // clone is a refcount bump, not a deep clone of the whole
                             // detail struct — every tab read of `detail_signal`

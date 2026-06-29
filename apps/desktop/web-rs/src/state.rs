@@ -41,12 +41,47 @@ pub enum ActiveView {
     DisasterRecovery,
 }
 
+/// Which entity surface an [`OpenItem`] points at — the three list views whose
+/// rows can be opened into the shared workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenItemKind {
+    AppReg,
+    Enterprise,
+    ManagedIdentity,
+}
+
+/// One entry in the cross-entity "working set" — an item the admin has opened
+/// into the workspace dock. Modeled on the toast stack: a `Vec` of these on
+/// `Session` with a monotonic `open_seq` id source, capped + drain-oldest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenItem {
+    /// Monotonic id from `open_seq` — the stable `<For>` key for this item's
+    /// window, so closing/reordering siblings never remounts (and discards the
+    /// live state of) another window.
+    pub id: u64,
+    pub kind: OpenItemKind,
+    /// App object id / SP id / MI service-principal id, per `kind`.
+    pub entity_id: String,
+    /// Dock chip label. Best-effort at open time (the clicked row's name); the
+    /// window calls [`Session::set_open_item_title`] once its detail resolves so
+    /// deep-link / global-search opens that lacked a name self-correct.
+    pub title: String,
+}
+
 #[derive(Clone, Copy)]
 pub struct Session {
     pub active_tenant: RwSignal<Option<TenantContext>>,
-    pub selected_app_object_id: RwSignal<Option<String>>,
-    pub selected_enterprise_app_id: RwSignal<Option<String>>,
-    pub selected_managed_identity_id: RwSignal<Option<String>>,
+    // The shared, cross-entity "working set": every item the admin has opened
+    // into the workspace dock, across all three list views. Modeled on the
+    // toast stack below (`Vec` + a monotonic `open_seq` id source, capped +
+    // drain-oldest). `shown_items` names the 1–2 currently displayed by id
+    // (left, right). Plain `RwSignal` (not `LocalStorage`) — `OpenItem` is
+    // `Send`, unlike `Toast`'s `Rc<dyn Fn()>` retry action. CROSS-TENANT
+    // FOOTGUN: both `open_items` and `shown_items` MUST reset in
+    // `set_active_tenant` (an open item from another tenant is stale + leaks).
+    pub open_items: RwSignal<Vec<OpenItem>>,
+    pub open_seq: RwSignal<u64>,
+    pub shown_items: RwSignal<Vec<u64>>,
     // Per-list "Filter this list" query. Lifted to the session (rather than a
     // local view signal) for two reasons: (1) the top-bar Global Search seeds it
     // when a record is picked, so jumping to a record lands the user on a
@@ -82,9 +117,8 @@ pub struct Session {
     // needs this). Reset on tenant switch with the facets.
     pub pending_open_filters: RwSignal<bool>,
     pub view: RwSignal<ActiveView>,
-    // Multi-select set of application object ids, distinct from the
-    // single-select `selected_app_object_id` (which drives the detail pane).
-    // This set is what the bulk-actions dialog operates on.
+    // Multi-select set of application object ids — distinct from the workspace's
+    // open-items working set; this set is what the bulk-actions dialog operates on.
     pub selected_app_ids: RwSignal<HashSet<String>>,
     // Separate multi-select set for the Security Audit table's inline bulk bar.
     // Kept distinct from `selected_app_ids` so checking rows in the audit doesn't
@@ -146,9 +180,11 @@ impl Session {
     /// `setActiveTenant` reducer in `apps/desktop/web/src/store.ts`.
     pub fn set_active_tenant(&self, tenant: Option<TenantContext>) {
         self.active_tenant.set(tenant);
-        self.selected_app_object_id.set(None);
-        self.selected_enterprise_app_id.set(None);
-        self.selected_managed_identity_id.set(None);
+        // Clear the cross-entity working set — a previous tenant's open items are
+        // stale and would leak its data into the next tenant's workspace (the
+        // repo's #1 footgun). `open_seq` stays monotonic, like `toast_seq`.
+        self.open_items.set(Vec::new());
+        self.shown_items.set(Vec::new());
         self.selected_app_ids.update(HashSet::clear);
         self.selected_audit_ids.update(HashSet::clear);
         // Clear per-list filters so a previous tenant's query never narrows the
@@ -169,10 +205,6 @@ impl Session {
         self.cache_open.set(false);
         self.pending_app_tab.set(None);
         self.pending_enterprise_tab.set(None);
-    }
-
-    pub fn set_selected_app(&self, id: Option<String>) {
-        self.selected_app_object_id.set(id);
     }
 
     /// Toggle an application object id in the bulk-selection set.
@@ -227,12 +259,106 @@ impl Session {
         self.audit_reload.update(|n| *n = n.wrapping_add(1));
     }
 
-    pub fn set_selected_enterprise_app(&self, id: Option<String>) {
-        self.selected_enterprise_app_id.set(id);
+    /// Open `entity_id` into the shared working set and focus it (1-up).
+    /// Deduped by `(kind, entity_id)`: re-opening an already-open item just
+    /// re-focuses it (and refreshes its chip title) instead of stacking a
+    /// duplicate. Returns the `OpenItem.id` (existing or freshly minted).
+    pub fn open_item(
+        &self,
+        kind: OpenItemKind,
+        entity_id: impl Into<String>,
+        title: impl Into<String>,
+    ) -> u64 {
+        let entity_id = entity_id.into();
+        let title = title.into();
+        if let Some(existing) = self.is_open(kind, &entity_id) {
+            self.set_open_item_title(existing, title);
+            self.focus_item(existing, false);
+            return existing;
+        }
+        let id = self.open_seq.get_untracked();
+        self.open_seq.set(id.wrapping_add(1));
+        // Cap the working set so it can't grow unbounded — drop the oldest.
+        const MAX_OPEN_ITEMS: usize = 8;
+        let mut dropped: Vec<u64> = Vec::new();
+        self.open_items.update(|list| {
+            list.push(OpenItem {
+                id,
+                kind,
+                entity_id,
+                title,
+            });
+            let overflow = list.len().saturating_sub(MAX_OPEN_ITEMS);
+            if overflow > 0 {
+                dropped = list.drain(0..overflow).map(|it| it.id).collect();
+            }
+        });
+        if !dropped.is_empty() {
+            self.shown_items
+                .update(|shown| shown.retain(|s| !dropped.contains(s)));
+        }
+        self.focus_item(id, false);
+        id
     }
 
-    pub fn set_selected_managed_identity(&self, id: Option<String>) {
-        self.selected_managed_identity_id.set(id);
+    /// Show `id` in the workspace. `split = false` replaces the shown set (1-up);
+    /// `split = true` pins it alongside the current pane for side-by-side
+    /// compare, capped at two (drops the oldest pane on overflow).
+    pub fn focus_item(&self, id: u64, split: bool) {
+        const MAX_SHOWN: usize = 2;
+        self.shown_items.update(|shown| {
+            if split {
+                if !shown.contains(&id) {
+                    shown.push(id);
+                }
+                while shown.len() > MAX_SHOWN {
+                    shown.remove(0);
+                }
+            } else {
+                shown.clear();
+                shown.push(id);
+            }
+        });
+    }
+
+    /// Close one open item (and drop it from the shown set if present).
+    pub fn close_item(&self, id: u64) {
+        self.open_items.update(|list| list.retain(|it| it.id != id));
+        self.shown_items.update(|shown| shown.retain(|s| *s != id));
+    }
+
+    /// Close the open item identified by `(kind, entity_id)` — for detail-pane
+    /// delete handlers, which know the entity id but not the synthetic open id.
+    pub fn close_item_by_entity(&self, kind: OpenItemKind, entity_id: &str) {
+        if let Some(id) = self.is_open(kind, entity_id) {
+            self.close_item(id);
+        }
+    }
+
+    /// Refresh an open item's chip label once its detail resolves (no-op if it
+    /// was closed meanwhile, or the title is unchanged — so it doesn't needlessly
+    /// re-render the dock).
+    pub fn set_open_item_title(&self, id: u64, title: String) {
+        let changed = self
+            .open_items
+            .with_untracked(|list| list.iter().any(|it| it.id == id && it.title != title));
+        if changed {
+            self.open_items.update(|list| {
+                if let Some(it) = list.iter_mut().find(|it| it.id == id) {
+                    it.title = title;
+                }
+            });
+        }
+    }
+
+    /// The open-item id for `(kind, entity_id)` if it's in the working set —
+    /// drives the list-row "open" highlight and `open_item` dedupe.
+    pub fn is_open(&self, kind: OpenItemKind, entity_id: &str) -> Option<u64> {
+        self.open_items.with(|list| {
+            list.iter()
+                .find(|it| it.kind == kind && it.entity_id == entity_id)
+                .map(|it| it.id)
+        })
     }
 
     pub fn set_view(&self, view: ActiveView) {
@@ -253,24 +379,25 @@ impl Session {
         self.create_open.set(true);
     }
 
-    /// Navigate to an app registration's detail pane opened on a specific tab
-    /// (e.g. `"credentials"`). Used to deep-link from the credential-expiry
-    /// dashboard straight into the rotation workflow. The detail pane consumes
-    /// `pending_app_tab` once on mount.
+    /// Open an app registration in the workspace on a specific tab (e.g.
+    /// `"credentials"`). Used to deep-link from the credential-expiry dashboard
+    /// straight into the rotation workflow. The detail pane consumes
+    /// `pending_app_tab` once on mount; the chip starts labelled with the id and
+    /// the pane corrects it to the real name once it loads.
     pub fn open_app_on_tab(&self, object_id: String, tab: &str) {
         self.pending_app_tab.set(Some(tab.to_string()));
-        self.selected_app_object_id.set(Some(object_id));
         self.view.set(ActiveView::Apps);
+        self.open_item(OpenItemKind::AppReg, object_id.clone(), object_id);
     }
 
-    /// Navigate to an enterprise application's detail pane opened on a specific
-    /// tab (e.g. `"permissions"`). Used to deep-link from a risky consent grant
-    /// or delegated-permission finding straight to where it can be revoked. The
+    /// Open an enterprise application in the workspace on a specific tab (e.g.
+    /// `"permissions"`). Used to deep-link from a risky consent grant or
+    /// delegated-permission finding straight to where it can be revoked. The
     /// enterprise pane consumes `pending_enterprise_tab` once on mount.
     pub fn open_enterprise_on_tab(&self, sp_object_id: String, tab: &str) {
         self.pending_enterprise_tab.set(Some(tab.to_string()));
-        self.selected_enterprise_app_id.set(Some(sp_object_id));
         self.view.set(ActiveView::EnterpriseApps);
+        self.open_item(OpenItemKind::Enterprise, sp_object_id.clone(), sp_object_id);
     }
 
     /// Navigate to the Enterprise Applications list pre-filtered to a facet
@@ -437,9 +564,9 @@ impl Session {
 pub fn provide_session() {
     let session = Session {
         active_tenant: RwSignal::new(None),
-        selected_app_object_id: RwSignal::new(None),
-        selected_enterprise_app_id: RwSignal::new(None),
-        selected_managed_identity_id: RwSignal::new(None),
+        open_items: RwSignal::new(Vec::new()),
+        open_seq: RwSignal::new(0),
+        shown_items: RwSignal::new(Vec::new()),
         apps_search: RwSignal::new(String::new()),
         enterprise_search: RwSignal::new(String::new()),
         mi_search: RwSignal::new(String::new()),
@@ -510,6 +637,105 @@ mod tests {
                 });
             });
         }
+    }
+
+    #[test]
+    fn open_item_dedupes_and_refocuses() {
+        with_session(|session| {
+            let a = session.open_item(OpenItemKind::AppReg, "app-1", "Contoso");
+            session.open_item(OpenItemKind::Enterprise, "sp-1", "Fabrikam");
+            // Re-opening the same (kind, entity) returns the same id, no dup.
+            let a2 = session.open_item(OpenItemKind::AppReg, "app-1", "Contoso (renamed)");
+            assert_eq!(a, a2, "dedupe by (kind, entity_id)");
+            session.open_items.with_untracked(|list| {
+                assert_eq!(list.len(), 2);
+                let item = list.iter().find(|it| it.id == a).unwrap();
+                assert_eq!(
+                    item.title, "Contoso (renamed)",
+                    "title refreshed on re-open"
+                );
+            });
+            // Re-opening focuses it (1-up).
+            session
+                .shown_items
+                .with_untracked(|shown| assert_eq!(shown, &vec![a]));
+        });
+    }
+
+    #[test]
+    fn open_item_caps_and_drops_oldest() {
+        with_session(|session| {
+            for i in 0..10 {
+                session.open_item(OpenItemKind::AppReg, format!("app-{i}"), format!("App {i}"));
+            }
+            session.open_items.with_untracked(|list| {
+                assert_eq!(list.len(), 8, "capped at MAX_OPEN_ITEMS");
+                // The two oldest were drained.
+                assert!(list.iter().all(|it| it.entity_id != "app-0"));
+                assert!(list.iter().all(|it| it.entity_id != "app-1"));
+                assert_eq!(list.first().unwrap().entity_id, "app-2");
+            });
+        });
+    }
+
+    #[test]
+    fn focus_item_split_caps_shown_at_two() {
+        with_session(|session| {
+            let a = session.open_item(OpenItemKind::AppReg, "app-1", "A");
+            let b = session.open_item(OpenItemKind::AppReg, "app-2", "B");
+            let c = session.open_item(OpenItemKind::AppReg, "app-3", "C");
+            session.focus_item(a, false);
+            session.focus_item(b, true);
+            session
+                .shown_items
+                .with_untracked(|s| assert_eq!(s, &vec![a, b]));
+            // A third pinned pane evicts the oldest shown (a).
+            session.focus_item(c, true);
+            session
+                .shown_items
+                .with_untracked(|s| assert_eq!(s, &vec![b, c]));
+        });
+    }
+
+    #[test]
+    fn close_item_clears_from_both_sets() {
+        with_session(|session| {
+            let a = session.open_item(OpenItemKind::AppReg, "app-1", "A");
+            let b = session.open_item(OpenItemKind::AppReg, "app-2", "B");
+            session.focus_item(a, false);
+            session.focus_item(b, true);
+            session.close_item(a);
+            session.open_items.with_untracked(|list| {
+                assert_eq!(list.len(), 1);
+                assert_eq!(list[0].id, b);
+            });
+            session
+                .shown_items
+                .with_untracked(|s| assert_eq!(s, &vec![b]));
+            // close_item_by_entity resolves the synthetic id from (kind, entity).
+            session.close_item_by_entity(OpenItemKind::AppReg, "app-2");
+            session
+                .open_items
+                .with_untracked(|list| assert!(list.is_empty()));
+            session
+                .shown_items
+                .with_untracked(|s| assert!(s.is_empty()));
+        });
+    }
+
+    #[test]
+    fn set_active_tenant_clears_working_set() {
+        with_session(|session| {
+            session.open_item(OpenItemKind::AppReg, "app-1", "A");
+            session.open_item(OpenItemKind::Enterprise, "sp-1", "B");
+            session.set_active_tenant(None);
+            session
+                .open_items
+                .with_untracked(|list| assert!(list.is_empty()));
+            session
+                .shown_items
+                .with_untracked(|s| assert!(s.is_empty()));
+        });
     }
 
     #[test]

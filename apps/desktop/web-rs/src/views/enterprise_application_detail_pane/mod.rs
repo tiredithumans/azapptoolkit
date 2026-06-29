@@ -25,7 +25,7 @@ use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{DataTable, DetailLoadError, DetailSkeleton};
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
-use crate::state::use_session;
+use crate::state::{OpenItemKind, use_session};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::pairing::jump_to_paired_app;
 use crate::views::tabs::EnterpriseTab;
@@ -74,6 +74,9 @@ fn fmt_date(d: Option<chrono::DateTime<chrono::Utc>>) -> String {
 #[component]
 pub fn EnterpriseApplicationDetailPane(
     #[prop(into)] service_principal_id: Signal<String>,
+    // Reports the resolved display name to the dock chip once the detail loads
+    // (the workspace passes a setter). `None` for standalone uses.
+    #[prop(optional)] on_title: Option<Callback<String>>,
 ) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
@@ -115,6 +118,9 @@ pub fn EnterpriseApplicationDetailPane(
                 {move || Suspend::new(async move {
                     match detail.await {
                         Ok(d) => {
+                            if let Some(cb) = on_title {
+                                cb.run(d.service_principal.display_name.clone());
+                            }
                             // Derive the child's signal from the resolved value — do
                             // NOT write a container signal here. A signal write inside
                             // this Suspend render fed back into the scope and looped
@@ -194,7 +200,7 @@ fn EnterpriseAppPanel(
             match enterprise_application::delete_enterprise_application(&t.tenant_id, &id).await {
                 Ok(()) => {
                     delete_open.set(false);
-                    session.set_selected_enterprise_app(None);
+                    session.close_item_by_entity(OpenItemKind::Enterprise, &id);
                     session.enterprise_apps_reload.update(|n| *n += 1);
                     session.toast_success("Enterprise application deleted.");
                 }

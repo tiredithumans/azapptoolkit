@@ -9,7 +9,7 @@ use leptos::prelude::*;
 use crate::bindings::managed_identity::{ManagedIdentityDto, MiSubtype};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::constants::*;
-use crate::state::use_session;
+use crate::state::{OpenItemKind, use_session};
 
 pub(crate) fn chip_kind_for(subtype: MiSubtype) -> AppKind {
     match subtype {
@@ -22,20 +22,20 @@ pub(crate) fn chip_kind_for(subtype: MiSubtype) -> AppKind {
 // Reuses the shared `app-list__*` row classes (and the VirtualList scroller)
 // so the managed-identity list matches the App Registration / Enterprise
 // Application lists exactly. Rows are absolutely positioned inside the sizer.
-pub(super) fn render_row(
-    idx: usize,
-    mi: ManagedIdentityDto,
-    selected_id: RwSignal<Option<String>>,
-    error: RwSignal<Option<String>>,
-) -> impl IntoView {
+pub(super) fn render_row(idx: usize, mi: ManagedIdentityDto) -> impl IntoView {
     let session = use_session();
     // One shared allocation for the row id; the per-handler captures below are
     // refcount bumps instead of String clones.
     let id: Arc<str> = mi.id.into();
     let id_for_click = Arc::clone(&id);
+    // Highlight every row open in the workspace (the working set). Class name
+    // stays `--selected` so `pairing.rs`'s scroll-settle selector keeps matching.
     let row_class = move || {
         let mut c = String::from("app-list__row");
-        if selected_id.with(|s| s.as_deref() == Some(&*id)) {
+        if session
+            .is_open(OpenItemKind::ManagedIdentity, &id)
+            .is_some()
+        {
             c.push_str(" app-list__row--selected");
         }
         c
@@ -48,6 +48,7 @@ pub(super) fn render_row(
         mi.display_name
     };
     let title_name = display_name.clone();
+    let name_for_open = display_name.clone();
     let app_id = mi.app_id;
     view! {
         <div
@@ -59,8 +60,11 @@ pub(super) fn render_row(
                 class="app-list__row-btn"
                 type="button"
                 on:click=move |_| {
-                    session.set_selected_managed_identity(Some(id_for_click.to_string()));
-                    error.set(None);
+                    session.open_item(
+                        OpenItemKind::ManagedIdentity,
+                        id_for_click.to_string(),
+                        name_for_open.clone(),
+                    );
                 }
             >
                 <span class="row-meta">
