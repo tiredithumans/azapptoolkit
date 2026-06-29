@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-29
+
 ### Added
 
 - **Open-items workspace — full-width lists + a shared "working set" dock.** The
