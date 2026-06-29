@@ -10,6 +10,8 @@ use thaw::{Spinner, SpinnerSize};
 use crate::bindings::{applications, updater};
 use crate::components::global_search::GlobalSearch;
 use crate::components::icon::{Icon, IconName};
+use crate::components::open_items_dock::OpenItemsDock;
+use crate::components::open_items_workspace::OpenItemsWorkspace;
 use crate::components::toast::{ToastHost, ToastKind};
 use crate::components::update_splash::UpdateSplash;
 use crate::state::{ActiveView, use_session};
@@ -339,7 +341,13 @@ pub fn AppShell(children: Children) -> impl IntoView {
                     </div>
                     <div class="shell__topbar-right" />
                 </header>
-                <div class="shell__content">{children()}</div>
+                // The content area + the workspace overlay share one positioned
+                // wrapper (the `1fr` grid row); the dock is the row below it.
+                <div class="shell__content-wrap">
+                    <div class="shell__content">{children()}</div>
+                    <OpenItemsWorkspace />
+                </div>
+                <OpenItemsDock />
             </div>
             <CacheDiagnosticsDialog
                 open=Signal::derive(move || session.cache_open.get())

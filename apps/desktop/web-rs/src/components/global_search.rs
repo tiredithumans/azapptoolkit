@@ -19,7 +19,7 @@ use crate::bindings::search::{self, GlobalSearchResults, SearchHit};
 use crate::components::icon::{Icon, IconName};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::hooks::use_debounced::use_debounced;
-use crate::state::{ActiveView, Session, use_session};
+use crate::state::{ActiveView, OpenItemKind, Session, use_session};
 
 /// One command-bar entry: a label, extra search keywords, and the side effect.
 /// `run` is a plain `fn` pointer (non-capturing) so the list is trivially `Copy`.
@@ -547,9 +547,10 @@ fn flatten_hits(
     out
 }
 
-/// Opens a picked record: switches to its list view, selects it, and seeds that
-/// list's filter with its name (the search↔filter bridge). Shared by the row
-/// mouse handler and the keyboard Enter dispatch so both behave identically.
+/// Opens a picked record: switches to its list view, opens it in the workspace,
+/// and seeds that list's filter with its name (the search↔filter bridge). Shared
+/// by the row mouse handler and the keyboard Enter dispatch so both behave
+/// identically.
 fn pick_hit(
     session: crate::state::Session,
     hit: &SearchHit,
@@ -561,18 +562,18 @@ fn pick_hit(
     match selection {
         SelectionKind::AppReg => {
             session.set_view(ActiveView::Apps);
-            session.set_selected_app(Some(id));
-            session.apps_search.set(name);
+            session.apps_search.set(name.clone());
+            session.open_item(OpenItemKind::AppReg, id, name);
         }
         SelectionKind::EntApp => {
             session.set_view(ActiveView::EnterpriseApps);
-            session.set_selected_enterprise_app(Some(id));
-            session.enterprise_search.set(name);
+            session.enterprise_search.set(name.clone());
+            session.open_item(OpenItemKind::Enterprise, id, name);
         }
         SelectionKind::Mi => {
             session.set_view(ActiveView::ManagedIdentities);
-            session.set_selected_managed_identity(Some(id));
-            session.mi_search.set(name);
+            session.mi_search.set(name.clone());
+            session.open_item(OpenItemKind::ManagedIdentity, id, name);
         }
     }
     raw_query.set(String::new());

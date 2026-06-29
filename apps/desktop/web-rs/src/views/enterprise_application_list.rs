@@ -25,7 +25,7 @@ use crate::components::virtual_list::VirtualList;
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
-use crate::state::use_session;
+use crate::state::{OpenItemKind, use_session};
 use crate::util::created_in_range;
 use crate::views::pairing::jump_to_paired_app;
 
@@ -411,12 +411,11 @@ fn view_row(
     let id: Arc<str> = sp.id.into();
     let id_click = Arc::clone(&id);
     let id_key = Arc::clone(&id);
+    // Highlight every row open in the workspace (the working set). Class name
+    // stays `--selected` so `pairing.rs`'s scroll-settle selector keeps matching.
     let row_class = move || {
         let mut c = String::from("app-list__row");
-        if session
-            .selected_enterprise_app_id
-            .with(|s| s.as_deref() == Some(&*id))
-        {
+        if session.is_open(OpenItemKind::Enterprise, &id).is_some() {
             c.push_str(" app-list__row--selected");
         }
         c
@@ -428,6 +427,9 @@ fn view_row(
         sp.display_name
     };
     let title_name = display_name.clone();
+    // Owned name copies for the open handlers (the open chip's label).
+    let name_click = display_name.clone();
+    let name_key = display_name.clone();
     let app_id_string = sp.app_id;
     let is_foreign = sp.is_foreign_tenant;
     let paired_app_id = sp.paired_app_registration_id.clone();
@@ -447,13 +449,11 @@ fn view_row(
                 type="button"
                 aria-label=row_label
                 on:click=move |_| {
-                    let s = session;
-                    s.set_selected_enterprise_app(Some(id_click.to_string()));
+                    session.open_item(OpenItemKind::Enterprise, id_click.to_string(), name_click.clone());
                 }
                 on:keydown=move |ev: ev::KeyboardEvent| {
-                    let s = session;
                     if ev.key() == "Enter" {
-                        s.set_selected_enterprise_app(Some(id_key.to_string()));
+                        session.open_item(OpenItemKind::Enterprise, id_key.to_string(), name_key.clone());
                     }
                 }
             >

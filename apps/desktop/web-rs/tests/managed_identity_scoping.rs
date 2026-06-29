@@ -15,7 +15,7 @@ use azapptoolkit_dto::managed_identity::{
     AppRoleGrantDto, AzureRolesResult, GrantManagedIdentityResult,
 };
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
-use azapptoolkit_web_rs::views::managed_identities::ManagedIdentitiesView;
+use azapptoolkit_web_rs::views::managed_identities::ManagedIdentityDetailWindow;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
@@ -87,8 +87,9 @@ fn select_permission(value: &str) {
     panic!("no permission row for `{value}`");
 }
 
-/// Mock the MI list + detail pane + catalog, mount the view, and open the
-/// selected identity's Permissions tab.
+/// Mock the MI resolution + detail resources + catalog, mount the self-contained
+/// detail window for the identity, and land on its Permissions tab. The window
+/// resolves the identity (id `mi-0`) from the mocked `list_managed_identities`.
 async fn mount_mi_permissions() -> ts::Mounted {
     ts::reset();
     ts::mock_ok(
@@ -117,13 +118,12 @@ async fn mount_mi_permissions() -> ts::Mounted {
         &fixtures::graph_resource_permissions(&["Mail.Read", "User.Read.All"]),
     );
 
-    let m = ts::mount_view(|| view! { <ManagedIdentitiesView /> });
-
-    ts::wait_for(|| ts::query_all(".app-list__row").len() == 1).await;
+    let m = ts::mount_view(|| {
+        view! { <ManagedIdentityDetailWindow mi_id=Signal::derive(|| "mi-0".to_string()) /> }
+    });
+    // Land the pane on its Permissions tab (consumed once on mount, before the
+    // window's resource resolves and mounts the pane).
     m.session.last_mi_tab.set("permissions".to_string());
-    m.session
-        .selected_managed_identity_id
-        .set(Some("mi-0".to_string()));
     ts::wait_for(|| ts::body_contains("Current permissions")).await;
     m
 }

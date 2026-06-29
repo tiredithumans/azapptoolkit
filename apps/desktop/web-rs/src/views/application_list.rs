@@ -29,7 +29,7 @@ use crate::components::virtual_list::VirtualList;
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
-use crate::state::use_session;
+use crate::state::{OpenItemKind, use_session};
 use crate::util::created_in_range;
 use crate::views::pairing::jump_to_paired_enterprise;
 
@@ -37,7 +37,6 @@ use crate::views::pairing::jump_to_paired_enterprise;
 pub fn ApplicationList() -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
-    let selected = session.selected_app_object_id;
 
     // "Filter this list" query, lifted to the session so the top-bar Global
     // Search can seed it (picking an App Registration there lands the user here
@@ -192,7 +191,6 @@ pub fn ApplicationList() -> impl IntoView {
                                         created_before=created_before
                                         filters_open=filters_open
                                         export_rows=export_rows
-                                        selected=selected
                                     />
                                 }
                                     .into_any()
@@ -241,7 +239,6 @@ fn LoadedApps(
     /// the rest of the drawer.
     filters_open: RwSignal<bool>,
     export_rows: StoredValue<Arc<Vec<ApplicationListRowDto>>>,
-    selected: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let session = use_session();
 
@@ -371,7 +368,7 @@ fn LoadedApps(
                     </div>
                 }
             })}
-        <VirtualRows items=shown selected=selected total=total />
+        <VirtualRows items=shown total=total />
     }
 }
 
@@ -380,7 +377,6 @@ fn LoadedApps(
 #[component]
 fn VirtualRows(
     items: Memo<Arc<Vec<ApplicationListRowDto>>>,
-    selected: RwSignal<Option<String>>,
     // The pre-filter tenant count, so an empty tenant gets an onboarding CTA
     // rather than the "adjust your filters" copy meant for a filtered-empty list.
     total: usize,
@@ -425,7 +421,7 @@ fn VirtualRows(
                 scroller_class="app-list__scroller"
                 sizer_class="app-list__sizer"
                 key=|row: &ApplicationListRowDto| row.id.clone()
-                render_row=move |idx, row| view_row(idx, row, selected, session).into_any()
+                render_row=move |idx, row| view_row(idx, row, session).into_any()
             />
         </Show>
     }
@@ -434,7 +430,6 @@ fn VirtualRows(
 fn view_row(
     idx: usize,
     row: ApplicationListRowDto,
-    selected: RwSignal<Option<String>>,
     session: crate::state::Session,
 ) -> impl IntoView {
     let paired_sp_id = row.paired_service_principal_id;
@@ -445,9 +440,12 @@ fn view_row(
     let id_click = Arc::clone(&id);
     let id_key = Arc::clone(&id);
     let id_check = Arc::clone(&id);
+    // Highlight every row that's open in the workspace (the working set), not a
+    // single selection. Class name stays `--selected` so `pairing.rs`'s
+    // scroll-settle selector keeps matching.
     let row_class = move || {
         let mut c = String::from("app-list__row");
-        if selected.with(|s| s.as_deref() == Some(&*id_class)) {
+        if session.is_open(OpenItemKind::AppReg, &id_class).is_some() {
             c.push_str(" app-list__row--selected");
         }
         c
@@ -459,6 +457,9 @@ fn view_row(
         row.display_name
     };
     let title_name = display_name.clone();
+    // Owned name copies for the open handlers (the open chip's label).
+    let name_click = display_name.clone();
+    let name_key = display_name.clone();
     let app_id_string = row.app_id;
     // Descriptive per-row label for the bulk-select checkbox: the row's
     // display name plus its appId, so screen-reader users can tell rows apart
@@ -480,10 +481,12 @@ fn view_row(
             <button
                 class="app-list__row-btn"
                 type="button"
-                on:click=move |_| { session.set_selected_app(Some(id_click.to_string())) }
+                on:click=move |_| {
+                    session.open_item(OpenItemKind::AppReg, id_click.to_string(), name_click.clone());
+                }
                 on:keydown=move |ev: ev::KeyboardEvent| {
                     if ev.key() == "Enter" {
-                        session.set_selected_app(Some(id_key.to_string()));
+                        session.open_item(OpenItemKind::AppReg, id_key.to_string(), name_key.clone());
                     }
                 }
             >

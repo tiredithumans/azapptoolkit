@@ -1,8 +1,8 @@
-//! Detail pane for a selected managed identity: header (TypeChip + name +
-//! Refresh) + properties + "Current permissions" + "Grant application
-//! permissions" + "Azure RBAC roles". Split out of `ManagedIdentitiesView`
-//! (the parent keeps the master list, all signals/resources, and all
-//! mutation callbacks); this component only reads those handles and renders.
+//! Detail pane for a managed identity: header (TypeChip + name + Refresh) +
+//! properties + "Current permissions" + "Grant application permissions" +
+//! "Azure RBAC roles". A pure presenter — `ManagedIdentityDetailWindow` owns
+//! the resources, signals, and mutation callbacks and passes them in; this
+//! component only reads those handles and renders.
 
 use std::collections::HashMap;
 
@@ -51,7 +51,10 @@ pub fn ManagedIdentityDetailPane(
     #[prop(into)] reload: RwSignal<u32>,
     #[prop(into)] arm_reload: RwSignal<u32>,
     #[prop(into)] tenant: RwSignal<Option<TenantContext>>,
-    #[prop(into)] selected_id: RwSignal<Option<String>>,
+    // The identity's service-principal id, for the Azure-role assign form. A
+    // `Signal` (not the old `RwSignal<selected_id>`) so each open window passes
+    // its own id derived from `mi_id`, independent of any global selection.
+    #[prop(into)] principal_id: Signal<Option<String>>,
 
     // Callbacks (all defined in the parent — this pane only invokes them).
     #[prop(into)] on_revoke: Callback<(String, String)>,
@@ -256,7 +259,7 @@ pub fn ManagedIdentityDetailPane(
                 tenant_id=Signal::derive(move || {
                     tenant.get().map(|t| t.tenant_id)
                 })
-                principal_id=Signal::derive(move || selected_id.get())
+                principal_id=principal_id
                 on_assigned=Callback::new(move |()| {
                     arm_reload.update(|n| *n += 1)
                 })
