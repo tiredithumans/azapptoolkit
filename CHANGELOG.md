@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-30
+
 ### Added
 
 - **Grant a custom app registration's app role to a managed identity (or another app) from
