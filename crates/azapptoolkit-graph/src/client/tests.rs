@@ -285,9 +285,12 @@ async fn list_tenant_app_role_resources_filters_by_owner_and_selects_app_roles()
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/servicePrincipals"))
+        // `appOwnerOrganizationId` is an Edm.Guid → unquoted filter literal
+        // (`eq <guid>`, not `eq '<guid>'`). A quoted value is a 400 against real
+        // Graph; this asserts the Graph-correct, unquoted contract.
         .and(query_param(
             "$filter",
-            "appOwnerOrganizationId eq 'tenant-test'",
+            "appOwnerOrganizationId eq tenant-test",
         ))
         .and(query_param("$select", "id,appId,displayName,appRoles"))
         .and(query_param("$count", "true"))

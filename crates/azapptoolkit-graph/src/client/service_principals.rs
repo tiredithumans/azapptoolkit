@@ -86,10 +86,12 @@ impl GraphClient {
     /// identities match the owner filter but carry no app roles, so the caller's
     /// role filter drops them.
     pub async fn list_tenant_app_role_resources(&self) -> Result<Vec<ServicePrincipal>> {
-        let filter = format!(
-            "appOwnerOrganizationId eq '{}'",
-            escape_odata(&self.tenant_id)
-        );
+        // `appOwnerOrganizationId` is an `Edm.Guid`, so its `$filter` literal is
+        // **unquoted** (`eq <guid>`) — unlike the `appId` string filter above
+        // (`eq '<guid>'`). Quoting a GUID property makes Graph reject the whole
+        // request with 400, which the picker silently swallows into an empty
+        // group. `self.tenant_id` is the trusted GUID from the auth context.
+        let filter = format!("appOwnerOrganizationId eq {}", self.tenant_id);
         let params: [(&str, &str); 4] = [
             ("$filter", filter.as_str()),
             ("$select", "id,appId,displayName,appRoles"),
