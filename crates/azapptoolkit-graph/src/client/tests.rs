@@ -277,6 +277,46 @@ async fn list_managed_identities_filters_by_sp_type() {
 }
 
 #[tokio::test]
+async fn list_tenant_app_role_resources_filters_by_owner_and_selects_app_roles() {
+    // The picker's tenant-app source: owner-scoped to this tenant, projecting
+    // appRoles, as an advanced query ($count + ConsistencyLevel: eventual). The
+    // client returns the raw SPs (with appRoles); the command layer does the
+    // app-role filtering.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .and(query_param(
+            "$filter",
+            "appOwnerOrganizationId eq 'tenant-test'",
+        ))
+        .and(query_param("$select", "id,appId,displayName,appRoles"))
+        .and(query_param("$count", "true"))
+        .and(header("consistencylevel", "eventual"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "sp-orders",
+                "appId": "app-orders",
+                "displayName": "Contoso Orders API",
+                "appRoles": [{
+                    "id": "role-1",
+                    "value": "Orders.Read.All",
+                    "displayName": "Read orders",
+                    "allowedMemberTypes": ["Application"],
+                    "isEnabled": true
+                }]
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let resources = client.list_tenant_app_role_resources().await.unwrap();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0].app_id, "app-orders");
+    assert_eq!(resources[0].app_roles.len(), 1);
+    assert_eq!(resources[0].app_roles[0].value, "Orders.Read.All");
+}
+
+#[tokio::test]
 async fn lean_sp_lookup_projects_lean_fields_and_caches() {
     // The audit's lean lookup must send $select=id,appId,accountEnabled (the
     // mock only matches that projection) and serve the second call from cache.

@@ -19,6 +19,16 @@ pub async fn list_resource_permission_counts(
     invoke_result("list_resource_permission_counts", TenantArg { tenant_id }).await
 }
 
+/// Tenant-owned app registrations / SPs that expose Application app roles, for
+/// the picker's "Tenant app registrations" resource group. `role_count` is the
+/// grantable-role count for the dropdown label; the roles themselves resolve via
+/// [`list_resource_permissions`] when the resource is selected.
+pub async fn list_app_role_resources(
+    tenant_id: &str,
+) -> Result<Vec<CatalogResourceSummary>, UiError> {
+    invoke_result("list_app_role_resources", TenantArg { tenant_id }).await
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ResourceArgs<'a> {

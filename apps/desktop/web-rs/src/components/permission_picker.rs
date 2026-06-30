@@ -100,6 +100,26 @@ pub fn PermissionPicker(
         });
     });
 
+    // The tenant's own app registrations / SPs that expose Application app roles
+    // (the org's custom APIs), shown as a second resource group below the
+    // bundled Microsoft APIs. Loaded once the tenant is known; selecting one
+    // reuses the existing `list_resource_permissions` resolve + grant path
+    // unchanged (`PickerSelection.resource_app_id` carries the appId). A failed
+    // load leaves the group empty rather than panicking the frontend. Local to
+    // this picker (re-created per wizard open) and re-derived from `tenant_id`,
+    // so there's nothing to reset on tenant switch.
+    let tenant_resources: RwSignal<Vec<CatalogResourceSummary>> = RwSignal::new(Vec::new());
+    Effect::new(move |_| {
+        let Some(tenant) = tenant_id.get() else {
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            if let Ok(list) = permissions::list_app_role_resources(&tenant).await {
+                tenant_resources.set(list);
+            }
+        });
+    });
+
     let permissions_res = LocalResource::new(move || {
         let tenant = tenant_id.get();
         let resource = resource_app_id.get();
@@ -159,6 +179,33 @@ pub fn PermissionPicker(
                                     view! { <option value=r.app_id.clone()>{label}</option> }
                                 })
                                 .collect_view()
+                        }}
+                        {move || {
+                            let apps = tenant_resources.get();
+                            (!apps.is_empty())
+                                .then(|| {
+                                    view! {
+                                        <optgroup label="Tenant app registrations">
+                                            {apps
+                                                .into_iter()
+                                                .map(|r: CatalogResourceSummary| {
+                                                    let label = if r.role_count == 1 {
+                                                        format!("{} (1 app role)", r.display_name)
+                                                    } else {
+                                                        format!(
+                                                            "{} ({} app roles)",
+                                                            r.display_name,
+                                                            r.role_count,
+                                                        )
+                                                    };
+                                                    view! {
+                                                        <option value=r.app_id.clone()>{label}</option>
+                                                    }
+                                                })
+                                                .collect_view()}
+                                        </optgroup>
+                                    }
+                                })
                         }}
                     </select>
                 </label>

@@ -72,6 +72,35 @@ impl GraphClient {
         self.collect_all_pages(page).await
     }
 
+    /// Tenant-owned service principals that may expose app roles, for the
+    /// Grant-access picker's "Tenant app registrations" group. Filters
+    /// server-side to `appOwnerOrganizationId == this tenant` — the org's own
+    /// apps, excluding Microsoft first-party and foreign multi-tenant SPs (the
+    /// same comparison `sp_to_enterprise_dto` uses for `is_foreign_tenant`) —
+    /// and projects `appRoles` so the caller can keep only those exposing an
+    /// Application role. Sourcing from `/servicePrincipals` (not `/applications`)
+    /// guarantees the resource has an SP in the tenant, so the later grant's
+    /// `resolve_resource_sp` resolves. `$count=true` + `ConsistencyLevel:
+    /// eventual` keep the `eq` filter valid regardless of how the property is
+    /// indexed; pagination follows `@odata.nextLink` to exhaustion. Managed
+    /// identities match the owner filter but carry no app roles, so the caller's
+    /// role filter drops them.
+    pub async fn list_tenant_app_role_resources(&self) -> Result<Vec<ServicePrincipal>> {
+        let filter = format!(
+            "appOwnerOrganizationId eq '{}'",
+            escape_odata(&self.tenant_id)
+        );
+        let params: [(&str, &str); 4] = [
+            ("$filter", filter.as_str()),
+            ("$select", "id,appId,displayName,appRoles"),
+            ("$count", "true"),
+            ("$top", "200"),
+        ];
+        let page: Paged<ServicePrincipal> =
+            self.get_json("/servicePrincipals", &params, true).await?;
+        self.collect_all_pages(page).await
+    }
+
     /// Single per-tenant service-principal scan shared by both list views'
     /// pairing joins. Selects the superset of fields the two views need so one
     /// cached enumeration serves the App Registrations list (which joins on
