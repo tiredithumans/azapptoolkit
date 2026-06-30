@@ -74,6 +74,7 @@ pub fn run() {
             commands::permissions::list_catalog_resources,
             commands::permissions::list_resource_permissions,
             commands::permissions::list_resource_permission_counts,
+            commands::permissions::list_app_role_resources,
             commands::permissions::update_required_resource_access,
             commands::permissions::grant_admin_consent,
             commands::permissions::grant_single_permission,

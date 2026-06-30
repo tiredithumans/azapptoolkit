@@ -1,5 +1,6 @@
 use tauri::State;
 
+use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_core::models::{RequiredResourceAccess, ResourceAccess, ServicePrincipal};
 
 use crate::dto::UiError;
@@ -22,6 +23,74 @@ pub fn list_catalog_resources() -> Vec<CatalogResourceSummary> {
             scope_count: r.oauth2_permission_scopes.len(),
         })
         .collect()
+}
+
+fn app_role_resources_key(tenant_id: &str) -> String {
+    format!("{tenant_id}|app_role_resources")
+}
+
+/// Tenant-owned resources (the org's own app registrations / service
+/// principals) that expose at least one enabled Application app role, for the
+/// Grant-access picker's "Tenant app registrations" group. Returns only the
+/// directory (name + appId + a role count for the dropdown label); the picker
+/// resolves the actual roles live via [`list_resource_permissions`] when one is
+/// selected, and the grant path (`grant_managed_identity_permission` /
+/// `grant_single_permission`) already accepts an arbitrary `resource_app_id`, so
+/// this adds no grant surface. Cached under [`CacheKind::Lists`] (tenant-scoped
+/// key) — a read-only directory busted by the Lists TTL and the sign-out tenant
+/// sweep, so no mutation-driven invalidation is wired.
+#[tauri::command]
+pub async fn list_app_role_resources(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<Vec<CatalogResourceSummary>, UiError> {
+    let key = app_role_resources_key(&tenant_id);
+    if let Some(cached) = state
+        .cache
+        .get::<Vec<CatalogResourceSummary>>(CacheKind::Lists, &key)
+    {
+        tracing::debug!(target = "azapptoolkit::cache", kind = "Lists", key = %key, "hit");
+        return Ok(cached);
+    }
+    tracing::debug!(target = "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
+
+    let client = state.graph_for(&tenant_id);
+    let mut rows: Vec<CatalogResourceSummary> = client
+        .list_tenant_app_role_resources()
+        .await?
+        .into_iter()
+        .filter_map(app_role_resource_summary)
+        .collect();
+    rows.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    state.cache.put(CacheKind::Lists, key, &rows);
+    Ok(rows)
+}
+
+/// An SP → summary **iff** it exposes ≥1 grantable Application app role: enabled
+/// (`isEnabled != false`), a non-empty `value` (what the picker and grant match
+/// on), and `allowedMemberTypes` containing "Application" (case-insensitive) —
+/// user-only roles can't be assigned to a service principal / managed identity.
+/// `role_count` is that count; `scope_count` is 0 (the tenant-app group lists app
+/// roles only). Pure so it's unit-testable without a Graph client (mirrors
+/// [`service_principal_to_permissions`]).
+fn app_role_resource_summary(sp: ServicePrincipal) -> Option<CatalogResourceSummary> {
+    let role_count = sp
+        .app_roles
+        .iter()
+        .filter(|r| {
+            r.is_enabled != Some(false)
+                && !r.value.is_empty()
+                && r.allowed_member_types
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case("Application"))
+        })
+        .count();
+    (role_count > 0).then_some(CatalogResourceSummary {
+        app_id: sp.app_id,
+        display_name: sp.display_name,
+        role_count,
+        scope_count: 0,
+    })
 }
 
 /// Returns the roles + scopes for `resource_app_id`, resolved **live** from
@@ -950,6 +1019,75 @@ mod tests {
                 .iter()
                 .any(|t| t == "Application")
         );
+    }
+
+    /// `role()` with explicit `allowedMemberTypes` (it hardcodes `Application`).
+    fn role_with_types(value: &str, enabled: Option<bool>, types: &[&str]) -> AppRole {
+        AppRole {
+            allowed_member_types: types.iter().map(|t| t.to_string()).collect(),
+            ..role(value, enabled)
+        }
+    }
+
+    #[test]
+    fn app_role_resource_summary_keeps_sp_exposing_application_roles() {
+        let sp = ServicePrincipal {
+            app_id: "11111111-1111-1111-1111-111111111111".into(),
+            display_name: "Contoso Orders API".into(),
+            app_roles: vec![
+                role("Orders.Read", Some(true)),
+                role("Orders.Write", None), // null isEnabled => kept
+            ],
+            ..Default::default()
+        };
+        let summary = app_role_resource_summary(sp).expect("exposes application roles");
+        assert_eq!(summary.app_id, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(summary.display_name, "Contoso Orders API");
+        assert_eq!(summary.role_count, 2);
+        assert_eq!(summary.scope_count, 0);
+    }
+
+    #[test]
+    fn app_role_resource_summary_counts_only_grantable_application_roles() {
+        let sp = ServicePrincipal {
+            app_id: "app".into(),
+            display_name: "Mixed".into(),
+            app_roles: vec![
+                role("Orders.Read", Some(true)),                    // counted
+                role("Legacy", Some(false)),                        // disabled -> dropped
+                role_with_types("UserOnly", Some(true), &["User"]), // user-only -> dropped
+                role_with_types("Both", Some(true), &["Application", "User"]), // counted
+                role_with_types("", Some(true), &["Application"]), // empty value -> dropped (not matchable by the grant)
+            ],
+            ..Default::default()
+        };
+        let summary = app_role_resource_summary(sp).expect("has grantable roles");
+        assert_eq!(summary.role_count, 2);
+    }
+
+    #[test]
+    fn app_role_resource_summary_drops_sp_without_grantable_roles() {
+        // No app roles at all (e.g. a managed identity, which the owner filter
+        // returns but exposes none).
+        assert!(
+            app_role_resource_summary(ServicePrincipal {
+                app_id: "a".into(),
+                display_name: "Bare".into(),
+                ..Default::default()
+            })
+            .is_none()
+        );
+        // Only user-only / disabled roles → not grantable to a service principal.
+        let sp = ServicePrincipal {
+            app_id: "a".into(),
+            display_name: "UserApp".into(),
+            app_roles: vec![
+                role_with_types("UserOnly", Some(true), &["User"]),
+                role("Disabled", Some(false)),
+            ],
+            ..Default::default()
+        };
+        assert!(app_role_resource_summary(sp).is_none());
     }
 
     fn access(id: &str, ty: &str) -> ResourceAccess {

@@ -543,6 +543,42 @@ pub fn graph_resource_permissions(role_values: &[&str]) -> ResourcePermissions {
     }
 }
 
+/// A tenant-owned resource (the org's own app registration) that exposes
+/// Application app roles — the picker's "Tenant app registrations" group, used
+/// by the managed-identity / app-registration grant flow. Stable synthetic
+/// appId so `list_resource_permissions` can be keyed to it.
+pub fn tenant_app_role_resource() -> CatalogResourceSummary {
+    CatalogResourceSummary {
+        app_id: guid("contoso-orders-api"),
+        display_name: "Contoso Orders API".to_string(),
+        role_count: 2,
+        scope_count: 0,
+    }
+}
+
+/// The app roles [`tenant_app_role_resource`] exposes, as `ResourcePermissions`
+/// (each an Application role so the `ApplicationOnly` picker keeps them). Keyed
+/// off the same appId so selecting the tenant app shows its own roles, not
+/// Graph's.
+pub fn tenant_app_role_permissions() -> ResourcePermissions {
+    ResourcePermissions {
+        app_id: guid("contoso-orders-api"),
+        display_name: "Contoso Orders API".to_string(),
+        app_roles: ["Orders.Read.All", "Orders.ReadWrite.All"]
+            .iter()
+            .map(|v| RoleEntry {
+                id: format!("{v}-role-id"),
+                value: (*v).to_string(),
+                display_name: format!("{v} (application)"),
+                description: None,
+                allowed_member_types: vec!["Application".to_string()],
+            })
+            .collect(),
+        oauth2_permission_scopes: Vec::new(),
+        source: "demo".to_string(),
+    }
+}
+
 /// A clean `GrantResult` (no failures) — the outcome of an org-wide
 /// `grant_single_permission`.
 pub fn grant_result() -> azapptoolkit_dto::permissions::GrantResult {

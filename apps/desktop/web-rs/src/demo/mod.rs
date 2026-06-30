@@ -488,10 +488,28 @@ fn register_fixtures() {
     let resources = vec![f::graph_resource_summary()];
     mock_ok("list_catalog_resources", &resources);
     mock_ok("list_resource_permission_counts", &resources);
-    mock_ok(
-        "list_resource_permissions",
-        &f::graph_resource_permissions(&["User.Read.All", "Mail.Read", "Sites.Selected"]),
-    );
+    // The tenant's own app registrations that expose Application app roles — the
+    // picker's second resource group (the managed-identity / app-reg grant flow).
+    let tenant_res = f::tenant_app_role_resource();
+    let tenant_app_id = tenant_res.app_id.clone();
+    mock_ok("list_app_role_resources", &vec![tenant_res]);
+    // Per-resource roles, args-aware so the demo is coherent: the tenant app
+    // shows its own Orders.* roles; every other resource (the bundled Graph)
+    // shows the Graph sample set.
+    let graph_perms =
+        f::graph_resource_permissions(&["User.Read.All", "Mail.Read", "Sites.Selected"]);
+    let tenant_perms = f::tenant_app_role_permissions();
+    mock_each("list_resource_permissions", move |args| {
+        let rid = args
+            .get("resourceAppId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if rid == tenant_app_id {
+            tenant_perms.clone()
+        } else {
+            graph_perms.clone()
+        }
+    });
 
     // ---- Infallible `invoke()` commands: must resolve or they panic on the
     // rejected-promise fallback (Result-returning reads can safely fall through).

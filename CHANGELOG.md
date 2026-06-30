@@ -7,6 +7,16 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Grant a custom app registration's app role to a managed identity (or another app) from
+  the UI.** The "Grant access" wizard's resource picker now lists the tenant's own app
+  registrations that expose application app roles — a new **"Tenant app registrations"**
+  group below the bundled Microsoft APIs — so a managed identity (or an app registration)
+  can be granted a custom API's app role without hand-crafting the assignment. The backend
+  grant path already accepted any resource; this surfaces those resources in the picker
+  (`list_app_role_resources`, owner-scoped to the tenant).
+
 ### Fixed
 
 - **The in-app update changelog renders as formatted text, not raw Markdown.** The
