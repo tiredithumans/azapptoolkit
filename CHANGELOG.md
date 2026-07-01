@@ -7,6 +7,14 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Failed loads offer an in-context Retry.** The tenant-wide audit dashboards
+  (Credential expiry, Consent grants, Application permissions) and the Managed
+  Identities list now show a Retry button with a "Failed to load: …" message instead
+  of a dead-end error, matching the App Registrations and Enterprise Applications
+  lists — so a transient 429/network failure recovers in place.
+
 ## [0.11.0] - 2026-06-30
 
 ### Added

@@ -185,7 +185,26 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                             .into_any()
                                     }
                                     Err(e) => {
-                                        view! { <Body1 class="form-error">{e.message}</Body1> }
+                                        // A list load can fail transiently (429 /
+                                        // network); offer an in-context Retry instead
+                                        // of a dead-end message (the App Registrations
+                                        // list does the same). Plain reload — the
+                                        // header Refresh keeps the cache-busting job.
+                                        view! {
+                                            <div class="app-list__error">
+                                                <Body1 class="form-error">
+                                                    {format!("Failed to load: {}", e.message)}
+                                                </Body1>
+                                                <Button
+                                                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                                    on_click=Box::new(move |_| {
+                                                        list_reload.update(|n| *n = n.wrapping_add(1))
+                                                    })
+                                                >
+                                                    "Retry"
+                                                </Button>
+                                            </div>
+                                        }
                                             .into_any()
                                     }
                                 }
