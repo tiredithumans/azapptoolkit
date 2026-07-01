@@ -8,14 +8,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Method;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 use azapptoolkit_core::http_retry::{
-    BASE_DELAY_MS, MAX_RETRIES, next_backoff_ms, parse_retry_after_seconds, sleep_before_retry,
-    sleep_with_jitter,
+    next_backoff_ms, parse_retry_after_seconds, sleep_before_retry, sleep_with_jitter,
+    BASE_DELAY_MS, MAX_RETRIES,
 };
 use azapptoolkit_core::token::BearerProvider;
 
@@ -330,7 +330,9 @@ mod tests {
                 "my-secret",
                 &SecretSetRequest {
                     value: "p@ssw0rd".into(),
-                    ..Default::default()
+                    content_type: None,
+                    tags: None,
+                    attributes: None,
                 },
             )
             .await

@@ -8,11 +8,11 @@ use tauri::State;
 use azapptoolkit_keyvault::SecretSetRequest;
 
 use crate::commands::applications::invalidate_app_credentials;
-use crate::dto::UiError;
 use crate::dto::keyvault::{
     KvSecretItemDto, KvSecretMetadataDto, KvSecretValueDto, KvSetSecretInput,
     RotateCredentialInput, RotateCredentialResult,
 };
+use crate::dto::UiError;
 use crate::state::AppState;
 
 // ---------------- Commands ----------------
@@ -109,11 +109,14 @@ pub async fn rotate_app_credential(
     let lifetime = std::time::Duration::from_secs(u64::from(days) * 86_400);
     let display_name = format!("rotated-{}", chrono::Utc::now().format("%Y%m%d"));
 
-    // 1. Mint the new app secret.
-    let new_cred = graph
+    // 1. Mint the new app secret. `take()` (not clone) the value so exactly one
+    //    copy exists, and it ends its life inside the Drop-zeroizing
+    //    SecretSetRequest below — this is the one flow where the backend is the
+    //    sole holder of the secret (the result DTO carries no value).
+    let mut new_cred = graph
         .add_password(&input.object_id, &display_name, lifetime)
         .await?;
-    let Some(secret_value) = new_cred.secret_text.clone() else {
+    let Some(secret_value) = new_cred.secret_text.take() else {
         // addPassword always returns the value; clean up just in case.
         let _ = graph
             .remove_password(&input.object_id, &new_cred.key_id)

@@ -7,6 +7,14 @@ the project adheres to
 
 ## [Unreleased]
 
+### Security
+
+- **Rotated client secrets are zeroized in backend memory.** The rotate-into-Key-Vault
+  flow holds the freshly minted secret in exactly one buffer and wipes it on drop
+  (`SecretSetRequest` now zeroizes its value — covering manual `kv_set_secret` writes
+  too — and redacts it from `Debug` output), matching the existing access-token and
+  generated-certificate handling.
+
 ## [0.11.0] - 2026-06-30
 
 ### Added
