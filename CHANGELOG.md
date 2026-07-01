@@ -7,6 +7,14 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **An invalid SAML certificate subject fails before the app is created.** SAML setup
+  now rejects a certificate subject that doesn't start with `CN=` up front (a typed
+  validation error, like the reply-URL check) instead of failing at the
+  certificate step — after the app and service principal already exist — and leaving a
+  half-configured app. The rotate-certificate command gets the same friendly rejection.
+
 ### Security
 
 - **Rotated client secrets are zeroized in backend memory.** The rotate-into-Key-Vault

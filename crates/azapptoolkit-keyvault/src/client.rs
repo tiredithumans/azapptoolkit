@@ -8,14 +8,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Method;
-use serde::de::DeserializeOwned;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use azapptoolkit_core::http_retry::{
-    next_backoff_ms, parse_retry_after_seconds, sleep_before_retry, sleep_with_jitter,
-    BASE_DELAY_MS, MAX_RETRIES,
+    BASE_DELAY_MS, MAX_RETRIES, next_backoff_ms, parse_retry_after_seconds, sleep_before_retry,
+    sleep_with_jitter,
 };
 use azapptoolkit_core::token::BearerProvider;
 
