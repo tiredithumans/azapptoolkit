@@ -114,7 +114,7 @@ where
             if still_active {
                 match result {
                     Ok(r) => rows.set(r),
-                    Err(e) => error.set(Some(e.message)),
+                    Err(e) => error.set(Some(format!("Failed to load: {}", e.message))),
                 }
                 loading.set(false);
             }
@@ -186,7 +186,26 @@ where
                 </Button>
             </SectionHeader>
 
-            {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || {
+                error
+                    .get()
+                    .map(|e| {
+                        // A tenant-wide load can fail transiently (429 / network);
+                        // offer an in-context Retry instead of a dead-end message
+                        // (the entity lists do the same).
+                        view! {
+                            <div class="app-list__error">
+                                <Body1 class="form-error">{e}</Body1>
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                    on_click=Box::new(move |_| reload.update(|n| *n += 1))
+                                >
+                                    "Retry"
+                                </Button>
+                            </div>
+                        }
+                    })
+            }}
             {move || {
                 export_msg.get().map(|m| view! { <div class="alert alert--ok">{m}</div> })
             }}

@@ -7,6 +7,27 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Failed loads offer an in-context Retry.** The tenant-wide audit dashboards
+  (Credential expiry, Consent grants, Application permissions) and the Managed
+  Identities list now show a Retry button with a "Failed to load: …" message instead
+  of a dead-end error, matching the App Registrations and Enterprise Applications
+  lists — so a transient 429/network failure recovers in place.
+- **An invalid SAML certificate subject fails before the app is created.** SAML setup
+  now rejects a certificate subject that doesn't start with `CN=` up front (a typed
+  validation error, like the reply-URL check) instead of failing at the
+  certificate step — after the app and service principal already exist — and leaving a
+  half-configured app. The rotate-certificate command gets the same friendly rejection.
+
+### Security
+
+- **Rotated client secrets are zeroized in backend memory.** The rotate-into-Key-Vault
+  flow holds the freshly minted secret in exactly one buffer and wipes it on drop
+  (`SecretSetRequest` now zeroizes its value — covering manual `kv_set_secret` writes
+  too — and redacts it from `Debug` output), matching the existing access-token and
+  generated-certificate handling.
+
 ### Changed
 
 - **Copy buttons confirm the copy.** `CopyableId` (the copy-to-clipboard GUID fields in
@@ -15,6 +36,12 @@ the project adheres to
 - **The open-items compare gesture is discoverable.** Dock chips' tooltip now reads
   "click to focus · Ctrl/Cmd-click to compare side-by-side" — the 2-up compare was
   previously invisible unless you already knew the shortcut.
+- **Admin-consent grants resolve resource service principals in one batched read.**
+  "Grant admin consent" (single, bulk, and DR-restore paths) pre-resolves every declared
+  resource's service principal via Graph `$batch` and the shared Permissions cache instead
+  of one sequential lookup per resource — on a cold cache an app with N resources costs
+  1 POST, not N GETs. A batch failure degrades to the existing per-resource lookups;
+  per-resource failure reporting is unchanged.
 
 ## [0.11.0] - 2026-06-30
 

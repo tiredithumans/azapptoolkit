@@ -436,6 +436,7 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]
