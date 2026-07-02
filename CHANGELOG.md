@@ -7,6 +7,14 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **The copy confirmation now covers every copy button.** v0.12.0's "Copied" badge only
+  landed on `CopyableId` (MI detail fields, DR view, credential-table ID cells) — the
+  detail-pane header's app-id copy button and the SSO summary fields still gave no
+  feedback. The badge behavior is extracted into a shared `CopyIconButton` and all
+  icon-button copy affordances render it.
+
 ## [0.12.0] - 2026-07-01
 
 ### Fixed
