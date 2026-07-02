@@ -13,6 +13,11 @@ ignore = [
     # Windows/macOS builds. Kept in sync with .cargo/audit.toml (see there for
     # the full rationale + drop condition).
     "RUSTSEC-2024-0429",
+    # quick-xml 0.39 DoS-class parser issues, transitive via plist -> tauri;
+    # plist parses only the app's own bundle metadata, never untrusted XML.
+    # Kept in sync with .cargo/audit.toml (full rationale + drop condition).
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]
