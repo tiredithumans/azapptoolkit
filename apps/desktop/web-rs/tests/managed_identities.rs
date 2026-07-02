@@ -45,6 +45,28 @@ async fn error_state_renders_message() {
 }
 
 #[wasm_bindgen_test]
+async fn retry_after_error_refetches() {
+    ts::reset();
+    ts::mock_err(
+        "list_managed_identities",
+        &fixtures::ui_error("throttled", "Too many requests"),
+    );
+
+    let _m = ts::mount_view(|| view! { <ManagedIdentitiesView /> });
+    ts::wait_for(|| ts::body_contains("Failed to load")).await;
+
+    // The transient failure clears: Retry refetches in place (no remount).
+    ts::mock_ok(
+        "list_managed_identities",
+        &fixtures::managed_identities(&["mi-recovered"]),
+    );
+    ts::click(".app-list__error button");
+
+    ts::wait_for(|| ts::query_all(".app-list__row").len() == 1).await;
+    assert_eq!(ts::call_count("list_managed_identities"), 2);
+}
+
+#[wasm_bindgen_test]
 async fn empty_list_renders_no_rows() {
     ts::reset();
     ts::mock_ok(

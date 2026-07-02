@@ -377,6 +377,13 @@ pub async fn create_saml_sso_application(
     azapptoolkit_core::redirect::validate_redirect_uri(&input.reply_url)
         .map_err(invalid_redirect_uri)?;
 
+    // Likewise reject a certificate subject Graph would refuse at step 4 —
+    // by then the app + SP already exist, so the failure would leave a
+    // half-configured app.
+    if let Some(s) = input.cert_subject.as_deref().filter(|s| !s.is_empty()) {
+        validate_cert_subject(s)?;
+    }
+
     // Pre-acquire the claims-write token up front (only when needed) so a
     // missing-consent rejection surfaces as `consent_required` and the UI can
     // offer a "Grant consent" button — before we create anything.
@@ -611,6 +618,20 @@ async fn configure_oidc(
 /// non-retryable `invalid_redirect_uri` UI error.
 fn invalid_redirect_uri(message: String) -> UiError {
     UiError::validation("invalid_redirect_uri", message)
+}
+
+/// Rejects a certificate subject Graph's `addTokenSigningCertificate` would
+/// refuse (its `displayName` must start with `CN=`) — validated *before* any
+/// mutation so a bad value can't leave a half-configured app.
+fn validate_cert_subject(subject: &str) -> Result<(), UiError> {
+    if subject.to_ascii_uppercase().starts_with("CN=") {
+        Ok(())
+    } else {
+        Err(UiError::validation(
+            "invalid_cert_subject",
+            "certificate subject must start with 'CN=' (e.g. CN=Contoso SSO)",
+        ))
+    }
 }
 
 /// Annotates an error message with the created object id so a partial failure
@@ -870,6 +891,8 @@ pub async fn rotate_saml_signing_certificate(
     } else {
         subject
     };
+    // Typed rejection instead of a raw Graph 400 (consistent with the create flow).
+    validate_cert_subject(&subject)?;
     let cert = client
         .add_token_signing_certificate(&service_principal_id, &subject, end)
         .await?;
@@ -1058,6 +1081,18 @@ pub async fn get_sso_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cert_subject_requires_cn_prefix() {
+        // Graph's addTokenSigningCertificate rejects a displayName that
+        // doesn't start with CN= — pin the fail-fast mirror of that rule.
+        assert!(validate_cert_subject("CN=Contoso SSO").is_ok());
+        assert!(validate_cert_subject("cn=lowercase").is_ok());
+        for bad in ["Contoso", "O=Contoso", " ", "CN"] {
+            let err = validate_cert_subject(bad).unwrap_err();
+            assert_eq!(err.code, "invalid_cert_subject", "input: {bad:?}");
+        }
+    }
 
     #[test]
     fn build_claims_definition_shapes_schema() {

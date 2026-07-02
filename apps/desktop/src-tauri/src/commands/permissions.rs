@@ -407,6 +407,17 @@ pub(crate) async fn grant_admin_consent_core(
     // everything (duplicate/conflicting assignments).
     let existing_assignments = client.list_app_role_assignments(&client_sp.id).await?;
 
+    // Batch-prewarm the resource SPs (one $batch POST per 20) so the loop
+    // below hits the Permissions cache instead of one sequential GET per
+    // declared resource. Best-effort: a batch failure degrades to the
+    // per-resource lookups, and the loop's failure handling is unchanged.
+    let resource_app_ids: Vec<String> = app
+        .required_resource_access
+        .iter()
+        .map(|r| r.resource_app_id.clone())
+        .collect();
+    client.prewarm_resource_sps(&resource_app_ids).await;
+
     let mut role_assignments_created = Vec::new();
     let mut role_assignments_skipped = Vec::new();
     let mut scope_grants_upserted = Vec::new();

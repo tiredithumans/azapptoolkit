@@ -7,6 +7,65 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **The compare gesture hint is visible in the dock itself.** Once a second item is
+  open, the dock shows an inline "Ctrl/Cmd-click a chip to compare" hint (hidden while
+  a side-by-side compare is active) — the hover tooltip alone required knowing to hover.
+
+### Fixed
+
+- **Global search finds anything by any of its GUIDs.** Pasting a full GUID into the
+  top-bar search only probed two of the four identities (app registration by appId,
+  service principal by object id) — so an Enterprise Application was unfindable by its
+  Application ID (and an app registration by its object id), returning nothing at all
+  for a gallery/third-party app with no local registration. The GUID branch now probes
+  all four in parallel: app registration by appId *and* object id, service principal by
+  object id *and* appId.
+- **The copy confirmation now covers every copy button.** v0.12.0's "Copied" badge only
+  landed on `CopyableId` (MI detail fields, DR view, credential-table ID cells) — the
+  detail-pane header's app-id copy button and the SSO summary fields still gave no
+  feedback. The badge behavior is extracted into a shared `CopyIconButton` and all
+  icon-button copy affordances render it.
+
+## [0.12.0] - 2026-07-01
+
+### Fixed
+
+- **Failed loads offer an in-context Retry.** The tenant-wide audit dashboards
+  (Credential expiry, Consent grants, Application permissions) and the Managed
+  Identities list now show a Retry button with a "Failed to load: …" message instead
+  of a dead-end error, matching the App Registrations and Enterprise Applications
+  lists — so a transient 429/network failure recovers in place.
+- **An invalid SAML certificate subject fails before the app is created.** SAML setup
+  now rejects a certificate subject that doesn't start with `CN=` up front (a typed
+  validation error, like the reply-URL check) instead of failing at the
+  certificate step — after the app and service principal already exist — and leaving a
+  half-configured app. The rotate-certificate command gets the same friendly rejection.
+
+### Security
+
+- **Rotated client secrets are zeroized in backend memory.** The rotate-into-Key-Vault
+  flow holds the freshly minted secret in exactly one buffer and wipes it on drop
+  (`SecretSetRequest` now zeroizes its value — covering manual `kv_set_secret` writes
+  too — and redacts it from `Debug` output), matching the existing access-token and
+  generated-certificate handling.
+
+### Changed
+
+- **Copy buttons confirm the copy.** `CopyableId` (the copy-to-clipboard GUID fields in
+  detail panes and table cells) shows a brief "Copied" badge after a click, instead of
+  no feedback at all.
+- **The open-items compare gesture is discoverable.** Dock chips' tooltip now reads
+  "click to focus · Ctrl/Cmd-click to compare side-by-side" — the 2-up compare was
+  previously invisible unless you already knew the shortcut.
+- **Admin-consent grants resolve resource service principals in one batched read.**
+  "Grant admin consent" (single, bulk, and DR-restore paths) pre-resolves every declared
+  resource's service principal via Graph `$batch` and the shared Permissions cache instead
+  of one sequential lookup per resource — on a cold cache an app with N resources costs
+  1 POST, not N GETs. A batch failure degrades to the existing per-resource lookups;
+  per-resource failure reporting is unchanged.
+
 ## [0.11.0] - 2026-06-30
 
 ### Added

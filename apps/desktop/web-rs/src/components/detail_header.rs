@@ -10,8 +10,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::components::icon::IconName;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::IconButton;
-use crate::util::copy_text;
+use crate::components::ui::{CopyIconButton, IconButton};
 
 #[component]
 pub fn DetailHeader(
@@ -41,12 +40,7 @@ pub fn DetailHeader(
                     <h2 class="app-detail__title">{move || title.get()}</h2>
                     <span class="row-meta">
                         <Body1 class="mono">{move || app_id.get()}</Body1>
-                        <IconButton
-                            icon=IconName::Copy
-                            aria_label="Copy app id".to_string()
-                            title="Copy app id".to_string()
-                            on_click=Callback::new(move |_| copy_text(app_id.get()))
-                        />
+                        <CopyIconButton value=app_id aria_label="Copy app id".to_string() />
                     </span>
                 </div>
                 {children.map(|c| c())}

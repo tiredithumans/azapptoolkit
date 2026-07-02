@@ -1,8 +1,6 @@
 use leptos::prelude::*;
 
-use crate::components::icon::IconName;
-use crate::components::ui::IconButton;
-use crate::util::copy_text;
+use crate::components::ui::CopyIconButton;
 
 /// A GUID/identifier with a copy-to-clipboard button. By default the text is
 /// truncated to 8 chars + `…` (full value on hover) — for table cells where a
@@ -20,18 +18,13 @@ pub fn CopyableId(
     } else {
         format!("{}…", value.chars().take(8).collect::<String>())
     };
-    let copy_value = value.clone();
+    let copy_value: Signal<String> = RwSignal::new(value.clone()).into();
     view! {
         <span class="copyable-id">
             <span class="mono" title=value.clone()>
                 {shown}
             </span>
-            <IconButton
-                icon=IconName::Copy
-                aria_label=format!("Copy {label}")
-                title="Copy".to_string()
-                on_click=Callback::new(move |_| copy_text(copy_value.clone()))
-            />
+            <CopyIconButton value=copy_value aria_label=format!("Copy {label}") />
         </span>
     }
 }

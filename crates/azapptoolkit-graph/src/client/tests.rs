@@ -537,6 +537,87 @@ async fn resolve_resource_sp_caches_in_permissions_bucket() {
 }
 
 #[tokio::test]
+async fn prewarm_resource_sps_seeds_permissions_cache() {
+    let server = MockServer::start().await;
+    // Only the `$batch` POST is mocked — no GET /servicePrincipals mock exists,
+    // so a resolve that misses the seeded cache would fail the test.
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "responses": [
+                { "id": "0", "status": 200, "body": { "value": [{
+                    "id": "sp-graph",
+                    "appId": "graph-id",
+                    "displayName": "Microsoft Graph",
+                    "appRoles": [{
+                        "id": "role-1",
+                        "allowedMemberTypes": ["Application"],
+                        "displayName": "Read all users",
+                        "value": "User.Read.All"
+                    }],
+                    "oauth2PermissionScopes": []
+                }] } },
+                { "id": "1", "status": 200, "body": { "value": [] } }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let ids = vec!["graph-id".to_string(), "unknown-id".to_string()];
+    client.prewarm_resource_sps(&ids).await;
+
+    let graph_sp = client
+        .resolve_resource_sp("graph-id")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(graph_sp.id, "sp-graph");
+    assert_eq!(graph_sp.app_roles.len(), 1);
+    // An empty page seeds `None`, exactly like the single lookup caches it.
+    assert!(
+        client
+            .resolve_resource_sp("unknown-id")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn prewarm_resource_sps_failure_degrades_to_per_resource_get() {
+    let server = MockServer::start().await;
+    // Whole-batch failure (400: not retried by the outer loop) is swallowed…
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": { "message": "bad batch" }
+        })))
+        .mount(&server)
+        .await;
+    // …and the per-resource GET still resolves.
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .and(query_param("$filter", "appId eq 'graph-id'"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "sp-graph", "appId": "graph-id", "displayName": "Microsoft Graph" }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    client.prewarm_resource_sps(&["graph-id".to_string()]).await;
+    let sp = client
+        .resolve_resource_sp("graph-id")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sp.id, "sp-graph");
+}
+
+#[tokio::test]
 async fn sp_cache_is_tenant_scoped() {
     // Two clients for different tenants share one `Cache` (as `AppState`
     // does). A service principal's object `id` is tenant-specific, so a

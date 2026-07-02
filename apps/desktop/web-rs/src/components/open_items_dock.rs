@@ -21,6 +21,16 @@ pub fn OpenItemsDock() -> impl IntoView {
                         {dock_chip(session, item)}
                     </For>
                 </div>
+                // Inline discoverability hint for the compare gesture — in the
+                // bar itself (user preference: no toast). Appears once a second
+                // item makes comparing possible; hides while a 2-up compare is
+                // active (the gesture has been found).
+                <Show when=move || {
+                    session.open_items.with(|l| l.len() > 1)
+                        && session.shown_items.with(|s| s.len() < 2)
+                }>
+                    <span class="open-dock__hint">"Ctrl/Cmd-click a chip to compare"</span>
+                </Show>
                 // Only meaningful with more than one open — a lone chip's × already
                 // closes it.
                 <Show when=move || session.open_items.with(|l| l.len() > 1)>
@@ -74,7 +84,11 @@ fn dock_chip(session: Session, item: OpenItem) -> impl IntoView {
                 type="button"
                 class="open-dock__chip-main"
                 aria-pressed=move || if is_active() { "true" } else { "false" }
-                title=label
+                // Surface the otherwise-invisible compare gesture; keeps the
+                // live-title behavior (closure form) the label comment requires.
+                title=move || {
+                    format!("{} — click to focus · Ctrl/Cmd-click to compare side-by-side", label())
+                }
                 on:click=move |ev: leptos::ev::MouseEvent| {
                     session.focus_item(id, ev.meta_key() || ev.ctrl_key());
                 }
