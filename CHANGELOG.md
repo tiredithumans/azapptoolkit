@@ -7,6 +7,18 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Readiness no longer reports an active role as missing in tenants with legacy role
+  names.** The checklist matched directory roles by display name, but the `directoryRole`
+  objects in long-lived tenants carry legacy names — Graph names the SharePoint
+  Administrator role "SharePoint Service Administrator" (documented), Global
+  Administrator historically "Company Administrator" — so an **active** role could show
+  "Role missing" no matter how often the token was refreshed. Roles are now matched by
+  their immutable `roleTemplateId` (with a display-name fallback), so the SharePoint
+  site access row — and every other directory-role check — recognizes the activated
+  role regardless of what the tenant calls it.
+
 ### Changed
 
 - **The compare gesture hint is visible in the dock itself.** Once a second item is

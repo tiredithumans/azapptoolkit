@@ -84,6 +84,15 @@ pub struct Capability {
     /// Cloud Application Administrator). For Azure/Exchange planes these name the
     /// RBAC role for *display only* (not directory-enumerable).
     pub directory_roles_any: &'static [&'static str],
+    /// The immutable `roleTemplateId`s matching `directory_roles_any`, index-
+    /// aligned. **Matching must use these, not the display names**: the
+    /// `directoryRole` objects in long-lived tenants carry legacy names —
+    /// the SharePoint Administrator role reads "SharePoint Service
+    /// Administrator" from Graph (Microsoft documents the rename), Global
+    /// Administrator historically "Company Administrator" — so a name match
+    /// silently reports an active role as missing. Empty for the Azure /
+    /// Exchange planes (not directory-enumerable).
+    pub directory_role_template_ids_any: &'static [&'static str],
     pub role_detect: RoleDetect,
     /// Delegated scope name(s) this capability needs, for display. **All** required.
     pub scopes: &'static [&'static str],
@@ -97,6 +106,21 @@ pub struct Capability {
     pub remediation: &'static str,
 }
 
+// Well-known Entra built-in role template ids (immutable, tenant-independent).
+// Source: https://learn.microsoft.com/entra/identity/role-based-access-control/permissions-reference
+const TID_APPLICATION_ADMIN: &str = "9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3";
+const TID_CLOUD_APPLICATION_ADMIN: &str = "158c047a-c907-4556-b7ef-446551a6b5f7";
+const TID_GLOBAL_ADMIN: &str = "62e90394-69f5-4237-9190-012177145e10";
+const TID_GLOBAL_READER: &str = "f2ef992c-3afb-46b9-b7cf-a126ee74c451";
+const TID_PRIVILEGED_ROLE_ADMIN: &str = "e8611ab8-c189-46e8-94e1-60213ab1f814";
+const TID_REPORTS_READER: &str = "4a5d8f65-41da-4de4-8968-e035b65339cf";
+const TID_SECURITY_READER: &str = "5d6b6bb7-de71-4623-b4af-96380a352509";
+const TID_SECURITY_ADMIN: &str = "194ae4cb-b126-40b2-bd5b-6091b380977d";
+const TID_CONDITIONAL_ACCESS_ADMIN: &str = "b1be1c3e-b65d-4f19-8427-f6fa0d97feb9";
+const TID_SHAREPOINT_ADMIN: &str = "f28a1f50-f6e7-4571-818b-6a12f2af6b6c";
+const TID_GROUPS_ADMIN: &str = "fdd7a751-b60b-444a-984c-02652fe8fa1c";
+const TID_USER_ADMIN: &str = "fe930be7-5e62-47db-91af-98c3a49a38b1";
+
 /// The catalog. Derived from `docs/operator-rbac/OPERATOR-ROLES.md`.
 pub static CAPABILITIES: &[Capability] = &[
     Capability {
@@ -109,6 +133,11 @@ pub static CAPABILITIES: &[Capability] = &[
             "Application Administrator",
             "Cloud Application Administrator",
             "Global Administrator",
+        ],
+        directory_role_template_ids_any: &[
+            TID_APPLICATION_ADMIN,
+            TID_CLOUD_APPLICATION_ADMIN,
+            TID_GLOBAL_ADMIN,
         ],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &["Application.ReadWrite.All", "Directory.Read.All"],
@@ -128,6 +157,11 @@ pub static CAPABILITIES: &[Capability] = &[
             "Application Administrator",
             "Cloud Application Administrator",
             "Global Administrator",
+        ],
+        directory_role_template_ids_any: &[
+            TID_APPLICATION_ADMIN,
+            TID_CLOUD_APPLICATION_ADMIN,
+            TID_GLOBAL_ADMIN,
         ],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &[
@@ -149,6 +183,7 @@ pub static CAPABILITIES: &[Capability] = &[
         label: "Admin consent for API permissions",
         description: "Grant tenant-wide admin consent to delegated scopes and application roles.",
         directory_roles_any: &["Privileged Role Administrator", "Global Administrator"],
+        directory_role_template_ids_any: &[TID_PRIVILEGED_ROLE_ADMIN, TID_GLOBAL_ADMIN],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &[
             "DelegatedPermissionGrant.ReadWrite.All",
@@ -173,6 +208,13 @@ pub static CAPABILITIES: &[Capability] = &[
             "Global Reader",
             "Global Administrator",
         ],
+        directory_role_template_ids_any: &[
+            TID_REPORTS_READER,
+            TID_SECURITY_READER,
+            TID_SECURITY_ADMIN,
+            TID_GLOBAL_READER,
+            TID_GLOBAL_ADMIN,
+        ],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &["AuditLog.Read.All"],
         scope_feature: Some("audit_log"),
@@ -193,6 +235,13 @@ pub static CAPABILITIES: &[Capability] = &[
             "Global Reader",
             "Global Administrator",
         ],
+        directory_role_template_ids_any: &[
+            TID_SECURITY_READER,
+            TID_SECURITY_ADMIN,
+            TID_CONDITIONAL_ACCESS_ADMIN,
+            TID_GLOBAL_READER,
+            TID_GLOBAL_ADMIN,
+        ],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &["Policy.Read.All"],
         scope_feature: Some("policy"),
@@ -207,6 +256,7 @@ pub static CAPABILITIES: &[Capability] = &[
         description: "List, grant, and revoke a site's per-app permissions; convert org-wide \
                       Sites.* to Sites.Selected.",
         directory_roles_any: &["SharePoint Administrator", "Global Administrator"],
+        directory_role_template_ids_any: &[TID_SHAREPOINT_ADMIN, TID_GLOBAL_ADMIN],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &["Sites.FullControl.All"],
         scope_feature: Some("sharepoint"),
@@ -225,6 +275,7 @@ pub static CAPABILITIES: &[Capability] = &[
             "User Administrator",
             "Global Administrator",
         ],
+        directory_role_template_ids_any: &[TID_GROUPS_ADMIN, TID_USER_ADMIN, TID_GLOBAL_ADMIN],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &["GroupMember.ReadWrite.All"],
         scope_feature: Some("group_membership"),
@@ -240,6 +291,7 @@ pub static CAPABILITIES: &[Capability] = &[
         label: "Key Vault secrets",
         description: "List, read, create, and rotate Key Vault secrets.",
         directory_roles_any: &["Key Vault Secrets Officer"],
+        directory_role_template_ids_any: &[],
         role_detect: RoleDetect::Indeterminate,
         scopes: &["https://vault.azure.net/.default"],
         scope_feature: Some("keyvault"),
@@ -253,6 +305,7 @@ pub static CAPABILITIES: &[Capability] = &[
         label: "Managed-identity Azure role reads",
         description: "Read a managed identity's Azure RBAC role assignments.",
         directory_roles_any: &["Reader"],
+        directory_role_template_ids_any: &[],
         role_detect: RoleDetect::Indeterminate,
         scopes: &["https://management.azure.com/.default"],
         scope_feature: Some("arm"),
@@ -267,6 +320,7 @@ pub static CAPABILITIES: &[Capability] = &[
         description: "Read MicrosoftGraphActivityLogs from a Log Analytics workspace to compare \
                       an app's granted permissions with its observed Graph calls.",
         directory_roles_any: &["Log Analytics Reader"],
+        directory_role_template_ids_any: &[],
         role_detect: RoleDetect::Indeterminate,
         scopes: &["https://api.loganalytics.azure.com/.default"],
         scope_feature: Some("log_analytics"),
@@ -281,6 +335,7 @@ pub static CAPABILITIES: &[Capability] = &[
         label: "Assign Azure role to a managed identity",
         description: "Create an Azure RBAC role assignment for a managed identity.",
         directory_roles_any: &["User Access Administrator", "Owner"],
+        directory_role_template_ids_any: &[],
         role_detect: RoleDetect::Indeterminate,
         scopes: &["https://management.azure.com/.default"],
         scope_feature: Some("arm"),
@@ -295,6 +350,7 @@ pub static CAPABILITIES: &[Capability] = &[
         description: "Scope mail/calendar/contacts permissions to specific mailboxes and resolve \
                       effective scope.",
         directory_roles_any: &["Exchange Administrator"],
+        directory_role_template_ids_any: &[],
         role_detect: RoleDetect::ExchangeProbe,
         scopes: &["https://outlook.office365.com/Exchange.Manage"],
         scope_feature: Some("exchange"),
@@ -320,14 +376,37 @@ pub fn capabilities_for_plane(plane: Plane) -> impl Iterator<Item = &'static Cap
     CAPABILITIES.iter().filter(move |c| c.plane == plane)
 }
 
-/// True when any of the user's `active_roles` (directory-role display names)
-/// satisfies the capability's `directory_roles_any`, case-insensitively. A
-/// capability with an empty `directory_roles_any` is never satisfied this way.
-pub fn directory_roles_satisfy(cap: &Capability, active_roles: &[String]) -> bool {
-    cap.directory_roles_any.iter().any(|needed| {
-        active_roles
-            .iter()
-            .any(|have| have.eq_ignore_ascii_case(needed))
+/// The first of the user's `active_roles` that satisfies the capability, or
+/// `None`. Matches primarily on the immutable `roleTemplateId` — long-lived
+/// tenants' `directoryRole` objects carry legacy display names ("SharePoint
+/// Service Administrator", "Company Administrator"), so a name-only match
+/// silently reports an active role as missing — with a case-insensitive
+/// display-name fallback. Returns the **catalog** display name that matched,
+/// for "Active role: …" detail text. A capability with empty role lists is
+/// never satisfied this way.
+pub fn matched_directory_role(
+    cap: &Capability,
+    active_roles: &[crate::models::ActiveDirectoryRole],
+) -> Option<&'static str> {
+    // Template-id match: catalog ids are index-aligned with the display names.
+    for role in active_roles {
+        if let Some(tid) = role.role_template_id.as_deref()
+            && let Some(i) = cap
+                .directory_role_template_ids_any
+                .iter()
+                .position(|want| want.eq_ignore_ascii_case(tid))
+        {
+            // The names/ids lists are index-aligned; guard anyway.
+            return cap.directory_roles_any.get(i).copied();
+        }
+    }
+    // Display-name fallback (covers a role listed without a template id).
+    cap.directory_roles_any.iter().copied().find(|needed| {
+        active_roles.iter().any(|have| {
+            have.display_name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(needed))
+        })
     })
 }
 
@@ -381,23 +460,85 @@ mod tests {
     #[test]
     fn directory_roles_satisfy_honors_alternatives_and_case() {
         let cap = capability("app_registrations").unwrap();
-        // Third alternative (Global Administrator) satisfies it.
-        assert!(directory_roles_satisfy(
-            cap,
-            &["Global Administrator".to_string()]
-        ));
-        // Case-insensitive match on a primary alternative.
-        assert!(directory_roles_satisfy(
-            cap,
-            &["cloud application administrator".to_string()]
-        ));
+        // Third alternative (Global Administrator) satisfies it, by template id.
+        assert_eq!(
+            matched_directory_role(
+                cap,
+                &[active_role("Global Administrator", TID_GLOBAL_ADMIN)]
+            ),
+            Some("Global Administrator")
+        );
+        // Case-insensitive display-name fallback (no template id on the row).
+        assert_eq!(
+            matched_directory_role(cap, &[named_role("cloud application administrator")]),
+            Some("Cloud Application Administrator")
+        );
         // An unrelated role does not.
-        assert!(!directory_roles_satisfy(
-            cap,
-            &["User Administrator".to_string()]
-        ));
+        assert_eq!(
+            matched_directory_role(cap, &[active_role("User Administrator", TID_USER_ADMIN)]),
+            None
+        );
         // Empty active set never satisfies.
-        assert!(!directory_roles_satisfy(cap, &[]));
+        assert_eq!(matched_directory_role(cap, &[]), None);
+    }
+
+    #[test]
+    fn legacy_display_name_matches_by_template_id() {
+        // The regression: Graph names the SharePoint Administrator directory
+        // role "SharePoint Service Administrator" (documented legacy name), so
+        // a name-only match reported an ACTIVE role as missing. The immutable
+        // template id must match regardless of the display name.
+        let cap = capability("sharepoint_sites_selected").unwrap();
+        assert_eq!(
+            matched_directory_role(
+                cap,
+                &[active_role(
+                    "SharePoint Service Administrator",
+                    TID_SHAREPOINT_ADMIN
+                )]
+            ),
+            Some("SharePoint Administrator")
+        );
+        // Same family: "Company Administrator" is Global Administrator.
+        assert_eq!(
+            matched_directory_role(
+                cap,
+                &[active_role("Company Administrator", TID_GLOBAL_ADMIN)]
+            ),
+            Some("Global Administrator")
+        );
+    }
+
+    #[test]
+    fn directory_role_names_and_template_ids_are_index_aligned() {
+        // matched_directory_role maps a template-id hit back to the display
+        // name at the same index — the two lists must stay in lockstep.
+        for c in CAPABILITIES {
+            if c.role_detect == RoleDetect::DirectoryRole {
+                assert_eq!(
+                    c.directory_roles_any.len(),
+                    c.directory_role_template_ids_any.len(),
+                    "{}: directory_roles_any and directory_role_template_ids_any lengths differ",
+                    c.key
+                );
+            }
+        }
+    }
+
+    fn active_role(name: &str, template_id: &str) -> crate::models::ActiveDirectoryRole {
+        crate::models::ActiveDirectoryRole {
+            id: "role-obj".into(),
+            display_name: Some(name.into()),
+            role_template_id: Some(template_id.into()),
+        }
+    }
+
+    fn named_role(name: &str) -> crate::models::ActiveDirectoryRole {
+        crate::models::ActiveDirectoryRole {
+            id: "role-obj".into(),
+            display_name: Some(name.into()),
+            role_template_id: None,
+        }
     }
 
     #[test]
