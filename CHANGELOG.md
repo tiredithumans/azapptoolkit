@@ -7,6 +7,12 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **The compare gesture hint is visible in the dock itself.** Once a second item is
+  open, the dock shows an inline "Ctrl/Cmd-click a chip to compare" hint (hidden while
+  a side-by-side compare is active) — the hover tooltip alone required knowing to hover.
+
 ### Fixed
 
 - **The copy confirmation now covers every copy button.** v0.12.0's "Copied" badge only
