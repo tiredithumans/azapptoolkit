@@ -9,6 +9,11 @@ the project adheres to
 
 ### Fixed
 
+- **Failed loads offer an in-context Retry.** The tenant-wide audit dashboards
+  (Credential expiry, Consent grants, Application permissions) and the Managed
+  Identities list now show a Retry button with a "Failed to load: …" message instead
+  of a dead-end error, matching the App Registrations and Enterprise Applications
+  lists — so a transient 429/network failure recovers in place.
 - **An invalid SAML certificate subject fails before the app is created.** SAML setup
   now rejects a certificate subject that doesn't start with `CN=` up front (a typed
   validation error, like the reply-URL check) instead of failing at the
