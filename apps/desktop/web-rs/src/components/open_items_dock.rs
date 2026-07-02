@@ -21,6 +21,16 @@ pub fn OpenItemsDock() -> impl IntoView {
                         {dock_chip(session, item)}
                     </For>
                 </div>
+                // Inline discoverability hint for the compare gesture — in the
+                // bar itself (user preference: no toast). Appears once a second
+                // item makes comparing possible; hides while a 2-up compare is
+                // active (the gesture has been found).
+                <Show when=move || {
+                    session.open_items.with(|l| l.len() > 1)
+                        && session.shown_items.with(|s| s.len() < 2)
+                }>
+                    <span class="open-dock__hint">"Ctrl/Cmd-click a chip to compare"</span>
+                </Show>
                 // Only meaningful with more than one open — a lone chip's × already
                 // closes it.
                 <Show when=move || session.open_items.with(|l| l.len() > 1)>

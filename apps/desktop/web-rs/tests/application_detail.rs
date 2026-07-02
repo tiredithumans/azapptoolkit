@@ -29,6 +29,24 @@ async fn loads_and_renders_detail() {
 }
 
 #[wasm_bindgen_test]
+async fn header_copy_shows_copied_badge() {
+    ts::reset();
+    ts::mock_ok(
+        "get_application_detail",
+        &fixtures::application_detail("obj-1", "app-1", "Contoso CRM"),
+    );
+
+    let _m = ts::mount_view(
+        || view! { <ApplicationDetailPane object_id=Signal::derive(|| "obj-1".to_string()) /> },
+    );
+    ts::wait_for(|| ts::body_contains("Contoso CRM")).await;
+
+    // The header's app-id copy button confirms the copy (shared CopyIconButton).
+    ts::click("button[aria-label=\"Copy app id\"]");
+    ts::wait_for(|| ts::query(".copyable-id__copied").is_some()).await;
+}
+
+#[wasm_bindgen_test]
 async fn error_state_offers_retry_that_reloads() {
     ts::reset();
     ts::mock_err(

@@ -8,16 +8,14 @@ use thaw::{Body1, Button, ButtonAppearance};
 use wasm_bindgen_futures::JsFuture;
 
 use crate::bindings::sso::{OidcSsoSummary, SamlSsoSummary};
-use crate::components::icon::IconName;
-use crate::components::ui::IconButton;
-use crate::util::copy_text;
+use crate::components::ui::CopyIconButton;
 
 /// A labelled, monospace, copy-to-clipboard read-only field. Empty values render
 /// an em-dash and no copy button.
 #[component]
 pub fn CopyField(#[prop(into)] label: String, #[prop(into)] value: String) -> impl IntoView {
     let has_value = !value.trim().is_empty();
-    let copy_value = value.clone();
+    let copy_value: Signal<String> = RwSignal::new(value.clone()).into();
     let aria = format!("Copy {label}");
     view! {
         <div class="sso-field">
@@ -26,14 +24,7 @@ pub fn CopyField(#[prop(into)] label: String, #[prop(into)] value: String) -> im
                 {if has_value { value.clone() } else { "—".to_string() }}
                 {has_value
                     .then(|| {
-                        view! {
-                            <IconButton
-                                icon=IconName::Copy
-                                aria_label=aria.clone()
-                                title="Copy".to_string()
-                                on_click=Callback::new(move |_| copy_text(copy_value.clone()))
-                            />
-                        }
+                        view! { <CopyIconButton value=copy_value aria_label=aria.clone() /> }
                     })}
             </span>
         </div>

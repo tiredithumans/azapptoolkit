@@ -7,6 +7,27 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **The compare gesture hint is visible in the dock itself.** Once a second item is
+  open, the dock shows an inline "Ctrl/Cmd-click a chip to compare" hint (hidden while
+  a side-by-side compare is active) — the hover tooltip alone required knowing to hover.
+
+### Fixed
+
+- **Global search finds anything by any of its GUIDs.** Pasting a full GUID into the
+  top-bar search only probed two of the four identities (app registration by appId,
+  service principal by object id) — so an Enterprise Application was unfindable by its
+  Application ID (and an app registration by its object id), returning nothing at all
+  for a gallery/third-party app with no local registration. The GUID branch now probes
+  all four in parallel: app registration by appId *and* object id, service principal by
+  object id *and* appId.
+- **The copy confirmation now covers every copy button.** v0.12.0's "Copied" badge only
+  landed on `CopyableId` (MI detail fields, DR view, credential-table ID cells) — the
+  detail-pane header's app-id copy button and the SSO summary fields still gave no
+  feedback. The badge behavior is extracted into a shared `CopyIconButton` and all
+  icon-button copy affordances render it.
+
 ## [0.12.0] - 2026-07-01
 
 ### Fixed
