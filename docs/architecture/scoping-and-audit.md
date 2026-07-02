@@ -238,6 +238,46 @@ The audit view's facets/cards key off structured `AuditItem` fields (`risk_level
 `score_application` (which stays sign-in-agnostic, defaulting them). When adding a new facet/card,
 prefer a structured flag on `AuditItem` over matching an advisory string.
 
+## SP-only principals in the audit (no local application)
+
+The audit run has **two phases**. Phase 1 scores every `/applications` entry
+(`score_application`). Phase 2 scores service principals with **no local application object** —
+foreign-tenant (OIDC/multi-tenant) enterprise apps, managed identities, orphaned SPs — via
+`score_service_principal`, from their *granted* state instead of a manifest.
+
+- **Candidates** (`sp_audit_candidates`, pure + unit-tested): shared `{tenant}|sp_index` rows whose
+  `appId` joins to no scanned application AND that hold ≥1 **Microsoft Graph** application grant in
+  the tenant-wide `appRoleAssignedTo` matrix. The grant requirement is the noise filter (grantless
+  first-party Microsoft SPs vanish); disabled SPs stay in (Rule 4). Known limitation: roles held
+  only on non-Graph resources (e.g. legacy Office 365 Exchange Online `full_access_as_app`) aren't
+  in the matrix, so such an SP isn't scored.
+- **Zero extra per-item Graph traffic.** Phase 2 reuses the run's tenant-wide reads — the Graph
+  `appRoleAssignedTo` matrix (now fetched regardless of Exchange availability; its mail-scopable
+  subset still feeds `score_one`'s reconciliation) and the `oauth2PermissionGrants` read (which now
+  also keeps AllPrincipals scope strings per client for Rule 13). Scoring is pure CPU — a plain
+  sequential loop, no `dispatch_capped` fan-out.
+- **Applicable rules only**: permission risk (1 & 2), admin consent (3), disabled SP (4),
+  mailbox/SharePoint advisories (11, 12), high-risk delegated (13), plus the sign-in post-pass.
+  Credential rules (5–9) and manifest rules (10, 14–18, downgrades) are deliberately absent —
+  those objects live in the app's home tenant. `mail_scopes` stays **empty on purpose**: a held
+  mail value here IS an un-stripped org-wide Entra grant, so the reconciliation would force
+  `OrgWide` regardless of any RBAC probe — empty scores identically without the 1–5s Exchange
+  probe per SP. (A properly scoped principal no longer holds the grant and drops out of the
+  candidate set; its RBAC-only access is not surfaced — under-reporting an advisory, never risk.)
+- **Wire shape**: one additive field, `AuditItem.principal_kind`
+  (`application` | `service_principal` | `managed_identity`, `#[serde(default)]` so pre-field
+  cached runs deserialize as `Application`). For SP rows `object_id` is the **SP object id**.
+- **Frontend routing keys off `principal_kind`** (structured-signals rule): the `no_local_app`
+  finding chip; Open → enterprise / MI detail (`open_enterprise_on_tab` /
+  `open_managed_identity_on_tab`); scope Fixes carry a `ScopeFixTarget` — `AppReg` rows call the
+  `remediation::remediate_scope_*` wrappers (which `get_application` first), SP rows call the
+  SP-only cores (`grant_managed_identity_scoped_exchange_access` /
+  `convert_site_access_to_selected`) that a foreign principal needs. **SP rows are non-selectable**
+  — the bulk commands loop app-registration cores and would 404 on an SP object id.
+- **Invalidation**: the SP-only scoping/revoke paths already bust the audit transitively
+  (`invalidate_app_lists` / `invalidate_app_detail_state`); `grant_managed_identity_permission`
+  busts it explicitly (its old "audit scans only app registrations" rationale died with this).
+
 ## Resource Access — the resource → identities reverse lookups
 
 The Resource Access page (`ActiveView::ResourceAccess`) answers the inverted question the

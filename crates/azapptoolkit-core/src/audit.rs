@@ -651,6 +651,37 @@ pub struct RemediationAction {
     pub targets: Vec<String>,
 }
 
+/// What kind of principal an [`AuditItem`] row scores — an application
+/// registration (with its local manifest + credentials) or a service principal
+/// with **no local application object** (a foreign-tenant enterprise app, a
+/// managed identity, or an orphaned SP whose app registration was deleted).
+/// Drives the audit view's routing: SP rows open the enterprise/MI detail and
+/// their Fix buttons call the SP-only scoping commands; app-registration bulk
+/// actions must never receive an SP row's `object_id`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditPrincipalKind {
+    /// A local application registration; `object_id` is the application
+    /// object id. The default, so pre-existing cached runs deserialize as-is.
+    #[default]
+    Application,
+    /// A service principal with no local application; `object_id` is the SP
+    /// object id.
+    ServicePrincipal,
+    /// A managed identity (also SP-only, but opens the MI detail).
+    ManagedIdentity,
+}
+
+impl AuditPrincipalKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AuditPrincipalKind::Application => "Application",
+            AuditPrincipalKind::ServicePrincipal => "ServicePrincipal",
+            AuditPrincipalKind::ManagedIdentity => "ManagedIdentity",
+        }
+    }
+}
+
 /// One scored application — the audit's output row.
 ///
 /// **Boundary note:** unlike most command payloads, `AuditItem` does not get a
@@ -698,6 +729,11 @@ pub struct AuditItem {
     /// state instead of a blank Unused tab.
     #[serde(default)]
     pub sign_in_report_available: bool,
+    /// Which kind of principal this row scores (see [`AuditPrincipalKind`]).
+    /// Defaults to `Application` so cached runs from before the field existed
+    /// deserialize unchanged.
+    #[serde(default)]
+    pub principal_kind: AuditPrincipalKind,
 }
 
 /// Stable markers the UI keys audit facets/home cards off. The scorer emits
@@ -1304,6 +1340,89 @@ pub fn score_application(
         last_sign_in: None,
         unused: false,
         sign_in_report_available: false,
+        principal_kind: AuditPrincipalKind::Application,
+    }
+}
+
+/// Inputs for scoring a service principal that has **no local application
+/// object** — a foreign-tenant enterprise app, a managed identity, or an
+/// orphaned local SP whose app registration was deleted. Everything is
+/// pre-resolved by the caller (the audit runner), mirroring
+/// [`score_application`]'s contract.
+#[derive(Debug, Clone)]
+pub struct SpAuditInput {
+    pub display_name: String,
+    pub app_id: String,
+    pub sp_object_id: String,
+    pub created_date_time: Option<DateTime<Utc>>,
+    pub account_enabled: Option<bool>,
+    /// Home tenant of the owning application — surfaced as the item's
+    /// `publisher` so the table/CSV show where a foreign app lives.
+    pub app_owner_organization_id: Option<String>,
+    /// Graph `servicePrincipalType`; `ManagedIdentity` selects
+    /// [`AuditPrincipalKind::ManagedIdentity`] (drives Open/Fix routing).
+    pub service_principal_type: Option<String>,
+}
+
+/// Builds an [`AuditItem`] for a service principal with no local application
+/// object. Only the rules that read *granted* state apply: permission risk
+/// (Rules 1 & 2), admin consent (3), disabled SP (4), the mailbox / SharePoint
+/// scoping advisories (11, 12), and high-risk delegated permissions (13).
+/// Credential rules (5-9) and manifest rules (10, 14-18, downgrade pointers)
+/// are deliberately absent — credentials and the manifest live on the
+/// application object in its home tenant, which this tenant can neither see
+/// nor fix. `perms.app_role_values` are the SP's *granted* app roles (its
+/// `appRoleAssignments`), not a declared manifest.
+pub fn score_service_principal(
+    sp: &SpAuditInput,
+    perms: &AppPermissions,
+    now: DateTime<Utc>,
+) -> AuditItem {
+    let mut acc = RuleContribution::default();
+    acc.merge(rule_app_permission_risk(perms)); // Rules 1 & 2
+    acc.merge(rule_admin_consent(perms)); // Rule 3
+    acc.merge(rule_sp_disabled(sp.account_enabled)); // Rule 4
+
+    // Rules 11 & 12 also return the sets the remediation block keys off.
+    let (mail_contrib, mailbox_unscoped) = rule_mailbox_advisory(perms);
+    acc.merge(mail_contrib);
+    let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(perms);
+    acc.merge(sharepoint_contrib);
+    acc.merge(rule_high_risk_delegated(perms)); // Rule 13
+
+    // No expired credentials (unknowable) and no redundant-permission removal
+    // (its remediation edits the application manifest) — only the two scope
+    // remediations, whose SP-only command cores exist.
+    let remediations = build_remediations(&[], &mailbox_unscoped, &sharepoint_orgwide, &[]);
+
+    AuditItem {
+        application_name: sp.display_name.clone(),
+        app_id: sp.app_id.clone(),
+        object_id: sp.sp_object_id.clone(),
+        created_date: sp.created_date_time,
+        publisher: sp.app_owner_organization_id.clone(),
+        sign_in_audience: None,
+        risk_score: acc.score,
+        risk_level: RiskLevel::from_score(acc.score),
+        issues: acc.issues,
+        recommendations: acc.recommendations,
+        remediations,
+        // Credentials live on the application in its home tenant — unknowable
+        // here, and deliberately never flagged.
+        credential_status: CredentialStatus::Unknown,
+        permission_count: (perms.app_role_values.len() + perms.scope_values.len()) as u32,
+        service_principal_enabled: sp.account_enabled,
+        days_since_created: sp.created_date_time.map(|c| (now - c).num_days()),
+        certificates: Vec::new(),
+        secrets: Vec::new(),
+        last_sign_in: None,
+        unused: false,
+        sign_in_report_available: false,
+        principal_kind: if sp.service_principal_type.as_deref() == Some("ManagedIdentity") {
+            AuditPrincipalKind::ManagedIdentity
+        } else {
+            AuditPrincipalKind::ServicePrincipal
+        },
     }
 }
 
@@ -1491,6 +1610,192 @@ mod tests {
             created_date_time: Some(now() - Duration::days(10)),
             ..Default::default()
         }
+    }
+
+    fn base_sp() -> SpAuditInput {
+        SpAuditInput {
+            display_name: "Foreign App".into(),
+            app_id: "app-f".into(),
+            sp_object_id: "sp-1".into(),
+            created_date_time: Some(now() - Duration::days(10)),
+            account_enabled: Some(true),
+            app_owner_organization_id: Some("11111111-2222-3333-4444-555555555555".into()),
+            service_principal_type: Some("Application".into()),
+        }
+    }
+
+    fn sp_perms(roles: &[&str]) -> AppPermissions {
+        AppPermissions {
+            app_role_values: roles.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    // ---- score_service_principal (SP-only principals: foreign enterprise
+    // apps, managed identities, orphaned SPs) --------------------------------
+
+    #[test]
+    fn sp_orgwide_mail_grant_scores_high_risk_with_scope_remediation() {
+        let item = score_service_principal(&base_sp(), &sp_perms(&["Mail.ReadWrite"]), now());
+        assert_eq!(item.risk_score, PTS_HIGH_RISK_APP_PERM);
+        assert!(
+            item.issues
+                .iter()
+                .any(|x| x.starts_with(issue::ORG_WIDE_MAILBOX))
+        );
+        let fix = item
+            .remediations
+            .iter()
+            .find(|r| r.kind == RemediationKind::ScopeMailboxAccess)
+            .expect("org-wide mail grant gets a scope-mailbox Fix");
+        assert_eq!(fix.targets, vec!["Mail.ReadWrite".to_string()]);
+        // Row identity is the SP object id; the owner tenant rides `publisher`.
+        assert_eq!(item.object_id, "sp-1");
+        assert_eq!(
+            item.publisher.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(item.principal_kind, AuditPrincipalKind::ServicePrincipal);
+    }
+
+    #[test]
+    fn sp_scoped_mail_verdict_earns_reduced_weight_and_no_fix() {
+        let mut perms = sp_perms(&["Mail.ReadWrite"]);
+        perms.mail_scopes.insert(
+            "Mail.ReadWrite".into(),
+            MailPermissionScope::Scoped {
+                scope_name: Some("azapptoolkit_app-f".into()),
+                recipient_filter: None,
+                group_count: Some(1),
+                mechanism: ScopeMechanism::Rbac,
+            },
+        );
+        let item = score_service_principal(&base_sp(), &perms, now());
+        assert_eq!(item.risk_score, PTS_SCOPED_HIGH_RISK_MAIL);
+        assert!(
+            item.issues
+                .iter()
+                .any(|x| x.contains(issue::SCOPED_VIA_RBAC))
+        );
+        assert!(
+            !item
+                .remediations
+                .iter()
+                .any(|r| r.kind == RemediationKind::ScopeMailboxAccess)
+        );
+    }
+
+    #[test]
+    fn sp_orgwide_sharepoint_grant_gets_sites_selected_remediation() {
+        let item = score_service_principal(&base_sp(), &sp_perms(&["Sites.Read.All"]), now());
+        assert!(
+            item.issues
+                .iter()
+                .any(|x| x.starts_with(issue::ORG_WIDE_SHAREPOINT))
+        );
+        let fix = item
+            .remediations
+            .iter()
+            .find(|r| r.kind == RemediationKind::ScopeSharePointAccess)
+            .expect("org-wide Sites grant gets a scope-SharePoint Fix");
+        assert_eq!(fix.targets, vec!["Sites.Read.All".to_string()]);
+
+        // Sites.Selected is the scoped model: advisory only, no Fix.
+        let scoped = score_service_principal(&base_sp(), &sp_perms(&["Sites.Selected"]), now());
+        assert!(
+            scoped
+                .issues
+                .iter()
+                .any(|x| x.starts_with(issue::SCOPED_SHAREPOINT))
+        );
+        assert!(scoped.remediations.is_empty());
+    }
+
+    #[test]
+    fn sp_disabled_and_consent_rules_apply() {
+        let disabled = SpAuditInput {
+            account_enabled: Some(false),
+            ..base_sp()
+        };
+        let item = score_service_principal(&disabled, &sp_perms(&["User.Read.All"]), now());
+        assert!(
+            item.issues
+                .iter()
+                .any(|x| x.starts_with("Service principal is disabled"))
+        );
+        assert_eq!(item.service_principal_enabled, Some(false));
+
+        let mut perms = sp_perms(&[]);
+        perms.has_admin_consent = true;
+        perms.scope_values = vec!["Directory.AccessAsUser.All".into()];
+        let consented = score_service_principal(&base_sp(), &perms, now());
+        assert_eq!(consented.risk_score, PTS_ADMIN_CONSENT_DELEGATED);
+        assert!(
+            consented
+                .issues
+                .iter()
+                .any(|x| x.starts_with(issue::HIGH_RISK_DELEGATED_PERMS))
+        );
+    }
+
+    #[test]
+    fn sp_scoring_never_emits_credential_or_manifest_findings() {
+        // Old SP + a redundant permission pair — the app path would raise the
+        // stale-app and Rule-18 findings; the SP path must not (credentials and
+        // the manifest live on the application in its home tenant).
+        let old = SpAuditInput {
+            created_date_time: Some(now() - Duration::days(2000)),
+            ..base_sp()
+        };
+        let item =
+            score_service_principal(&old, &sp_perms(&["Mail.Read", "Mail.ReadWrite"]), now());
+        assert_eq!(item.credential_status, CredentialStatus::Unknown);
+        assert!(item.certificates.is_empty() && item.secrets.is_empty());
+        assert!(!item.issues.iter().any(|x| x.contains("days ago")));
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|x| x.starts_with(issue::REDUNDANT_APP_PERMS))
+        );
+        assert!(item.remediations.iter().all(|r| matches!(
+            r.kind,
+            RemediationKind::ScopeMailboxAccess | RemediationKind::ScopeSharePointAccess
+        )));
+        // days_since_created still populates the column.
+        assert_eq!(item.days_since_created, Some(2000));
+    }
+
+    #[test]
+    fn sp_principal_kind_follows_service_principal_type() {
+        let mi = SpAuditInput {
+            service_principal_type: Some("ManagedIdentity".into()),
+            ..base_sp()
+        };
+        let item = score_service_principal(&mi, &sp_perms(&["User.Read.All"]), now());
+        assert_eq!(item.principal_kind, AuditPrincipalKind::ManagedIdentity);
+        let none = SpAuditInput {
+            service_principal_type: None,
+            ..base_sp()
+        };
+        let item = score_service_principal(&none, &sp_perms(&[]), now());
+        assert_eq!(item.principal_kind, AuditPrincipalKind::ServicePrincipal);
+    }
+
+    #[test]
+    fn principal_kind_is_additive_on_the_wire() {
+        // snake_case wire values, matching the rest of the AuditItem payload…
+        assert_eq!(
+            serde_json::to_string(&AuditPrincipalKind::ServicePrincipal).unwrap(),
+            "\"service_principal\""
+        );
+        // …and absent-field JSON (a cached run from before the field existed)
+        // deserializes as Application — the additive-only wire guarantee.
+        let scored = score_application(&base_app(), None, &AppPermissions::default(), now());
+        let mut v = serde_json::to_value(&scored).unwrap();
+        v.as_object_mut().unwrap().remove("principal_kind");
+        let item: AuditItem = serde_json::from_value(v).unwrap();
+        assert_eq!(item.principal_kind, AuditPrincipalKind::Application);
     }
 
     #[test]

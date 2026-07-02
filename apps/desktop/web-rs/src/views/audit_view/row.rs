@@ -1,21 +1,27 @@
 //! Per-row actions for an audit finding: the "Open" deep-link plus any
 //! one-click remediation the scorer attached.
 
-use azapptoolkit_core::audit::{AuditItem, RemediationAction, RemediationKind, issue};
+use azapptoolkit_core::audit::{
+    AuditItem, AuditPrincipalKind, RemediationAction, RemediationKind, issue,
+};
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::remediation;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
-use crate::views::dialogs::scope_remediation::{ScopeMailboxButton, ScopeSharePointButton};
+use crate::views::dialogs::scope_remediation::{
+    ScopeFixTarget, ScopeMailboxButton, ScopeSharePointButton,
+};
 
 /// Picks the most actionable detail-pane tab for an audit finding, so the row's
 /// "Open" deep-link lands where the operator can act on it (mailbox/site
 /// scoping and risky perms → Permissions, which hosts the Exchange/SharePoint
 /// scoping sections; ownership → Owners; expiry → Credentials), falling back to
-/// Overview. The audit only enumerates app registrations and `object_id` is the
-/// app-registration object id, so the target always resolves in the Apps pane.
+/// Overview. Which pane it opens follows `principal_kind` (app registration /
+/// enterprise app / managed identity); SP-only rows never carry ownership or
+/// credential findings, so their tab is always Permissions or Overview — both
+/// exist on every pane.
 fn target_tab(item: &AuditItem) -> &'static str {
     use azapptoolkit_core::audit::CredentialStatus;
     let has = |p: &str| item.issues.iter().any(|x| x.starts_with(p));
@@ -64,16 +70,41 @@ pub(super) fn AuditRowActions(
     let sharepoint = find(RemediationKind::ScopeSharePointAccess);
 
     let tab = target_tab(&item);
+    let kind = item.principal_kind;
     let object_id = item.object_id.clone();
+    // SP-only rows route their scope Fixes to the SP-only cores, which need the
+    // appId + display name alongside the SP object id — all on the item.
+    let scope_target = match kind {
+        AuditPrincipalKind::Application => ScopeFixTarget::AppReg {
+            object_id: object_id.clone(),
+        },
+        AuditPrincipalKind::ServicePrincipal | AuditPrincipalKind::ManagedIdentity => {
+            ScopeFixTarget::ServicePrincipal {
+                sp_object_id: object_id.clone(),
+                app_id: item.app_id.clone(),
+                display_name: item.application_name.clone(),
+            }
+        }
+    };
     let oid_open = object_id.clone();
     let oid_r = object_id.clone();
-    let oid_m = object_id.clone();
-    let oid_s = object_id.clone();
+    let target_m = scope_target.clone();
+    let target_s = scope_target;
     view! {
         <div class="audit-actions-stack">
             <Button
                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                on_click=Box::new(move |_| session.open_app_on_tab(oid_open.clone(), tab))
+                on_click=Box::new(move |_| match kind {
+                    AuditPrincipalKind::Application => {
+                        session.open_app_on_tab(oid_open.clone(), tab)
+                    }
+                    AuditPrincipalKind::ServicePrincipal => {
+                        session.open_enterprise_on_tab(oid_open.clone(), tab)
+                    }
+                    AuditPrincipalKind::ManagedIdentity => {
+                        session.open_managed_identity_on_tab(oid_open.clone(), tab)
+                    }
+                })
             >
                 "Open"
             </Button>
@@ -91,12 +122,12 @@ pub(super) fn AuditRowActions(
                 })}
             {mailbox
                 .map(|action| {
-                    view! { <ScopeMailboxButton object_id=oid_m.clone() action=action on_done=on_done /> }
+                    view! { <ScopeMailboxButton target=target_m.clone() action=action on_done=on_done /> }
                 })}
             {sharepoint
                 .map(|action| {
                     view! {
-                        <ScopeSharePointButton object_id=oid_s.clone() action=action on_done=on_done />
+                        <ScopeSharePointButton target=target_s.clone() action=action on_done=on_done />
                     }
                 })}
         </div>
@@ -292,6 +323,7 @@ mod tests {
             last_sign_in: None,
             unused: false,
             sign_in_report_available: false,
+            principal_kind: AuditPrincipalKind::Application,
         }
     }
 

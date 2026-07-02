@@ -20,15 +20,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
-use azapptoolkit_core::audit::{AppPermissions, AuditItem, score_application, unused_app_advisory};
+use azapptoolkit_core::audit::{
+    AppPermissions, AuditItem, SpAuditInput, score_application, score_service_principal,
+    unused_app_advisory,
+};
 use azapptoolkit_core::cache::{Cache, CacheKind};
-use azapptoolkit_core::models::{Application, RequiredResourceAccess};
+use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
 use azapptoolkit_core::scoping::is_scopable_exchange_permission;
 use azapptoolkit_exchange::{ExchangeClient, ExchangeError};
 use azapptoolkit_graph::GraphClient;
 use azapptoolkit_graph::client::AppListQuery;
 use chrono::{DateTime, Utc};
 
+use crate::commands::applications::sp_index_key;
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::exchange::{exchange_client, resolve_mail_scopes_audit_cached};
 use crate::commands::graph_roles::graph_role_index;
@@ -95,7 +99,6 @@ pub async fn run_audit(
             Some(MAX_APPS_PER_RUN),
         )
         .await?;
-    let total = apps.len();
 
     // Pre-resolve every app's service principal in one $batch per 20 so each
     // score_one SP lookup is a cache hit, not a round trip. Best-effort: a batch
@@ -103,68 +106,117 @@ pub async fn run_audit(
     let app_ids: Vec<String> = apps.iter().map(|a| a.app_id.clone()).collect();
     client.prewarm_service_principals_lean(&app_ids).await;
 
-    // Admin-consent flags come from ONE tenant-wide oauth2PermissionGrants read
-    // instead of a per-app GET inside the scoring loop (an N+1 that dominated
-    // large runs' request budget and 429 pressure). Best-effort, matching the
-    // per-app path it replaces (whose errors were swallowed per app): on
-    // failure no app gets the flag and the audit proceeds.
-    let admin_consent_clients: Arc<HashSet<String>> =
-        Arc::new(match client.list_all_oauth2_grants().await {
-            Ok(grants) => grants
-                .into_iter()
-                .filter(|g| g.consent_type == "AllPrincipals")
-                .map(|g| g.client_id)
-                .collect(),
+    // Admin-consent flags and delegated scopes come from ONE tenant-wide
+    // oauth2PermissionGrants read instead of a per-app GET inside the scoring
+    // loop (an N+1 that dominated large runs' request budget and 429 pressure).
+    // The AllPrincipals scope strings are kept per client so the SP-only phase
+    // below can score high-risk delegated permissions (an SP has no manifest to
+    // resolve them from). Best-effort: on failure no principal gets the flag
+    // and the audit proceeds.
+    let (admin_consent_clients, delegated_scopes_by_client) =
+        match client.list_all_oauth2_grants().await {
+            Ok(grants) => {
+                let mut clients: HashSet<String> = HashSet::new();
+                let mut scopes: HashMap<String, Vec<String>> = HashMap::new();
+                for g in grants {
+                    if g.consent_type != "AllPrincipals" {
+                        continue;
+                    }
+                    scopes
+                        .entry(g.client_id.clone())
+                        .or_default()
+                        .extend(g.scope.split_whitespace().map(str::to_string));
+                    clients.insert(g.client_id);
+                }
+                (clients, scopes)
+            }
             Err(err) => {
                 tracing::info!(
                     ?err,
                     "audit: tenant-wide grants read failed; admin-consent flags unavailable"
                 );
-                HashSet::new()
+                (HashSet::new(), HashMap::new())
             }
-        });
+        };
+    let admin_consent_clients = Arc::new(admin_consent_clients);
 
-    // Org-wide mail grants for the scoped-mail reconciliation come from ONE
-    // tenant-wide appRoleAssignedTo read on the Microsoft Graph SP, instead of a
-    // per-app appRoleAssignments GET inside the scoring loop (the last per-app
-    // N+1 — `consent`/`permission_tester` already read this matrix in one call).
-    // Built only when Exchange scoping is available (otherwise the reconciliation
-    // is never consulted). Best-effort: an empty map ⇒ no reconciliation,
-    // identical to the per-app path's swallowed-error behavior.
-    let orgwide_mail_by_sp: Arc<HashMap<String, HashSet<String>>> = Arc::new(if exo.is_some() {
-        match graph_role_index(&client).await {
-            Ok((graph_sp_id, role_value_by_id)) => {
-                match client.list_app_role_assigned_to(&graph_sp_id).await {
-                    Ok(assigned) => {
-                        let mut m: HashMap<String, HashSet<String>> = HashMap::new();
-                        for a in assigned {
-                            // App permissions held by an app's SP — Users/Groups
-                            // can't hold Graph app roles relevant to mail scoping.
-                            if a.principal_type.as_deref() != Some("ServicePrincipal") {
-                                continue;
-                            }
-                            if let Some(v) = role_value_by_id.get(&a.app_role_id)
-                                && is_scopable_exchange_permission(v)
-                            {
-                                m.entry(a.principal_id).or_default().insert(v.clone());
-                            }
-                        }
-                        m
+    // ONE tenant-wide appRoleAssignedTo read on the Microsoft Graph SP does
+    // double duty (formerly gated on Exchange availability): the full per-SP
+    // granted Graph role values feed the SP-only scoring phase below, and the
+    // mail-scopable subset keeps feeding score_one's scoped-mail reconciliation
+    // exactly as before. Best-effort: an empty map ⇒ no SP items this run and
+    // no reconciliation — identical to the swallowed-error behavior.
+    let mut graph_roles_by_sp: HashMap<String, Vec<String>> = HashMap::new();
+    if let Ok((graph_sp_id, role_value_by_id)) = graph_role_index(&client).await {
+        match client.list_app_role_assigned_to(&graph_sp_id).await {
+            Ok(assigned) => {
+                for a in assigned {
+                    // App permissions held by an app's SP — Users/Groups
+                    // can't hold Graph app roles.
+                    if a.principal_type.as_deref() != Some("ServicePrincipal") {
+                        continue;
                     }
-                    Err(err) => {
-                        tracing::info!(
-                            ?err,
-                            "audit: tenant-wide app-role assignments read failed; org-wide mail reconciliation unavailable"
-                        );
-                        HashMap::new()
+                    if let Some(v) = role_value_by_id.get(&a.app_role_id) {
+                        graph_roles_by_sp
+                            .entry(a.principal_id)
+                            .or_default()
+                            .push(v.clone());
                     }
                 }
             }
-            Err(_) => HashMap::new(),
+            Err(err) => {
+                tracing::info!(
+                    ?err,
+                    "audit: tenant-wide app-role assignments read failed; SP coverage and org-wide mail reconciliation unavailable"
+                );
+            }
         }
-    } else {
-        HashMap::new()
-    });
+    }
+    let orgwide_mail_by_sp: Arc<HashMap<String, HashSet<String>>> = Arc::new(
+        graph_roles_by_sp
+            .iter()
+            .map(|(sp_id, values)| {
+                let mail: HashSet<String> = values
+                    .iter()
+                    .filter(|v| is_scopable_exchange_permission(v))
+                    .cloned()
+                    .collect();
+                (sp_id.clone(), mail)
+            })
+            .filter(|(_, mail)| !mail.is_empty())
+            .collect(),
+    );
+
+    // SP-only phase candidates: service principals whose appId has NO local
+    // application object (foreign enterprise apps, managed identities, orphaned
+    // SPs) and that hold at least one Graph application-permission grant — the
+    // filter that keeps the hundreds of grantless first-party Microsoft SPs out
+    // of the results. Reuses the shared SP index (same get-or-fetch as
+    // list_enterprise_applications). Best-effort: on failure the run covers app
+    // registrations only.
+    let index_key = sp_index_key(&tenant_id);
+    let sp_index: Vec<ServicePrincipal> = match state
+        .cache
+        .get::<Vec<ServicePrincipal>>(CacheKind::Lists, &index_key)
+    {
+        Some(cached) => cached,
+        None => match client.list_service_principals_index().await {
+            Ok(sps) => {
+                state.cache.put(CacheKind::Lists, index_key, &sps);
+                sps
+            }
+            Err(err) => {
+                tracing::info!(
+                    ?err,
+                    "audit: SP index unavailable; scanning app registrations only"
+                );
+                Vec::new()
+            }
+        },
+    };
+    let local_app_ids: HashSet<String> = apps.iter().map(|a| a.app_id.clone()).collect();
+    let sp_candidates = sp_audit_candidates(sp_index, &local_app_ids, &graph_roles_by_sp);
+    let total = apps.len() + sp_candidates.len();
 
     // Exchange circuit breaker: a genuine auth failure (401 / 403) from the
     // admin API recurs for every app in the run, so the first one opens the
@@ -306,6 +358,73 @@ pub async fn run_audit(
         },
     )
     .await;
+
+    // Phase 2: score the SP-only candidates (foreign enterprise apps, managed
+    // identities, orphaned SPs). Every input is already resolved tenant-wide —
+    // granted roles from the appRoleAssignedTo matrix, consent + delegated
+    // scopes from the grants read, sign-ins from the appId-keyed report — so
+    // this is pure scoring: no per-item Graph traffic, no fan-out needed.
+    // mail_scopes stays empty ON PURPOSE: a held mail value here IS an
+    // un-stripped org-wide Entra grant (it comes from the grant matrix), and
+    // grant ∪ RBAC reach is always org-wide, so the reconciliation score_one
+    // applies would force OrgWide regardless of any RBAC verdict — an empty map
+    // scores identically without the 1-5s Exchange probe per SP. A principal
+    // whose grant the scoping flow stripped no longer holds the value and drops
+    // out of the candidate set entirely.
+    if !cancelled_before_all_dispatched && !cancel.is_cancelled() {
+        let mut done_count = *done.lock().await;
+        let now = chrono::Utc::now();
+        for sp in sp_candidates {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let perms = AppPermissions {
+                app_role_values: graph_roles_by_sp.get(&sp.id).cloned().unwrap_or_default(),
+                scope_values: delegated_scopes_by_client
+                    .get(&sp.id)
+                    .cloned()
+                    .unwrap_or_default(),
+                has_admin_consent: admin_consent_clients.contains(&sp.id),
+                mail_scopes: HashMap::new(),
+            };
+            let input = SpAuditInput {
+                display_name: sp.display_name.clone(),
+                app_id: sp.app_id.clone(),
+                sp_object_id: sp.id.clone(),
+                created_date_time: sp.created_date_time,
+                account_enabled: sp.account_enabled,
+                app_owner_organization_id: sp.app_owner_organization_id.clone(),
+                service_principal_type: sp.service_principal_type.clone(),
+            };
+            let mut item = score_service_principal(&input, &perms, now);
+            let last_sign_in = if sign_in_available {
+                Some(sign_in_map.get(&sp.app_id).copied().flatten())
+            } else {
+                None
+            };
+            item.sign_in_report_available = last_sign_in.is_some();
+            item.last_sign_in = last_sign_in.flatten();
+            if let Some((issue, rec)) =
+                unused_app_advisory(last_sign_in.into(), sp.created_date_time, now)
+            {
+                item.unused = true;
+                item.issues.push(issue);
+                item.recommendations.push(rec);
+            }
+            done_count += 1;
+            emit_progress(
+                &app_handle,
+                AuditProgress {
+                    done: done_count,
+                    total,
+                    current_app: Some(item.application_name.clone()),
+                    in_flight_cap: tracker.current_limit(),
+                    cancelled: false,
+                },
+            );
+            items.push(item);
+        }
+    }
 
     let cancelled = cancelled_before_all_dispatched || cancel.is_cancelled();
     items.sort_by_key(|i| std::cmp::Reverse(i.risk_score));
@@ -457,7 +576,7 @@ fn html_escape(s: &str) -> String {
 #[tauri::command]
 pub fn export_audit_csv(items: Vec<AuditItem>) -> String {
     let mut out = String::new();
-    out.push_str("ApplicationName,AppId,ObjectId,CreatedDate,Publisher,SignInAudience,RiskScore,RiskLevel,CredentialStatus,PermissionCount,DaysSinceCreated,ServicePrincipalEnabled,Issues,Recommendations\n");
+    out.push_str("ApplicationName,AppId,ObjectId,CreatedDate,Publisher,SignInAudience,RiskScore,RiskLevel,CredentialStatus,PermissionCount,DaysSinceCreated,ServicePrincipalEnabled,Issues,Recommendations,PrincipalKind\n");
     for item in items {
         let row = [
             csv_field(&item.application_name),
@@ -483,6 +602,7 @@ pub fn export_audit_csv(items: Vec<AuditItem>) -> String {
                 .unwrap_or_default(),
             csv_field(&item.issues.join("; ")),
             csv_field(&item.recommendations.join("; ")),
+            csv_field(item.principal_kind.as_str()),
         ]
         .join(",");
         out.push_str(&row);
@@ -492,6 +612,26 @@ pub fn export_audit_csv(items: Vec<AuditItem>) -> String {
 }
 
 // ---------------- internals ----------------
+
+/// The SP-only scoring candidates: service principals whose `appId` has no
+/// local application object (foreign enterprise apps, managed identities,
+/// orphaned SPs — paired SPs are already scored via the app-registration
+/// phase) AND that hold at least one Graph application-permission grant. The
+/// grant requirement is the noise filter: it drops the hundreds of grantless
+/// first-party Microsoft SPs every tenant carries. Disabled SPs stay in (Rule
+/// 4 flags them). Known limitation: roles held only on non-Graph resources
+/// aren't in the matrix, so such an SP is not scored.
+fn sp_audit_candidates(
+    sp_index: Vec<ServicePrincipal>,
+    local_app_ids: &HashSet<String>,
+    graph_roles_by_sp: &HashMap<String, Vec<String>>,
+) -> Vec<ServicePrincipal> {
+    sp_index
+        .into_iter()
+        .filter(|sp| !local_app_ids.contains(&sp.app_id))
+        .filter(|sp| graph_roles_by_sp.get(&sp.id).is_some_and(|v| !v.is_empty()))
+        .collect()
+}
 
 pub(crate) fn csv_field(s: &str) -> String {
     // Formula-injection guard (CWE-1236): a field beginning with one of these
@@ -791,7 +931,7 @@ async fn score_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use azapptoolkit_core::audit::{CredentialStatus, RiskLevel};
+    use azapptoolkit_core::audit::{AuditPrincipalKind, CredentialStatus, RiskLevel};
 
     fn sample(name: &str) -> AuditItem {
         AuditItem {
@@ -815,7 +955,56 @@ mod tests {
             last_sign_in: None,
             unused: false,
             sign_in_report_available: false,
+            principal_kind: AuditPrincipalKind::Application,
         }
+    }
+
+    fn sp(id: &str, app_id: &str, sp_type: Option<&str>) -> ServicePrincipal {
+        ServicePrincipal {
+            id: id.to_string(),
+            app_id: app_id.to_string(),
+            service_principal_type: sp_type.map(str::to_string),
+            ..ServicePrincipal::default()
+        }
+    }
+
+    // The SP-only candidate filter: no local application AND ≥1 Graph
+    // application grant. Managed identities and disabled SPs are candidates;
+    // paired and grantless SPs are not.
+    #[test]
+    fn sp_audit_candidates_filters_paired_and_grantless() {
+        let local_app_ids: HashSet<String> = ["paired-app".to_string()].into();
+        let roles: HashMap<String, Vec<String>> = [
+            ("sp-foreign".to_string(), vec!["Mail.Read".to_string()]),
+            ("sp-paired".to_string(), vec!["Mail.Read".to_string()]),
+            ("sp-mi".to_string(), vec!["User.Read.All".to_string()]),
+            ("sp-empty".to_string(), Vec::new()),
+        ]
+        .into();
+        let index = vec![
+            sp("sp-foreign", "foreign-app", Some("Application")),
+            sp("sp-paired", "paired-app", Some("Application")),
+            sp("sp-mi", "mi-app", Some("ManagedIdentity")),
+            sp("sp-grantless", "gallery-app", Some("Application")),
+            sp("sp-empty", "empty-app", Some("Application")),
+        ];
+        let got: Vec<String> = sp_audit_candidates(index, &local_app_ids, &roles)
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        // Paired (has a local app), grantless (not in the matrix), and
+        // empty-role-list SPs are all excluded; the foreign SP and the MI stay.
+        assert_eq!(got, vec!["sp-foreign".to_string(), "sp-mi".to_string()]);
+    }
+
+    #[test]
+    fn export_audit_csv_ends_rows_with_principal_kind() {
+        let mut item = sample("SP App");
+        item.principal_kind = AuditPrincipalKind::ServicePrincipal;
+        let csv = export_audit_csv(vec![item]);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert!(lines[0].ends_with(",PrincipalKind"));
+        assert!(lines[1].ends_with(",ServicePrincipal"));
     }
 
     #[test]

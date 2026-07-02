@@ -7,7 +7,7 @@ mod row;
 mod sort;
 
 use crate::hooks::use_progress_stream::use_progress_stream;
-use azapptoolkit_core::audit::{AuditItem, RiskLevel, issue};
+use azapptoolkit_core::audit::{AuditItem, AuditPrincipalKind, RiskLevel, issue};
 use leptos::prelude::*;
 use thaw::{
     Body1, Button, ButtonAppearance, Menu, MenuItem, MenuPosition, MenuTrigger, ProgressBar,
@@ -131,6 +131,10 @@ pub fn AuditView() -> impl IntoView {
                                     || x.starts_with(issue::SINGLE_OWNER)
                             })
                         })
+                        .count(),
+                    no_local_app: items
+                        .iter()
+                        .filter(|i| i.principal_kind != AuditPrincipalKind::Application)
                         .count(),
                 }
             })
@@ -529,6 +533,12 @@ pub fn AuditView() -> impl IntoView {
                                         count=c.unowned
                                         facet=finding
                                     />
+                                    <FilterChip
+                                        label="No app registration"
+                                        value="no_local_app"
+                                        count=c.no_local_app
+                                        facet=finding
+                                    />
                                 </div>
                             }
                         })
@@ -642,6 +652,9 @@ pub fn AuditView() -> impl IntoView {
                         // object_ids of every row matching the active filters (not
                         // just the rendered window), so "select all visible" covers
                         // the whole filtered set. Rebuilt when the filter changes.
+                        // SP-only rows are excluded — the bulk commands loop
+                        // app-registration cores, which have nothing to resolve
+                        // for a principal without a local application.
                         {move || {
                             let (count_label, visible_ids) = filtered
                                 .with(|idx| {
@@ -655,9 +668,12 @@ pub fn AuditView() -> impl IntoView {
                                             r.as_ref()
                                                 .map(|r| {
                                                     idx.iter()
-                                                        .filter_map(|&i| {
-                                                            r.items.get(i).map(|it| it.object_id.clone())
+                                                        .filter_map(|&i| r.items.get(i))
+                                                        .filter(|it| {
+                                                            it.principal_kind
+                                                                == AuditPrincipalKind::Application
                                                         })
+                                                        .map(|it| it.object_id.clone())
                                                         .collect::<Vec<_>>()
                                                 })
                                                 .unwrap_or_default()
@@ -768,17 +784,37 @@ pub fn AuditView() -> impl IntoView {
                                             "Select {} for bulk actions",
                                             i.application_name,
                                         );
+                                        // SP-only rows can't join the bulk selection (the
+                                        // bulk commands target app registrations) and have
+                                        // no local credentials to report a status for.
+                                        let is_app_reg = i.principal_kind
+                                            == AuditPrincipalKind::Application;
                                         view! {
                                             <tr>
                                                 <td class="data-table__check">
-                                                    <input
-                                                        type="checkbox"
-                                                        aria-label=check_label
-                                                        prop:checked=move || session.is_audit_selected(&oid)
-                                                        on:change=move |_| {
-                                                            session.toggle_audit_selected(oid_change.clone())
+                                                    {if is_app_reg {
+                                                        view! {
+                                                            <input
+                                                                type="checkbox"
+                                                                aria-label=check_label
+                                                                prop:checked=move || session.is_audit_selected(&oid)
+                                                                on:change=move |_| {
+                                                                    session.toggle_audit_selected(oid_change.clone())
+                                                                }
+                                                            />
                                                         }
-                                                    />
+                                                            .into_any()
+                                                    } else {
+                                                        view! {
+                                                            <span
+                                                                class="muted"
+                                                                title="Bulk actions target app registrations — this principal has no local one"
+                                                            >
+                                                                "—"
+                                                            </span>
+                                                        }
+                                                            .into_any()
+                                                    }}
                                                 </td>
                                                 <td>{i.application_name.clone()}</td>
                                                 <td class="mono">{i.app_id.clone()}</td>
@@ -789,7 +825,21 @@ pub fn AuditView() -> impl IntoView {
                                                     )>{i.risk_level.as_str()}</span>
                                                 </td>
                                                 <td>{i.risk_score}</td>
-                                                <td>{i.credential_status.as_str()}</td>
+                                                <td>
+                                                    {if is_app_reg {
+                                                        view! { {i.credential_status.as_str()} }.into_any()
+                                                    } else {
+                                                        view! {
+                                                            <span
+                                                                class="muted"
+                                                                title="Credentials live on the application in its home tenant"
+                                                            >
+                                                                "—"
+                                                            </span>
+                                                        }
+                                                            .into_any()
+                                                    }}
+                                                </td>
                                                 <td>{last_sign_in_cell(&i)}</td>
                                                 <td>
                                                     <ul class="issues">
@@ -896,6 +946,7 @@ struct PostureCounts {
     orgwide_sharepoint: usize,
     scoped_sites: usize,
     unowned: usize,
+    no_local_app: usize,
 }
 
 fn count_level(items: &[AuditItem], level: RiskLevel) -> usize {

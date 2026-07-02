@@ -5,7 +5,7 @@
 //! can stack them (e.g. Critical apps *with* expiring credentials) instead of
 //! picking one flat facet at a time.
 
-use azapptoolkit_core::audit::{AuditItem, RiskLevel, issue};
+use azapptoolkit_core::audit::{AuditItem, AuditPrincipalKind, RiskLevel, issue};
 
 /// The audit table's filter, as a pure function over the item set: returns the
 /// indices (in original order) of items matching the severity dimension AND the
@@ -91,6 +91,13 @@ pub(super) fn matches_finding(i: &AuditItem, finding: &str) -> bool {
         // Structured flag set by the audit runner from the sign-in activity
         // report — no longer parsed from the issue text.
         "unused" => i.unused,
+        // Structured kind field: SP-only rows (foreign enterprise apps, managed
+        // identities, orphaned SPs) — principals scored from their granted app
+        // roles because no local application object exists.
+        "no_local_app" => matches!(
+            i.principal_kind,
+            AuditPrincipalKind::ServicePrincipal | AuditPrincipalKind::ManagedIdentity
+        ),
         _ => true,
     }
 }
@@ -122,6 +129,7 @@ mod tests {
             last_sign_in: None,
             unused: false,
             sign_in_report_available: false,
+            principal_kind: AuditPrincipalKind::Application,
         }
     }
 
@@ -310,6 +318,28 @@ mod tests {
                     "issue {text:?} vs finding {f}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn no_local_app_finding_matches_sp_and_mi_kinds_only() {
+        // Structured-field finding (like "unused"/"expired"): keys off
+        // `principal_kind`, never issue text.
+        let app = blank();
+        let sp = AuditItem {
+            principal_kind: AuditPrincipalKind::ServicePrincipal,
+            ..blank()
+        };
+        let mi = AuditItem {
+            principal_kind: AuditPrincipalKind::ManagedIdentity,
+            ..blank()
+        };
+        assert!(!matches_finding(&app, "no_local_app"));
+        assert!(matches_finding(&sp, "no_local_app"));
+        assert!(matches_finding(&mi, "no_local_app"));
+        // And the kind alone trips no marker-driven finding.
+        for f in ["high_risk_perms", "orgwide_mailbox", "orgwide_sharepoint"] {
+            assert!(!matches_finding(&sp, f), "kind alone matched finding {f}");
         }
     }
 
