@@ -84,6 +84,12 @@ toolkit-owned service principal storing tokens you cannot audit.
   for Applications (the supported replacement for the deprecated
   Application Access Policies), and migrate an existing policy to
   RBAC in one click with a dry-run preview.
+- **Works for foreign-tenant apps too** — an enterprise application whose
+  registration lives in another tenant (a consented multi-tenant/OIDC app) has
+  no local manifest, but its granted permissions can still be scoped: the
+  Enterprise Application detail's Permissions tab carries the same Grant-access
+  wizard, and an inline callout flags held org-wide mail/SharePoint access with
+  a one-click path into scoping.
 
 ### Enterprise apps, service principals & managed identities
 
@@ -110,7 +116,10 @@ toolkit-owned service principal storing tokens you cannot audit.
   (remove expired credentials, scope mailbox/SharePoint access, remove
   redundant permissions), **scope-aware risk** (a mail permission confined via
   Exchange RBAC scores below an org-wide one), facet filters, CSV/JSON/HTML
-  export, adaptive throttling on 429s, and cancellable scans.
+  export, adaptive throttling on 429s, and cancellable scans. Also covers
+  **principals without a local app registration** — foreign-tenant enterprise
+  apps and managed identities holding Graph application grants — with fixes
+  that route to the SP-native scoping paths.
 - **Consent & application-permission audits** — tenant-wide views of every
   delegated (OAuth2) consent grant and every application permission apps hold
   on Microsoft Graph / Exchange / SharePoint, with high-risk highlighting,

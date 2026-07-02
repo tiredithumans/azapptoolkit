@@ -17,6 +17,7 @@ use crate::bindings::managed_identity::{self, AppRoleGrantDto, ManagedIdentityDt
 use crate::components::detail_header::DetailHeader;
 use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
+use crate::components::orgwide_scope_callout::OrgwideScopeCallout;
 use crate::components::permission_picker::PickerSelection;
 use crate::components::requires_role::RequiresRole;
 use crate::components::scope_badge::is_exchange_scopable;
@@ -228,6 +229,14 @@ pub fn ManagedIdentityDetailPane(
                                 });
                             view! {
                                 {scope_banner}
+                                // Org-wide discoverability callout — same shared
+                                // component as the enterprise pane (both are bare
+                                // SPs; mail has no per-row "Scope…").
+                                <OrgwideScopeCallout
+                                    permissions=list.clone()
+                                    scope_map=scope_map.clone()
+                                    on_scope=on_scope
+                                />
                                 <HeldPermissionsPanel
                                     permissions=list
                                     scope_map=scope_map

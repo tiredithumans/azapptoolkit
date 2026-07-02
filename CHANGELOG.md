@@ -9,6 +9,14 @@ the project adheres to
 
 ### Added
 
+- **An inline callout points at scoping when an identity holds org-wide access.** On the
+  Enterprise Application and Managed Identity Permissions tabs — the surfaces where a
+  foreign-tenant (no local app registration) principal gets scoped — a warning callout
+  now names the held org-wide mail/SharePoint permissions up front and its "Scope…"
+  button opens the Grant-access wizard pre-seeded, the same contract as a held row's
+  "Scope…". Previously the Exchange/SharePoint scoping sections rendered further down
+  the tab and mail had no per-row scope entry, so the path was easy to miss.
+
 - **The Security Audit now covers principals without a local app registration** —
   foreign-tenant (OIDC/multi-tenant) enterprise applications, managed identities, and
   orphaned service principals. Previously the audit enumerated only `/applications`, so
