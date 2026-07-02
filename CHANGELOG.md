@@ -7,6 +7,22 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **An invalid SAML certificate subject fails before the app is created.** SAML setup
+  now rejects a certificate subject that doesn't start with `CN=` up front (a typed
+  validation error, like the reply-URL check) instead of failing at the
+  certificate step — after the app and service principal already exist — and leaving a
+  half-configured app. The rotate-certificate command gets the same friendly rejection.
+
+### Security
+
+- **Rotated client secrets are zeroized in backend memory.** The rotate-into-Key-Vault
+  flow holds the freshly minted secret in exactly one buffer and wipes it on drop
+  (`SecretSetRequest` now zeroizes its value — covering manual `kv_set_secret` writes
+  too — and redacts it from `Debug` output), matching the existing access-token and
+  generated-certificate handling.
+
 ### Changed
 
 - **Admin-consent grants resolve resource service principals in one batched read.**

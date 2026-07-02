@@ -52,7 +52,7 @@ pub struct SecretValue {
 
 /// Body for `PUT /secrets/{name}`. Only `value` is required; everything else
 /// is optional (Key Vault applies defaults).
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Clone, Default, Serialize)]
 pub struct SecretSetRequest {
     pub value: String,
     #[serde(skip_serializing_if = "Option::is_none", rename = "contentType")]
@@ -61,6 +61,30 @@ pub struct SecretSetRequest {
     pub tags: Option<std::collections::HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attributes: Option<SecretAttributesRequest>,
+}
+
+/// The payload carries live secret material; wipe it on drop so freed heap
+/// pages don't retain the plaintext (matches `AccessToken` / `GeneratedCert`).
+/// The serialized request body and the transport buffers are the same accepted
+/// limits as token handling.
+impl Drop for SecretSetRequest {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.value.zeroize();
+    }
+}
+
+/// Manual impl so a stray `{:?}` can't log the secret value (mirrors
+/// `PasswordCredential`'s redacted Debug).
+impl std::fmt::Debug for SecretSetRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretSetRequest")
+            .field("value", &"<redacted>")
+            .field("content_type", &self.content_type)
+            .field("tags", &self.tags)
+            .field("attributes", &self.attributes)
+            .finish()
+    }
 }
 
 /// Request-shape for attributes on create/update. Key Vault expects Unix
@@ -145,9 +169,13 @@ mod tests {
 
     #[test]
     fn set_request_omits_none_fields() {
+        // Explicit fields: functional record update would move out of the
+        // base value, which the Drop (zeroize) impl forbids (E0509).
         let req = SecretSetRequest {
             value: "v".into(),
-            ..Default::default()
+            content_type: None,
+            tags: None,
+            attributes: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         assert_eq!(s, r#"{"value":"v"}"#);
