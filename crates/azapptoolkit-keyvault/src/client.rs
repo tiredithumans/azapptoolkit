@@ -330,7 +330,9 @@ mod tests {
                 "my-secret",
                 &SecretSetRequest {
                     value: "p@ssw0rd".into(),
-                    ..Default::default()
+                    content_type: None,
+                    tags: None,
+                    attributes: None,
                 },
             )
             .await
