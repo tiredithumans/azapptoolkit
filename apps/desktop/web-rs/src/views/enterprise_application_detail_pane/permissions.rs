@@ -4,6 +4,7 @@ use crate::bindings::graph_roles;
 use crate::bindings::permissions as permissions_bindings;
 use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
+use crate::components::orgwide_scope_callout::OrgwideScopeCallout;
 use crate::components::permission_picker::PickerSelection;
 use crate::components::scope_badge::{is_exchange_scopable, is_sharepoint_orgwide};
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
@@ -249,6 +250,15 @@ pub(super) fn PermissionsContent(
                             });
                             view! {
                                 {scope_banner}
+                                // Org-wide discoverability callout: names the held
+                                // org-wide values up front and opens the wizard
+                                // pre-seeded (the scoping sections only render
+                                // further down, and mail has no per-row "Scope…").
+                                <OrgwideScopeCallout
+                                    permissions=list.clone()
+                                    scope_map=scope_map.clone()
+                                    on_scope=on_scope
+                                />
                                 <HeldPermissionsPanel
                                     permissions=list
                                     scope_map=scope_map

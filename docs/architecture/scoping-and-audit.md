@@ -151,6 +151,14 @@ exchange + sharepoint); SharePoint org-wide detection is name-based (`is_sharepo
 once in `azapptoolkit-core::scoping`). **To teach the app a new mechanism**: add a `ScopeKind` variant
 + a target panel + a Step-3 apply arm — nothing else branches on the concrete mechanism.
 
+**Discoverability**: the enterprise-app and managed-identity Permissions tabs render the shared
+`OrgwideScopeCallout` (`web-rs/components/orgwide_scope_callout.rs`) above the held-permissions
+table when the principal holds org-wide access — a scopable mail value whose verdict is not
+`Scoped` (unresolved counts, never-under-report) or any broad `Sites.*`. It names the values and
+its "Scope…" opens the wizard pre-seeded to the first one, same contract as a held row's "Scope…".
+This is the front door for scoping a **foreign-tenant** enterprise app (no local app registration
+⇒ no App Registrations surface, and the scoping sections only render further down the tab).
+
 ## Audit remediations (one-click "Fix")
 
 Only for findings whose fix maps to a **safe, existing** mutation. Add a `RemediationKind` variant
