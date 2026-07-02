@@ -99,8 +99,8 @@ impl GraphClient {
         }
     }
 
-    /// The signed-in user's **active** directory-role display names (e.g.
-    /// "Cloud Application Administrator"). Reads
+    /// The signed-in user's **active** directory roles (display name +
+    /// immutable `roleTemplateId`). Reads
     /// `/me/transitiveMemberOf/microsoft.graph.directoryRole` — the OData cast
     /// keeps only directory roles — via the verb-selected read token
     /// (`Directory.Read.All`, in the sign-in bundle). PIM-eligible-but-inactive
@@ -109,25 +109,28 @@ impl GraphClient {
     /// user must still activate reads as absent. Best-effort — callers that
     /// can't read it (e.g. a tenant restricting directory reads) degrade to "?".
     ///
+    /// Callers must match on `role_template_id`, not the display name: the
+    /// `directoryRole` objects in long-lived tenants carry legacy names
+    /// ("SharePoint Service Administrator", "Company Administrator").
+    ///
     /// The OData cast is an advanced query on directory objects, so Graph
     /// rejects it with `400 Request_UnsupportedQuery` unless **both**
     /// `ConsistencyLevel: eventual` and `$count=true` are sent. `id` must be
     /// in the `$select` — Graph returns only the selected properties, and
-    /// [`DirectoryObject`] requires `id` to deserialize.
-    pub async fn me_active_directory_roles(&self) -> Result<Vec<String>> {
-        let params: [(&str, &str); 2] = [("$select", "id,displayName"), ("$count", "true")];
-        let page: Paged<DirectoryObject> = self
+    /// [`ActiveDirectoryRole`] requires `id` to deserialize.
+    pub async fn me_active_directory_roles(&self) -> Result<Vec<ActiveDirectoryRole>> {
+        let params: [(&str, &str); 2] = [
+            ("$select", "id,displayName,roleTemplateId"),
+            ("$count", "true"),
+        ];
+        let page: Paged<ActiveDirectoryRole> = self
             .get_json(
                 "/me/transitiveMemberOf/microsoft.graph.directoryRole",
                 &params,
                 true,
             )
             .await?;
-        Ok(page
-            .items
-            .into_iter()
-            .filter_map(|o| o.display_name)
-            .collect())
+        Ok(page.items)
     }
 
     pub async fn get_organization(&self) -> Result<Organization> {

@@ -59,13 +59,15 @@ async fn get_organization_returns_first_item() {
 }
 
 #[tokio::test]
-async fn me_active_directory_roles_extracts_display_names() {
+async fn me_active_directory_roles_extracts_names_and_template_ids() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/me/transitiveMemberOf/microsoft.graph.directoryRole"))
         // `id` must stay in the $select: Graph returns only the selected
-        // properties and DirectoryObject requires `id` to deserialize.
-        .and(query_param("$select", "id,displayName"))
+        // properties and ActiveDirectoryRole requires `id` to deserialize.
+        // `roleTemplateId` is what consumers match on — directoryRole objects
+        // can carry legacy display names ("SharePoint Service Administrator").
+        .and(query_param("$select", "id,displayName,roleTemplateId"))
         // The OData cast is an advanced query: Graph 400s without both the
         // header and $count=true, so the mock pins them.
         .and(query_param("$count", "true"))
@@ -73,8 +75,16 @@ async fn me_active_directory_roles_extracts_display_names() {
         .and(header("authorization", "Bearer tok"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "value": [
-                {"id": "r1", "displayName": "Cloud Application Administrator"},
-                {"id": "r2", "displayName": "Reports Reader"}
+                {
+                    "id": "r1",
+                    "displayName": "Cloud Application Administrator",
+                    "roleTemplateId": "158c047a-c907-4556-b7ef-446551a6b5f7"
+                },
+                {
+                    "id": "r2",
+                    "displayName": "SharePoint Service Administrator",
+                    "roleTemplateId": "f28a1f50-f6e7-4571-818b-6a12f2af6b6c"
+                }
             ]
         })))
         .mount(&server)
@@ -82,9 +92,23 @@ async fn me_active_directory_roles_extracts_display_names() {
 
     let client = make_client(&server.uri());
     let roles = client.me_active_directory_roles().await.unwrap();
+    assert_eq!(roles.len(), 2);
     assert_eq!(
-        roles,
-        vec!["Cloud Application Administrator", "Reports Reader"]
+        roles[0].display_name.as_deref(),
+        Some("Cloud Application Administrator")
+    );
+    assert_eq!(
+        roles[0].role_template_id.as_deref(),
+        Some("158c047a-c907-4556-b7ef-446551a6b5f7")
+    );
+    // The legacy-named row still carries the immutable template id.
+    assert_eq!(
+        roles[1].display_name.as_deref(),
+        Some("SharePoint Service Administrator")
+    );
+    assert_eq!(
+        roles[1].role_template_id.as_deref(),
+        Some("f28a1f50-f6e7-4571-818b-6a12f2af6b6c")
     );
 }
 

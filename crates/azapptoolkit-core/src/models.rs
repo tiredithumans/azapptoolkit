@@ -405,6 +405,22 @@ pub struct DirectoryObject {
     pub odata_type: Option<String>,
 }
 
+/// One row of `/me/transitiveMemberOf/microsoft.graph.directoryRole`: an
+/// **activated** directory role's display name plus its immutable
+/// `roleTemplateId`. Consumers must match on the template id — long-lived
+/// tenants' `directoryRole` objects carry legacy display names ("SharePoint
+/// Service Administrator", "Company Administrator").
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveDirectoryRole {
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub role_template_id: Option<String>,
+}
+
 /// Lean projection of a Graph `group` — the fields the membership views need.
 /// `group_types` distinguishes Microsoft 365 groups (`Unified`) and rule-based
 /// membership (`DynamicMembership`, which rejects direct member adds);

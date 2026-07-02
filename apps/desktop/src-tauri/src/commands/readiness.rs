@@ -15,7 +15,10 @@ use std::collections::{HashMap, HashSet};
 use tauri::State;
 
 use azapptoolkit_auth::AuthError;
-use azapptoolkit_core::capabilities::{CAPABILITIES, Capability, RoleDetect};
+use azapptoolkit_core::capabilities::{
+    CAPABILITIES, Capability, RoleDetect, matched_directory_role,
+};
+use azapptoolkit_core::models::ActiveDirectoryRole;
 
 use crate::dto::UiError;
 use crate::dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
@@ -30,10 +33,11 @@ pub async fn check_readiness(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<ReadinessReport, UiError> {
-    // Active directory-role display names. PIM-eligible-but-inactive roles are
-    // absent (only activated assignments are memberships) — exactly the signal
-    // we want. A read failure isn't fatal: every DirectoryRole row degrades to
-    // "?" and the UI shows one banner.
+    // Active directory roles (display name + roleTemplateId — matching uses
+    // the template id; tenants carry legacy display names). PIM-eligible-but-
+    // inactive roles are absent (only activated assignments are memberships) —
+    // exactly the signal we want. A read failure isn't fatal: every
+    // DirectoryRole row degrades to "?" and the UI shows one banner.
     let active_roles = state
         .graph_for(&tenant_id)
         .me_active_directory_roles()
@@ -107,7 +111,7 @@ pub async fn check_readiness(
 /// turning every directory-role capability into "?".
 fn role_for(
     cap: &Capability,
-    active_roles: &[String],
+    active_roles: &[ActiveDirectoryRole],
     directory_unreadable: bool,
 ) -> (Verdict, String) {
     match cap.role_detect {
@@ -118,11 +122,10 @@ fn role_for(
                     "Couldn't read your active directory roles.".to_string(),
                 );
             }
-            match cap.directory_roles_any.iter().find(|needed| {
-                active_roles
-                    .iter()
-                    .any(|have| have.eq_ignore_ascii_case(needed))
-            }) {
+            // Matched by roleTemplateId (with a name fallback) — a name-only
+            // match reported active roles as missing in tenants whose
+            // directoryRole objects carry legacy display names.
+            match matched_directory_role(cap, active_roles) {
                 Some(matched) => (Verdict::Have, format!("Active role: {matched}.")),
                 None => (
                     Verdict::Missing,
@@ -196,18 +199,59 @@ mod tests {
     use super::*;
     use azapptoolkit_core::capabilities::capability;
 
+    fn role(name: &str, template_id: &str) -> ActiveDirectoryRole {
+        ActiveDirectoryRole {
+            id: "role-obj".into(),
+            display_name: Some(name.into()),
+            role_template_id: Some(template_id.into()),
+        }
+    }
+
     #[test]
     fn directory_role_present_is_have() {
         let cap = capability("app_registrations").unwrap();
-        let (v, detail) = role_for(cap, &["Global Administrator".to_string()], false);
+        let (v, detail) = role_for(
+            cap,
+            &[role(
+                "Global Administrator",
+                "62e90394-69f5-4237-9190-012177145e10",
+            )],
+            false,
+        );
         assert_eq!(v, Verdict::Have);
         assert!(detail.contains("Global Administrator"));
     }
 
     #[test]
+    fn legacy_named_role_matches_by_template_id() {
+        // The user-reported bug: an ACTIVE SharePoint Administrator read as
+        // "Role missing" because the tenant's directoryRole object is named
+        // "SharePoint Service Administrator" (the documented Graph legacy
+        // name). The template id must satisfy the check regardless.
+        let cap = capability("sharepoint_sites_selected").unwrap();
+        let (v, detail) = role_for(
+            cap,
+            &[role(
+                "SharePoint Service Administrator",
+                "f28a1f50-f6e7-4571-818b-6a12f2af6b6c",
+            )],
+            false,
+        );
+        assert_eq!(v, Verdict::Have);
+        assert!(detail.contains("SharePoint Administrator"));
+    }
+
+    #[test]
     fn directory_role_absent_is_missing_and_lists_alternatives() {
         let cap = capability("app_registrations").unwrap();
-        let (v, detail) = role_for(cap, &["User Administrator".to_string()], false);
+        let (v, detail) = role_for(
+            cap,
+            &[role(
+                "User Administrator",
+                "fe930be7-5e62-47db-91af-98c3a49a38b1",
+            )],
+            false,
+        );
         assert_eq!(v, Verdict::Missing);
         assert!(detail.contains("Cloud Application Administrator"));
     }
