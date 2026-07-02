@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-01
+
 ### Fixed
 
 - **Failed loads offer an in-context Retry.** The tenant-wide audit dashboards
