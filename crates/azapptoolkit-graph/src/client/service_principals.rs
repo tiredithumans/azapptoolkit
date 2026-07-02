@@ -7,6 +7,11 @@ use super::*;
 /// these three fields cuts the audit's largest per-app transfer by 10–100×.
 const SP_LEAN_SELECT: &str = "id,appId,accountEnabled";
 
+/// Projection for resolving a *resource* SP's permission definitions
+/// (appRoles + oauth2PermissionScopes) — shared by [`GraphClient::resolve_resource_sp`]
+/// and its batch prewarm so the single and batched lookups stay in lockstep.
+const RESOURCE_SP_SELECT: &str = "id,appId,displayName,appRoles,oauth2PermissionScopes";
+
 impl GraphClient {
     /// Returns `None` when the app registration has no backing SP (e.g. a
     /// newly-created single-tenant app before consent).
@@ -496,10 +501,9 @@ impl GraphClient {
             return Ok(cached);
         }
         let filter = format!("appId eq '{}'", escape_odata(resource_app_id));
-        let select = "id,appId,displayName,appRoles,oauth2PermissionScopes";
         let params: [(&str, &str); 3] = [
             ("$filter", filter.as_str()),
-            ("$select", select),
+            ("$select", RESOURCE_SP_SELECT),
             ("$top", "1"),
         ];
         let page: Paged<ServicePrincipal> =
@@ -507,5 +511,75 @@ impl GraphClient {
         let sp = page.items.into_iter().next();
         self.cache.put(CacheKind::Permissions, cache_key, &sp);
         Ok(sp)
+    }
+
+    /// Best-effort batch pre-resolution of resource app ids via Graph `$batch`
+    /// (one POST per 20), seeding the [`CacheKind::Permissions`] cache so a
+    /// following per-resource [`Self::resolve_resource_sp`] is a cache hit
+    /// instead of a round trip — the admin-consent grant path's per-resource
+    /// fan-out. Only not-already-cached ids are fetched, and any error is
+    /// swallowed: the per-resource fallback still works, so resilience is
+    /// unchanged.
+    pub async fn prewarm_resource_sps(&self, resource_app_ids: &[String]) {
+        let mut missing: Vec<&String> = resource_app_ids
+            .iter()
+            .filter(|id| {
+                self.cache
+                    .get::<Option<ServicePrincipal>>(CacheKind::Permissions, &self.sp_cache_key(id))
+                    .is_none()
+            })
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        // The Permissions bucket holds at most `max_size` entries (LRU):
+        // prewarming past it would evict the earliest entries before the
+        // caller's loop reads them, silently re-creating the per-resource GETs
+        // the prewarm exists to remove. Cap and say so — the remainder resolves
+        // per-resource, exactly the pre-prewarm behavior.
+        let cap = self.cache.config().max_size;
+        if missing.len() > cap {
+            tracing::info!(
+                missing = missing.len(),
+                cap,
+                "resource-SP prewarm capped at the cache size; the remainder resolves per-resource"
+            );
+            missing.truncate(cap);
+        }
+        let urls: Vec<String> = missing
+            .iter()
+            .map(|id| {
+                // Build the relative sub-request URL with a properly percent-encoded
+                // `$filter` value (spaces/quotes), matching the single lookup's query.
+                let mut u = url::Url::parse("https://graph.invalid/servicePrincipals")
+                    .expect("static URL parses");
+                u.query_pairs_mut()
+                    .append_pair("$filter", &format!("appId eq '{}'", escape_odata(id)))
+                    .append_pair("$select", RESOURCE_SP_SELECT)
+                    .append_pair("$top", "1");
+                format!("/servicePrincipals?{}", u.query().unwrap_or(""))
+            })
+            .collect();
+
+        let pages: Vec<Result<Paged<ServicePrincipal>>> = match self.batch_get_json(&urls).await {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::debug!(
+                    ?err,
+                    "resource-SP prewarm batch failed; per-resource lookups will resolve"
+                );
+                return;
+            }
+        };
+        for (id, page) in missing.iter().zip(pages) {
+            // A failed sub-request leaves the cache cold; the per-resource
+            // lookup retries. An empty page caches `None`, exactly like
+            // resolve_resource_sp.
+            if let Ok(page) = page {
+                let sp = page.items.into_iter().next();
+                self.cache
+                    .put(CacheKind::Permissions, self.sp_cache_key(id), &sp);
+            }
+        }
     }
 }
