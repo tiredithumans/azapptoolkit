@@ -2324,6 +2324,11 @@ h3 {
   white-space: nowrap;
 }
 
+.copyable-id__copied {
+  color: var(--ok);
+  font-size: 12px;
+}
+
 /* ---- IconButton ---- */
 .ui-icon-btn {
   width: 32px;
