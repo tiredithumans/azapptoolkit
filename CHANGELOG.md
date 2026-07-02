@@ -30,6 +30,12 @@ the project adheres to
 
 ### Changed
 
+- **Copy buttons confirm the copy.** `CopyableId` (the copy-to-clipboard GUID fields in
+  detail panes and table cells) shows a brief "Copied" badge after a click, instead of
+  no feedback at all.
+- **The open-items compare gesture is discoverable.** Dock chips' tooltip now reads
+  "click to focus · Ctrl/Cmd-click to compare side-by-side" — the 2-up compare was
+  previously invisible unless you already knew the shortcut.
 - **Admin-consent grants resolve resource service principals in one batched read.**
   "Grant admin consent" (single, bulk, and DR-restore paths) pre-resolves every declared
   resource's service principal via Graph `$batch` and the shared Permissions cache instead

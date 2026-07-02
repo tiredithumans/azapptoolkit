@@ -72,6 +72,15 @@ async fn open_focus_compare_close() {
     );
     ts::wait_for(|| ts::query_all(".open-dock__chip").len() == 1).await;
     ts::wait_for(|| visible_panes() == 1).await;
+    // The otherwise-invisible compare gesture is advertised on the chip tooltip.
+    let title = ts::query(".open-dock__chip-main")
+        .unwrap()
+        .get_attribute("title")
+        .unwrap_or_default();
+    assert!(
+        title.contains("Ctrl/Cmd-click to compare"),
+        "chip title advertises the compare gesture: {title}"
+    );
     // Single pane: the "Full" control would be a no-op, so it isn't shown.
     assert_eq!(
         visible_count(".workspace__pane-full"),

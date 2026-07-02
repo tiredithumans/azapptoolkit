@@ -74,7 +74,11 @@ fn dock_chip(session: Session, item: OpenItem) -> impl IntoView {
                 type="button"
                 class="open-dock__chip-main"
                 aria-pressed=move || if is_active() { "true" } else { "false" }
-                title=label
+                // Surface the otherwise-invisible compare gesture; keeps the
+                // live-title behavior (closure form) the label comment requires.
+                title=move || {
+                    format!("{} — click to focus · Ctrl/Cmd-click to compare side-by-side", label())
+                }
                 on:click=move |ev: leptos::ev::MouseEvent| {
                     session.focus_item(id, ev.meta_key() || ev.ctrl_key());
                 }
