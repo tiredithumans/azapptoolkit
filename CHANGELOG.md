@@ -7,6 +7,15 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **Admin-consent grants resolve resource service principals in one batched read.**
+  "Grant admin consent" (single, bulk, and DR-restore paths) pre-resolves every declared
+  resource's service principal via Graph `$batch` and the shared Permissions cache instead
+  of one sequential lookup per resource — on a cold cache an app with N resources costs
+  1 POST, not N GETs. A batch failure degrades to the existing per-resource lookups;
+  per-resource failure reporting is unchanged.
+
 ## [0.11.0] - 2026-06-30
 
 ### Added
