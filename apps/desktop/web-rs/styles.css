@@ -2329,6 +2329,12 @@ h3 {
   font-size: 12px;
 }
 
+.open-dock__hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* ---- IconButton ---- */
 .ui-icon-btn {
   width: 32px;

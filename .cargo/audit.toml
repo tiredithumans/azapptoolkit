@@ -13,4 +13,14 @@ ignore = [
     # artifacts. Dismissed on GitHub Dependabot as tolerable risk. Drop this
     # ignore once Tauri's Linux backend ships on a glib >= 0.20 webview stack.
     "RUSTSEC-2024-0429",
+    # RUSTSEC-2026-0194 / -0195: quick-xml 0.39 DoS-class parser issues
+    # (quadratic duplicate-attribute check; unbounded namespace allocation in
+    # NsReader). quick-xml is a transitive dep only via plist 1.9 -> tauri 2.11,
+    # and plist parses the app's OWN bundle metadata (Info.plist), never
+    # attacker-controlled XML, so neither DoS path is reachable from untrusted
+    # input. The fix is quick-xml >= 0.41, a semver-major jump plist hasn't
+    # shipped yet (1.9.0 pins 0.39 and is the latest release). Drop both
+    # ignores once `cargo update -p plist` pulls a release on quick-xml 0.41+.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]

@@ -113,10 +113,21 @@ async fn open_focus_compare_close() {
     let app_id = m.session.is_open(OpenItemKind::AppReg, "app-1").unwrap();
     let ent_id = m.session.is_open(OpenItemKind::Enterprise, "sp-1").unwrap();
 
+    // Two items + not yet comparing → the inline compare hint shows in the bar.
+    assert!(
+        ts::query(".open-dock__hint").is_some(),
+        "compare hint visible once a second item is open"
+    );
+
     // Compare: pin both side-by-side → two visible panes + the two-up grid.
     m.session.focus_item(app_id, false);
     m.session.focus_item(ent_id, true);
     ts::wait_for(|| visible_panes() == 2).await;
+    // The gesture has been found — the hint gets out of the way.
+    assert!(
+        ts::query(".open-dock__hint").is_none(),
+        "compare hint hidden while a 2-up compare is active"
+    );
     assert!(
         !ts::query_all(".workspace__panes--two").is_empty(),
         "side-by-side compare applies the two-up modifier"
