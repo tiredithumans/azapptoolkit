@@ -148,37 +148,26 @@ pub async fn global_search(
     let client = state.graph_for(&tenant_id);
 
     if is_guid(&trimmed) {
-        // GUID branch: try object-id and appId in parallel for each kind. A
-        // single GUID can plausibly be any of: App Reg object id, App Reg
-        // appId (also the SP appId), or SP object id (managed identity or
-        // enterprise app).
-        let app_obj_fut = client.find_application_by_app_id(&trimmed);
-        let sp_obj_fut = client.get_service_principal_by_object_id(&trimmed);
-        let (app_by_app_id, sp_by_obj_id) = futures::future::join(app_obj_fut, sp_obj_fut).await;
+        // GUID branch: probe ALL FOUR identities in parallel — a single GUID
+        // can be an App Reg object id, an App Reg appId (shared with its
+        // paired SP), or an SP object id / appId. The appId → SP probe is what
+        // finds an enterprise app that has no local app registration at all
+        // (gallery / third-party apps); each probe is best-effort, so a failed
+        // lookup just contributes no hit.
+        let (app_by_app_id, app_by_obj_id, sp_by_obj_id, sp_by_app_id) = futures::future::join4(
+            client.find_application_by_app_id(&trimmed),
+            client.get_application(&trimmed),
+            client.get_service_principal_by_object_id(&trimmed),
+            client.get_service_principal_by_app_id(&trimmed),
+        )
+        .await;
 
-        let mut app_registrations = Vec::new();
-        let mut enterprise_apps = Vec::new();
-        let mut managed_identities = Vec::new();
-
-        if let Ok(Some(a)) = app_by_app_id {
-            app_registrations.push(SearchHit {
-                id: a.id,
-                app_id: Some(a.app_id),
-                display_name: a.display_name,
-            });
-        }
-        if let Ok(Some(sp)) = sp_by_obj_id {
-            let hit = SearchHit {
-                id: sp.id,
-                app_id: Some(sp.app_id),
-                display_name: sp.display_name,
-            };
-            if sp.service_principal_type.as_deref() == Some("ManagedIdentity") {
-                managed_identities.push(hit);
-            } else {
-                enterprise_apps.push(hit);
-            }
-        }
+        let (app_registrations, enterprise_apps, managed_identities) = assemble_guid_hits(
+            app_by_app_id.ok().flatten(),
+            app_by_obj_id.ok(),
+            sp_by_obj_id.ok().flatten(),
+            sp_by_app_id.ok().flatten(),
+        );
 
         return Ok(GlobalSearchResults {
             query: trimmed,
@@ -224,6 +213,53 @@ pub async fn global_search(
         enterprise_apps: finalize(&mut ent_hits),
         managed_identities: finalize(&mut mi_hits),
     })
+}
+
+/// Buckets the four GUID-probe results into (app registrations, enterprise
+/// apps, managed identities) hits, deduping within a bucket by object id.
+/// Pure and unit-tested — the original GUID branch probed only two of the four
+/// identities, which made an enterprise app unfindable by its appId (the exact
+/// lookup an admin pastes from the portal).
+fn assemble_guid_hits(
+    app_by_app_id: Option<Application>,
+    app_by_obj_id: Option<Application>,
+    sp_by_obj_id: Option<ServicePrincipal>,
+    sp_by_app_id: Option<ServicePrincipal>,
+) -> (Vec<SearchHit>, Vec<SearchHit>, Vec<SearchHit>) {
+    let mut app_registrations: Vec<SearchHit> = Vec::new();
+    for a in [app_by_app_id, app_by_obj_id].into_iter().flatten() {
+        if app_registrations.iter().any(|h| h.id == a.id) {
+            continue;
+        }
+        app_registrations.push(SearchHit {
+            id: a.id,
+            app_id: Some(a.app_id),
+            display_name: a.display_name,
+        });
+    }
+
+    let mut enterprise_apps: Vec<SearchHit> = Vec::new();
+    let mut managed_identities: Vec<SearchHit> = Vec::new();
+    for sp in [sp_by_obj_id, sp_by_app_id].into_iter().flatten() {
+        if enterprise_apps
+            .iter()
+            .chain(managed_identities.iter())
+            .any(|h| h.id == sp.id)
+        {
+            continue;
+        }
+        let hit = SearchHit {
+            id: sp.id,
+            app_id: Some(sp.app_id),
+            display_name: sp.display_name,
+        };
+        if sp.service_principal_type.as_deref() == Some("ManagedIdentity") {
+            managed_identities.push(hit);
+        } else {
+            enterprise_apps.push(hit);
+        }
+    }
+    (app_registrations, enterprise_apps, managed_identities)
 }
 
 /// Relevance rank for a substring match (lower = better), or `None` when the
@@ -278,6 +314,84 @@ pub(crate) fn is_guid(input: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app(id: &str, app_id: &str, name: &str) -> Application {
+        Application {
+            id: id.into(),
+            app_id: app_id.into(),
+            display_name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    fn sp(id: &str, app_id: &str, name: &str, sp_type: Option<&str>) -> ServicePrincipal {
+        ServicePrincipal {
+            id: id.into(),
+            app_id: app_id.into(),
+            display_name: name.into(),
+            service_principal_type: sp_type.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn guid_hits_find_enterprise_app_by_app_id() {
+        // The regression: an enterprise app with NO local app registration
+        // (gallery / third-party) must be findable by its appId.
+        let (apps, ents, mis) = assemble_guid_hits(
+            None,
+            None,
+            None,
+            Some(sp("sp-1", "guid-1", "Salesforce", Some("Application"))),
+        );
+        assert!(apps.is_empty());
+        assert_eq!(ents.len(), 1);
+        assert_eq!(ents[0].id, "sp-1");
+        assert!(mis.is_empty());
+    }
+
+    #[test]
+    fn guid_hits_pair_app_reg_and_enterprise_app_for_one_app_id() {
+        // A tenant-owned app's appId identifies both halves of the pairing.
+        let (apps, ents, _) = assemble_guid_hits(
+            Some(app("obj-1", "guid-1", "Contoso API")),
+            None,
+            None,
+            Some(sp("sp-1", "guid-1", "Contoso API", Some("Application"))),
+        );
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].id, "obj-1");
+        assert_eq!(ents.len(), 1);
+        assert_eq!(ents[0].id, "sp-1");
+    }
+
+    #[test]
+    fn guid_hits_find_app_reg_by_object_id_and_mi_by_type() {
+        let (apps, ents, mis) = assemble_guid_hits(
+            None,
+            Some(app("obj-2", "app-2", "By Object Id")),
+            Some(sp("sp-2", "app-3", "Build MI", Some("ManagedIdentity"))),
+            None,
+        );
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].id, "obj-2");
+        assert!(ents.is_empty());
+        assert_eq!(mis.len(), 1);
+        assert_eq!(mis[0].id, "sp-2");
+    }
+
+    #[test]
+    fn guid_hits_dedupe_within_buckets() {
+        // The same object returned by two probes appears once.
+        let (apps, ents, _) = assemble_guid_hits(
+            Some(app("obj-1", "guid-1", "Contoso API")),
+            Some(app("obj-1", "guid-1", "Contoso API")),
+            Some(sp("sp-1", "guid-1", "Contoso API", Some("Application"))),
+            Some(sp("sp-1", "guid-1", "Contoso API", Some("Application"))),
+        );
+        assert_eq!(apps.len(), 1);
+        assert_eq!(ents.len(), 1);
+    }
 
     #[test]
     fn guid_parser_accepts_canonical_form_case_insensitive() {
