@@ -15,6 +15,13 @@ the project adheres to
 
 ### Fixed
 
+- **Global search finds anything by any of its GUIDs.** Pasting a full GUID into the
+  top-bar search only probed two of the four identities (app registration by appId,
+  service principal by object id) — so an Enterprise Application was unfindable by its
+  Application ID (and an app registration by its object id), returning nothing at all
+  for a gallery/third-party app with no local registration. The GUID branch now probes
+  all four in parallel: app registration by appId *and* object id, service principal by
+  object id *and* appId.
 - **The copy confirmation now covers every copy button.** v0.12.0's "Copied" badge only
   landed on `CopyableId` (MI detail fields, DR view, credential-table ID cells) — the
   detail-pane header's app-id copy button and the SSO summary fields still gave no
