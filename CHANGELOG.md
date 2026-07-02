@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-07-02
+
 ### Fixed
 
 - **Readiness no longer reports an active role as missing in tenants with legacy role
@@ -18,15 +20,6 @@ the project adheres to
   their immutable `roleTemplateId` (with a display-name fallback), so the SharePoint
   site access row — and every other directory-role check — recognizes the activated
   role regardless of what the tenant calls it.
-
-### Changed
-
-- **The compare gesture hint is visible in the dock itself.** Once a second item is
-  open, the dock shows an inline "Ctrl/Cmd-click a chip to compare" hint (hidden while
-  a side-by-side compare is active) — the hover tooltip alone required knowing to hover.
-
-### Fixed
-
 - **Global search finds anything by any of its GUIDs.** Pasting a full GUID into the
   top-bar search only probed two of the four identities (app registration by appId,
   service principal by object id) — so an Enterprise Application was unfindable by its
@@ -39,6 +32,18 @@ the project adheres to
   detail-pane header's app-id copy button and the SSO summary fields still gave no
   feedback. The badge behavior is extracted into a shared `CopyIconButton` and all
   icon-button copy affordances render it.
+
+### Changed
+
+- **The compare gesture hint is visible in the dock itself.** Once a second item is
+  open, the dock shows an inline "Ctrl/Cmd-click a chip to compare" hint (hidden while
+  a side-by-side compare is active) — the hover tooltip alone required knowing to hover.
+- **Dependency refresh.** tauri 2.11.3 → 2.11.5, leptos 0.8.19 → 0.8.20,
+  anyhow 1.0.103, time 0.3.53 (Dependabot), and the `taiki-e/install-action` CI pin
+  → 2.82.7. Two fresh `quick-xml` advisories (RUSTSEC-2026-0194/0195 — DoS-class
+  parser issues, transitive via `plist` → `tauri`, which parses only the app's own
+  bundle metadata) are triaged as documented ignores until `plist` ships on
+  quick-xml 0.41+.
 
 ## [0.12.0] - 2026-07-01
 
