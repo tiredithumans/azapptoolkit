@@ -7,6 +7,27 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **The Security Audit now covers principals without a local app registration** —
+  foreign-tenant (OIDC/multi-tenant) enterprise applications, managed identities, and
+  orphaned service principals. Previously the audit enumerated only `/applications`, so
+  a foreign app holding org-wide `Mail.*` or `Sites.*` produced no finding at all. Such
+  principals are scored from their *granted* Graph application roles (plus
+  admin-consented delegated scopes): permission risk, admin consent, disabled-SP,
+  org-wide mailbox/SharePoint advisories, and the unused-app signal apply; credential
+  and manifest rules don't (those live on the application in its home tenant). The
+  noise filter — only SPs holding at least one Graph application grant — keeps the
+  hundreds of grantless first-party Microsoft SPs out. Rows carry a new additive
+  `principal_kind` field and a "No app registration" finding chip; their Open
+  deep-links to the Enterprise Application / Managed Identity detail, and their
+  one-click mailbox/SharePoint Fixes route to the SP-only scoping commands (the
+  app-registration remediation wrappers would 404). SP rows are excluded from the bulk
+  selection — bulk actions target app registrations. The extra coverage costs no new
+  per-item Graph traffic: it reuses the tenant-wide grants and app-role reads the run
+  already made. CSV export gains a trailing `PrincipalKind` column, and granting a
+  permission to a bare SP now invalidates the cached audit run.
+
 ## [0.12.1] - 2026-07-02
 
 ### Fixed

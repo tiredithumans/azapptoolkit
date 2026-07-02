@@ -90,10 +90,14 @@ pub async fn grant_managed_identity_permission(
     let (granted, skipped, failures) =
         grant_managed_identity_roles_core(&client, &managed_identity_id, &resource_app_id, &roles)
             .await?;
-    // No cache bust: the cached `{tenant}|mi` list holds only identity rows
+    // No list bust: the cached `{tenant}|mi` list holds only identity rows
     // (id/name/enabled), which a grant doesn't change; the MI's held grants are
     // read live, and granting a new mail permission yields a new `mail_scopes`
-    // key (no stale verdict). The audit scans only app registrations.
+    // key (no stale verdict). The audit DOES score SP-only principals from
+    // their granted roles, so a successful grant busts the cached run.
+    if !granted.is_empty() {
+        crate::commands::audit::invalidate_audit_cache(&state.cache, &tenant_id);
+    }
     Ok(GrantManagedIdentityResult {
         managed_identity_id,
         granted,

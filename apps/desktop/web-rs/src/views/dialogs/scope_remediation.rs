@@ -9,18 +9,47 @@ use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize, Textarea};
 
 use azapptoolkit_core::audit::RemediationAction;
 
-use crate::bindings::{auth, remediation};
+use crate::bindings::{auth, exchange, remediation, sharepoint};
 use crate::components::group_autocomplete::GroupAutocomplete;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
 use crate::util::parse_lines;
 
+/// Which principal a scope Fix targets. App-registration rows route to the
+/// audit remediation wrappers (which re-resolve the application + its SP);
+/// SP-only rows (foreign enterprise apps, managed identities, orphaned SPs —
+/// `AuditPrincipalKind::{ServicePrincipal,ManagedIdentity}`) have no local
+/// application for those wrappers to resolve, so they route to the same
+/// SP-only cores the Grant-access wizard's bare-SP arms call.
+#[derive(Clone, PartialEq)]
+pub enum ScopeFixTarget {
+    AppReg {
+        object_id: String,
+    },
+    ServicePrincipal {
+        sp_object_id: String,
+        app_id: String,
+        display_name: String,
+    },
+}
+
+impl ScopeFixTarget {
+    /// The row identity reported back through `on_done` — always the audit
+    /// item's `object_id` (the app object id or the SP object id, per kind).
+    fn row_id(&self) -> String {
+        match self {
+            ScopeFixTarget::AppReg { object_id } => object_id.clone(),
+            ScopeFixTarget::ServicePrincipal { sp_object_id, .. } => sp_object_id.clone(),
+        }
+    }
+}
+
 /// "Scope mailbox access" remediation — confines the flagged org-wide mail
 /// permissions to admin-chosen mail-enabled groups via Exchange RBAC.
 #[component]
 pub fn ScopeMailboxButton(
-    object_id: String,
+    target: ScopeFixTarget,
     action: RemediationAction,
     #[prop(into)] on_done: Callback<String>,
 ) -> impl IntoView {
@@ -48,29 +77,51 @@ pub fn ScopeMailboxButton(
         };
         busy.set(true);
         error.set(None);
-        let object_id = object_id.clone();
+        let target = target.clone();
         let targets = targets.clone();
         leptos::task::spawn_local(async move {
-            match remediation::remediate_scope_mailbox_access(
-                &t.tenant_id,
-                &object_id,
-                &targets,
-                &groups,
-            )
-            .await
-            {
-                Ok(res) => {
+            // Both paths share the grant-before-strip Exchange scoping core;
+            // only the entry point differs (manifest-resolving wrapper vs the
+            // SP-only command). Unified to (removed grants, warnings) counts.
+            let outcome = match &target {
+                ScopeFixTarget::AppReg { object_id } => {
+                    remediation::remediate_scope_mailbox_access(
+                        &t.tenant_id,
+                        object_id,
+                        &targets,
+                        &groups,
+                    )
+                    .await
+                    .map(|res| (res.removed_entra_grants.len(), res.warnings.len()))
+                }
+                ScopeFixTarget::ServicePrincipal {
+                    sp_object_id,
+                    app_id,
+                    display_name,
+                } => exchange::grant_managed_identity_scoped_exchange_access(
+                    &t.tenant_id,
+                    sp_object_id,
+                    app_id,
+                    display_name,
+                    &targets,
+                    &groups,
+                    true,
+                )
+                .await
+                .map(|res| (res.removed_entra_grants.len(), 0)),
+            };
+            match outcome {
+                Ok((removed, warnings)) => {
                     open.set(false);
-                    let removed = res.removed_entra_grants.len();
-                    let warn = if res.warnings.is_empty() {
+                    let warn = if warnings == 0 {
                         String::new()
                     } else {
-                        format!(" ({} warning(s))", res.warnings.len())
+                        format!(" ({warnings} warning(s))")
                     };
                     session.toast_success(format!(
                         "Scoped mailbox access — removed {removed} org-wide grant(s){warn}. Re-run the audit to refresh scores."
                     ));
-                    on_done.run(object_id);
+                    on_done.run(target.row_id());
                 }
                 Err(e) => error.set(Some(e.message)),
             }
@@ -152,7 +203,7 @@ pub fn ScopeMailboxButton(
 /// `Sites.*` permissions to `Sites.Selected` on admin-supplied site URLs.
 #[component]
 pub fn ScopeSharePointButton(
-    object_id: String,
+    target: ScopeFixTarget,
     action: RemediationAction,
     #[prop(into)] on_done: Callback<String>,
 ) -> impl IntoView {
@@ -167,7 +218,7 @@ pub fn ScopeSharePointButton(
     // Performs the scope conversion for `role` ("read"/"write"). Reusable from
     // both grant buttons and the consent-retry path, so it's a Copy `Callback`.
     let do_scope = {
-        let object_id = object_id.clone();
+        let target = target.clone();
         Callback::new(move |write: bool| {
             if busy.get() {
                 return;
@@ -182,26 +233,47 @@ pub fn ScopeSharePointButton(
             };
             busy.set(true);
             error.set(None);
-            let object_id = object_id.clone();
+            let target = target.clone();
             let role = if write { "write" } else { "read" };
             leptos::task::spawn_local(async move {
-                match remediation::remediate_scope_sharepoint_access(
-                    &t.tenant_id,
-                    &object_id,
-                    &site_urls,
-                    role,
-                )
-                .await
-                {
-                    Ok(res) => {
+                // Same convert-to-selected core either way; the app-reg wrapper
+                // resolves the SP from the application first, the SP-only path
+                // supplies it directly. Unified to (sites, removed) counts.
+                let outcome = match &target {
+                    ScopeFixTarget::AppReg { object_id } => {
+                        remediation::remediate_scope_sharepoint_access(
+                            &t.tenant_id,
+                            object_id,
+                            &site_urls,
+                            role,
+                        )
+                        .await
+                        .map(|res| (res.sites_granted.len(), res.removed_orgwide_grants.len()))
+                    }
+                    ScopeFixTarget::ServicePrincipal {
+                        sp_object_id,
+                        app_id,
+                        display_name,
+                    } => sharepoint::convert_site_access_to_selected(
+                        &t.tenant_id,
+                        sp_object_id,
+                        app_id,
+                        display_name,
+                        &site_urls,
+                        role,
+                        true,
+                    )
+                    .await
+                    .map(|res| (res.sites_granted.len(), res.removed_orgwide_grants.len())),
+                };
+                match outcome {
+                    Ok((sites, removed)) => {
                         open.set(false);
                         needs_consent.set(false);
-                        let removed = res.removed_orgwide_grants.len();
                         session.toast_success(format!(
-                            "Restricted SharePoint access to {} site(s) — removed {removed} org-wide grant(s). Re-run the audit to refresh scores.",
-                            res.sites_granted.len()
+                            "Restricted SharePoint access to {sites} site(s) — removed {removed} org-wide grant(s). Re-run the audit to refresh scores."
                         ));
-                        on_done.run(object_id);
+                        on_done.run(target.row_id());
                     }
                     Err(e) if e.code == "consent_required" => {
                         needs_consent.set(true);

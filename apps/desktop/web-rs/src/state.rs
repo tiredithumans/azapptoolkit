@@ -414,6 +414,21 @@ impl Session {
         self.open_item(OpenItemKind::Enterprise, sp_object_id.clone(), sp_object_id);
     }
 
+    /// Open a managed identity in the workspace on a specific tab (e.g.
+    /// `"permissions"`). Used to deep-link from an SP-only audit finding. The MI
+    /// pane has no pending-tab signal; it initializes from `last_mi_tab`, so
+    /// setting that here lands a *newly mounted* window on the target tab (an
+    /// already-open window keeps its live tab, same as the pending-tab panes).
+    pub fn open_managed_identity_on_tab(&self, sp_object_id: String, tab: &str) {
+        self.last_mi_tab.set(tab.to_string());
+        self.view.set(ActiveView::ManagedIdentities);
+        self.open_item(
+            OpenItemKind::ManagedIdentity,
+            sp_object_id.clone(),
+            sp_object_id,
+        );
+    }
+
     /// Navigate to the Enterprise Applications list pre-filtered to a facet
     /// (`"disabled"` | `"foreign"` | `"enabled"`). Used by the Home dashboard's
     /// Enterprise metrics. Clears any lingering per-list search so the drilled

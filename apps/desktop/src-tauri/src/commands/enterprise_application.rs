@@ -199,7 +199,8 @@ pub async fn assign_enterprise_app_access(
         .await?;
     // No cache bust: app-role assignments to an enterprise app are read live
     // (the detail pane's "who has access" is uncached) and appear in no cached
-    // list/audit payload (the audit scans only app registrations).
+    // list/audit payload (the audit reads roles held ON the Graph resource SP,
+    // not who is assigned to this app).
     Ok(())
 }
 

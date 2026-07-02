@@ -4,8 +4,8 @@
 //! `serde-wasm-bindgen` round-trip the real IPC uses validates them.
 
 use azapptoolkit_core::audit::{
-    AuditItem, CredentialKind, CredentialStatus, ListCredentialStatus, MailPermissionScope,
-    RiskLevel, ScopeMechanism, issue,
+    AuditItem, AuditPrincipalKind, CredentialKind, CredentialStatus, ListCredentialStatus,
+    MailPermissionScope, RiskLevel, ScopeMechanism, issue,
 };
 use azapptoolkit_core::identity::{SignInOutcome, TenantContext};
 use azapptoolkit_core::models::{
@@ -253,6 +253,7 @@ pub fn audit_item(name: &str, risk: RiskLevel, issues: &[String]) -> AuditItem {
         last_sign_in: None,
         unused: false,
         sign_in_report_available: true,
+        principal_kind: AuditPrincipalKind::Application,
     }
 }
 
