@@ -127,25 +127,13 @@ pub struct UpdateApplicationInput {
 /// reply (redirect) URLs, the optional front-channel logout URL, the implicit-
 /// grant flags, and the fallback-public-client flag. Returned by
 /// `get_application_authentication`, which reads `web`/`spa`/`publicClient` —
-/// none of which are on the list-shape [`Application`].
+/// none of which are on the list-shape [`Application`] — and accepted back by
+/// `set_application_authentication` as its full-replace input (each list
+/// replaces that platform's set wholesale, so the editor loads current values
+/// before saving). One type for both directions so get/set can't drift.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationAuthenticationDto {
-    pub web_redirect_uris: Vec<String>,
-    pub spa_redirect_uris: Vec<String>,
-    pub public_client_redirect_uris: Vec<String>,
-    pub logout_url: Option<String>,
-    pub is_fallback_public_client: bool,
-    pub enable_access_token_issuance: bool,
-    pub enable_id_token_issuance: bool,
-}
-
-/// Full-replace Authentication settings written via `set_application_authentication`.
-/// Each redirect-URI list replaces that platform's set wholesale (an empty list
-/// clears it), so the editor must load current values before saving.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetApplicationAuthenticationInput {
     pub web_redirect_uris: Vec<String>,
     pub spa_redirect_uris: Vec<String>,
     pub public_client_redirect_uris: Vec<String>,
@@ -357,7 +345,7 @@ mod tests {
 
     #[test]
     fn set_application_authentication_input_uses_camel_case_and_round_trips() {
-        let input = SetApplicationAuthenticationInput {
+        let input = ApplicationAuthenticationDto {
             web_redirect_uris: vec!["https://app/cb".into()],
             spa_redirect_uris: vec!["https://app/spa".into()],
             public_client_redirect_uris: vec!["http://localhost".into()],
@@ -378,7 +366,7 @@ mod tests {
         ] {
             assert!(json.get(key).is_some(), "missing camelCase key {key}");
         }
-        let back: SetApplicationAuthenticationInput = serde_json::from_value(json).unwrap();
+        let back: ApplicationAuthenticationDto = serde_json::from_value(json).unwrap();
         assert_eq!(back.web_redirect_uris, vec!["https://app/cb".to_string()]);
         assert!(back.is_fallback_public_client);
         assert!(back.enable_id_token_issuance);
