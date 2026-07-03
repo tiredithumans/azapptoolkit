@@ -100,12 +100,21 @@ impl ArmClient {
         url: &str,
         query: &[(&str, &str)],
     ) -> Result<Vec<T>> {
+        // Defensive bound: a misbehaving server returning a self-referencing
+        // `nextLink` must not page forever (far above any real collection).
+        const MAX_PAGES: usize = 1000;
         let mut out = Vec::new();
         let mut page: Paged<T> = self.get_json(url, query).await?;
         out.append(&mut page.value);
         let mut next = page.next_link;
+        let mut pages = 1usize;
         // `nextLink` is fully qualified and already carries every query param.
         while let Some(link) = next.take() {
+            if pages >= MAX_PAGES {
+                return Err(ArmError::Protocol(format!(
+                    "paged listing exceeded {MAX_PAGES} pages; aborting"
+                )));
+            }
             // A `nextLink` is attacker-influenced server output: refuse to
             // attach the bearer off the ARM origin (mirrors the Graph and Key
             // Vault clients' guard).
@@ -118,6 +127,7 @@ impl ArmClient {
             let p: Paged<T> = self.get_json(&link, &[]).await?;
             out.extend(p.value);
             next = p.next_link;
+            pages += 1;
         }
         Ok(out)
     }
