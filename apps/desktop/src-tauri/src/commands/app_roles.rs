@@ -26,35 +26,7 @@ use crate::dto::enterprise_application::{AppRoleInput, AppRolesView};
 use crate::state::AppState;
 
 use super::applications::invalidate_app_details;
-
-/// A random v4 GUID for a new app-role id. Generated here (like the portal) so
-/// the upsert PATCH is self-contained.
-fn new_app_role_guid() -> String {
-    use rand::RngCore;
-    let mut b = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut b);
-    b[6] = (b[6] & 0x0f) | 0x40; // version 4
-    b[8] = (b[8] & 0x3f) | 0x80; // variant 1 (RFC 4122)
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0],
-        b[1],
-        b[2],
-        b[3],
-        b[4],
-        b[5],
-        b[6],
-        b[7],
-        b[8],
-        b[9],
-        b[10],
-        b[11],
-        b[12],
-        b[13],
-        b[14],
-        b[15]
-    )
-}
+use super::guid::new_v4_guid;
 
 /// Where an enterprise app's exposed roles live. Resolved per request from the
 /// SP's `appId`: the paired application when one exists locally, else the SP.
@@ -263,7 +235,7 @@ fn merge_role(
         }
         None => {
             let mut obj = serde_json::Map::new();
-            obj.insert("id".into(), Value::String(new_app_role_guid()));
+            obj.insert("id".into(), Value::String(new_v4_guid()));
             apply_input(&mut obj, input);
             roles.push(Value::Object(obj));
         }
@@ -425,13 +397,6 @@ mod tests {
             allowed_member_types: vec!["User".into()],
             is_enabled: true,
         }
-    }
-
-    #[test]
-    fn new_app_role_guid_is_v4_format() {
-        let g = new_app_role_guid();
-        assert_eq!(g.len(), 36);
-        assert_eq!(g.as_bytes()[14], b'4'); // version nibble
     }
 
     #[test]

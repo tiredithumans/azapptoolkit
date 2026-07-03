@@ -5,14 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Microsoft Graph permissions catalog (bundled + on-demand)"
+description = "Bundled Microsoft Graph permissions catalog (resource directory; live permission data resolves via the Graph client)"
 
 [dependencies]
-azapptoolkit-core = { path = "../azapptoolkit-core" }
-
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 
 [lints]
 workspace = true

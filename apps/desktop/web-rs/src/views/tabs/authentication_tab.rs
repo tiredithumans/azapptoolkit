@@ -14,9 +14,7 @@ use std::sync::Arc;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
 
-use crate::bindings::applications::{
-    self, ApplicationAuthenticationDto, ApplicationDetail, SetApplicationAuthenticationInput,
-};
+use crate::bindings::applications::{self, ApplicationAuthenticationDto, ApplicationDetail};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 
@@ -115,7 +113,7 @@ fn AuthenticationForm(
                     let l = logout.get().trim().to_string();
                     (!l.is_empty()).then_some(l)
                 };
-                let input = SetApplicationAuthenticationInput {
+                let input = ApplicationAuthenticationDto {
                     web_redirect_uris: lines_to_uris(&web.get()),
                     spa_redirect_uris: lines_to_uris(&spa.get()),
                     public_client_redirect_uris: lines_to_uris(&public_client.get()),

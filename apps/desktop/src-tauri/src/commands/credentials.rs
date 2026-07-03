@@ -21,7 +21,7 @@ use azapptoolkit_core::audit::summarize_credentials;
 use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_graph::client::AppListQuery;
 
-use crate::commands::audit::csv_field;
+use crate::commands::export::csv_field;
 use crate::dto::UiError;
 use crate::dto::credentials::CredentialRowDto;
 use crate::state::AppState;
@@ -117,7 +117,7 @@ pub async fn save_credentials_to_file(
         "credentials-{}.csv",
         chrono::Utc::now().format("%Y%m%dT%H%M%S")
     );
-    super::audit::write_via_dialog(app_handle, "CSV", "csv", default_name, content).await
+    super::export::write_via_dialog(app_handle, "CSV", "csv", default_name, content).await
 }
 
 /// Serializes credential rows as CSV. Display names are app-controllable, so

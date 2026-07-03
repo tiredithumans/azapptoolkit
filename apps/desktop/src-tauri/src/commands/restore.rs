@@ -196,7 +196,7 @@ pub async fn restore_tenant(
         }
     }
 
-    // ---- Pass 5: enterprise applications ----
+    // ---- Pass 4: enterprise applications ----
     // Re-apply access (assignments + group memberships + settings) for SPs that
     // were recreated by the app-reg restore above. Foreign/gallery apps — and
     // paired apps that weren't restored — become runbook entries.
@@ -204,7 +204,7 @@ pub async fn restore_tenant(
         restore_enterprise_app(&client, ent, &app_id_remap, &mut report, &mut principals).await;
     }
 
-    // ---- Pass 6: managed identities ----
+    // ---- Pass 5: managed identities ----
     // MIs are Azure resources — they can't be created here. Re-bind Graph
     // app-roles to any MI already recreated (matched by name); Azure RBAC and
     // not-yet-recreated MIs become runbook entries.
@@ -238,7 +238,7 @@ pub async fn save_restore_report_to_file(
             "restore report is JSON only",
         ));
     }
-    super::audit::save_export_via_dialog(
+    super::export::save_export_via_dialog(
         &app_handle,
         "restore-report",
         "json",

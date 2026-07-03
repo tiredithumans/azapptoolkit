@@ -14,17 +14,13 @@ use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_core::models::{ServicePrincipal, SynchronizationJob};
 use azapptoolkit_graph::GraphError;
 
-use crate::commands::applications::{invalidate_app_lists, sp_index_key};
+use crate::commands::applications::{enterprise_key, invalidate_app_lists, sp_index_key};
 use crate::dto::UiError;
 use crate::dto::enterprise_application::{
     AppAssignmentDto, EnterpriseApplicationDetail, EnterpriseApplicationDto, GroupMembershipDto,
     ProvisioningJobDto,
 };
 use crate::state::AppState;
-
-fn enterprise_key(tenant_id: &str) -> String {
-    format!("{tenant_id}|enterprise")
-}
 
 /// Builds an [`EnterpriseApplicationDto`] from a service principal. `tenant_id`
 /// drives the foreign-tenant flag; `paired_app_registration_id` is resolved by
@@ -498,7 +494,7 @@ pub async fn delete_enterprise_application(
 /// per-app credentials live on the detail. Display names route through
 /// `csv_field` (formula-injection guard), reused from the audit export.
 fn enterprise_apps_to_csv(rows: &[EnterpriseApplicationDto]) -> String {
-    use crate::commands::audit::csv_field;
+    use crate::commands::export::csv_field;
     let mut out = String::new();
     out.push_str(
         "DisplayName,AppId,ObjectId,Enabled,ForeignTenant,AppOwnerOrgId,PairedAppRegistrationId,Created\n",
@@ -534,7 +530,7 @@ pub async fn save_enterprise_applications_to_file(
     rows: Vec<EnterpriseApplicationDto>,
     format: String,
 ) -> Result<Option<String>, UiError> {
-    crate::commands::audit::save_export_via_dialog(
+    crate::commands::export::save_export_via_dialog(
         &app_handle,
         "enterprise-applications",
         &format,

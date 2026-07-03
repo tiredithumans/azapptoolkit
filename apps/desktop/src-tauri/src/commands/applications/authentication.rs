@@ -6,7 +6,7 @@ use azapptoolkit_graph::client::{
 };
 
 use crate::dto::UiError;
-use crate::dto::applications::{ApplicationAuthenticationDto, SetApplicationAuthenticationInput};
+use crate::dto::applications::ApplicationAuthenticationDto;
 use crate::state::AppState;
 
 use super::invalidate_app_detail_state;
@@ -77,7 +77,7 @@ pub async fn set_application_authentication(
     state: State<'_, AppState>,
     tenant_id: String,
     object_id: String,
-    input: SetApplicationAuthenticationInput,
+    input: ApplicationAuthenticationDto,
 ) -> Result<(), UiError> {
     for set in [
         &input.web_redirect_uris,

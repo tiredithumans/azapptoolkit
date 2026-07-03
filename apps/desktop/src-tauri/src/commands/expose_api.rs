@@ -23,36 +23,7 @@ use crate::dto::expose_api::{ExposeApiDto, SetPreAuthorizedAppInput, UpsertApiSc
 use crate::state::AppState;
 
 use super::applications::invalidate_app_details;
-use super::search::is_guid;
-
-/// A random v4 GUID for a new scope id. Generated client-side (like the
-/// portal) so the upsert PATCH is self-contained.
-fn new_scope_guid() -> String {
-    use rand::RngCore;
-    let mut b = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut b);
-    b[6] = (b[6] & 0x0f) | 0x40; // version 4
-    b[8] = (b[8] & 0x3f) | 0x80; // variant 1 (RFC 4122)
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0],
-        b[1],
-        b[2],
-        b[3],
-        b[4],
-        b[5],
-        b[6],
-        b[7],
-        b[8],
-        b[9],
-        b[10],
-        b[11],
-        b[12],
-        b[13],
-        b[14],
-        b[15]
-    )
-}
+use super::guid::{is_guid, new_v4_guid};
 
 /// Live read of the app's `identifierUris` + `api` block — the merge base for
 /// every mutation below.
@@ -324,7 +295,7 @@ pub async fn upsert_api_scope(
     let client = state.graph_for(&tenant_id);
     let live = fetch_expose_api(&client, &object_id).await?;
     let is_edit = input.id.is_some();
-    let scope = build_scope(&input, input.id.clone().unwrap_or_else(new_scope_guid));
+    let scope = build_scope(&input, input.id.clone().unwrap_or_else(new_v4_guid));
     let scopes = merge_scope(live.api.oauth2_permission_scopes, scope, is_edit)?;
     let body = ApplicationExposeApiPatch {
         identifier_uris: None,
@@ -504,13 +475,6 @@ mod tests {
             user_consent_description: None,
             is_enabled: true,
         }
-    }
-
-    #[test]
-    fn new_scope_guid_is_v4_format() {
-        let g = new_scope_guid();
-        assert!(is_guid(&g), "not a GUID: {g}");
-        assert_eq!(g.as_bytes()[14], b'4'); // version nibble
     }
 
     #[test]

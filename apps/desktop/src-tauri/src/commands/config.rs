@@ -7,6 +7,8 @@ use tauri::{AppHandle, State};
 use azapptoolkit_core::settings::UserSettings;
 
 use crate::dto::UiError;
+
+use super::guid::is_guid;
 use crate::dto::config::AuthConfigStatus;
 use crate::state::AppState;
 
@@ -61,20 +63,6 @@ pub fn restart_app(app: AppHandle) {
     app.restart();
 }
 
-/// 8-4-4-4-12 hexadecimal, the canonical GUID shape Entra uses for both the
-/// client (application) ID and the tenant (directory) ID.
-fn is_guid(s: &str) -> bool {
-    let groups = [8usize, 4, 4, 4, 12];
-    let mut parts = s.split('-');
-    for &len in &groups {
-        match parts.next() {
-            Some(p) if p.len() == len && p.bytes().all(|b| b.is_ascii_hexdigit()) => {}
-            _ => return false,
-        }
-    }
-    parts.next().is_none()
-}
-
 /// A tenant id is either a GUID or a verified domain (e.g.
 /// `contoso.onmicrosoft.com`). Domains are accepted loosely — a dotted,
 /// whitespace-free host — since Entra also takes one as an authority segment.
@@ -85,18 +73,6 @@ fn is_valid_tenant(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn guid_accepts_canonical_and_rejects_junk() {
-        assert!(is_guid("00000000-0000-0000-0000-000000000000"));
-        assert!(is_guid("3fa85f64-5717-4562-b3fc-2c963f66afa6"));
-        assert!(is_guid("3FA85F64-5717-4562-B3FC-2C963F66AFA6")); // hex is case-insensitive
-        assert!(!is_guid("not-a-guid"));
-        assert!(!is_guid("3fa85f64-5717-4562-b3fc")); // too few groups
-        assert!(!is_guid("3fa85f64-5717-4562-b3fc-2c963f66afa6-extra")); // trailing group
-        assert!(!is_guid("zzzzzzzz-5717-4562-b3fc-2c963f66afa6")); // non-hex
-        assert!(!is_guid(""));
-    }
 
     #[test]
     fn tenant_accepts_guid_or_domain() {

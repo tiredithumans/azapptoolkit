@@ -18,11 +18,9 @@ use tauri::{AppHandle, State};
 use azapptoolkit_core::audit::{
     HIGH_RISK_APP_PERMISSIONS, MEDIUM_RISK_APP_PERMISSIONS, is_risky_delegated_scope,
 };
-use azapptoolkit_core::cache::CacheKind;
-use azapptoolkit_core::models::ServicePrincipal;
 
-use crate::commands::applications::sp_index_key;
-use crate::commands::audit::csv_field;
+use crate::commands::applications::sp_index_cached;
+use crate::commands::export::csv_field;
 use crate::dto::UiError;
 use crate::dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};
 use crate::state::AppState;
@@ -67,18 +65,7 @@ pub async fn list_oauth2_grants_audit(
 
     // Reuse the shared per-tenant SP index for name resolution (same cache the
     // App Registrations / Enterprise Apps lists use).
-    let index_key = sp_index_key(&tenant_id);
-    let sps = match state
-        .cache
-        .get::<Vec<ServicePrincipal>>(CacheKind::Lists, &index_key)
-    {
-        Some(cached) => cached,
-        None => {
-            let sps = client.list_service_principals_index().await?;
-            state.cache.put(CacheKind::Lists, index_key, &sps);
-            sps
-        }
-    };
+    let sps = sp_index_cached(&state, &client, &tenant_id).await?;
     let by_id: HashMap<String, (String, String)> = sps
         .into_iter()
         .map(|sp| (sp.id, (sp.display_name, sp.app_id)))
@@ -150,7 +137,7 @@ pub async fn save_oauth2_grants_to_file(
         "oauth2-grants-{}.csv",
         chrono::Utc::now().format("%Y%m%dT%H%M%S")
     );
-    super::audit::write_via_dialog(app_handle, "CSV", "csv", default_name, content).await
+    super::export::write_via_dialog(app_handle, "CSV", "csv", default_name, content).await
 }
 
 fn grants_to_csv(rows: &[OAuth2GrantDto]) -> String {
@@ -262,7 +249,7 @@ pub async fn save_app_permission_grants_to_file(
         "app-permissions-{}.csv",
         chrono::Utc::now().format("%Y%m%dT%H%M%S")
     );
-    super::audit::write_via_dialog(app_handle, "CSV", "csv", default_name, content).await
+    super::export::write_via_dialog(app_handle, "CSV", "csv", default_name, content).await
 }
 
 fn app_permissions_to_csv(rows: &[AppPermissionGrantDto]) -> String {

@@ -61,6 +61,19 @@ pub fn is_expired(end: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     end.is_some_and(|e| (e - now).num_days() < 0)
 }
 
+/// keyIds of the app's expired client secrets, by the shared whole-day
+/// [`is_expired`] rule — the *exact* set the audit flags, so no removal path
+/// (the one-click fix, the per-app expired-secret removal, or the bulk sweep)
+/// can ever delete a credential the audit never flagged. Single-sourced here
+/// because two byte-identical copies had grown in the command layer.
+pub fn expired_password_key_ids(app: &Application, now: DateTime<Utc>) -> Vec<String> {
+    app.password_credentials
+        .iter()
+        .filter(|c| is_expired(c.end_date_time, now))
+        .map(|c| c.key_id.clone())
+        .collect()
+}
+
 fn credential_status(days: Option<i64>) -> CredentialStatus {
     match days {
         None => CredentialStatus::Unknown,
@@ -186,6 +199,28 @@ mod tests {
                 "credential_status({end:?}) = {status:?}"
             );
         }
+    }
+
+    #[test]
+    fn expired_password_key_ids_selects_exactly_the_flagged_set() {
+        use crate::models::PasswordCredential;
+        let now = now();
+        let cred = |key: &str, end: DateTime<Utc>| PasswordCredential {
+            key_id: key.to_string(),
+            end_date_time: Some(end),
+            ..Default::default()
+        };
+        let app = Application {
+            password_credentials: vec![
+                cred("active", now + Duration::days(30)),
+                // Lapsed under a whole day: ExpiringSoon to the audit, so the
+                // removal predicate must NOT select it either.
+                cred("sub-day", now - Duration::hours(12)),
+                cred("day-old", now - Duration::days(1)),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(expired_password_key_ids(&app, now), vec!["day-old"]);
     }
 
     #[test]

@@ -15,6 +15,7 @@ use tauri::{AppHandle, State};
 use azapptoolkit_arm::RoleAssignment;
 use azapptoolkit_core::cache::CacheKind;
 
+use crate::commands::guid::new_v4_guid;
 use crate::dto::UiError;
 use crate::dto::managed_identity::{
     AzureRoleDto, AzureRolesResult, GrantManagedIdentityResult, ManagedIdentityDto, MiSubtype,
@@ -321,36 +322,6 @@ pub async fn list_managed_identity_azure_roles(
     })
 }
 
-/// A random v4 GUID for a role-assignment name. ARM requires the *client* to
-/// supply the assignment's GUID name; generating it here makes the PUT idempotent
-/// (a retry reuses the same name rather than creating a duplicate).
-fn new_role_assignment_guid() -> String {
-    use rand::RngCore;
-    let mut b = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut b);
-    b[6] = (b[6] & 0x0f) | 0x40; // version 4
-    b[8] = (b[8] & 0x3f) | 0x80; // variant 1 (RFC 4122)
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0],
-        b[1],
-        b[2],
-        b[3],
-        b[4],
-        b[5],
-        b[6],
-        b[7],
-        b[8],
-        b[9],
-        b[10],
-        b[11],
-        b[12],
-        b[13],
-        b[14],
-        b[15]
-    )
-}
-
 /// Extracts the subscription id from an ARM `scope` path
 /// (`/subscriptions/{sub}/...`). `None` for a non-subscription scope (e.g. a
 /// management group), which this assignment path doesn't support.
@@ -399,7 +370,7 @@ pub async fn assign_managed_identity_azure_role(
     let role_definition_path = format!(
         "/subscriptions/{subscription_id}/providers/Microsoft.Authorization/roleDefinitions/{role_guid}"
     );
-    let assignment_name = new_role_assignment_guid();
+    let assignment_name = new_v4_guid();
 
     let arm = state.arm_for(&tenant_id);
     arm.create_role_assignment(
@@ -457,7 +428,7 @@ fn mi_subtype_label(subtype: MiSubtype) -> &'static str {
 /// Serializes the managed-identity list as CSV for an access review. Display
 /// names route through `csv_field` (formula-injection guard), reused from audit.
 fn managed_identities_to_csv(rows: &[ManagedIdentityDto]) -> String {
-    use crate::commands::audit::csv_field;
+    use crate::commands::export::csv_field;
     let mut out = String::new();
     out.push_str("DisplayName,AppId,ObjectId,Subtype,Enabled\n");
     for r in rows {
@@ -484,7 +455,7 @@ pub async fn save_managed_identities_to_file(
     rows: Vec<ManagedIdentityDto>,
     format: String,
 ) -> Result<Option<String>, UiError> {
-    crate::commands::audit::save_export_via_dialog(
+    crate::commands::export::save_export_via_dialog(
         &app_handle,
         "managed-identities",
         &format,
@@ -558,21 +529,6 @@ mod tests {
             None
         );
         assert_eq!(subscription_from_scope(""), None);
-    }
-
-    #[test]
-    fn role_assignment_guid_is_well_formed_v4() {
-        let g = new_role_assignment_guid();
-        assert_eq!(g.len(), 36);
-        let parts: Vec<&str> = g.split('-').collect();
-        assert_eq!(
-            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
-            vec![8, 4, 4, 4, 12]
-        );
-        assert!(g.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
-        // Version nibble is 4; variant nibble is 8/9/a/b.
-        assert_eq!(&parts[2][0..1], "4");
-        assert!(matches!(&parts[3][0..1], "8" | "9" | "a" | "b"));
     }
 
     #[test]

@@ -7,19 +7,18 @@
 //! exception: it runs its own concurrent loop for throughput, but selects
 //! credentials with the same shared expiry rule
 //! ([`azapptoolkit_core::audit::is_expired`]) the audit scorer and the
-//! per-app removal paths use — pinned by [`expired_password_key_ids`]'s test.
+//! per-app removal paths use — pinned by `expired_password_key_ids`'s test in
+//! `azapptoolkit_core::audit`.
 //! Progress events ride the same `bulk-progress` channel so the frontend can
 //! share a single listener.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
-use azapptoolkit_core::audit::is_expired;
-use azapptoolkit_core::models::Application;
+use azapptoolkit_core::audit::expired_password_key_ids;
 use azapptoolkit_graph::client::AppListQuery;
 
 use crate::commands::dispatch::dispatch_capped;
@@ -43,17 +42,6 @@ const VALID_AUDIENCES: &[&str] = &[
     "AzureADandPersonalMicrosoftAccount",
     "PersonalMicrosoftAccount",
 ];
-
-/// keyIds of the app's expired secrets, by the audit's shared whole-day rule —
-/// the same set the audit flags and the per-app paths remove, so the sweep is
-/// a throughput shortcut, not a different deletion policy.
-fn expired_password_key_ids(app: &Application, now: DateTime<Utc>) -> Vec<String> {
-    app.password_credentials
-        .iter()
-        .filter(|c| is_expired(c.end_date_time, now))
-        .map(|c| c.key_id.clone())
-        .collect()
-}
 
 /// Signals an in-progress bulk action (delete / grant / create / expired-secret
 /// sweep) to stop at the next item boundary. Shares [`AppState::audit_cancel`]
@@ -878,41 +866,5 @@ pub async fn bulk_disable_sign_in(
 fn emit(app_handle: &AppHandle, progress: BulkProgress) {
     if let Err(err) = app_handle.emit("bulk-progress", progress) {
         tracing::warn!(?err, "bulk-progress emit failed");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use azapptoolkit_core::models::PasswordCredential;
-    use chrono::{Duration, TimeZone};
-
-    fn now() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 4, 22, 12, 0, 0).unwrap()
-    }
-
-    fn secret(key_id: &str, end: Option<DateTime<Utc>>) -> PasswordCredential {
-        PasswordCredential {
-            key_id: key_id.into(),
-            end_date_time: end,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn bulk_expiry_rule_matches_the_audit_scorer() {
-        // The sweep must delete exactly the set the audit flags as Expired: a
-        // secret lapsed under 24h is "expiring soon" (no Fix offered, left by
-        // the per-app remediation) and must survive the bulk sweep too.
-        let app = Application {
-            password_credentials: vec![
-                secret("just-lapsed", Some(now() - Duration::hours(12))),
-                secret("day-old", Some(now() - Duration::days(1))),
-                secret("active", Some(now() + Duration::days(30))),
-                secret("no-expiry", None),
-            ],
-            ..Default::default()
-        };
-        assert_eq!(expired_password_key_ids(&app, now()), vec!["day-old"]);
     }
 }
