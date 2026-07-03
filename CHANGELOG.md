@@ -19,6 +19,12 @@ the project adheres to
 
 ### Fixed
 
+- **Interactive sign-in no longer hangs when the browser opens a speculative
+  connection to the loopback listener.** The redirect listener previously accepted
+  exactly one connection and read one TCP segment; a browser preconnect or a stray
+  `/favicon.ico` probe could consume that slot and the real OAuth redirect was lost
+  until the 300s timeout. It now loops — non-redirect requests get a 404 — and reads
+  to the end of the request head instead of assuming a single segment.
 - **Azure Resource Manager paging now refuses off-origin `nextLink`s** before the
   bearer token is attached — the same guard the Graph and Key Vault clients already
   had. The origin check (including its embedded-credentials rejection, which the Key
