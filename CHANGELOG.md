@@ -7,6 +7,20 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **Internal: the audit engine is now a module directory** (`azapptoolkit-core::audit`
+  split into `permissions` / `types` / `scoring` / `credentials` submodules with a
+  re-exporting `mod.rs`) — no behavior or wire-format change; every public path and
+  all 124 characterization tests are unchanged.
+- **The capabilities catalog pairs each directory-role name with its immutable
+  `roleTemplateId` in one entry** (previously two index-aligned slices whose
+  alignment only a test enforced — the shape the v0.12.1 "Role missing" fix worked
+  around). Misaligned name/id pairs are now unrepresentable; display consumers use
+  the new `Capability::role_names()`. Also removed two dead public helpers
+  (`capabilities_for_plane`, `ScopeKind::target_noun`) and derived the cache's
+  per-kind bucket array size from `CacheKind::ALL` instead of a hand-synced literal.
+
 ### Fixed
 
 - **Azure Resource Manager paging now refuses off-origin `nextLink`s** before the

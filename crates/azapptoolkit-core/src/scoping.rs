@@ -75,14 +75,6 @@ pub enum ScopeKind {
 }
 
 impl ScopeKind {
-    /// Plural noun for the scope targets, for generic UI copy ("…confined to N {noun}").
-    pub fn target_noun(self) -> &'static str {
-        match self {
-            ScopeKind::Exchange => "mailboxes",
-            ScopeKind::SharePoint => "sites",
-        }
-    }
-
     /// Capabilities-catalog key for the role hint a scope action surfaces.
     pub fn capability_key(self) -> &'static str {
         match self {
@@ -185,8 +177,6 @@ mod tests {
 
     #[test]
     fn scope_kind_metadata_is_per_mechanism() {
-        assert_eq!(ScopeKind::Exchange.target_noun(), "mailboxes");
-        assert_eq!(ScopeKind::SharePoint.target_noun(), "sites");
         assert_eq!(ScopeKind::Exchange.capability_key(), "exchange_rbac");
         assert_eq!(
             ScopeKind::SharePoint.capability_key(),
