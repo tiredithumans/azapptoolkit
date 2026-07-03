@@ -16,7 +16,9 @@ mod permissions;
 mod scoring;
 mod types;
 
-pub use credentials::{SignInStatus, is_expired, summarize_credentials, unused_app_advisory};
+pub use credentials::{
+    SignInStatus, expired_password_key_ids, is_expired, summarize_credentials, unused_app_advisory,
+};
 pub use permissions::{
     EXPIRY_WARNING_DAYS, HIGH_RISK_APP_PERMISSIONS, HIGH_RISK_DELEGATED_PERMISSIONS,
     LONG_LIVED_SECRET_DAYS, MEDIUM_RISK_APP_PERMISSIONS, RISK_CRITICAL, RISK_HIGH, RISK_MEDIUM,

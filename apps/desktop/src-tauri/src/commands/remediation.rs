@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use tauri::State;
 
-use azapptoolkit_core::audit::{is_expired, subsuming_app_permissions};
+use azapptoolkit_core::audit::{expired_password_key_ids, is_expired, subsuming_app_permissions};
 use azapptoolkit_core::models::{Application, RequiredResourceAccess};
 
 use crate::commands::applications::{invalidate_app_credentials, invalidate_app_lists};
@@ -20,17 +20,6 @@ use crate::dto::exchange::ExchangeAccessResult;
 use crate::dto::remediation::{RedundantPermissionsOutcome, RemediationOutcome};
 use crate::dto::sharepoint::SiteScopeResult;
 use crate::state::AppState;
-
-/// keyIds of the app's expired secrets. Uses the shared whole-day rule
-/// (`azapptoolkit_core::audit::is_expired`) so the command removes *exactly*
-/// the set the audit flagged and previewed, never more.
-fn expired_secret_key_ids(app: &Application, now: DateTime<Utc>) -> Vec<String> {
-    app.password_credentials
-        .iter()
-        .filter(|c| is_expired(c.end_date_time, now))
-        .map(|c| c.key_id.clone())
-        .collect()
-}
 
 /// Distinct keyIds of the app's expired certificates. A certificate can appear
 /// as paired Sign/Verify entries sharing one keyId; `remove_key_credential`
@@ -65,7 +54,7 @@ pub async fn remediate_remove_expired_credentials(
     let app = client.get_application(&object_id).await?;
     let now = Utc::now();
 
-    let expired_secrets = expired_secret_key_ids(&app, now);
+    let expired_secrets = expired_password_key_ids(&app, now);
     let expired_certs = expired_cert_key_ids(&app, now);
 
     let mut outcome = RemediationOutcome::default();
@@ -416,7 +405,7 @@ pub async fn remediate_remove_redundant_permissions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use azapptoolkit_core::models::{KeyCredential, PasswordCredential};
+    use azapptoolkit_core::models::KeyCredential;
     use chrono::Duration;
 
     fn now() -> DateTime<Utc> {
@@ -425,48 +414,12 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    fn secret(key_id: &str, end: Option<DateTime<Utc>>) -> PasswordCredential {
-        PasswordCredential {
-            key_id: key_id.into(),
-            end_date_time: end,
-            ..Default::default()
-        }
-    }
-
     fn cert(key_id: &str, end: Option<DateTime<Utc>>) -> KeyCredential {
         KeyCredential {
             key_id: key_id.into(),
             end_date_time: end,
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn picks_only_expired_secrets() {
-        let app = Application {
-            password_credentials: vec![
-                secret("expired", Some(now() - Duration::days(1))),
-                secret("active", Some(now() + Duration::days(30))),
-                secret("no-expiry", None), // never expires / unknown → left alone
-            ],
-            ..Default::default()
-        };
-        assert_eq!(expired_secret_key_ids(&app, now()), vec!["expired"]);
-    }
-
-    #[test]
-    fn sub_day_lapsed_credential_matches_audit_and_is_left_alone() {
-        // Lapsed 12h ago: num_days() truncates to 0, so the audit calls this
-        // "expiring soon" (no Fix offered). The command must agree and NOT
-        // remove it — it only crosses into "expired" after a full day.
-        let app = Application {
-            password_credentials: vec![
-                secret("just-lapsed", Some(now() - Duration::hours(12))),
-                secret("day-old", Some(now() - Duration::days(1))),
-            ],
-            ..Default::default()
-        };
-        assert_eq!(expired_secret_key_ids(&app, now()), vec!["day-old"]);
     }
 
     #[test]
