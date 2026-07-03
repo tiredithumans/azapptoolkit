@@ -1849,16 +1849,38 @@ async fn conditional_access_refuses_foreign_origin_next_link() {
     assert!(matches!(err, GraphError::Protocol(_)), "got {err:?}");
 }
 
-#[test]
-fn same_origin_rejects_embedded_credentials() {
-    let base = "https://graph.microsoft.com";
-    assert!(same_origin(base, "https://graph.microsoft.com/v1.0/foo"));
-    // userinfo is ignored by Url::origin(); we must reject it explicitly.
-    assert!(!same_origin(
-        base,
-        "https://user:pass@graph.microsoft.com/v1.0/foo"
-    ));
-    assert!(!same_origin(base, "https://evil.example.com/v1.0/foo"));
+// `same_origin` (incl. the embedded-credentials rejection) is unit-tested at
+// its single-sourced home, `azapptoolkit_core::net`; the origin-guard
+// *behavior* stays pinned here by the nextLink tests above.
+
+#[tokio::test]
+async fn scoped_one_shot_maps_429_to_throttled_without_retry() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-1/synchronization/jobs"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "7")
+                .set_body_string("busy"),
+        )
+        // One-shot contract: the scoped transport degrades fast, no retry —
+        // but the *error* must still be the typed `Throttled` (ui code
+        // `throttled`, retryable) the retrying transport returns, not a
+        // generic `Api { status: 429 }`.
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri()).with_sync_token(StaticTokenProvider::new("sync"));
+    let err = client.list_synchronization_jobs("sp-1").await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            GraphError::Throttled {
+                retry_after_secs: Some(7)
+            }
+        ),
+        "got {err:?}"
+    );
 }
 
 #[test]
