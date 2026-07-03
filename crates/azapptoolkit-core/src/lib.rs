@@ -8,6 +8,8 @@ pub mod constants;
 pub mod http_retry;
 pub mod identity;
 pub mod models;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod net;
 pub mod redirect;
 pub mod scoping;
 #[cfg(not(target_arch = "wasm32"))]

@@ -17,6 +17,7 @@ use azapptoolkit_core::http_retry::{
     BASE_DELAY_MS, MAX_RETRIES, next_backoff_ms, parse_retry_after_seconds, sleep_before_retry,
     sleep_with_jitter,
 };
+use azapptoolkit_core::net::{redacted_host, same_origin};
 use azapptoolkit_core::token::BearerProvider;
 
 use crate::error::{KeyVaultError, Result};
@@ -156,16 +157,9 @@ impl KeyVaultClient {
         check_origin: bool,
     ) -> Result<bytes::Bytes> {
         if check_origin && !same_origin(&self.base_url, url) {
-            // Surface only the offending host. The full URL is attacker-
-            // influenced (a malicious nextLink in a server response) and may
-            // contain tokens, paths, or query material we do not want
-            // persisted in logs/audit/error UI.
-            let host = url::Url::parse(url)
-                .ok()
-                .and_then(|u| u.host_str().map(str::to_string))
-                .unwrap_or_else(|| "<unparseable>".into());
             return Err(KeyVaultError::Protocol(format!(
-                "refusing to follow nextLink to a different origin (host: {host})"
+                "refusing to follow nextLink to a different origin (host: {})",
+                redacted_host(url)
             )));
         }
         let api_version = attach_api_version.then_some(self.api_version.as_str());
@@ -263,16 +257,6 @@ impl KeyVaultClient {
     /// before the bearer is attached.
     async fn send_core_absolute(&self, method: Method, url: &str) -> Result<bytes::Bytes> {
         self.send_core_url(method, url, false, None, true).await
-    }
-}
-
-/// True when `candidate` has the same scheme/host/port as `base`. Used to
-/// reject `nextLink` values that point off this vault's origin before the
-/// bearer token is attached.
-fn same_origin(base: &str, candidate: &str) -> bool {
-    match (url::Url::parse(base), url::Url::parse(candidate)) {
-        (Ok(b), Ok(c)) => b.origin() == c.origin(),
-        _ => false,
     }
 }
 

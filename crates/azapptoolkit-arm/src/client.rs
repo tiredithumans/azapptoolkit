@@ -7,6 +7,7 @@ use std::time::Duration;
 use reqwest::Method;
 use serde::de::DeserializeOwned;
 
+use azapptoolkit_core::net::{redacted_host, same_origin};
 use azapptoolkit_core::token::BearerProvider;
 
 use crate::error::{ArmError, Result};
@@ -105,6 +106,15 @@ impl ArmClient {
         let mut next = page.next_link;
         // `nextLink` is fully qualified and already carries every query param.
         while let Some(link) = next.take() {
+            // A `nextLink` is attacker-influenced server output: refuse to
+            // attach the bearer off the ARM origin (mirrors the Graph and Key
+            // Vault clients' guard).
+            if !same_origin(&self.base_url, &link) {
+                return Err(ArmError::Protocol(format!(
+                    "refusing to follow nextLink to a different origin (host: {})",
+                    redacted_host(&link)
+                )));
+            }
             let p: Paged<T> = self.get_json(&link, &[]).await?;
             out.extend(p.value);
             next = p.next_link;
@@ -259,6 +269,31 @@ mod tests {
         let subs = client(&uri).list_subscriptions().await.unwrap();
         assert_eq!(subs.len(), 2);
         assert_eq!(subs[1].subscription_id, "sub-2");
+    }
+
+    #[tokio::test]
+    async fn refuses_off_origin_next_link() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subscriptions"))
+            .and(query_param("api-version", SUBSCRIPTIONS_API))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{"subscriptionId": "sub-1"}],
+                "nextLink": "https://evil.example.com/subscriptions?token=steal"
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(&server.uri())
+            .list_subscriptions()
+            .await
+            .unwrap_err();
+        // The bearer must never be sent off-origin; the error names only the
+        // host (the full link is attacker-influenced).
+        assert!(matches!(err, ArmError::Protocol(_)), "got {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("evil.example.com"), "got {msg}");
+        assert!(!msg.contains("token=steal"), "leaked query: {msg}");
     }
 
     #[tokio::test]
