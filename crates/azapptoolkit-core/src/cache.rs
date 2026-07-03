@@ -29,20 +29,17 @@ pub enum CacheKind {
 
 impl CacheKind {
     /// All kinds, for whole-cache operations (clear, tenant sweep). Adding a
-    /// variant must extend this — the per-kind bucket array is sized to it.
+    /// variant must extend this — the per-kind bucket array is sized by it.
+    /// Stable Rust can't count enum variants at compile time, so this can't by
+    /// itself prove it lists *every* variant — the exhaustive `match` in
+    /// `CacheConfig::ttl_for` (no wildcard) is what forces a new variant to be
+    /// handled.
     const ALL: [CacheKind; 4] = [
         CacheKind::ServicePrincipal,
         CacheKind::Permissions,
         CacheKind::Audit,
         CacheKind::Lists,
     ];
-
-    /// Pins `ALL`'s length so resizing the per-kind bucket array and `ALL`
-    /// remain one deliberate edit. Stable Rust can't count enum variants at
-    /// compile time, so this can't by itself prove `ALL` lists *every* variant —
-    /// the exhaustive `match` in `CacheConfig::ttl_for` (no wildcard) is what
-    /// forces a new variant to be handled.
-    const _ALL_LEN: () = assert!(CacheKind::ALL.len() == 4);
 
     /// Index into the per-kind bucket array (matches enum declaration order).
     fn idx(self) -> usize {
@@ -163,7 +160,7 @@ pub struct Cache {
     // One lock PER kind (indexed by `CacheKind::idx`) instead of a single lock
     // over all kinds — so an interactive `Lists` read never blocks on an audit's
     // continuous `Audit`/`ServicePrincipal` writes (and vice versa).
-    buckets: [Mutex<Bucket>; 4],
+    buckets: [Mutex<Bucket>; CacheKind::ALL.len()],
     stats: Mutex<CacheStats>,
     config: Mutex<CacheConfig>,
 }
@@ -171,12 +168,7 @@ pub struct Cache {
 impl Cache {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            buckets: [
-                Mutex::new(Bucket::new()),
-                Mutex::new(Bucket::new()),
-                Mutex::new(Bucket::new()),
-                Mutex::new(Bucket::new()),
-            ],
+            buckets: std::array::from_fn(|_| Mutex::new(Bucket::new())),
             stats: Mutex::new(CacheStats::default()),
             config: Mutex::new(CacheConfig::default()),
         })

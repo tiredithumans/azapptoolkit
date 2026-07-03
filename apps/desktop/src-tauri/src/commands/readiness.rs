@@ -129,7 +129,10 @@ fn role_for(
                 Some(matched) => (Verdict::Have, format!("Active role: {matched}.")),
                 None => (
                     Verdict::Missing,
-                    format!("Activate one of: {}.", cap.directory_roles_any.join(", ")),
+                    format!(
+                        "Activate one of: {}.",
+                        cap.role_names().collect::<Vec<_>>().join(", ")
+                    ),
                 ),
             }
         }
@@ -149,7 +152,7 @@ fn role_for(
             format!(
                 "Not enumerable from the directory — verify the {} role in PIM for Azure \
                  resources.",
-                cap.directory_roles_any.join(" / ")
+                cap.role_names().collect::<Vec<_>>().join(" / ")
             ),
         ),
     }

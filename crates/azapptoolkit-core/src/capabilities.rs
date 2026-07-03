@@ -79,20 +79,21 @@ pub struct Capability {
     /// Short human label shown in "Requires: {label}" and as the checklist title.
     pub label: &'static str,
     pub description: &'static str,
-    /// Directory-role display names that satisfy the role half — **any one** is
-    /// sufficient (encodes built-in alternatives, e.g. Global Administrator OR
-    /// Cloud Application Administrator). For Azure/Exchange planes these name the
-    /// RBAC role for *display only* (not directory-enumerable).
-    pub directory_roles_any: &'static [&'static str],
-    /// The immutable `roleTemplateId`s matching `directory_roles_any`, index-
-    /// aligned. **Matching must use these, not the display names**: the
-    /// `directoryRole` objects in long-lived tenants carry legacy names —
-    /// the SharePoint Administrator role reads "SharePoint Service
-    /// Administrator" from Graph (Microsoft documents the rename), Global
-    /// Administrator historically "Company Administrator" — so a name match
-    /// silently reports an active role as missing. Empty for the Azure /
-    /// Exchange planes (not directory-enumerable).
-    pub directory_role_template_ids_any: &'static [&'static str],
+    /// The roles that satisfy the role half — **any one** is sufficient
+    /// (encodes built-in alternatives, e.g. Global Administrator OR Cloud
+    /// Application Administrator). Each entry pairs the display name with the
+    /// immutable `roleTemplateId` when the role is directory-enumerable.
+    /// **Matching must use the template id, not the display name**: the
+    /// `directoryRole` objects in long-lived tenants carry legacy names — the
+    /// SharePoint Administrator role reads "SharePoint Service Administrator"
+    /// from Graph (Microsoft documents the rename), Global Administrator
+    /// historically "Company Administrator" — so a name match silently reports
+    /// an active role as missing. `None` marks the Azure / Exchange planes'
+    /// display-only rows (not directory-enumerable). Pairing name and id in
+    /// one entry makes a misaligned name/id unrepresentable (the old parallel
+    /// index-aligned slices needed a test to police alignment — and the
+    /// v0.12.0 "Role missing" bug lived exactly there).
+    pub directory_roles_any: &'static [(&'static str, Option<&'static str>)],
     pub role_detect: RoleDetect,
     /// Delegated scope name(s) this capability needs, for display. **All** required.
     pub scopes: &'static [&'static str],
@@ -130,14 +131,12 @@ pub static CAPABILITIES: &[Capability] = &[
         description: "Create, update, and delete app registrations; manage credentials, owners, \
                       and authentication.",
         directory_roles_any: &[
-            "Application Administrator",
-            "Cloud Application Administrator",
-            "Global Administrator",
-        ],
-        directory_role_template_ids_any: &[
-            TID_APPLICATION_ADMIN,
-            TID_CLOUD_APPLICATION_ADMIN,
-            TID_GLOBAL_ADMIN,
+            ("Application Administrator", Some(TID_APPLICATION_ADMIN)),
+            (
+                "Cloud Application Administrator",
+                Some(TID_CLOUD_APPLICATION_ADMIN),
+            ),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
         ],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &["Application.ReadWrite.All", "Directory.Read.All"],
@@ -154,14 +153,12 @@ pub static CAPABILITIES: &[Capability] = &[
         description: "Recreate app registrations from a backup, re-grant their permissions, and \
                       regenerate their client secrets in the current tenant.",
         directory_roles_any: &[
-            "Application Administrator",
-            "Cloud Application Administrator",
-            "Global Administrator",
-        ],
-        directory_role_template_ids_any: &[
-            TID_APPLICATION_ADMIN,
-            TID_CLOUD_APPLICATION_ADMIN,
-            TID_GLOBAL_ADMIN,
+            ("Application Administrator", Some(TID_APPLICATION_ADMIN)),
+            (
+                "Cloud Application Administrator",
+                Some(TID_CLOUD_APPLICATION_ADMIN),
+            ),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
         ],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &[
@@ -182,8 +179,13 @@ pub static CAPABILITIES: &[Capability] = &[
         plane: Plane::EntraDirectory,
         label: "Admin consent for API permissions",
         description: "Grant tenant-wide admin consent to delegated scopes and application roles.",
-        directory_roles_any: &["Privileged Role Administrator", "Global Administrator"],
-        directory_role_template_ids_any: &[TID_PRIVILEGED_ROLE_ADMIN, TID_GLOBAL_ADMIN],
+        directory_roles_any: &[
+            (
+                "Privileged Role Administrator",
+                Some(TID_PRIVILEGED_ROLE_ADMIN),
+            ),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
+        ],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &[
             "DelegatedPermissionGrant.ReadWrite.All",
@@ -202,18 +204,11 @@ pub static CAPABILITIES: &[Capability] = &[
         description: "Directory audit log (Activity tab) and service-principal sign-in activity \
                       (unused-app detection).",
         directory_roles_any: &[
-            "Reports Reader",
-            "Security Reader",
-            "Security Administrator",
-            "Global Reader",
-            "Global Administrator",
-        ],
-        directory_role_template_ids_any: &[
-            TID_REPORTS_READER,
-            TID_SECURITY_READER,
-            TID_SECURITY_ADMIN,
-            TID_GLOBAL_READER,
-            TID_GLOBAL_ADMIN,
+            ("Reports Reader", Some(TID_REPORTS_READER)),
+            ("Security Reader", Some(TID_SECURITY_READER)),
+            ("Security Administrator", Some(TID_SECURITY_ADMIN)),
+            ("Global Reader", Some(TID_GLOBAL_READER)),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
         ],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &["AuditLog.Read.All"],
@@ -229,18 +224,14 @@ pub static CAPABILITIES: &[Capability] = &[
         label: "Conditional Access (read)",
         description: "View the Conditional Access policies that target an app.",
         directory_roles_any: &[
-            "Security Reader",
-            "Security Administrator",
-            "Conditional Access Administrator",
-            "Global Reader",
-            "Global Administrator",
-        ],
-        directory_role_template_ids_any: &[
-            TID_SECURITY_READER,
-            TID_SECURITY_ADMIN,
-            TID_CONDITIONAL_ACCESS_ADMIN,
-            TID_GLOBAL_READER,
-            TID_GLOBAL_ADMIN,
+            ("Security Reader", Some(TID_SECURITY_READER)),
+            ("Security Administrator", Some(TID_SECURITY_ADMIN)),
+            (
+                "Conditional Access Administrator",
+                Some(TID_CONDITIONAL_ACCESS_ADMIN),
+            ),
+            ("Global Reader", Some(TID_GLOBAL_READER)),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
         ],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &["Policy.Read.All"],
@@ -255,8 +246,10 @@ pub static CAPABILITIES: &[Capability] = &[
         label: "SharePoint site access (Sites.Selected)",
         description: "List, grant, and revoke a site's per-app permissions; convert org-wide \
                       Sites.* to Sites.Selected.",
-        directory_roles_any: &["SharePoint Administrator", "Global Administrator"],
-        directory_role_template_ids_any: &[TID_SHAREPOINT_ADMIN, TID_GLOBAL_ADMIN],
+        directory_roles_any: &[
+            ("SharePoint Administrator", Some(TID_SHAREPOINT_ADMIN)),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
+        ],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &["Sites.FullControl.All"],
         scope_feature: Some("sharepoint"),
@@ -271,11 +264,10 @@ pub static CAPABILITIES: &[Capability] = &[
         description: "Add or remove a service principal as a member of a security group — the \
                       access model for group-gated APIs like Power BI / Fabric.",
         directory_roles_any: &[
-            "Groups Administrator",
-            "User Administrator",
-            "Global Administrator",
+            ("Groups Administrator", Some(TID_GROUPS_ADMIN)),
+            ("User Administrator", Some(TID_USER_ADMIN)),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
         ],
-        directory_role_template_ids_any: &[TID_GROUPS_ADMIN, TID_USER_ADMIN, TID_GLOBAL_ADMIN],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &["GroupMember.ReadWrite.All"],
         scope_feature: Some("group_membership"),
@@ -290,8 +282,7 @@ pub static CAPABILITIES: &[Capability] = &[
         plane: Plane::AzureRbac,
         label: "Key Vault secrets",
         description: "List, read, create, and rotate Key Vault secrets.",
-        directory_roles_any: &["Key Vault Secrets Officer"],
-        directory_role_template_ids_any: &[],
+        directory_roles_any: &[("Key Vault Secrets Officer", None)],
         role_detect: RoleDetect::Indeterminate,
         scopes: &["https://vault.azure.net/.default"],
         scope_feature: Some("keyvault"),
@@ -304,8 +295,7 @@ pub static CAPABILITIES: &[Capability] = &[
         plane: Plane::AzureRbac,
         label: "Managed-identity Azure role reads",
         description: "Read a managed identity's Azure RBAC role assignments.",
-        directory_roles_any: &["Reader"],
-        directory_role_template_ids_any: &[],
+        directory_roles_any: &[("Reader", None)],
         role_detect: RoleDetect::Indeterminate,
         scopes: &["https://management.azure.com/.default"],
         scope_feature: Some("arm"),
@@ -319,8 +309,7 @@ pub static CAPABILITIES: &[Capability] = &[
         label: "Graph activity usage",
         description: "Read MicrosoftGraphActivityLogs from a Log Analytics workspace to compare \
                       an app's granted permissions with its observed Graph calls.",
-        directory_roles_any: &["Log Analytics Reader"],
-        directory_role_template_ids_any: &[],
+        directory_roles_any: &[("Log Analytics Reader", None)],
         role_detect: RoleDetect::Indeterminate,
         scopes: &["https://api.loganalytics.azure.com/.default"],
         scope_feature: Some("log_analytics"),
@@ -334,8 +323,7 @@ pub static CAPABILITIES: &[Capability] = &[
         plane: Plane::AzureRbac,
         label: "Assign Azure role to a managed identity",
         description: "Create an Azure RBAC role assignment for a managed identity.",
-        directory_roles_any: &["User Access Administrator", "Owner"],
-        directory_role_template_ids_any: &[],
+        directory_roles_any: &[("User Access Administrator", None), ("Owner", None)],
         role_detect: RoleDetect::Indeterminate,
         scopes: &["https://management.azure.com/.default"],
         scope_feature: Some("arm"),
@@ -349,8 +337,7 @@ pub static CAPABILITIES: &[Capability] = &[
         label: "Exchange mailbox scoping (RBAC for Applications)",
         description: "Scope mail/calendar/contacts permissions to specific mailboxes and resolve \
                       effective scope.",
-        directory_roles_any: &["Exchange Administrator"],
-        directory_role_template_ids_any: &[],
+        directory_roles_any: &[("Exchange Administrator", None)],
         role_detect: RoleDetect::ExchangeProbe,
         scopes: &["https://outlook.office365.com/Exchange.Manage"],
         scope_feature: Some("exchange"),
@@ -364,16 +351,18 @@ pub static CAPABILITIES: &[Capability] = &[
     },
 ];
 
+impl Capability {
+    /// Display names of the satisfying roles, in catalog order — for
+    /// "Requires: …" labels and "Activate one of: …" guidance.
+    pub fn role_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.directory_roles_any.iter().map(|(name, _)| *name)
+    }
+}
+
 /// The capability with this `key`, or `None`. Used by command-level 403 hints
 /// (mechanism 1) and the proactive `RequiresRole` label (mechanism 2).
 pub fn capability(key: &str) -> Option<&'static Capability> {
     CAPABILITIES.iter().find(|c| c.key == key)
-}
-
-/// Every capability on `plane`, in catalog order. Used to group the readiness
-/// checklist by plane.
-pub fn capabilities_for_plane(plane: Plane) -> impl Iterator<Item = &'static Capability> {
-    CAPABILITIES.iter().filter(move |c| c.plane == plane)
 }
 
 /// The first of the user's `active_roles` that satisfies the capability, or
@@ -388,20 +377,19 @@ pub fn matched_directory_role(
     cap: &Capability,
     active_roles: &[crate::models::ActiveDirectoryRole],
 ) -> Option<&'static str> {
-    // Template-id match: catalog ids are index-aligned with the display names.
+    // Template-id match: ids are immutable while display names drift.
     for role in active_roles {
         if let Some(tid) = role.role_template_id.as_deref()
-            && let Some(i) = cap
-                .directory_role_template_ids_any
+            && let Some((name, _)) = cap
+                .directory_roles_any
                 .iter()
-                .position(|want| want.eq_ignore_ascii_case(tid))
+                .find(|(_, want)| want.is_some_and(|w| w.eq_ignore_ascii_case(tid)))
         {
-            // The names/ids lists are index-aligned; guard anyway.
-            return cap.directory_roles_any.get(i).copied();
+            return Some(name);
         }
     }
     // Display-name fallback (covers a role listed without a template id).
-    cap.directory_roles_any.iter().copied().find(|needed| {
+    cap.role_names().find(|needed| {
         active_roles.iter().any(|have| {
             have.display_name
                 .as_deref()
@@ -510,17 +498,15 @@ mod tests {
     }
 
     #[test]
-    fn directory_role_names_and_template_ids_are_index_aligned() {
-        // matched_directory_role maps a template-id hit back to the display
-        // name at the same index — the two lists must stay in lockstep.
+    fn directory_role_capabilities_carry_template_ids() {
+        // Matching is template-id-first; a DirectoryRole-detect entry without
+        // an id would silently fall back to display-name matching — the exact
+        // legacy-name bug (v0.12.0 "Role missing") the ids exist to prevent.
         for c in CAPABILITIES {
             if c.role_detect == RoleDetect::DirectoryRole {
-                assert_eq!(
-                    c.directory_roles_any.len(),
-                    c.directory_role_template_ids_any.len(),
-                    "{}: directory_roles_any and directory_role_template_ids_any lengths differ",
-                    c.key
-                );
+                for (name, tid) in c.directory_roles_any {
+                    assert!(tid.is_some(), "{}: role {name} lacks a template id", c.key);
+                }
             }
         }
     }
@@ -557,8 +543,11 @@ mod tests {
 
     #[test]
     fn three_planes_are_represented() {
-        assert!(capabilities_for_plane(Plane::EntraDirectory).count() >= 1);
-        assert!(capabilities_for_plane(Plane::AzureRbac).count() >= 1);
-        assert!(capabilities_for_plane(Plane::ExchangeRbac).count() >= 1);
+        for plane in [Plane::EntraDirectory, Plane::AzureRbac, Plane::ExchangeRbac] {
+            assert!(
+                CAPABILITIES.iter().any(|c| c.plane == plane),
+                "no capability on {plane:?}"
+            );
+        }
     }
 }

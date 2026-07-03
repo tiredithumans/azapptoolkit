@@ -15,15 +15,11 @@ pub fn RequiresRole(#[prop(into)] capability_key: String) -> impl IntoView {
     capability(&capability_key).map(|cap| {
         // Name the primary role (the label users recognise); the full list of
         // satisfying roles + what-to-do lives in the tooltip.
-        let primary = cap
-            .directory_roles_any
-            .first()
-            .copied()
-            .unwrap_or(cap.label);
+        let primary = cap.role_names().next().unwrap_or(cap.label);
         let tip = if cap.directory_roles_any.len() > 1 {
             format!(
                 "Any of: {}.\n\n{}",
-                cap.directory_roles_any.join(", "),
+                cap.role_names().collect::<Vec<_>>().join(", "),
                 cap.remediation
             )
         } else {
