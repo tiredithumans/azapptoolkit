@@ -9,6 +9,19 @@ the project adheres to
 
 ### Added
 
+- **Two new one-click audit remediations: "Add owner" and "Disable sign-in".** The
+  ownership finding (no owners / single owner) now carries an **Add owner** Fix — a
+  guided directory-search modal that adds the picked user via the existing owner
+  mutation (purely additive, so it can't break a working sign-in). Apps flagged
+  **Unused** carry a **Disable sign-in** Fix that sets `accountEnabled: false` on the
+  app's service principal — reversible any time from the enterprise app's Overview
+  toggle, which is why a plain confirm suffices. Both follow the audit's safe-fix
+  contract: the backend re-resolves live state before acting (disable-sign-in resolves
+  the SP fresh from the application; an app with no SP reports not-found), and both
+  clear the row's Fix button on success. Previously the ownership and unused findings
+  were advisory-only — 12 of ~18 finding types had no remediation path at all; this
+  starts closing that gap ahead of the findings-first Security tab revamp.
+
 - **An inline callout points at scoping when an identity holds org-wide access.** On the
   Enterprise Application and Managed Identity Permissions tabs — the surfaces where a
   foreign-tenant (no local app registration) principal gets scoped — a warning callout

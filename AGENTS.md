@@ -87,7 +87,7 @@ docs/architecture/                   # deep-dives: auth-consent, caching-search,
 
 - **Audit scoring rule** — implement in `azapptoolkit-core::audit` with a table-driven test citing legacy PowerShell `file:line`.
 
-- **Audit remediation (one-click "Fix")** — only for findings with a safe, existing mutation; handler **re-resolves live state**. Full pattern: [docs/architecture/scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
+- **Audit remediation (one-click "Fix")** — only for findings with a safe, existing mutation (additive like AddOwner or reversible like DisableSignIn also qualify); handler **re-resolves live state**. Scorer-attached via `build_remediations`, except `DisableSignIn` (runner post-pass — `unused` is set there) and `AddOwner` (no dedicated handler; the modal reuses `add_application_owner`). Full pattern: [docs/architecture/scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
 - **New external origin (CSP)** — only direct WASM frontend fetches need a `connect-src` change; backend reqwest calls don't.
 

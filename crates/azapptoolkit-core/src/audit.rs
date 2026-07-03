@@ -634,6 +634,17 @@ pub enum RemediationKind {
     /// live manifest + grants and removes a narrower permission's grant only
     /// while a covering broader grant is still present.
     RemoveRedundantPermissions,
+    /// Add an owner to an app with the Rule-14 ownership gap (no owners, or a
+    /// single owner). Safe: purely additive — granting ownership can't break a
+    /// working sign-in or revoke access. The "Fix" opens a guided user picker;
+    /// the existing add-owner mutation does the write.
+    AddOwner,
+    /// Disable sign-in for an *unused* app (no sign-in past [`UNUSED_APP_DAYS`])
+    /// by setting `accountEnabled: false` on its service principal. Safe because
+    /// it is reversible — re-enable any time from the enterprise app's Overview.
+    /// Attached by the audit *runner*, not `score_application`: `unused` is a
+    /// runner post-pass flag (the sign-in report is fetched separately).
+    DisableSignIn,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1171,12 +1182,15 @@ fn rule_downgrade_pointers(perms: &AppPermissions) -> RuleContribution {
 /// that raised the corresponding issues — so a "Fix" button appears exactly
 /// when its finding does. The backend re-resolves live state before acting;
 /// `targets`/`detail` are the advisory preview. Emitted in a fixed order:
-/// remove-expired, scope-mailbox, scope-SharePoint, remove-redundant.
+/// remove-expired, scope-mailbox, scope-SharePoint, remove-redundant,
+/// add-owner. `owner_count` is the same `app.owners` data Rule 14 keys off
+/// (`None` = owners not fetched — SP-only rows — so no AddOwner is attached).
 fn build_remediations(
     expired: &[&CredentialSummary],
     mailbox_unscoped: &[&String],
     sharepoint_orgwide: &[&String],
     redundant: &[(String, Vec<String>)],
+    owner_count: Option<usize>,
 ) -> Vec<RemediationAction> {
     let mut remediations: Vec<RemediationAction> = Vec::new();
     if !expired.is_empty() {
@@ -1240,7 +1254,35 @@ fn build_remediations(
             targets: redundant.iter().map(|(n, _)| n.clone()).collect(),
         });
     }
+    match owner_count {
+        Some(0) => remediations.push(RemediationAction {
+            kind: RemediationKind::AddOwner,
+            label: "Add an owner".to_string(),
+            detail: "No owners assigned — ownership/accountability gap".to_string(),
+            targets: Vec::new(),
+        }),
+        Some(1) => remediations.push(RemediationAction {
+            kind: RemediationKind::AddOwner,
+            label: "Add a second owner".to_string(),
+            detail: "Single owner — vulnerable to owner departure".to_string(),
+            targets: Vec::new(),
+        }),
+        _ => {}
+    }
     remediations
+}
+
+/// The [`RemediationKind::DisableSignIn`] action for an unused app. Pushed by
+/// the audit runner's sign-in post-pass (where `unused` is set), not by
+/// [`score_application`] — the sign-in report is resolved after scoring.
+pub fn disable_sign_in_remediation() -> RemediationAction {
+    RemediationAction {
+        kind: RemediationKind::DisableSignIn,
+        label: "Disable sign-in".to_string(),
+        detail: "No recent sign-in activity — disables the service principal (reversible)"
+            .to_string(),
+        targets: Vec::new(),
+    }
 }
 
 pub fn score_application(
@@ -1314,8 +1356,13 @@ pub fn score_application(
 
     let permission_count = (perms.app_role_values.len() + perms.scope_values.len()) as u32;
 
-    let remediations =
-        build_remediations(&expired, &mailbox_unscoped, &sharepoint_orgwide, &redundant);
+    let remediations = build_remediations(
+        &expired,
+        &mailbox_unscoped,
+        &sharepoint_orgwide,
+        &redundant,
+        app.owners.as_ref().map(Vec::len),
+    );
 
     AuditItem {
         application_name: app.display_name.clone(),
@@ -1390,10 +1437,11 @@ pub fn score_service_principal(
     acc.merge(sharepoint_contrib);
     acc.merge(rule_high_risk_delegated(perms)); // Rule 13
 
-    // No expired credentials (unknowable) and no redundant-permission removal
-    // (its remediation edits the application manifest) — only the two scope
-    // remediations, whose SP-only command cores exist.
-    let remediations = build_remediations(&[], &mailbox_unscoped, &sharepoint_orgwide, &[]);
+    // No expired credentials (unknowable), no redundant-permission removal
+    // (its remediation edits the application manifest), and no add-owner
+    // (`None`: SP owners aren't audited) — only the two scope remediations,
+    // whose SP-only command cores exist.
+    let remediations = build_remediations(&[], &mailbox_unscoped, &sharepoint_orgwide, &[], None);
 
     AuditItem {
         application_name: sp.display_name.clone(),
@@ -2104,6 +2152,72 @@ mod tests {
     }
 
     #[test]
+    fn ownership_gap_offers_add_owner_remediation() {
+        use crate::models::DirectoryObject;
+        let owners = |n: usize| {
+            Some(
+                (0..n)
+                    .map(|i| DirectoryObject {
+                        id: format!("o{i}"),
+                        display_name: None,
+                        user_principal_name: None,
+                        odata_type: None,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        // (owners, expected AddOwner label) — attaches exactly when Rule 14 fires.
+        let cases: [(Option<Vec<DirectoryObject>>, Option<&str>); 4] = [
+            (None, None), // not fetched → skip, like the issue
+            (owners(0), Some("Add an owner")),
+            (owners(1), Some("Add a second owner")),
+            (owners(2), None), // healthy
+        ];
+        for (owners, expect) in cases {
+            let mut app = base_app();
+            app.owners = owners;
+            let item = score_application(&app, Some(true), &AppPermissions::default(), now());
+            let add_owner: Vec<_> = item
+                .remediations
+                .iter()
+                .filter(|r| r.kind == RemediationKind::AddOwner)
+                .collect();
+            match expect {
+                Some(label) => {
+                    assert_eq!(add_owner.len(), 1, "expected one AddOwner remediation");
+                    assert_eq!(add_owner[0].label, label);
+                    assert!(add_owner[0].targets.is_empty());
+                }
+                None => assert!(
+                    add_owner.is_empty(),
+                    "expected no AddOwner remediation, got {:?}",
+                    item.remediations
+                ),
+            }
+        }
+
+        // SP-only rows never get AddOwner (owners aren't audited there).
+        let sp_item = score_service_principal(&base_sp(), &AppPermissions::default(), now());
+        assert!(
+            !sp_item
+                .remediations
+                .iter()
+                .any(|r| r.kind == RemediationKind::AddOwner)
+        );
+    }
+
+    #[test]
+    fn disable_sign_in_remediation_shape() {
+        // Runner-attached (unused is a post-pass flag) — pin the action the
+        // runner pushes so the frontend's kind-matching stays honest.
+        let r = disable_sign_in_remediation();
+        assert_eq!(r.kind, RemediationKind::DisableSignIn);
+        assert_eq!(r.label, "Disable sign-in");
+        assert!(r.detail.contains("reversible"));
+        assert!(r.targets.is_empty());
+    }
+
+    #[test]
     fn unused_app_advisory_degrades_and_flags_correctly() {
         let created_old = Some(now() - Duration::days(200));
         let created_new = Some(now() - Duration::days(10));
@@ -2439,6 +2553,7 @@ mod tests {
                 RemediationKind::ScopeMailboxAccess,
                 RemediationKind::ScopeSharePointAccess,
                 RemediationKind::RemoveRedundantPermissions,
+                RemediationKind::AddOwner,
             ]
         );
     }
@@ -2467,9 +2582,10 @@ mod tests {
                 "Narrower alternatives exist if the broader capability is unused: Mail.ReadWrite → Mail.Read / Mail.ReadBasic / Mail.ReadBasic.All",
             ]
         );
-        assert!(
-            item.remediations.is_empty(),
-            "no expired creds, no org-wide mailbox/SharePoint, no redundancy ⇒ no remediations"
+        assert_eq!(
+            item.remediations.iter().map(|r| r.kind).collect::<Vec<_>>(),
+            vec![RemediationKind::AddOwner],
+            "no expired creds, no org-wide mailbox/SharePoint, no redundancy — only the single-owner AddOwner fix"
         );
     }
 

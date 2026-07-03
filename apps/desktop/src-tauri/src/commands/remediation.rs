@@ -11,7 +11,7 @@ use tauri::State;
 use azapptoolkit_core::audit::{is_expired, subsuming_app_permissions};
 use azapptoolkit_core::models::{Application, RequiredResourceAccess};
 
-use crate::commands::applications::invalidate_app_credentials;
+use crate::commands::applications::{invalidate_app_credentials, invalidate_app_lists};
 use crate::commands::exchange::grant_exchange_mailbox_access;
 use crate::commands::permissions::remove_declared_access;
 use crate::commands::sharepoint::convert_site_access_to_selected;
@@ -159,6 +159,33 @@ pub async fn remediate_scope_sharepoint_access(
         true,
     )
     .await
+}
+
+/// Disables sign-in for an *unused* app (audit DisableSignIn remediation) by
+/// setting `accountEnabled: false` on its service principal — reversible any
+/// time from the enterprise app's Overview toggle. Re-resolves the SP from the
+/// live application (never the audit snapshot); an app with no SP has nothing
+/// to disable and surfaces `not_found`. Busts the list caches on Ok (the flag
+/// is on the enterprise list DTO and the shared SP index), mirroring
+/// `set_enterprise_app_account_enabled`.
+#[tauri::command]
+pub async fn remediate_disable_sign_in(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    object_id: String,
+) -> Result<(), UiError> {
+    let client = state.graph_for(&tenant_id);
+    let app = client.get_application(&object_id).await?;
+    let sp = client
+        .get_service_principal_by_app_id(&app.app_id)
+        .await?
+        .ok_or_else(|| {
+            UiError::not_found("sp", "no service principal exists for this application")
+        })?;
+    let body = serde_json::json!({ "accountEnabled": false });
+    client.patch_service_principal(&sp.id, &body).await?;
+    invalidate_app_lists(&state.cache, &tenant_id);
+    Ok(())
 }
 
 /// One planned removal for the redundant-permissions fix: a narrower declared

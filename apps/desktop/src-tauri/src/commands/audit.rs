@@ -924,6 +924,13 @@ async fn score_one(
         item.unused = true;
         item.issues.push(issue);
         item.recommendations.push(rec);
+        // Attached here rather than in `score_application` because `unused` is
+        // this post-pass's flag. Skip when there's no SP to disable, or the SP
+        // is already disabled — either way the fix has nothing to do.
+        if sp.is_some() && item.service_principal_enabled != Some(false) {
+            item.remediations
+                .push(azapptoolkit_core::audit::disable_sign_in_remediation());
+        }
     }
     Ok(item)
 }

@@ -9,6 +9,7 @@ use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::remediation;
 use crate::state::use_session;
+use crate::views::dialogs::add_owner::AddOwnerButton;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::dialogs::scope_remediation::{
     ScopeFixTarget, ScopeMailboxButton, ScopeSharePointButton,
@@ -68,6 +69,8 @@ pub(super) fn AuditRowActions(
     let redundant = find(RemediationKind::RemoveRedundantPermissions);
     let mailbox = find(RemediationKind::ScopeMailboxAccess);
     let sharepoint = find(RemediationKind::ScopeSharePointAccess);
+    let add_owner = find(RemediationKind::AddOwner);
+    let disable = find(RemediationKind::DisableSignIn);
 
     let tab = target_tab(&item);
     let kind = item.principal_kind;
@@ -88,6 +91,8 @@ pub(super) fn AuditRowActions(
     };
     let oid_open = object_id.clone();
     let oid_r = object_id.clone();
+    let oid_owner = object_id.clone();
+    let oid_disable = object_id.clone();
     let target_m = scope_target.clone();
     let target_s = scope_target;
     view! {
@@ -130,8 +135,89 @@ pub(super) fn AuditRowActions(
                         <ScopeSharePointButton target=target_s.clone() action=action on_done=on_done />
                     }
                 })}
+            {add_owner
+                .map(|action| {
+                    view! { <AddOwnerButton object_id=oid_owner.clone() action=action on_done=on_done /> }
+                })}
+            {disable
+                .map(|action| {
+                    view! {
+                        <DisableSignInAction object_id=oid_disable.clone() action=action on_done=on_done />
+                    }
+                })}
         </div>
     }
+}
+
+/// The disable-sign-in fix for an unused app: a button gated by a static
+/// confirm dialog. Sets `accountEnabled: false` on the app's service principal
+/// — reversible any time from the enterprise app's Overview toggle, which is
+/// why a plain confirm (no typed keyword) suffices.
+#[component]
+fn DisableSignInAction(
+    object_id: String,
+    action: RemediationAction,
+    #[prop(into)] on_done: Callback<String>,
+) -> impl IntoView {
+    let session = use_session();
+    let tenant = session.active_tenant;
+
+    let open = RwSignal::new(false);
+    let busy = RwSignal::new(false);
+    let error: RwSignal<Option<String>> = RwSignal::new(None);
+
+    let confirm = move |()| {
+        if busy.get() {
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        let object_id = object_id.clone();
+        let tenant = tenant.get();
+        leptos::task::spawn_local(async move {
+            let Some(t) = tenant else {
+                busy.set(false);
+                return;
+            };
+            match remediation::remediate_disable_sign_in(&t.tenant_id, &object_id).await {
+                Ok(()) => {
+                    open.set(false);
+                    session.toast_success(
+                        "Sign-in disabled — re-enable anytime from the enterprise app's Overview. Re-run the audit to refresh scores.",
+                    );
+                    on_done.run(object_id);
+                }
+                Err(e) => error.set(Some(e.message)),
+            }
+            busy.set(false);
+        });
+    };
+
+    let label = action.label.clone();
+    let detail = action.detail.clone();
+
+    view! {
+        <div class="audit-actions">
+            <Button
+                appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                on_click=Box::new(move |_| open.set(true))
+            >
+                {label}
+            </Button>
+            <div class="audit-actions__preview">{detail}</div>
+            <ConfirmDialog
+                open=Signal::derive(move || open.get())
+                title="Disable sign-in?"
+                body="Blocks token issuance for this unused app by disabling its service principal. This is reversible — re-enable it anytime from the enterprise app's Overview tab. Nothing is deleted. Re-run the audit afterward to refresh scores."
+                confirm_label="Disable sign-in"
+                busy=Signal::derive(move || busy.get())
+                error=Signal::derive(move || error.get())
+                on_confirm=Callback::new(confirm)
+                on_close=Callback::new(move |()| open.set(false))
+            />
+        </div>
+    }
+        .into_any()
 }
 
 /// The remove-redundant-permissions fix: a button gated by a static confirm

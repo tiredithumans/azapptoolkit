@@ -5,7 +5,8 @@
 
 use azapptoolkit_core::audit::{
     AuditItem, AuditPrincipalKind, CredentialKind, CredentialStatus, ListCredentialStatus,
-    MailPermissionScope, RiskLevel, ScopeMechanism, issue,
+    MailPermissionScope, RemediationAction, RemediationKind, RiskLevel, ScopeMechanism,
+    disable_sign_in_remediation, issue,
 };
 use azapptoolkit_core::identity::{SignInOutcome, TenantContext};
 use azapptoolkit_core::models::{
@@ -285,12 +286,29 @@ pub fn audit_run_result() -> AuditRunResult {
         &[issue::NO_OWNERS.to_string()],
     );
     no_owners.unused = true;
+    // The ownership + unused fixes light up in the demo (the mutations they
+    // invoke stay unmocked and degrade to the demo-unsupported toast).
+    no_owners.remediations = vec![
+        RemediationAction {
+            kind: RemediationKind::AddOwner,
+            label: "Add an owner".to_string(),
+            detail: "No owners assigned — ownership/accountability gap".to_string(),
+            targets: Vec::new(),
+        },
+        disable_sign_in_remediation(),
+    ];
 
-    let single_owner = audit_item(
+    let mut single_owner = audit_item(
         "Tailspin Reporting",
         RiskLevel::Medium,
         &[issue::SINGLE_OWNER.to_string()],
     );
+    single_owner.remediations = vec![RemediationAction {
+        kind: RemediationKind::AddOwner,
+        label: "Add a second owner".to_string(),
+        detail: "Single owner — vulnerable to owner departure".to_string(),
+        targets: Vec::new(),
+    }];
     let second_over = audit_item(
         "Wingtip Toys Connector",
         RiskLevel::Medium,
