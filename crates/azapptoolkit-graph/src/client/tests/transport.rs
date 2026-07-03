@@ -55,6 +55,20 @@ async fn not_found_returns_typed_error() {
 }
 
 #[test]
+fn search_phrase_neutralizes_embedded_quotes() {
+    // `$search` has no quote escape — an embedded `"` would end the phrase
+    // early and make Graph reject the request, so it becomes a space.
+    assert_eq!(
+        search_phrase("displayName", "Contoso"),
+        "\"displayName:Contoso\""
+    );
+    assert_eq!(
+        search_phrase("displayName", "Cont\"oso"),
+        "\"displayName:Cont oso\""
+    );
+}
+
+#[test]
 fn escape_odata_doubles_single_quotes() {
     assert_eq!(escape_odata("O'Brien"), "O''Brien");
     assert_eq!(escape_odata("alice"), "alice");

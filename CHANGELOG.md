@@ -7,6 +7,15 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **Graph client restructured for maintainability** (no behavior change): the
+  transport/retry core, pagination helpers, and request/patch body types moved out
+  of the 1,150-line `client.rs` into `client/transport.rs` and their domain modules
+  (all import paths preserved via re-exports); the 2,700-line test monolith split
+  into per-domain files. The two near-identical service-principal batch-prewarm
+  functions now share one core, and the dead `GraphError::Url` variant was removed.
+
 ### Fixed
 
 - **Azure Resource Manager paging now refuses off-origin `nextLink`s** before the

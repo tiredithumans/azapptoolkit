@@ -60,7 +60,7 @@ pub use applications::{
 };
 pub use credentials::{FederatedCredentialPatch, FederatedCredentialRequest};
 pub use service_principals::{ServicePrincipalSigningKeyPatch, ServicePrincipalSsoModePatch};
-pub(crate) use transport::{batch_sub_url, escape_odata};
+pub(crate) use transport::{batch_sub_url, escape_odata, search_phrase};
 
 pub struct GraphClient {
     http: reqwest::Client,

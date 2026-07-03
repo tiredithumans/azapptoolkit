@@ -212,10 +212,7 @@ impl GraphClient {
         if let Some(s) = &q.search {
             // Neutralize double quotes so a term like `Test"App` can't break the
             // `$search` phrase (matches search_applications_by_name).
-            params.push((
-                "$search",
-                format!("\"displayName:{}\"", s.replace('"', " ")),
-            ));
+            params.push(("$search", search_phrase("displayName", s)));
         } else if q.expand.is_none() {
             // Graph rejects `$orderby` together with `$expand` on `/applications`
             // ("Request_UnsupportedQuery: Sorting not supported for 'Application'"),
@@ -386,7 +383,7 @@ impl GraphClient {
         term: &str,
         top: u32,
     ) -> Result<Vec<Application>> {
-        let search = format!("\"displayName:{}\"", term.replace('"', " "));
+        let search = search_phrase("displayName", term);
         let top_s = top.to_string();
         let params: [(&str, &str); 4] = [
             ("$search", search.as_str()),

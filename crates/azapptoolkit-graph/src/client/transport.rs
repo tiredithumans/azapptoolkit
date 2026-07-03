@@ -525,6 +525,15 @@ pub(crate) fn escape_odata(input: &str) -> String {
     input.replace('\'', "''")
 }
 
+/// Builds the quoted `$search` phrase for a display-name term search:
+/// `"displayName:<term>"`. Graph's `$search` syntax reserves the double quote
+/// as the phrase delimiter with no escape, so any `"` in the user's term is
+/// neutralized to a space — pinning that contract here keeps the three
+/// name-search call sites from drifting.
+pub(crate) fn search_phrase(field: &str, term: &str) -> String {
+    format!("\"{field}:{}\"", term.replace('"', " "))
+}
+
 /// Builds a Graph-version-root-relative sub-request URL (`/applications/{id}?…`)
 /// with percent-encoded query values, for the `$batch` helpers. Mirrors the
 /// single-call encoding `prewarm_service_principals_lean` does inline, so a
