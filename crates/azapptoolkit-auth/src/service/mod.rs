@@ -6,8 +6,8 @@
 //!      `azapptoolkit_core::constants::GRAPH_READ_SCOPES` plus `offline_access`),
 //!      open it in the system browser. Write scopes are consented incrementally
 //!      the first time a mutating Graph call needs them.
-//!   3. Accept one HTTP request on the listener, pull `code` + `state`, reply
-//!      with a success page, shut down.
+//!   3. Accept requests on the listener until the OAuth redirect arrives,
+//!      pull `code` + `state`, reply with a success page, shut down.
 //!   4. Exchange the code at `/token` with our own reqwest call so we can read
 //!      `id_token` from the response.
 //!   5. Resolve tenant id + account oid from the ID token claims.
@@ -16,27 +16,36 @@
 //! [`EntraAuthService::access_token_for_scopes`] on every Graph request; it
 //! refreshes lazily 60s ahead of expiry under a single shared mutex, and caches
 //! per scope set so the read and write tokens coexist.
+//!
+//! Module layout: [`wire`] (AAD response shapes, error classification and
+//! redaction, claims decoding), [`loopback`] (redirect listener + browser
+//! launch), [`scopes`] (the per-feature scope catalog). This file keeps the
+//! service struct, the token lifecycle, and the interactive/silent flows.
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+mod loopback;
+mod scopes;
+mod wire;
+
 use chrono::{Duration, Utc};
 use oauth2::{CsrfToken, PkceCodeChallenge, PkceCodeVerifier};
 use parking_lot::Mutex;
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
 
 use azapptoolkit_core::cloud::CloudEnvironment;
-use azapptoolkit_core::constants::{GRAPH_READ_SCOPES, GRAPH_WRITE_SCOPES};
 use azapptoolkit_core::identity::{SignInOutcome, TenantContext};
 
 use crate::error::{AuthError, Result};
 use crate::token_cache::{
     AccessToken, TokenCache, delete_refresh_token, load_refresh_token, save_refresh_token,
     scope_key,
+};
+use loopback::{listen_for_code, open_system_browser};
+use wire::{
+    IdClaims, TokenErrorBody, TokenResponse, build_cae_claims, classify_token_error,
+    parse_id_token, parse_scopes, redacted_aad_error,
 };
 
 const REFRESH_LEEWAY_SECS: i64 = 60;
@@ -70,30 +79,6 @@ pub struct EntraAuthService {
     http: reqwest::Client,
 }
 
-#[derive(Debug, Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    #[serde(default)]
-    refresh_token: Option<String>,
-    #[serde(default)]
-    id_token: Option<String>,
-    expires_in: u64,
-    #[serde(default)]
-    scope: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenErrorBody {
-    error: String,
-    #[serde(default)]
-    error_description: Option<String>,
-    // AAD's request-tracing GUID. Safe for operator logs (it identifies the
-    // request, not the user) and the one field Microsoft support asks for —
-    // unlike `error_description`, which embeds tenant/user GUIDs and client IPs.
-    #[serde(default)]
-    correlation_id: Option<String>,
-}
-
 impl EntraAuthService {
     pub fn new(client_id: impl Into<String>, tenant_id: impl Into<String>) -> Arc<Self> {
         let cloud = CloudEnvironment::from_env();
@@ -120,119 +105,8 @@ impl EntraAuthService {
         self.cloud
     }
 
-    /// Read-only Graph scopes requested at sign-in and used for every GET.
-    /// `GRAPH_READ_SCOPES` plus `offline_access`, `openid`, `profile`.
-    pub fn default_graph_read_scopes(&self) -> Vec<String> {
-        self.graph_scopes(GRAPH_READ_SCOPES)
-    }
-
-    /// Read-write Graph scopes, requested on demand for mutating requests.
-    /// `GRAPH_WRITE_SCOPES` plus `offline_access`, `openid`, `profile`. The
-    /// refresh token minted at sign-in is redeemed for these the first time a
-    /// write runs; admin consent on the tenant keeps the redemption silent.
-    pub fn default_graph_write_scopes(&self) -> Vec<String> {
-        self.graph_scopes(GRAPH_WRITE_SCOPES)
-    }
-
-    /// `Synchronization.Read.All` Graph scope for reading SCIM provisioning job
-    /// status. Acquired on demand (incremental consent), not at sign-in, with
-    /// the same graceful-degradation contract as the reports scope.
-    pub fn default_graph_sync_scopes(&self) -> Vec<String> {
-        self.graph_scopes(&["Synchronization.Read.All"])
-    }
-
-    /// `AuditLog.Read.All` Graph scope for the directory activity / change log.
-    /// Acquired on demand (incremental consent), never at sign-in, with the same
-    /// graceful-degradation contract as the reports scope — a tenant that hasn't
-    /// admin-consented (or lacks Entra ID P1/P2) can still sign in and browse;
-    /// the Activity tab simply reports the feature as unavailable.
-    pub fn default_graph_audit_log_scopes(&self) -> Vec<String> {
-        self.graph_scopes(&["AuditLog.Read.All"])
-    }
-
-    /// `Policy.Read.All` Graph scope for reading Conditional Access policies.
-    /// Acquired on demand (incremental consent), never at sign-in, with the same
-    /// graceful-degradation contract — a tenant without admin consent (or Entra
-    /// ID P1/P2) can still sign in and browse; the Conditional Access tab simply
-    /// reports the feature as unavailable.
-    pub fn default_graph_policy_scopes(&self) -> Vec<String> {
-        self.graph_scopes(&["Policy.Read.All"])
-    }
-
-    /// `Policy.ReadWrite.ApplicationConfiguration` Graph scope for creating and
-    /// assigning claims-mapping policies (SAML attribute & claim customization
-    /// in the SSO setup flow). Admin-consent-only; acquired on demand, never at
-    /// sign-in, so SSO setups that don't customize claims never request it and a
-    /// tenant that hasn't consented can still sign in and browse.
-    pub fn default_graph_policy_write_scopes(&self) -> Vec<String> {
-        self.graph_scopes(&["Policy.ReadWrite.ApplicationConfiguration"])
-    }
-
-    /// `Sites.FullControl.All` Graph scope for the SharePoint `Sites.Selected`
-    /// model — listing, granting, and revoking a site's per-app permissions
-    /// (the Permissions tab's SharePoint site access section). The
-    /// site-permission endpoints require this
-    /// scope even for reads. Acquired on demand (incremental consent), never at
-    /// sign-in: it needs admin consent and a SharePoint-admin / site-owner
-    /// signed-in user, so baking it into the write bundle would over-request it
-    /// on every ordinary app edit and could block sign-in for un-consented
-    /// tenants. The UI degrades to a "Grant consent" prompt instead.
-    pub fn default_graph_sharepoint_scopes(&self) -> Vec<String> {
-        self.graph_scopes(&["Sites.FullControl.All"])
-    }
-
-    /// `GroupMember.ReadWrite.All` Graph scope for adding/removing a service
-    /// principal as a member of a security group (group-gated APIs like
-    /// Power BI / Fabric admit service principals via group membership).
-    /// Deliberately the membership-only scope, not `Group.ReadWrite.All` — the
-    /// app never creates or deletes groups. Admin-consent-only; acquired on
-    /// demand, never at sign-in, with the same graceful-degradation contract
-    /// as the SharePoint scope (membership *reads* ride `Directory.Read.All`).
-    pub fn default_graph_group_member_scopes(&self) -> Vec<String> {
-        self.graph_scopes(&["GroupMember.ReadWrite.All"])
-    }
-
-    /// Prefixes each Graph permission with the Graph resource URL and appends
-    /// the OIDC scopes (`offline_access` for the refresh token, `openid` +
-    /// `profile` for the ID token). Callers that need tokens for other
-    /// resources (Key Vault, ARM, SharePoint) use [`Self::resource_default_scopes`].
-    fn graph_scopes(&self, permissions: &[&str]) -> Vec<String> {
-        let resource = self.cloud.graph_resource();
-        let mut scopes: Vec<String> = permissions
-            .iter()
-            .map(|s| format!("{resource}/{s}"))
-            .collect();
-        scopes.push("offline_access".to_string());
-        scopes.push("openid".to_string());
-        scopes.push("profile".to_string());
-        scopes
-    }
-
-    /// Exchange Online Admin API scopes (`EXCHANGE_SCOPES` plus
-    /// `offline_access`), for managing RBAC for Applications. The audience is
-    /// `outlook.office365.com`, so this is a distinct token from the Graph
-    /// read/write tokens; it is redeemed on demand from the sign-in refresh
-    /// token the first time an Exchange operation runs.
-    pub fn default_exchange_scopes(&self) -> Vec<String> {
-        vec![
-            // Classic scope — the InvokeCommand gateway rejects `ManageV2`
-            // (preview per-cmdlet API only) with a bodyless 403. See
-            // `azapptoolkit_core::constants::EXCHANGE_SCOPES`.
-            format!("{}/Exchange.Manage", self.cloud.exchange_resource()),
-            "offline_access".to_string(),
-        ]
-    }
-
-    /// Scopes to request for a non-Graph audience. Every Entra-secured
-    /// resource advertises a `<resource>/.default` scope that asks for "every
-    /// permission the user consented to for this audience"; we always add
-    /// `offline_access` so the refresh token keeps working across audiences.
-    pub fn resource_default_scopes(resource_url: &str) -> Vec<String> {
-        vec![
-            format!("{}/.default", resource_url.trim_end_matches('/')),
-            "offline_access".to_string(),
-        ]
-    }
+    // The scope catalog (default_graph_*_scopes, default_exchange_scopes,
+    // resource_default_scopes) lives in the `scopes` sibling module.
 
     // Each parameter maps to a distinct OAuth `/authorize` query param; a
     // params struct would only add indirection for a single private call site.
@@ -277,61 +151,6 @@ impl EntraAuthService {
         Ok(url)
     }
 
-    async fn listen_for_code(listener: TcpListener, expected_state: &str) -> Result<String> {
-        let (mut socket, _peer) = listener
-            .accept()
-            .await
-            .map_err(|e| AuthError::Loopback(e.to_string()))?;
-
-        let mut buf = vec![0u8; 8192];
-        let n = socket
-            .read(&mut buf)
-            .await
-            .map_err(|e| AuthError::Loopback(e.to_string()))?;
-        let request = String::from_utf8_lossy(&buf[..n]);
-
-        let first_line = request.lines().next().unwrap_or_default();
-        let mut parts = first_line.split_whitespace();
-        let _method = parts.next();
-        let path = parts.next().unwrap_or("");
-
-        let query = path.split('?').nth(1).unwrap_or("");
-        let mut code: Option<String> = None;
-        let mut state: Option<String> = None;
-        let mut error: Option<String> = None;
-        for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
-            match k.as_ref() {
-                "code" => code = Some(v.into_owned()),
-                "state" => state = Some(v.into_owned()),
-                "error" => error = Some(v.into_owned()),
-                _ => {}
-            }
-        }
-
-        let body = if error.is_some() {
-            "<html><body><h2>Sign-in failed.</h2><p>You can close this window.</p></body></html>"
-        } else {
-            "<html><body><h2>azapptoolkit sign-in complete.</h2><p>You can close this window.</p></body></html>"
-        };
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let _ = socket.write_all(response.as_bytes()).await;
-        let _ = socket.shutdown().await;
-
-        if let Some(err) = error {
-            return Err(AuthError::Authorization(err));
-        }
-
-        let got_state = state.ok_or(AuthError::StateMismatch)?;
-        if got_state != expected_state {
-            return Err(AuthError::StateMismatch);
-        }
-        code.ok_or_else(|| AuthError::Authorization("no code returned".into()))
-    }
-
     async fn post_token(&self, authority: &str, params: &[(&str, &str)]) -> Result<TokenResponse> {
         let url = format!("{authority}/oauth2/v2.0/token");
         let resp = self.http.post(&url).form(params).send().await?;
@@ -363,201 +182,6 @@ impl EntraAuthService {
         }
         let token: TokenResponse = serde_json::from_slice(&bytes)?;
         Ok(token)
-    }
-}
-
-/// Maps an AAD `/token` error body to the right [`AuthError`]. A missing-consent
-/// rejection (AADSTS65001 "not consented", 65004 "user declined", or the
-/// `consent_required` OAuth code) is recoverable via interactive consent and
-/// must be distinguished *first* — unlike [`AuthError::InvalidGrant`], it must
-/// NOT purge the refresh token. Everything else `invalid_grant`-like means the
-/// refresh token is dead; the remainder is a generic exchange failure. The
-/// carried string is always the UI-safe redacted summary.
-fn classify_token_error(body: &TokenErrorBody) -> AuthError {
-    let safe = redacted_aad_error(body);
-    let aadsts = body
-        .error_description
-        .as_deref()
-        .and_then(extract_aadsts_code);
-    if body.error == "consent_required"
-        || matches!(aadsts.as_deref(), Some("AADSTS65001") | Some("AADSTS65004"))
-    {
-        return AuthError::ConsentRequired(safe);
-    }
-    if matches!(
-        body.error.as_str(),
-        "invalid_grant" | "interaction_required" | "login_required"
-    ) {
-        return AuthError::InvalidGrant(safe);
-    }
-    AuthError::TokenExchange(safe)
-}
-
-/// Builds a UI-safe summary of an AAD error response. Keeps the canonical
-/// OAuth error code (e.g. `invalid_client`) and the AADSTS numeric code if
-/// present, and drops the rest of `error_description` (which routinely
-/// embeds tenant/user GUIDs, correlation IDs, and client IPs).
-fn redacted_aad_error(body: &TokenErrorBody) -> String {
-    let aadsts = body
-        .error_description
-        .as_deref()
-        .and_then(extract_aadsts_code);
-    match aadsts {
-        Some(code) => format!("{} ({})", body.error, code),
-        None => body.error.clone(),
-    }
-}
-
-/// Pulls the first `AADSTSnnnnn` token out of an AAD error_description.
-fn extract_aadsts_code(description: &str) -> Option<String> {
-    let idx = description.find("AADSTS")?;
-    let tail = &description[idx + "AADSTS".len()..];
-    // A non-digit right after "AADSTS" yields no digits below → `None`.
-    let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        None
-    } else {
-        Some(format!("AADSTS{digits}"))
-    }
-}
-
-#[cfg(test)]
-mod aad_redaction_tests {
-    use super::*;
-
-    #[test]
-    fn extracts_aadsts_code() {
-        let s = "AADSTS50034: The user account does not exist in <tenant guid> directory.";
-        assert_eq!(extract_aadsts_code(s).as_deref(), Some("AADSTS50034"));
-    }
-
-    #[test]
-    fn returns_none_when_no_code() {
-        assert!(extract_aadsts_code("invalid_grant").is_none());
-    }
-
-    #[test]
-    fn rejects_non_digit_after_aadsts() {
-        // "AADSTS" present but immediately followed by a non-digit → no code.
-        assert!(extract_aadsts_code("AADSTS: malformed, no number").is_none());
-    }
-
-    #[test]
-    fn redacted_combines_oauth_and_aadsts() {
-        let body = TokenErrorBody {
-            error: "invalid_grant".into(),
-            error_description: Some("AADSTS70008: The refresh token has expired...".into()),
-            correlation_id: None,
-        };
-        assert_eq!(redacted_aad_error(&body), "invalid_grant (AADSTS70008)");
-    }
-
-    #[test]
-    fn redacted_falls_back_to_oauth_code() {
-        let body = TokenErrorBody {
-            error: "invalid_client".into(),
-            error_description: None,
-            correlation_id: None,
-        };
-        assert_eq!(redacted_aad_error(&body), "invalid_client");
-    }
-
-    #[test]
-    fn consent_codes_classify_as_consent_required_not_invalid_grant() {
-        // AADSTS65001 ("not consented") arrives wrapped as `invalid_grant`; it
-        // must surface as ConsentRequired so the refresh token is NOT purged.
-        let body = TokenErrorBody {
-            error: "invalid_grant".into(),
-            error_description: Some(
-                "AADSTS65001: The user or administrator has not consented to use the application."
-                    .into(),
-            ),
-            correlation_id: None,
-        };
-        assert!(matches!(
-            classify_token_error(&body),
-            AuthError::ConsentRequired(_)
-        ));
-
-        // 65004 (user declined) and the explicit `consent_required` OAuth code
-        // are the same recoverable class.
-        let declined = TokenErrorBody {
-            error: "invalid_grant".into(),
-            error_description: Some("AADSTS65004: User declined to consent...".into()),
-            correlation_id: None,
-        };
-        assert!(matches!(
-            classify_token_error(&declined),
-            AuthError::ConsentRequired(_)
-        ));
-        let explicit = TokenErrorBody {
-            error: "consent_required".into(),
-            error_description: None,
-            correlation_id: None,
-        };
-        assert!(matches!(
-            classify_token_error(&explicit),
-            AuthError::ConsentRequired(_)
-        ));
-    }
-
-    #[test]
-    fn expired_refresh_token_stays_invalid_grant() {
-        // A genuinely dead refresh token (70008) must still purge — it is NOT
-        // a consent problem.
-        let body = TokenErrorBody {
-            error: "invalid_grant".into(),
-            error_description: Some("AADSTS70008: The refresh token has expired...".into()),
-            correlation_id: None,
-        };
-        assert!(matches!(
-            classify_token_error(&body),
-            AuthError::InvalidGrant(_)
-        ));
-    }
-
-    #[test]
-    fn other_errors_are_generic_token_exchange() {
-        let body = TokenErrorBody {
-            error: "invalid_client".into(),
-            error_description: Some("AADSTS7000215: Invalid client secret...".into()),
-            correlation_id: None,
-        };
-        assert!(matches!(
-            classify_token_error(&body),
-            AuthError::TokenExchange(_)
-        ));
-    }
-}
-
-/// Parse space-delimited scope strings from a token response. When the response
-/// omits `scope` entirely (`None`), fall back to `fallback` — the scopes we
-/// requested — so a refresh that doesn't echo the grant still records what the
-/// token covers. A present-but-empty `scope` stays empty (the server said so).
-fn parse_scopes(raw: Option<&str>, fallback: &[String]) -> Vec<String> {
-    match raw {
-        Some(s) => s.split_whitespace().map(str::to_string).collect(),
-        None => fallback.to_vec(),
-    }
-}
-
-#[cfg(test)]
-mod parse_scopes_tests {
-    use super::parse_scopes;
-
-    #[test]
-    fn splits_present_scope() {
-        let fallback = vec!["req".to_string()];
-        assert_eq!(parse_scopes(Some("a b a"), &fallback), ["a", "b", "a"]);
-    }
-
-    #[test]
-    fn falls_back_only_when_scope_absent() {
-        let fallback = vec!["req".to_string()];
-        // Absent → requested scopes (a refresh that omits `scope`).
-        assert_eq!(parse_scopes(None, &fallback), ["req"]);
-        // Present-but-empty → empty (the server explicitly returned none).
-        assert!(parse_scopes(Some("   "), &fallback).is_empty());
     }
 }
 
@@ -631,7 +255,7 @@ impl EntraAuthService {
         // (the future holds the loopback socket and blocks the caller).
         let code = tokio::time::timeout(
             std::time::Duration::from_secs(300),
-            Self::listen_for_code(listener, csrf_state.secret()),
+            listen_for_code(listener, csrf_state.secret()),
         )
         .await
         .map_err(|_| AuthError::Loopback("timed out waiting for the sign-in redirect".into()))??;
@@ -732,16 +356,7 @@ impl EntraAuthService {
 
         // Defense-in-depth: a consent screen can switch tenant/account even
         // with a login_hint. Refuse to cache a token for a different identity.
-        if claims.tid.as_deref() != Some(tenant.tenant_id.as_str()) {
-            return Err(AuthError::Authorization(
-                "consent completed for a different tenant".into(),
-            ));
-        }
-        if claims.oid.as_deref() != Some(tenant.account_oid.as_str()) {
-            return Err(AuthError::Authorization(
-                "consent completed for a different account".into(),
-            ));
-        }
+        ensure_same_identity(&claims, &tenant, "consent")?;
 
         // Cache under the *requested* `scopes` (not `auth_scopes`) so the next
         // silent acquisition for the same set hits this entry. `scope_key`
@@ -981,19 +596,8 @@ impl EntraAuthService {
             .await?;
 
         // Defense-in-depth (mirrors `consent_for_scopes`): a login screen can
-        // switch tenant/account even with a login_hint. Refuse to re-establish
-        // the session under a different identity — it would cross this tenant's
-        // data caches with another operator's view.
-        if claims.tid.as_deref() != Some(tenant.tenant_id.as_str()) {
-            return Err(AuthError::Authorization(
-                "re-authenticated for a different tenant — use Sign Out to switch".into(),
-            ));
-        }
-        if claims.oid.as_deref() != Some(tenant.account_oid.as_str()) {
-            return Err(AuthError::Authorization(
-                "re-authenticated as a different account — use Sign Out to switch".into(),
-            ));
-        }
+        // switch tenant/account even with a login_hint.
+        ensure_same_identity(&claims, tenant, "re-authentication")?;
 
         self.store_token_outcome(
             &tenant.tenant_id,
@@ -1026,84 +630,26 @@ impl EntraAuthService {
     }
 }
 
-fn open_system_browser(url: &str) -> Result<()> {
-    webbrowser::open(url)?;
+/// Refuses a token minted for a different identity than the session's. A
+/// consent/login screen can switch tenant or account even with a
+/// `login_hint`; caching such a token would cross this session's tenant-keyed
+/// data caches with another operator's view. One implementation for every
+/// interactive post-sign-in flow, so a future one can't check `tid` but
+/// forget `oid`. (`sign_in` has a different contract — a tid-only match
+/// against the *configured* tenant — and stays separate.) `action` names the
+/// flow in the error ("consent", "re-authentication").
+fn ensure_same_identity(claims: &IdClaims, tenant: &TenantContext, action: &str) -> Result<()> {
+    if claims.tid.as_deref() != Some(tenant.tenant_id.as_str()) {
+        return Err(AuthError::Authorization(format!(
+            "{action} completed for a different tenant — use Sign Out to switch"
+        )));
+    }
+    if claims.oid.as_deref() != Some(tenant.account_oid.as_str()) {
+        return Err(AuthError::Authorization(format!(
+            "{action} completed with a different account — use Sign Out to switch"
+        )));
+    }
     Ok(())
-}
-
-/// Base64-decodes a CAE `claims=` challenge value, tolerating both the
-/// URL-safe (no-pad) and standard alphabets that different services emit.
-fn decode_claims_challenge(b64: &str) -> Option<Vec<u8>> {
-    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-    URL_SAFE_NO_PAD
-        .decode(b64)
-        .ok()
-        .or_else(|| STANDARD.decode(b64).ok())
-}
-
-/// Builds the `claims` request parameter for a CAE-capable token. It always
-/// advertises the `cp1` client capability (`xms_cc`) so Microsoft Graph issues a
-/// CAE token; when a base64 `challenge` from a `401 insufficient_claims` is
-/// supplied, its decoded claims are merged under `access_token` so the re-minted
-/// token also satisfies the resource's new requirement.
-fn build_cae_claims(challenge_b64: Option<&str>) -> String {
-    use serde_json::{Value, json};
-    let mut claims: Value = challenge_b64
-        .and_then(decode_claims_challenge)
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}));
-
-    let root = claims
-        .as_object_mut()
-        .expect("claims initialized as an object");
-    let access_token = root.entry("access_token").or_insert_with(|| json!({}));
-    if !access_token.is_object() {
-        *access_token = json!({});
-    }
-    access_token
-        .as_object_mut()
-        .expect("access_token is an object")
-        .insert("xms_cc".into(), json!({ "values": ["cp1"] }));
-    claims.to_string()
-}
-
-#[derive(Debug, Default)]
-struct IdClaims {
-    tid: Option<String>,
-    oid: Option<String>,
-    preferred_username: Option<String>,
-    name: Option<String>,
-    nonce: Option<String>,
-}
-
-/// Decodes the **claims** segment of an ID token *without verifying its
-/// signature* — it base64-decodes the middle JWT segment and reads fields.
-///
-/// Safe **only** because every call site feeds a token that arrived over TLS
-/// directly from Entra's `/token` endpoint, and the security-relevant claims
-/// (`nonce`, `tid`, `oid`) are re-bound to the request afterwards. Do NOT reuse
-/// this on a token from an untrusted source: it performs no signature, issuer,
-/// audience, or expiry validation.
-fn parse_id_token(id_token: Option<&str>) -> Result<IdClaims> {
-    let id_token =
-        id_token.ok_or_else(|| AuthError::TokenExchange("no id_token in response".into()))?;
-    let parts: Vec<&str> = id_token.split('.').collect();
-    if parts.len() < 2 {
-        return Err(AuthError::TokenExchange("malformed id_token".into()));
-    }
-    let decoded = URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .map_err(|e| AuthError::TokenExchange(format!("id_token b64 decode: {e}")))?;
-    let value: serde_json::Value = serde_json::from_slice(&decoded)?;
-    let claim = |key: &str| value.get(key).and_then(|v| v.as_str()).map(str::to_string);
-    Ok(IdClaims {
-        tid: claim("tid"),
-        oid: claim("oid"),
-        preferred_username: claim("preferred_username"),
-        name: claim("name"),
-        nonce: claim("nonce"),
-    })
 }
 
 #[cfg(test)]
@@ -1269,89 +815,6 @@ mod tests {
     }
 
     #[test]
-    fn read_scopes_are_read_only_with_offline_access() {
-        let scopes = EntraAuthService::new("c", "t").default_graph_read_scopes();
-        assert!(scopes.iter().any(|s| s == "offline_access"));
-        assert!(
-            scopes
-                .iter()
-                .any(|s| s == "https://graph.microsoft.com/Directory.Read.All")
-        );
-        assert!(
-            !scopes.iter().any(|s| s.contains("ReadWrite")),
-            "sign-in must not request any write scope"
-        );
-    }
-
-    #[test]
-    fn write_scopes_cover_mutations() {
-        let scopes = EntraAuthService::new("c", "t").default_graph_write_scopes();
-        assert!(scopes.iter().any(|s| s == "offline_access"));
-        for perm in [
-            "Application.ReadWrite.All",
-            "AppRoleAssignment.ReadWrite.All",
-            "DelegatedPermissionGrant.ReadWrite.All",
-        ] {
-            assert!(
-                scopes
-                    .iter()
-                    .any(|s| s == &format!("https://graph.microsoft.com/{perm}"))
-            );
-        }
-    }
-
-    #[test]
-    fn exchange_scopes_target_outlook_audience_with_offline_access() {
-        let scopes = EntraAuthService::new("c", "t").default_exchange_scopes();
-        assert!(
-            scopes
-                .iter()
-                .any(|s| s == "https://outlook.office365.com/Exchange.Manage")
-        );
-        assert!(scopes.iter().any(|s| s == "offline_access"));
-        // Must not leak any Graph scope into the Exchange token request.
-        assert!(!scopes.iter().any(|s| s.contains("graph.microsoft.com")));
-    }
-
-    #[test]
-    fn resource_default_scopes_appends_default_suffix() {
-        let scopes = EntraAuthService::resource_default_scopes("https://vault.azure.net");
-        assert!(
-            scopes
-                .iter()
-                .any(|s| s == "https://vault.azure.net/.default")
-        );
-        assert!(scopes.iter().any(|s| s == "offline_access"));
-    }
-
-    #[test]
-    fn parse_id_token_reads_tid_oid() {
-        let payload =
-            URL_SAFE_NO_PAD.encode(r#"{"tid":"t1","oid":"o1","name":"Alice","nonce":"n1"}"#);
-        let id_token = format!("header.{payload}.sig");
-        let claims = parse_id_token(Some(&id_token)).unwrap();
-        assert_eq!(claims.tid.as_deref(), Some("t1"));
-        assert_eq!(claims.oid.as_deref(), Some("o1"));
-        assert_eq!(claims.name.as_deref(), Some("Alice"));
-        assert_eq!(claims.nonce.as_deref(), Some("n1"));
-    }
-
-    #[test]
-    fn cae_claims_advertise_cp1_and_merge_challenge() {
-        // No challenge → just the cp1 client capability under access_token.
-        let v: serde_json::Value = serde_json::from_str(&build_cae_claims(None)).unwrap();
-        assert_eq!(v["access_token"]["xms_cc"]["values"][0], "cp1");
-
-        // A challenge's claims are preserved AND cp1 is added alongside.
-        let challenge = URL_SAFE_NO_PAD
-            .encode(r#"{"access_token":{"nbf":{"essential":true,"value":"1700000000"}}}"#);
-        let v: serde_json::Value =
-            serde_json::from_str(&build_cae_claims(Some(&challenge))).unwrap();
-        assert_eq!(v["access_token"]["nbf"]["value"], "1700000000");
-        assert_eq!(v["access_token"]["xms_cc"]["values"][0], "cp1");
-    }
-
-    #[test]
     fn authorize_url_contains_pkce_and_scopes() {
         let svc = EntraAuthService::new("client-id-xyz", "tenant-id-abc");
         let (challenge, _verifier) = PkceCodeChallenge::new_random_sha256();
@@ -1425,5 +888,42 @@ mod tests {
                 .unwrap()
                 .contains("https://management.azure.com/.default")
         );
+    }
+
+    #[test]
+    fn identity_mismatch_is_rejected_on_both_axes() {
+        let tenant = TenantContext {
+            tenant_id: "t1".into(),
+            account_oid: "o1".into(),
+            username: None,
+            display_name: None,
+        };
+        let ok = IdClaims {
+            tid: Some("t1".into()),
+            oid: Some("o1".into()),
+            ..Default::default()
+        };
+        assert!(ensure_same_identity(&ok, &tenant, "consent").is_ok());
+
+        // Wrong tenant, wrong account, and absent claims must all fail closed.
+        let wrong_tenant = IdClaims {
+            tid: Some("t2".into()),
+            oid: Some("o1".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            ensure_same_identity(&wrong_tenant, &tenant, "consent"),
+            Err(AuthError::Authorization(_))
+        ));
+        let wrong_account = IdClaims {
+            tid: Some("t1".into()),
+            oid: Some("o2".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            ensure_same_identity(&wrong_account, &tenant, "consent"),
+            Err(AuthError::Authorization(_))
+        ));
+        assert!(ensure_same_identity(&IdClaims::default(), &tenant, "consent").is_err());
     }
 }
