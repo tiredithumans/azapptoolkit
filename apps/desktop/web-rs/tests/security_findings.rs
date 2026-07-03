@@ -153,14 +153,22 @@ async fn groups_rank_by_impact_with_counts() {
 async fn fix_all_selects_only_application_rows() {
     let m = mount_security().await;
     m.session
+        .tenant_ui
         .audit_expanded_group
         .set(Some("orgwide_mailbox".to_string()));
     ts::wait_for(|| ts::body_contains("Fix all 1")).await;
     // The group holds 2 principals (app + SP) but only the app registration is
     // bulk-eligible — Fix all must seed exactly it.
     click_button("Fix all 1");
-    ts::wait_for(|| !m.session.selected_audit_ids.get_untracked().is_empty()).await;
-    let selected = m.session.selected_audit_ids.get_untracked();
+    ts::wait_for(|| {
+        !m.session
+            .tenant_ui
+            .selected_audit_ids
+            .get_untracked()
+            .is_empty()
+    })
+    .await;
+    let selected = m.session.tenant_ui.selected_audit_ids.get_untracked();
     assert!(selected.contains("obj-Mail App"));
     assert!(
         !selected.contains("obj-Foreign App"),
@@ -174,6 +182,7 @@ async fn group_bar_pairs_each_fix_with_its_own_rule() {
     let m = mount_security().await;
     // The redundant-permissions group offers RemoveRedundant…
     m.session
+        .tenant_ui
         .audit_expanded_group
         .set(Some("redundant_perms".to_string()));
     ts::wait_for(|| ts::body_contains("Fix all 1")).await;
@@ -183,11 +192,16 @@ async fn group_bar_pairs_each_fix_with_its_own_rule() {
     // …but the over-privileged (advisory) group must NOT — the old
     // audit_bulk_actions mapped a different rule's fix here.
     m.session
+        .tenant_ui
         .audit_expanded_group
         .set(Some("high_risk_perms".to_string()));
     ts::wait_for(|| !ts::body_contains("Remove redundant permissions")).await;
     assert!(
-        m.session.selected_audit_ids.get_untracked().is_empty(),
+        m.session
+            .tenant_ui
+            .selected_audit_ids
+            .get_untracked()
+            .is_empty(),
         "switching groups clears the shared selection"
     );
     // Selecting its row offers no bulk bar actions (advisory group).
@@ -197,7 +211,14 @@ async fn group_bar_pairs_each_fix_with_its_own_rule() {
         .expect("advisory group rows are still visible with checkboxes")
         .unchecked_into();
     checkbox.click();
-    ts::wait_for(|| !m.session.selected_audit_ids.get_untracked().is_empty()).await;
+    ts::wait_for(|| {
+        !m.session
+            .tenant_ui
+            .selected_audit_ids
+            .get_untracked()
+            .is_empty()
+    })
+    .await;
     assert!(
         !ts::body_contains("Remove redundant permissions"),
         "no cross-rule fix is offered on the advisory group"
@@ -238,6 +259,7 @@ async fn bulk_add_owner_flow_sends_the_picked_principal() {
     );
 
     m.session
+        .tenant_ui
         .audit_expanded_group
         .set(Some("ownership".to_string()));
     ts::wait_for(|| ts::body_contains("Fix all 2")).await;
@@ -281,6 +303,7 @@ async fn bulk_disable_sign_in_flow_runs_on_the_unused_group() {
     );
 
     m.session
+        .tenant_ui
         .audit_expanded_group
         .set(Some("unused".to_string()));
     ts::wait_for(|| ts::body_contains("Fix all 1")).await;
@@ -310,7 +333,11 @@ async fn home_drills_route_severity_to_apps_and_findings_to_groups() {
     m.session.open_posture_with_facet("ownership");
     assert_eq!(m.session.security_tab.get_untracked(), "findings");
     assert_eq!(
-        m.session.audit_expanded_group.get_untracked().as_deref(),
+        m.session
+            .tenant_ui
+            .audit_expanded_group
+            .get_untracked()
+            .as_deref(),
         Some("ownership")
     );
     ts::wait_for(|| ts::body_contains("Adding an owner is purely additive")).await;
@@ -320,7 +347,10 @@ async fn home_drills_route_severity_to_apps_and_findings_to_groups() {
     // (display:none) with its own tables still in the DOM.
     m.session.open_posture_with_facet("critical");
     assert_eq!(m.session.security_tab.get_untracked(), "apps");
-    assert_eq!(m.session.audit_severity.get_untracked(), "critical");
+    assert_eq!(
+        m.session.tenant_ui.audit_severity.get_untracked(),
+        "critical"
+    );
     ts::wait_for(|| {
         ts::query_all(".audit-apps-pane tbody tr").iter().any(|r| {
             r.text_content()

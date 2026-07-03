@@ -3,7 +3,7 @@
 //! A ranked, grouped list of finding categories (Defender-recommendations
 //! style): each group header shows its severity tone, affected-principal
 //! count, and a "Fix all" affordance; expanding (accordion, one at a time via
-//! `Session.audit_expanded_group`) reveals the affected principals with
+//! `Session.tenant_ui.audit_expanded_group`) reveals the affected principals with
 //! per-row Open/Fix actions, a per-group multi-select, and the shared
 //! `BulkActionBar` offering exactly the fix that pairs with the group's rule.
 //! Positive signals (already-scoped access) sit demoted in a collapsed
@@ -29,8 +29,8 @@ use super::{last_sign_in_cell, risk_class};
 pub(crate) fn FindingsPane() -> impl IntoView {
     let session = use_session();
     let ctrl = expect_context::<AuditController>();
-    let expanded = session.audit_expanded_group;
-    let selection = session.selected_audit_ids;
+    let expanded = session.tenant_ui.audit_expanded_group;
+    let selection = session.tenant_ui.selected_audit_ids;
 
     let groups = Memo::new(move |_| {
         ctrl.result

@@ -88,7 +88,7 @@ fn action_list() -> Vec<PaletteAction> {
         PaletteAction {
             label: "Open Cache",
             keywords: "tools debug cache diagnostics",
-            run: |s| s.cache_open.set(true),
+            run: |s| s.tenant_ui.cache_open.set(true),
         },
         PaletteAction {
             label: "Sign Out",
@@ -567,17 +567,17 @@ fn pick_hit(
     match selection {
         SelectionKind::AppReg => {
             session.set_view(ActiveView::Apps);
-            session.apps_search.set(name.clone());
+            session.tenant_ui.apps_search.set(name.clone());
             session.open_item(OpenItemKind::AppReg, id, name);
         }
         SelectionKind::EntApp => {
             session.set_view(ActiveView::EnterpriseApps);
-            session.enterprise_search.set(name.clone());
+            session.tenant_ui.enterprise_search.set(name.clone());
             session.open_item(OpenItemKind::Enterprise, id, name);
         }
         SelectionKind::Mi => {
             session.set_view(ActiveView::ManagedIdentities);
-            session.mi_search.set(name.clone());
+            session.tenant_ui.mi_search.set(name.clone());
             session.open_item(OpenItemKind::ManagedIdentity, id, name);
         }
     }

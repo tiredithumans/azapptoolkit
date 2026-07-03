@@ -26,6 +26,14 @@ the project adheres to
   (all import paths preserved via re-exports); the 2,700-line test monolith split
   into per-domain files. The two near-identical service-principal batch-prewarm
   functions now share one core, and the dead `GraphError::Url` variant was removed.
+- **The frontend's tenant-scoped UI state resets structurally on tenant switch.**
+  Every lifted search, facet, bulk selection, pending deep-link tab, and shell
+  dialog flag now lives in one `TenantScopedUi` substruct on `Session` whose
+  `reset()` sits directly under its field declarations, and `set_active_tenant`
+  resets the whole group in one call — previously each of ~18 fields had to be
+  remembered individually there, and two dialog flags had already been missed
+  (fixed in the prior release wave). A pinning test asserts every field returns
+  to its sentinel. No behavior change beyond that structural guarantee.
 
 ### Fixed
 
