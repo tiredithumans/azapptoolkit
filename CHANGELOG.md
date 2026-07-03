@@ -7,6 +7,29 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Azure Resource Manager paging now refuses off-origin `nextLink`s** before the
+  bearer token is attached — the same guard the Graph and Key Vault clients already
+  had. The origin check (including its embedded-credentials rejection, which the Key
+  Vault copy had missed) is now single-sourced in `azapptoolkit-core::net` so the
+  three clients can't drift again.
+- **Throttled one-shot scoped Graph calls (sync jobs, directory audits, sign-in
+  activity, claims-policy writes) now surface as `throttled`/retryable** instead of a
+  generic Graph error, so the UI's retry affordance and backoff messaging apply. The
+  one-shot transport still deliberately skips the retry loop.
+- **Key Vault secret reads can no longer leak the secret via `{:?}` debug
+  formatting** — `SecretValue` got the same redacted `Debug` its write-side twin
+  gained in v0.12.0.
+- **Interactive sign-in / consent / re-authenticate no longer block an async worker
+  on the OS-keyring write** (the silent-refresh path already ran it off-thread); the
+  four flows now share one post-token-exchange persistence helper.
+- **A dead session during DR backup/restore now offers the Re-authenticate toast
+  action** instead of a dead-end error banner (the DR view's hand-rolled handlers
+  bypassed the central error sink).
+- **Switching tenants closes the create-app dialog and SSO wizard** — previously a
+  tenant switch mid-dialog left the stale form floating over the new tenant's Home.
+
 ## [0.13.0] - 2026-07-03
 
 ### Changed
