@@ -55,12 +55,12 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
     // Search can seed it (picking a Managed Identity there lands the user here
     // with the list pre-filtered to that name). Mirrors the App Registration /
     // Enterprise Application lists.
-    let raw_search = session.mi_search;
+    let raw_search = session.tenant_ui.mi_search;
     let search = use_debounced(raw_search.into(), LIST_FILTER_DEBOUNCE_MS);
     // Facet chip over the loaded list (all | system | user | enabled | disabled),
     // lifted to the session (like the search above) so the Home dashboard's
     // Managed Identities metrics can seed it.
-    let mi_filter = session.mi_facet;
+    let mi_filter = session.tenant_ui.mi_facet;
 
     // Bumped by the Refresh button to force the identities list to re-evaluate.
     let list_reload = RwSignal::new(0_u32);

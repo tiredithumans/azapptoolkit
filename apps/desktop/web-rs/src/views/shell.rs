@@ -286,7 +286,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                         // Cache diagnostics inspector — sits directly above Sign Out
                         // in the user block. Reuses `nav_row_action` so it renders as
                         // a full-width `nav__item` matching the buttons around it.
-                        {nav_row_action("Cache", IconName::Activity, session.cache_open)}
+                        {nav_row_action("Cache", IconName::Activity, session.tenant_ui.cache_open)}
                         // Manual update check — pairs with the version readout
                         // below; opens the changelog splash if an update is found.
                         <button
@@ -350,8 +350,8 @@ pub fn AppShell(children: Children) -> impl IntoView {
                 <OpenItemsDock />
             </div>
             <CacheDiagnosticsDialog
-                open=Signal::derive(move || session.cache_open.get())
-                on_close=Callback::new(move |()| session.cache_open.set(false))
+                open=Signal::derive(move || session.tenant_ui.cache_open.get())
+                on_close=Callback::new(move |()| session.tenant_ui.cache_open.set(false))
             />
             <UpdateSplash open=update_open info=update_info />
             <ToastHost />
@@ -359,14 +359,14 @@ pub fn AppShell(children: Children) -> impl IntoView {
             // switches (create_open is a signal here, not local to Apps).
             <Show when=move || view.get() == ActiveView::Apps>
                 {move || {
-                    let open = session.create_open.get();
+                    let open = session.tenant_ui.create_open.get();
                     if !open {
                         return ().into_any();
                     }
                     // Capture session by move into each closure so they stay 'static.
                     let on_close = Callback::new({
                         let session = session;
-                        move |()| session.create_open.set(false)
+                        move |()| session.tenant_ui.create_open.set(false)
                     });
                     let on_created_cb = Callback::new({
                         let session = session;
@@ -374,7 +374,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                     });
                     view! {
                         <CreateAppDialog
-                            open=Signal::derive(move || session.create_open.get())
+                            open=Signal::derive(move || session.tenant_ui.create_open.get())
                             on_close=on_close
                             on_created=on_created_cb
                         />
@@ -387,12 +387,12 @@ pub fn AppShell(children: Children) -> impl IntoView {
             // Enterprise Apps view, where it's launched.
             <Show when=move || view.get() == ActiveView::EnterpriseApps>
                 {move || {
-                    if !session.sso_wizard_open.get() {
+                    if !session.tenant_ui.sso_wizard_open.get() {
                         return ().into_any();
                     }
                     let on_close = Callback::new({
                         let session = session;
-                        move |()| session.sso_wizard_open.set(false)
+                        move |()| session.tenant_ui.sso_wizard_open.set(false)
                     });
                     let on_created_cb = Callback::new({
                         let session = session;
@@ -402,7 +402,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                     });
                     view! {
                         <SsoWizardDialog
-                            open=Signal::derive(move || session.sso_wizard_open.get())
+                            open=Signal::derive(move || session.tenant_ui.sso_wizard_open.get())
                             on_close=on_close
                             on_created=on_created_cb
                         />

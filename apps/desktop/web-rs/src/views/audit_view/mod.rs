@@ -37,7 +37,7 @@ use sort::SortCol;
 
 /// The ranked per-app audit table. Reads the shared scan from the
 /// [`AuditController`] context; its one filter dimension is the severity
-/// TabBar (`Session.audit_severity`, so Home's Critical/High/Medium drills
+/// TabBar (`Session.tenant_ui.audit_severity`, so Home's Critical/High/Medium drills
 /// seed it) intersected with the name/appId search. Finding-shaped filtering
 /// and remediation grouping live in the Findings pane — this table's bulk bar
 /// offers only the management set (Remove expired / Delete).
@@ -47,8 +47,8 @@ pub fn AuditAppsPane() -> impl IntoView {
     let ctrl = expect_context::<AuditController>();
     let result = ctrl.result;
 
-    let severity = session.audit_severity;
-    let selection = session.selected_audit_ids;
+    let severity = session.tenant_ui.audit_severity;
+    let selection = session.tenant_ui.selected_audit_ids;
     let search = RwSignal::new(String::new());
     // Column sort: `None` keeps the backend's risk-ranked order. `Some((col,
     // desc))` sorts the filtered indices by that column.

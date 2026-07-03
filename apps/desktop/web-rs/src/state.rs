@@ -68,80 +68,75 @@ pub struct OpenItem {
     pub title: String,
 }
 
+/// Every lifted search / facet / selection / dialog signal that would leak one
+/// tenant's context into the next if it survived a tenant switch — the
+/// front-end mirror of the backend's tenant-scoped-cache footgun. Grouped so
+/// the reset is structural: [`Self::reset`] lives DIRECTLY below the field
+/// declarations, and **every field added here must be reset in `reset()` —
+/// that adjacency is the point** (the old flat-on-`Session` shape relied on
+/// remembering to extend `set_active_tenant`, and drifted twice).
+///
+/// All fields are `Copy` `RwSignal`s, so this struct (and `Session`) stay
+/// `Copy`. Deliberately NOT here: state that must survive a tenant switch
+/// (`last_*_tab`, `security_tab`, reload bumps, toasts, `open_seq`) and the
+/// open-items working set (`open_items`/`shown_items` — reset in
+/// `set_active_tenant` next to their own footgun comment, but owned by
+/// `Session` because their helper API (`open_item`, `focus_item`, …) and the
+/// monotonic `open_seq` form one model).
 #[derive(Clone, Copy)]
-pub struct Session {
-    pub active_tenant: RwSignal<Option<TenantContext>>,
-    // The shared, cross-entity "working set": every item the admin has opened
-    // into the workspace dock, across all three list views. Modeled on the
-    // toast stack below (`Vec` + a monotonic `open_seq` id source, capped +
-    // drain-oldest). `shown_items` names the 1–2 currently displayed by id
-    // (left, right). Plain `RwSignal` (not `LocalStorage`) — `OpenItem` is
-    // `Send`, unlike `Toast`'s `Rc<dyn Fn()>` retry action. CROSS-TENANT
-    // FOOTGUN: both `open_items` and `shown_items` MUST reset in
-    // `set_active_tenant` (an open item from another tenant is stale + leaks).
-    pub open_items: RwSignal<Vec<OpenItem>>,
-    pub open_seq: RwSignal<u64>,
-    pub shown_items: RwSignal<Vec<u64>>,
+pub struct TenantScopedUi {
     // Per-list "Filter this list" query. Lifted to the session (rather than a
-    // local view signal) for two reasons: (1) the top-bar Global Search seeds it
-    // when a record is picked, so jumping to a record lands the user on a
-    // visibly-filtered list with that record's detail open; (2) it MUST be reset
-    // on tenant switch (see `set_active_tenant`) — a leftover filter from another
-    // tenant silently narrowing this tenant's list would be cross-tenant leakage.
+    // local view signal) so the top-bar Global Search can seed it when a record
+    // is picked — jumping to a record lands the user on a visibly-filtered list
+    // with that record's detail open.
     pub apps_search: RwSignal<String>,
     pub enterprise_search: RwSignal<String>,
     pub mi_search: RwSignal<String>,
-    // Facet selection for each surface the Home dashboard drills INTO, lifted to
-    // the session for the same two reasons as the searches above: (1) a metric
-    // click seeds it via `open_*_with_facet` so the destination lands pre-filtered
-    // to that subset; (2) it MUST reset on tenant switch (see `set_active_tenant`)
-    // — a leftover facet silently narrowing the next tenant's list would be
-    // cross-tenant leakage. Defaults are each surface's "show all" sentinel
-    // ("all"). The App Registrations list keeps a local facet — no metric drills
-    // into it (its card's secret/cert counts have no matching facet).
+    // Facet selection for each surface the Home dashboard drills INTO: a metric
+    // click seeds it via `open_*_with_facet` so the destination lands
+    // pre-filtered to that subset. Defaults are each surface's "show all"
+    // sentinel ("all"). The App Registrations list keeps a local facet — no
+    // metric drills into it (its card's secret/cert counts have no matching
+    // facet).
     pub enterprise_facet: RwSignal<String>,
     pub mi_facet: RwSignal<String>,
-    // The All-apps audit pane's ONE filter dimension (risk severity). Lifted +
-    // reset on tenant switch for the same cross-tenant-leakage reason as the
-    // other facets; Home's Critical/High/Medium drills seed it via
-    // `open_posture_with_facet`. (The old second dimension, `audit_finding`,
-    // is gone — finding-shaped browsing lives in the Findings pane's groups,
-    // driven by `audit_expanded_group` below.)
+    // The All-apps audit pane's ONE filter dimension (risk severity); Home's
+    // Critical/High/Medium drills seed it via `open_posture_with_facet`. (The
+    // old second dimension, `audit_finding`, is gone — finding-shaped browsing
+    // lives in the Findings pane's groups, driven by `audit_expanded_group`
+    // below.)
     pub audit_severity: RwSignal<String>,
     // Which finding group the Findings pane has expanded (accordion — one at a
     // time; `None` = all collapsed). Holds a `groups::GROUP_CATALOG` key.
-    // Lifted so Home's finding drills land with the right group open, and MUST
-    // reset on tenant switch (a stale expansion would leak the prior tenant's
-    // context into the next tenant's findings).
+    // Lifted so Home's finding drills land with the right group open.
     pub audit_expanded_group: RwSignal<Option<String>>,
     pub credentials_facet: RwSignal<String>,
     // One-shot "open the filter drawer on arrival" flag. The Enterprise list's
     // facet chips live in a drawer collapsed by default, so a drill would land
-    // filtered with the active chip hidden; `open_enterprise_with_facet` sets this
-    // and the list consumes it once to expand the drawer (MI shows its chips
-    // unconditionally and the audit/credentials surfaces show tabs, so neither
-    // needs this). Reset on tenant switch with the facets.
+    // filtered with the active chip hidden; `open_enterprise_with_facet` sets
+    // this and the list consumes it once to expand the drawer (MI shows its
+    // chips unconditionally and the audit/credentials surfaces show tabs, so
+    // neither needs this).
     pub pending_open_filters: RwSignal<bool>,
-    pub view: RwSignal<ActiveView>,
-    // Multi-select set of application object ids — distinct from the workspace's
-    // open-items working set; this set is what the bulk-actions dialog operates on.
+    // Multi-select set of application object ids — distinct from the
+    // workspace's open-items working set; this set is what the bulk-actions
+    // dialog operates on.
     pub selected_app_ids: RwSignal<HashSet<String>>,
     // Separate multi-select set for the Security Audit table's inline bulk bar.
-    // Kept distinct from `selected_app_ids` so checking rows in the audit doesn't
-    // surface a stale selection in the App Registrations list (and vice versa) —
-    // both hold app-registration object ids but they're independent working sets.
-    // Reset on tenant switch alongside `selected_app_ids`.
+    // Kept distinct from `selected_app_ids` so checking rows in the audit
+    // doesn't surface a stale selection in the App Registrations list (and vice
+    // versa) — both hold app-registration object ids but they're independent
+    // working sets.
     pub selected_audit_ids: RwSignal<HashSet<String>>,
-    // Bumped to force the app-registrations list to refetch — e.g. after a
-    // bulk delete / remove-expired sweep invalidates the backend cache.
-    pub apps_reload: RwSignal<u32>,
-    // Enterprise-app reload bump (analogous to `apps_reload`).
-    pub enterprise_apps_reload: RwSignal<u32>,
-    // Bumped when a security audit completes, so surfaces that cache the audit
-    // result independently of the audit view — chiefly the Home dashboard's
-    // "Security Posture" tile, which stays mounted (keep-alive) across view
-    // switches — refetch the freshly cached run instead of showing stale state.
-    pub audit_reload: RwSignal<u32>,
+    // Deep-link target tab for the app detail pane. Set by `open_app_on_tab`
+    // (e.g. the credential dashboard's "Open" action) and consumed once by the
+    // detail pane on mount so it opens directly on that tab instead of
+    // Overview.
+    pub pending_app_tab: RwSignal<Option<String>>,
+    // Same deep-link mechanism for the enterprise-app detail pane (e.g. a
+    // consent-grant "Open" jumping straight to its Permissions tab). Consumed
+    // once by the enterprise pane on mount.
+    pub pending_enterprise_tab: RwSignal<Option<String>>,
     // Shell-owned tool dialog flag. Lifted here so the dialog can be mounted by
     // the persistent shell and triggered from the nav rail no matter which view
     // is on screen. (Key Vault and Bulk actions are now pages — ActiveView
@@ -154,14 +149,86 @@ pub struct Session {
     // `create_open`) so it survives view switches and is triggered from the
     // Enterprise Apps view header.
     pub sso_wizard_open: RwSignal<bool>,
-    // Deep-link target tab for the app detail pane. Set by `open_app_on_tab`
-    // (e.g. the credential dashboard's "Open" action) and consumed once by the
-    // detail pane on mount so it opens directly on that tab instead of Overview.
-    pub pending_app_tab: RwSignal<Option<String>>,
-    // Same deep-link mechanism for the enterprise-app detail pane (e.g. a
-    // consent-grant "Open" jumping straight to its Permissions tab). Consumed
-    // once by the enterprise pane on mount.
-    pub pending_enterprise_tab: RwSignal<Option<String>>,
+}
+
+impl TenantScopedUi {
+    fn new() -> Self {
+        Self {
+            apps_search: RwSignal::new(String::new()),
+            enterprise_search: RwSignal::new(String::new()),
+            mi_search: RwSignal::new(String::new()),
+            enterprise_facet: RwSignal::new(String::from("all")),
+            mi_facet: RwSignal::new(String::from("all")),
+            audit_severity: RwSignal::new(String::from("all")),
+            audit_expanded_group: RwSignal::new(None),
+            credentials_facet: RwSignal::new(String::from("all")),
+            pending_open_filters: RwSignal::new(false),
+            selected_app_ids: RwSignal::new(HashSet::new()),
+            selected_audit_ids: RwSignal::new(HashSet::new()),
+            pending_app_tab: RwSignal::new(None),
+            pending_enterprise_tab: RwSignal::new(None),
+            cache_open: RwSignal::new(false),
+            create_open: RwSignal::new(false),
+            sso_wizard_open: RwSignal::new(false),
+        }
+    }
+
+    /// Reset every field to its "show all"/empty/closed sentinel. Called by
+    /// `Session::set_active_tenant` — a leftover search, facet, selection,
+    /// pending deep-link, or open dialog from another tenant silently applied
+    /// to the next tenant's data is cross-tenant leakage (this repo's #1
+    /// footgun). Every field declared above MUST have a line here; the
+    /// `tenant_switch_resets_every_tenant_scoped_field` test pins it.
+    pub fn reset(&self) {
+        self.apps_search.set(String::new());
+        self.enterprise_search.set(String::new());
+        self.mi_search.set(String::new());
+        self.enterprise_facet.set(String::from("all"));
+        self.mi_facet.set(String::from("all"));
+        self.audit_severity.set(String::from("all"));
+        self.audit_expanded_group.set(None);
+        self.credentials_facet.set(String::from("all"));
+        self.pending_open_filters.set(false);
+        self.selected_app_ids.update(HashSet::clear);
+        self.selected_audit_ids.update(HashSet::clear);
+        self.pending_app_tab.set(None);
+        self.pending_enterprise_tab.set(None);
+        self.cache_open.set(false);
+        self.create_open.set(false);
+        self.sso_wizard_open.set(false);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Session {
+    pub active_tenant: RwSignal<Option<TenantContext>>,
+    // The shared, cross-entity "working set": every item the admin has opened
+    // into the workspace dock, across all three list views. Modeled on the
+    // toast stack below (`Vec` + a monotonic `open_seq` id source, capped +
+    // drain-oldest). `shown_items` names the 1–2 currently displayed by id
+    // (left, right). Plain `RwSignal` (not `LocalStorage`) — `OpenItem` is
+    // `Send`, unlike `Toast`'s `Rc<dyn Fn()>` retry action. CROSS-TENANT
+    // FOOTGUN: both `open_items` and `shown_items` MUST reset in
+    // `set_active_tenant` (an open item from another tenant is stale + leaks).
+    // They live on `Session` (not `TenantScopedUi`) because the working-set
+    // helpers + monotonic `open_seq` form one model.
+    pub open_items: RwSignal<Vec<OpenItem>>,
+    pub open_seq: RwSignal<u64>,
+    pub shown_items: RwSignal<Vec<u64>>,
+    // Every tenant-scoped search/facet/selection/dialog signal, grouped so the
+    // tenant-switch reset is structural — see the type's doc for the invariant.
+    pub tenant_ui: TenantScopedUi,
+    pub view: RwSignal<ActiveView>,
+    // Bumped to force the app-registrations list to refetch — e.g. after a
+    // bulk delete / remove-expired sweep invalidates the backend cache.
+    pub apps_reload: RwSignal<u32>,
+    // Enterprise-app reload bump (analogous to `apps_reload`).
+    pub enterprise_apps_reload: RwSignal<u32>,
+    // Bumped when a security audit completes, so surfaces that cache the audit
+    // result independently of the audit view — chiefly the Home dashboard's
+    // "Security Posture" tile, which stays mounted (keep-alive) across view
+    // switches — refetch the freshly cached run instead of showing stale state.
+    pub audit_reload: RwSignal<u32>,
     // Last-viewed detail tab per resource type, so switching between items keeps
     // the admin's working tab (e.g. stay on Permissions across apps) instead of
     // snapping back to Overview. A deep-link via `pending_app_tab` overrides it.
@@ -191,36 +258,15 @@ impl Session {
         // repo's #1 footgun). `open_seq` stays monotonic, like `toast_seq`.
         self.open_items.set(Vec::new());
         self.shown_items.set(Vec::new());
-        self.selected_app_ids.update(HashSet::clear);
-        self.selected_audit_ids.update(HashSet::clear);
-        // Clear per-list filters so a previous tenant's query never narrows the
-        // next tenant's list (cross-tenant leakage is this repo's #1 footgun).
-        self.apps_search.set(String::new());
-        self.enterprise_search.set(String::new());
-        self.mi_search.set(String::new());
-        // Reset the lifted facets to their "show all" sentinel for the same
-        // cross-tenant-leakage reason as the searches above (the App Registrations
-        // facet is local, so it rides its own view's lifecycle).
-        self.enterprise_facet.set(String::from("all"));
-        self.mi_facet.set(String::from("all"));
-        self.audit_severity.set(String::from("all"));
-        self.audit_expanded_group.set(None);
-        self.credentials_facet.set(String::from("all"));
-        self.pending_open_filters.set(false);
+        // Every lifted search/facet/selection/dialog signal resets structurally
+        // — membership and sentinels live on `TenantScopedUi` itself.
+        self.tenant_ui.reset();
         self.view.set(ActiveView::Home);
-        // Close ALL the shell-owned dialogs — a tenant switch mid-dialog would
-        // otherwise leave a stale form (create app / SSO wizard) floating over
-        // the new tenant's Home.
-        self.cache_open.set(false);
-        self.create_open.set(false);
-        self.sso_wizard_open.set(false);
-        self.pending_app_tab.set(None);
-        self.pending_enterprise_tab.set(None);
     }
 
     /// Toggle an application object id in the bulk-selection set.
     pub fn toggle_app_selected(&self, id: String) {
-        self.selected_app_ids.update(|ids| {
+        self.tenant_ui.selected_app_ids.update(|ids| {
             if !ids.remove(&id) {
                 ids.insert(id);
             }
@@ -230,19 +276,19 @@ impl Session {
     /// True if `id` is in the bulk-selection set — O(1) (a per-row checkbox
     /// re-evaluates this on every selection change).
     pub fn is_app_selected(&self, id: &str) -> bool {
-        self.selected_app_ids.with(|ids| ids.contains(id))
+        self.tenant_ui.selected_app_ids.with(|ids| ids.contains(id))
     }
 
     /// Clear the bulk-selection set.
     pub fn clear_app_selection(&self) {
-        self.selected_app_ids.update(HashSet::clear);
+        self.tenant_ui.selected_app_ids.update(HashSet::clear);
     }
 
     /// Toggle an application object id in the audit-table selection set (the
     /// audit's inline bulk bar operates on this, kept separate from
     /// `selected_app_ids`).
     pub fn toggle_audit_selected(&self, id: String) {
-        self.selected_audit_ids.update(|ids| {
+        self.tenant_ui.selected_audit_ids.update(|ids| {
             if !ids.remove(&id) {
                 ids.insert(id);
             }
@@ -251,12 +297,14 @@ impl Session {
 
     /// True if `id` is in the audit-table selection set — O(1).
     pub fn is_audit_selected(&self, id: &str) -> bool {
-        self.selected_audit_ids.with(|ids| ids.contains(id))
+        self.tenant_ui
+            .selected_audit_ids
+            .with(|ids| ids.contains(id))
     }
 
     /// Clear the audit-table selection set.
     pub fn clear_audit_selection(&self) {
-        self.selected_audit_ids.update(HashSet::clear);
+        self.tenant_ui.selected_audit_ids.update(HashSet::clear);
     }
 
     /// Force the app-registrations list to refetch.
@@ -401,7 +449,7 @@ impl Session {
     /// Open the Create-app dialog. (Lifted to the shell so it survives view
     /// switches.)
     pub fn open_create_app(&self) {
-        self.create_open.set(true);
+        self.tenant_ui.create_open.set(true);
     }
 
     /// Open an app registration in the workspace on a specific tab (e.g.
@@ -410,7 +458,7 @@ impl Session {
     /// `pending_app_tab` once on mount; the chip starts labelled with the id and
     /// the pane corrects it to the real name once it loads.
     pub fn open_app_on_tab(&self, object_id: String, tab: &str) {
-        self.pending_app_tab.set(Some(tab.to_string()));
+        self.tenant_ui.pending_app_tab.set(Some(tab.to_string()));
         self.view.set(ActiveView::Apps);
         self.open_item(OpenItemKind::AppReg, object_id.clone(), object_id);
     }
@@ -420,7 +468,9 @@ impl Session {
     /// delegated-permission finding straight to where it can be revoked. The
     /// enterprise pane consumes `pending_enterprise_tab` once on mount.
     pub fn open_enterprise_on_tab(&self, sp_object_id: String, tab: &str) {
-        self.pending_enterprise_tab.set(Some(tab.to_string()));
+        self.tenant_ui
+            .pending_enterprise_tab
+            .set(Some(tab.to_string()));
         self.view.set(ActiveView::EnterpriseApps);
         self.open_item(OpenItemKind::Enterprise, sp_object_id.clone(), sp_object_id);
     }
@@ -446,9 +496,9 @@ impl Session {
     /// list matches the clicked metric, and trips `pending_open_filters` so the
     /// list expands its (collapsed-by-default) drawer to show the active chip.
     pub fn open_enterprise_with_facet(&self, facet: &str) {
-        self.enterprise_facet.set(facet.to_string());
-        self.enterprise_search.set(String::new());
-        self.pending_open_filters.set(true);
+        self.tenant_ui.enterprise_facet.set(facet.to_string());
+        self.tenant_ui.enterprise_search.set(String::new());
+        self.tenant_ui.pending_open_filters.set(true);
         self.view.set(ActiveView::EnterpriseApps);
     }
 
@@ -457,8 +507,8 @@ impl Session {
     /// dashboard's Managed Identities metrics. (MI chips are always visible, so
     /// no drawer needs expanding.)
     pub fn open_managed_identities_with_facet(&self, facet: &str) {
-        self.mi_facet.set(facet.to_string());
-        self.mi_search.set(String::new());
+        self.tenant_ui.mi_facet.set(facet.to_string());
+        self.tenant_ui.mi_search.set(String::new());
         self.view.set(ActiveView::ManagedIdentities);
     }
 
@@ -472,17 +522,19 @@ impl Session {
     pub fn open_posture_with_facet(&self, facet: &str) {
         match facet {
             "critical" | "high" | "medium" | "low" => {
-                self.audit_severity.set(facet.to_string());
+                self.tenant_ui.audit_severity.set(facet.to_string());
                 self.open_security("apps");
             }
             "all" => {
-                self.audit_expanded_group.set(None);
+                self.tenant_ui.audit_expanded_group.set(None);
                 self.open_security("findings");
             }
             // Any other value is a finding-group key (unused, ownership,
             // orgwide_mailbox, …).
             _ => {
-                self.audit_expanded_group.set(Some(facet.to_string()));
+                self.tenant_ui
+                    .audit_expanded_group
+                    .set(Some(facet.to_string()));
                 self.open_security("findings");
             }
         }
@@ -494,7 +546,7 @@ impl Session {
     /// secret/cert), so the drilled count matches the clicked metric, unlike the
     /// per-app App Registrations credential facet.
     pub fn open_credentials_with_facet(&self, facet: &str) {
-        self.credentials_facet.set(facet.to_string());
+        self.tenant_ui.credentials_facet.set(facet.to_string());
         self.open_security("credentials");
     }
 
@@ -616,24 +668,9 @@ pub fn provide_session() {
         open_items: RwSignal::new(Vec::new()),
         open_seq: RwSignal::new(0),
         shown_items: RwSignal::new(Vec::new()),
-        apps_search: RwSignal::new(String::new()),
-        enterprise_search: RwSignal::new(String::new()),
-        mi_search: RwSignal::new(String::new()),
-        enterprise_facet: RwSignal::new(String::from("all")),
-        mi_facet: RwSignal::new(String::from("all")),
-        audit_severity: RwSignal::new(String::from("all")),
-        audit_expanded_group: RwSignal::new(None),
-        credentials_facet: RwSignal::new(String::from("all")),
-        pending_open_filters: RwSignal::new(false),
-        selected_app_ids: RwSignal::new(HashSet::new()),
-        selected_audit_ids: RwSignal::new(HashSet::new()),
+        tenant_ui: TenantScopedUi::new(),
         apps_reload: RwSignal::new(0),
         view: RwSignal::new(ActiveView::Home),
-        cache_open: RwSignal::new(false),
-        create_open: RwSignal::new(false),
-        sso_wizard_open: RwSignal::new(false),
-        pending_app_tab: RwSignal::new(None),
-        pending_enterprise_tab: RwSignal::new(None),
         last_app_tab: RwSignal::new(String::from("overview")),
         last_enterprise_tab: RwSignal::new(String::from("overview")),
         last_mi_tab: RwSignal::new(String::from("overview")),
@@ -701,18 +738,59 @@ mod tests {
     }
 
     #[test]
-    fn tenant_switch_closes_shell_dialogs() {
-        // A tenant switch mid-dialog must not leave a stale create-app form or
-        // SSO wizard floating over the new tenant's Home (same cross-tenant
-        // footgun as the lifted searches/facets).
+    fn tenant_switch_resets_every_tenant_scoped_field() {
+        // Pins the `TenantScopedUi` invariant: every field must return to its
+        // "show all"/empty/closed sentinel on tenant switch — a survivor is
+        // cross-tenant leakage (a stale search/facet silently narrowing the
+        // next tenant's list, a selection targeting the wrong tenant's apps, a
+        // create-app form or SSO wizard floating over the new tenant's Home).
+        // Adding a field to `TenantScopedUi` without a `reset()` line (and an
+        // assertion here) is the drift this structure exists to prevent.
         with_session(|session| {
-            session.cache_open.set(true);
-            session.create_open.set(true);
-            session.sso_wizard_open.set(true);
+            let ui = session.tenant_ui;
+            ui.apps_search.set("query".into());
+            ui.enterprise_search.set("query".into());
+            ui.mi_search.set("query".into());
+            ui.enterprise_facet.set("disabled".into());
+            ui.mi_facet.set("user".into());
+            ui.audit_severity.set("critical".into());
+            ui.audit_expanded_group.set(Some("ownership".into()));
+            ui.credentials_facet.set("expired".into());
+            ui.pending_open_filters.set(true);
+            ui.selected_app_ids.update(|s| {
+                s.insert("app-1".into());
+            });
+            ui.selected_audit_ids.update(|s| {
+                s.insert("app-2".into());
+            });
+            ui.pending_app_tab.set(Some("credentials".into()));
+            ui.pending_enterprise_tab.set(Some("permissions".into()));
+            ui.cache_open.set(true);
+            ui.create_open.set(true);
+            ui.sso_wizard_open.set(true);
+
             session.set_active_tenant(None);
-            assert!(!session.cache_open.get_untracked());
-            assert!(!session.create_open.get_untracked());
-            assert!(!session.sso_wizard_open.get_untracked());
+
+            assert_eq!(ui.apps_search.get_untracked(), "");
+            assert_eq!(ui.enterprise_search.get_untracked(), "");
+            assert_eq!(ui.mi_search.get_untracked(), "");
+            assert_eq!(ui.enterprise_facet.get_untracked(), "all");
+            assert_eq!(ui.mi_facet.get_untracked(), "all");
+            assert_eq!(ui.audit_severity.get_untracked(), "all");
+            assert_eq!(ui.audit_expanded_group.get_untracked(), None);
+            assert_eq!(ui.credentials_facet.get_untracked(), "all");
+            assert!(!ui.pending_open_filters.get_untracked());
+            ui.selected_app_ids
+                .with_untracked(|s| assert!(s.is_empty()));
+            ui.selected_audit_ids
+                .with_untracked(|s| assert!(s.is_empty()));
+            assert_eq!(ui.pending_app_tab.get_untracked(), None);
+            assert_eq!(ui.pending_enterprise_tab.get_untracked(), None);
+            assert!(!ui.cache_open.get_untracked());
+            assert!(!ui.create_open.get_untracked());
+            assert!(!ui.sso_wizard_open.get_untracked());
+            // And the Session-owned resets still happen alongside.
+            assert_eq!(session.view.get_untracked(), ActiveView::Home);
         });
     }
 

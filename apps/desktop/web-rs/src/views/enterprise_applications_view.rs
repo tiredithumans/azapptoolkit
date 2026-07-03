@@ -18,7 +18,7 @@ pub fn EnterpriseApplicationsView() -> impl IntoView {
                 <div class="view-header__actions">
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Primary)
-                        on_click=Box::new(move |_| session.sso_wizard_open.set(true))
+                        on_click=Box::new(move |_| session.tenant_ui.sso_wizard_open.set(true))
                     >
                         "+ New SSO application"
                     </Button>

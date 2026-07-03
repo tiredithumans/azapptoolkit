@@ -43,6 +43,14 @@ the project adheres to
   of a fabricated HTTP-200 API error. Key Vault dropped a dead transport parameter
   and its unused `SecretProperties` alias, and both the ARM and Key Vault paging
   loops gained a defensive page cap against self-referencing `nextLink`s.
+- **The frontend's tenant-scoped UI state resets structurally on tenant switch.**
+  Every lifted search, facet, bulk selection, pending deep-link tab, and shell
+  dialog flag now lives in one `TenantScopedUi` substruct on `Session` whose
+  `reset()` sits directly under its field declarations, and `set_active_tenant`
+  resets the whole group in one call — previously each of ~18 fields had to be
+  remembered individually there, and two dialog flags had already been missed
+  (fixed in the prior release wave). A pinning test asserts every field returns
+  to its sentinel. No behavior change beyond that structural guarantee.
 
 ### Fixed
 

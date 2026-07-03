@@ -2,7 +2,7 @@
 //!
 //! - **Selected apps** — the shared [`BulkActionBar`] (Grant consent / Remove
 //!   expired credentials / Delete) over the apps checked in the App
-//!   Registrations list (`session.selected_app_ids`). The bar is the single home
+//!   Registrations list (`session.tenant_ui.selected_app_ids`). The bar is the single home
 //!   of the bulk command-calling logic; this page just hosts it.
 //! - **Create apps** — a JSON form that ignores the selection.
 //!
@@ -243,7 +243,7 @@ pub fn BulkActionsView() -> impl IntoView {
                         // checked, including right after a run clears the selection.
                         view! {
                             <BulkActionBar
-                                selection=session.selected_app_ids
+                                selection=session.tenant_ui.selected_app_ids
                                 actions=Signal::derive(|| {
                                     vec![
                                         BulkAction::Grant,
@@ -253,7 +253,7 @@ pub fn BulkActionsView() -> impl IntoView {
                                 })
                                 on_done=on_done
                             />
-                            <Show when=move || session.selected_app_ids.with(|s| s.is_empty()) fallback=|| ()>
+                            <Show when=move || session.tenant_ui.selected_app_ids.with(|s| s.is_empty()) fallback=|| ()>
                                 <EmptyState
                                     icon=IconName::AppWindow
                                     title="No apps selected".to_string()

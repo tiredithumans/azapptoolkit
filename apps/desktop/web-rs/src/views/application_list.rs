@@ -43,7 +43,7 @@ pub fn ApplicationList() -> impl IntoView {
     // with the list pre-filtered to that name). Debounced, then applied in
     // memory over the loaded rows — like the other two lists, a keystroke
     // never re-enters Graph.
-    let raw_search = session.apps_search;
+    let raw_search = session.tenant_ui.apps_search;
     let search = use_debounced(raw_search.into(), LIST_FILTER_DEBOUNCE_MS);
 
     // Client-side filters over the loaded rows. "any" disables the credential
@@ -343,7 +343,7 @@ fn LoadedApps(
                 <SelectAllBar
                     count_label=count_label
                     visible_ids=visible_ids
-                    selected=session.selected_app_ids
+                    selected=session.tenant_ui.selected_app_ids
                 />
             }
         }}
@@ -352,7 +352,7 @@ fn LoadedApps(
         // remove expired creds / delete without leaving the list (the separate
         // Bulk Actions page remains for Create-apps).
         <BulkActionBar
-            selection=session.selected_app_ids
+            selection=session.tenant_ui.selected_app_ids
             actions=Signal::derive(|| {
                 vec![BulkAction::Grant, BulkAction::RemoveExpired, BulkAction::Delete]
             })

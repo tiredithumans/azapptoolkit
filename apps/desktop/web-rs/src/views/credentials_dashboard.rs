@@ -47,7 +47,7 @@ pub fn CredentialsDashboard() -> impl IntoView {
             ]
             // Lifted to the session so the Home Credential Health metrics can
             // deep-link straight to e.g. the Expired or ≤7-day rows.
-            facet=session.credentials_facet
+            facet=session.tenant_ui.credentials_facet
             headers=vec!["Application", "Type", "Credential", "Expires", "Status", ""]
             fetch=fetch
             export=export

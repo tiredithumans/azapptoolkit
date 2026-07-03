@@ -163,10 +163,11 @@ fn EnterpriseAppPanel(
     // and overrides the restored last-tab; consume it once so it doesn't pin
     // every later visit.
     let restored = session
+        .tenant_ui
         .pending_enterprise_tab
         .get_untracked()
         .unwrap_or_else(|| session.last_enterprise_tab.get_untracked());
-    session.pending_enterprise_tab.set(None);
+    session.tenant_ui.pending_enterprise_tab.set(None);
     // Clamp a stale persisted/deep-linked value to a live tab (e.g. the former
     // merged "insights" → Conditional Access) via the typed enum.
     let active_tab = RwSignal::new(EnterpriseTab::from_str(&restored).value().to_string());
