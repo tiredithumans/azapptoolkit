@@ -7,6 +7,29 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **The Security tab is now a findings-first workbench.** The old audit pane had three
+  competing controls for the same two filter signals — a severity tab bar, an 11-chip
+  finding drawer, and an 11-card clickable scorecard — with remediation buried per-row
+  in one big table. The redesign gives one clear path: a read-only posture strip
+  (severity counts + Run/Cancel/Export/progress/consent) above four sub-tabs.
+  **Findings** (the new default) is a ranked, grouped list of finding categories —
+  worst-impact first, healthy/scoped configurations demoted to a collapsed section —
+  where expanding a group shows the affected principals with per-row Open/Fix, a
+  multi-select, and a bulk bar offering exactly the fix that pairs with that group's
+  rule ("Fix all N" pre-selects every eligible app; typed confirmations and target
+  forms still gate execution). This also retires the old mismatch where the
+  Over-privileged filter offered the Remove-redundant bulk fix (a different rule) —
+  Redundant permissions now has its own group, and new group fixes cover ownership
+  (Add owner) and unused apps (Disable sign-in / Delete). **All apps** keeps the
+  ranked score table with a single severity filter + search for triage. Credential
+  expiry and Delegated grants stay as sibling tabs. Home's Security Posture card keeps
+  its metrics but now shares the workbench's count code (the numbers can never
+  disagree), and its drills route severity clicks to All apps and finding clicks to
+  the matching expanded group. Saved views for the audit were removed along with the
+  filter drawer (any stored `audit` saved views are simply ignored).
+
 ### Added
 
 - **Two new one-click audit remediations: "Add owner" and "Disable sign-in".** The

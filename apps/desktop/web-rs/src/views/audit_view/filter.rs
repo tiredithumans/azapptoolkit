@@ -80,6 +80,14 @@ pub(super) fn matches_finding(i: &AuditItem, finding: &str) -> bool {
             .issues
             .iter()
             .any(|x| x.starts_with(issue::ORG_WIDE_SHAREPOINT)),
+        // Rule 18 — held narrower permissions a broader held one already covers.
+        // Its own finding key (not folded into `high_risk_perms`) so the
+        // RemoveRedundant group/bulk action pairs with the rule it actually
+        // fixes.
+        "redundant_perms" => i
+            .issues
+            .iter()
+            .any(|x| x.starts_with(issue::REDUNDANT_APP_PERMS)),
         "scoped_sites" => i
             .issues
             .iter()
@@ -299,6 +307,10 @@ mod tests {
                 "scoped_sites",
             ),
             (format!("{} something", issue::NO_OWNERS), "ownership"),
+            (
+                format!("{} something", issue::REDUNDANT_APP_PERMS),
+                "redundant_perms",
+            ),
         ];
         let marker_findings = [
             "high_risk_perms",
@@ -308,6 +320,7 @@ mod tests {
             "orgwide_sharepoint",
             "scoped_sites",
             "ownership",
+            "redundant_perms",
         ];
         for (text, expect) in &cases {
             let item = with_issue(text.clone());

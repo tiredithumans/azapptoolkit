@@ -48,9 +48,14 @@ fn action_list() -> Vec<PaletteAction> {
             run: |s| s.set_view(ActiveView::ManagedIdentities),
         },
         PaletteAction {
-            label: "Go to Security audit",
-            keywords: "risk audit health posture security",
-            run: |s| s.open_security("posture"),
+            label: "Go to Security findings",
+            keywords: "risk audit health posture security findings",
+            run: |s| s.open_security("findings"),
+        },
+        PaletteAction {
+            label: "Go to Security — all audited apps",
+            keywords: "risk audit score table apps security",
+            run: |s| s.open_security("apps"),
         },
         PaletteAction {
             label: "Go to Credential expiry",

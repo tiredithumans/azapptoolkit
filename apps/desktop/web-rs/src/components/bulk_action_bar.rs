@@ -2,25 +2,31 @@
 //! ids.
 //!
 //! The **single home** of the selection-driven bulk command-calling logic: the
-//! Security Audit table, the App Registrations list, and the Bulk Actions page
-//! all mount this same component. The offered actions are configurable (the
-//! `actions` signal) so each host shows the right set — the audit surfaces the
-//! remediation matching its active finding filter (no Grant consent), while the
-//! App Registrations list / Bulk Actions page show the management set.
+//! Security workbench (one bar per expanded Findings group + the All-apps
+//! pane), the App Registrations list, and the Bulk Actions page all mount this
+//! same component. The offered actions are configurable (the `actions` signal)
+//! so each host shows the right set — a Findings group offers exactly the fix
+//! paired with its rule (no Grant consent on audit surfaces), while the App
+//! Registrations list / Bulk Actions page show the management set.
 //!
 //! Each action arms an inline panel before running: destructive ones (Remove
 //! expired, Delete) behind a typed REMOVE/DELETE confirmation, the scoping ones
-//! behind a small target form (mailbox groups / site URLs), reusing the same
-//! shapes as the per-row "Scope…" fixes. A live progress row + Cancel and a
-//! tone-coded result summary mirror the former tab-per-action page.
+//! behind a small target form (mailbox groups / site URLs) reusing the same
+//! shapes as the per-row "Scope…" fixes, Add-owner behind a directory-search
+//! picker, and Disable-sign-in behind a plain confirm (reversible). A live
+//! progress row + Cancel and a tone-coded result summary mirror the former
+//! tab-per-action page.
 
 use std::collections::HashSet;
 
+use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Input, Spinner, SpinnerSize, Textarea};
 
+use crate::bindings::applications;
 use crate::bindings::bulk;
 use crate::bindings::events;
+use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
 use crate::util::parse_lines;
@@ -35,13 +41,15 @@ pub struct BulkFailure {
 }
 
 /// The bulk operations a bar can offer. Hosts pass the subset they support.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BulkAction {
     Grant,
     RemoveExpired,
     RemoveRedundant,
     ScopeMailbox,
     ScopeSharePoint,
+    AddOwner,
+    DisableSignIn,
     Delete,
 }
 
@@ -53,6 +61,8 @@ impl BulkAction {
             BulkAction::RemoveRedundant => "Remove redundant permissions",
             BulkAction::ScopeMailbox => "Scope mailbox access",
             BulkAction::ScopeSharePoint => "Scope SharePoint access",
+            BulkAction::AddOwner => "Add owner",
+            BulkAction::DisableSignIn => "Disable sign-in",
             BulkAction::Delete => "Delete",
         }
     }
@@ -106,12 +116,36 @@ pub fn BulkActionBar(
     let groups_text = RwSignal::new(String::new());
     let sites_text = RwSignal::new(String::new());
     let sp_write = RwSignal::new(false);
+    // Add-owner picker state: a debounced directory search + the single picked
+    // principal `(id, label)`. Created here (not in the armed panel, which is
+    // rebuilt per arming) so the resource lives once per bar.
+    let owner_query = RwSignal::new(String::new());
+    let owner_pick: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+    let owner_query_debounced = use_debounced(owner_query.into(), 300);
+    let owner_candidates = LocalResource::new(move || {
+        let q = owner_query_debounced.get();
+        let tenant = session.active_tenant.get();
+        async move {
+            let q = q.trim().to_string();
+            if q.len() < 2 {
+                return Ok::<Vec<DirectoryObject>, String>(Vec::new());
+            }
+            let Some(t) = tenant else {
+                return Ok(Vec::new());
+            };
+            applications::search_users(&t.tenant_id, &q)
+                .await
+                .map_err(|e| e.message)
+        }
+    });
     Effect::new(move |_| {
         let _ = armed.get();
         confirm_text.set(String::new());
         groups_text.set(String::new());
         sites_text.set(String::new());
         sp_write.set(false);
+        owner_query.set(String::new());
+        owner_pick.set(None);
     });
     Effect::new(move |_| {
         let _ = actions.get();
@@ -124,8 +158,11 @@ pub fn BulkActionBar(
         Some(BulkAction::RemoveExpired) => confirm_text.get().trim() == "REMOVE",
         Some(BulkAction::Delete) => confirm_text.get().trim() == "DELETE",
         Some(BulkAction::RemoveRedundant) => true,
+        // Reversible (accountEnabled toggles back), so a plain confirm suffices.
+        Some(BulkAction::DisableSignIn) => true,
         Some(BulkAction::ScopeMailbox) => !parse_lines(&groups_text.get()).is_empty(),
         Some(BulkAction::ScopeSharePoint) => !parse_lines(&sites_text.get()).is_empty(),
+        Some(BulkAction::AddOwner) => owner_pick.with(Option::is_some),
         Some(BulkAction::Grant) | None => false,
     });
 
@@ -157,6 +194,11 @@ pub fn BulkActionBar(
             _ => {}
         }
         let role = if sp_write.get() { "write" } else { "read" }.to_string();
+        let principal_id = owner_pick.get().map(|(id, _)| id);
+        if action == BulkAction::AddOwner && principal_id.is_none() {
+            error.set(Some("Pick a user to add as owner.".into()));
+            return;
+        }
         busy.set(true);
         summary.set(None);
         failures.set(Vec::new());
@@ -197,6 +239,20 @@ pub fn BulkActionBar(
                         .map(|((s, f), c)| (s, f, c))
                         .map_err(|e| e.message)
                 }
+                BulkAction::AddOwner => {
+                    // Guarded non-None above; unwrap_or_default is unreachable.
+                    let principal_id = principal_id.unwrap_or_default();
+                    bulk::bulk_add_owner(tid, &ids, &principal_id)
+                        .await
+                        .map(|r| (parse_add_owner(r), false))
+                        .map(|((s, f), c)| (s, f, c))
+                        .map_err(|e| e.message)
+                }
+                BulkAction::DisableSignIn => bulk::bulk_disable_sign_in(tid, &ids)
+                    .await
+                    .map(|r| (parse_disable(r), false))
+                    .map(|((s, f), c)| (s, f, c))
+                    .map_err(|e| e.message),
                 BulkAction::Delete => bulk::bulk_delete_applications(tid, &ids)
                     .await
                     .map(|r| (parse_delete(r), true))
@@ -271,6 +327,9 @@ pub fn BulkActionBar(
                     groups_text,
                     sites_text,
                     sp_write,
+                    owner_query,
+                    owner_pick,
+                    owner_candidates,
                     confirm_ok,
                     armed,
                     busy,
@@ -355,6 +414,9 @@ struct ArmedPanel<R: Fn(BulkAction) + Copy + Send + Sync + 'static> {
     groups_text: RwSignal<String>,
     sites_text: RwSignal<String>,
     sp_write: RwSignal<bool>,
+    owner_query: RwSignal<String>,
+    owner_pick: RwSignal<Option<(String, String)>>,
+    owner_candidates: LocalResource<Result<Vec<DirectoryObject>, String>>,
     confirm_ok: Memo<bool>,
     armed: RwSignal<Option<BulkAction>>,
     busy: RwSignal<bool>,
@@ -373,6 +435,9 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
         groups_text,
         sites_text,
         sp_write,
+        owner_query,
+        owner_pick,
+        owner_candidates,
         confirm_ok,
         armed,
         busy,
@@ -407,6 +472,16 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
                 {move || format!("Convert the {} selected app(s)' org-wide SharePoint access to Sites.Selected on the sites below.", n())}
             </Body1>
         }.into_any(),
+        BulkAction::AddOwner => view! {
+            <Body1>
+                {move || format!("Add one user as an owner of the {} selected app(s). Purely additive — apps that already have this owner are skipped.", n())}
+            </Body1>
+        }.into_any(),
+        BulkAction::DisableSignIn => view! {
+            <Body1>
+                {move || format!("Disable sign-in for the {} selected app(s) by disabling their service principals. Reversible — re-enable anytime from the enterprise app's Overview.", n())}
+            </Body1>
+        }.into_any(),
         BulkAction::Grant => ().into_any(),
     };
 
@@ -439,7 +514,79 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
                 </label>
             </div>
         }.into_any(),
-        BulkAction::RemoveRedundant | BulkAction::Grant => ().into_any(),
+        BulkAction::AddOwner => {
+            // Debounced directory search; clicking a candidate picks them (one
+            // owner per run) and shows a "picked" line in place of the list.
+            view! {
+                <div class="bulk-action-bar__scope-form">
+                    {move || match owner_pick.get() {
+                        Some((_, label)) => view! {
+                            <div class="actions-row">
+                                <Body1>"Adding: "<strong>{label}</strong></Body1>
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                    on_click=Box::new(move |_| owner_pick.set(None))
+                                >
+                                    "Change"
+                                </Button>
+                            </div>
+                        }
+                            .into_any(),
+                        None => view! {
+                            <Input value=owner_query placeholder="Search users by name or UPN (min 2 chars)" />
+                            {move || {
+                                owner_candidates
+                                    .get()
+                                    .map(|res| match res {
+                                        Ok(users) if users.is_empty() => ().into_any(),
+                                        Ok(users) => view! {
+                                            <ul class="add-owner-candidates">
+                                                {users
+                                                    .into_iter()
+                                                    .map(|u| {
+                                                        let name = u
+                                                            .display_name
+                                                            .clone()
+                                                            .unwrap_or_else(|| "—".to_string());
+                                                        let upn = u.user_principal_name.clone().unwrap_or_default();
+                                                        let label = if upn.is_empty() {
+                                                            name.clone()
+                                                        } else {
+                                                            format!("{name} ({upn})")
+                                                        };
+                                                        let id = u.id.clone();
+                                                        view! {
+                                                            <li class="add-owner-candidates__row">
+                                                                <Button
+                                                                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                                    on_click=Box::new(move |_| {
+                                                                        owner_pick.set(Some((id.clone(), label.clone())))
+                                                                    })
+                                                                >
+                                                                    {name} " " <span class="muted">{upn}</span>
+                                                                </Button>
+                                                            </li>
+                                                        }
+                                                    })
+                                                    .collect_view()}
+                                            </ul>
+                                        }
+                                            .into_any(),
+                                        Err(e) => {
+                                            view! { <Body1 class="form-error">{e}</Body1> }.into_any()
+                                        }
+                                    })
+                            }}
+                        }
+                            .into_any(),
+                    }}
+                </div>
+            }
+            .into_any()
+        }
+        BulkAction::RemoveRedundant | BulkAction::DisableSignIn | BulkAction::Grant => {
+            ().into_any()
+        }
     };
 
     let confirm_label = match action {
@@ -447,6 +594,8 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
         BulkAction::RemoveRedundant => "Remove redundant",
         BulkAction::ScopeMailbox => "Scope mailbox",
         BulkAction::ScopeSharePoint => "Scope SharePoint",
+        BulkAction::AddOwner => "Add owner",
+        BulkAction::DisableSignIn => "Disable sign-in",
         BulkAction::Delete => "Delete",
         BulkAction::Grant => "Confirm",
     };
@@ -579,6 +728,51 @@ fn parse_scope(noun: &str, r: bulk::BulkScopeResult) -> (String, Vec<BulkFailure
     (
         format!(
             "Scoped {noun} access on {scoped} app(s); {} failed{}.",
+            fails.len(),
+            cancelled_suffix(r.cancelled)
+        ),
+        fails,
+    )
+}
+
+fn parse_add_owner(r: bulk::BulkAddOwnerResult) -> (String, Vec<BulkFailure>) {
+    let fails: Vec<BulkFailure> = r
+        .outcomes
+        .iter()
+        .filter_map(|o| {
+            o.error.as_ref().map(|e| BulkFailure {
+                label: o.object_id.clone(),
+                reason: e.clone(),
+            })
+        })
+        .collect();
+    let added = r.outcomes.iter().filter(|o| o.added).count();
+    let skipped = r.outcomes.iter().filter(|o| o.skipped).count();
+    (
+        format!(
+            "Added the owner to {added} app(s); {skipped} already had them; {} failed{}.",
+            fails.len(),
+            cancelled_suffix(r.cancelled)
+        ),
+        fails,
+    )
+}
+
+fn parse_disable(r: bulk::BulkDisableSignInResult) -> (String, Vec<BulkFailure>) {
+    let fails: Vec<BulkFailure> = r
+        .outcomes
+        .iter()
+        .filter_map(|o| {
+            o.error.as_ref().map(|e| BulkFailure {
+                label: o.object_id.clone(),
+                reason: e.clone(),
+            })
+        })
+        .collect();
+    let disabled = r.outcomes.len() - fails.len();
+    (
+        format!(
+            "Disabled sign-in for {disabled} app(s); {} failed{}. Re-enable anytime from the enterprise app's Overview.",
             fails.len(),
             cancelled_suffix(r.cancelled)
         ),

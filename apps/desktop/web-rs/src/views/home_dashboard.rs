@@ -3,7 +3,7 @@
 //! at a glance (credential expiry + security posture). Each card loads
 //! independently so the page renders immediately.
 
-use azapptoolkit_core::audit::{CredentialStatus, RiskLevel, issue};
+use azapptoolkit_core::audit::CredentialStatus;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 
@@ -12,6 +12,7 @@ use crate::bindings::{applications, audit, credentials, enterprise_application, 
 use crate::components::icon::{Icon, IconName};
 use crate::components::ui::SectionHeader;
 use crate::state::{ActiveView, use_session};
+use crate::views::audit_view::posture::posture_counts;
 
 #[component]
 pub fn HomeDashboard() -> impl IntoView {
@@ -342,35 +343,17 @@ pub fn HomeDashboard() -> impl IntoView {
                         {move || Suspend::new(async move {
                             match cached_audit.await {
                                 Some(r) => {
-                                    let crit = count_level(&r.items, RiskLevel::Critical);
-                                    let high = count_level(&r.items, RiskLevel::High);
-                                    let medium = count_level(&r.items, RiskLevel::Medium);
-                                    // Already-expired credentials — matches the audit's
-                                    // "Expired" finding (narrowed to expired, not expiring-soon).
-                                    let expired = r
-                                        .items
-                                        .iter()
-                                        .filter(|i| {
-                                            matches!(i.credential_status, CredentialStatus::Expired)
-                                        })
-                                        .count();
-                                    // High-risk application permissions — the audit's
-                                    // "Over-privileged" finding.
-                                    let over_privileged =
-                                        count_issue(&r.items, issue::HIGH_RISK_APP_PERMS);
-                                    let orgwide_mailbox =
-                                        count_issue(&r.items, issue::ORG_WIDE_MAILBOX);
-                                    let orgwide_sharepoint =
-                                        count_issue(&r.items, issue::ORG_WIDE_SHAREPOINT);
-                                    // Match the audit "Ownership" facet this metric drills into:
-                                    // apps with no owners OR a single owner (both are ownership
-                                    // risks; the two markers are disjoint, so the sum is exact).
-                                    let ownership = count_issue(&r.items, issue::NO_OWNERS)
-                                        + count_issue(&r.items, issue::SINGLE_OWNER);
-                                    // Structured flag set by the audit runner from the
-                                    // sign-in activity report — matches the audit view's
-                                    // "Unused" facet (no issue-text parsing).
-                                    let unused = r.items.iter().filter(|i| i.unused).count();
+                                    // One shared count source with the Security
+                                    // workbench's posture strip — the numbers
+                                    // here and there can never disagree.
+                                    let c = posture_counts(&r.items);
+                                    let (crit, high, medium) = (c.critical, c.high, c.medium);
+                                    let expired = c.expired;
+                                    let over_privileged = c.over_privileged;
+                                    let orgwide_mailbox = c.orgwide_mailbox;
+                                    let orgwide_sharepoint = c.orgwide_sharepoint;
+                                    let ownership = c.unowned;
+                                    let unused = c.unused;
                                     view! {
                                         <div class="dash-metrics">
                                             {metric_link(
@@ -435,7 +418,7 @@ pub fn HomeDashboard() -> impl IntoView {
                                         </div>
                                         <Button
                                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                            on_click=Box::new(move |_| session.open_security("posture"))
+                                            on_click=Box::new(move |_| session.open_security("findings"))
                                         >
                                             "Open security audit"
                                         </Button>
@@ -447,7 +430,7 @@ pub fn HomeDashboard() -> impl IntoView {
                                         <Body1>"No audit has been run yet."</Body1>
                                         <Button
                                             appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                            on_click=Box::new(move |_| session.open_security("posture"))
+                                            on_click=Box::new(move |_| session.open_security("findings"))
                                         >
                                             "Run a security audit"
                                         </Button>
@@ -531,15 +514,4 @@ fn metric_link(
         </button>
     }
     .into_any()
-}
-
-fn count_level(items: &[azapptoolkit_core::audit::AuditItem], level: RiskLevel) -> usize {
-    items.iter().filter(|i| i.risk_level == level).count()
-}
-
-fn count_issue(items: &[azapptoolkit_core::audit::AuditItem], prefix: &str) -> usize {
-    items
-        .iter()
-        .filter(|i| i.issues.iter().any(|x| x.starts_with(prefix)))
-        .count()
 }

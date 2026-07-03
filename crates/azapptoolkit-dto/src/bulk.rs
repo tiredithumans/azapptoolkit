@@ -126,3 +126,37 @@ pub struct BulkScopeResult {
     pub outcomes: Vec<BulkScopeOutcome>,
     pub cancelled: bool,
 }
+
+// ---------------- Bulk add owner ----------------
+
+/// One app's outcome from a bulk add-owner run. `skipped` = the principal was
+/// already an owner (re-resolved live), so nothing was written.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkOwnerOutcome {
+    pub object_id: String,
+    pub added: bool,
+    pub skipped: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkAddOwnerResult {
+    pub outcomes: Vec<BulkOwnerOutcome>,
+    pub cancelled: bool,
+}
+
+// ---------------- Bulk disable sign-in ----------------
+
+/// One app's outcome from a bulk disable-sign-in run. `error: None` = its
+/// service principal was disabled OK.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkDisableOutcome {
+    pub object_id: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkDisableSignInResult {
+    pub outcomes: Vec<BulkDisableOutcome>,
+    pub cancelled: bool,
+}
