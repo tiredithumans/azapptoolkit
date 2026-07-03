@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-03
+
 ### Changed
 
 - **The Security tab is now a findings-first workbench.** The old audit pane had three
