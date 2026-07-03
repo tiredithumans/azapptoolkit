@@ -26,6 +26,23 @@ the project adheres to
   (all import paths preserved via re-exports); the 2,700-line test monolith split
   into per-domain files. The two near-identical service-principal batch-prewarm
   functions now share one core, and the dead `GraphError::Url` variant was removed.
+- **The auth service is now a module directory** (`service/{wire,loopback,scopes}.rs` +
+  a ~900-line core): the AAD wire protocol (error classification/redaction, claims
+  decoding), the loopback redirect listener, and the per-feature scope catalog each
+  live in their own file. Pure code motion plus one shared `ensure_same_identity`
+  helper for the tid+oid cache-safety check `consent_for_scopes` and `reauthenticate`
+  previously duplicated. `AccessToken` also dropped its never-used serde derives, so
+  the memory-only token contract is now compiler-enforced.
+- **Exchange client restructured the same way** (no behavior change): the 1,136-line
+  `client.rs` split into `client/transport.rs` (envelope POST + retry loop with the
+  bodyless-403 diagnostics capture), `client/rbac.rs` (service principals, scopes,
+  role assignments, legacy AAP, verification), `client/groups.rs` (recipient groups
+  + the managed scope group + the OPATH filter builder), and `client/tests.rs`; the
+  four optional `Get-*` lookups now share one `first_optional_as` projection, and an
+  empty single-object cmdlet result is reported honestly as a protocol error instead
+  of a fabricated HTTP-200 API error. Key Vault dropped a dead transport parameter
+  and its unused `SecretProperties` alias, and both the ARM and Key Vault paging
+  loops gained a defensive page cap against self-referencing `nextLink`s.
 - **The frontend's tenant-scoped UI state resets structurally on tenant switch.**
   Every lifted search, facet, bulk selection, pending deep-link tab, and shell
   dialog flag now lives in one `TenantScopedUi` substruct on `Session` whose
@@ -37,6 +54,12 @@ the project adheres to
 
 ### Fixed
 
+- **Interactive sign-in no longer hangs when the browser opens a speculative
+  connection to the loopback listener.** The redirect listener previously accepted
+  exactly one connection and read one TCP segment; a browser preconnect or a stray
+  `/favicon.ico` probe could consume that slot and the real OAuth redirect was lost
+  until the 300s timeout. It now loops — non-redirect requests get a 404 — and reads
+  to the end of the request head instead of assuming a single segment.
 - **Azure Resource Manager paging now refuses off-origin `nextLink`s** before the
   bearer token is attached — the same guard the Graph and Key Vault clients already
   had. The origin check (including its embedded-credentials rejection, which the Key

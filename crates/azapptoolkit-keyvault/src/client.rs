@@ -71,12 +71,22 @@ impl KeyVaultClient {
     }
 
     pub async fn list_secrets(&self) -> Result<Vec<SecretItem>> {
+        // Defensive bound: a misbehaving server returning a self-referencing
+        // `nextLink` must not page forever (far above any real vault).
+        const MAX_PAGES: usize = 1000;
         let path = "/secrets".to_string();
-        let mut paged: Paged<SecretItem> = self.get_json(&path, true).await?;
+        let mut paged: Paged<SecretItem> = self.get_json(&path).await?;
         let mut out = paged.value;
+        let mut pages = 1usize;
         while let Some(link) = paged.next_link.take() {
+            if pages >= MAX_PAGES {
+                return Err(KeyVaultError::Protocol(format!(
+                    "secret listing exceeded {MAX_PAGES} pages; aborting"
+                )));
+            }
             paged = self.get_json_absolute(&link).await?;
             out.extend(paged.value);
+            pages += 1;
         }
         Ok(out)
     }
@@ -87,7 +97,7 @@ impl KeyVaultClient {
             Some(v) => format!("/secrets/{name}/{v}"),
             None => format!("/secrets/{name}"),
         };
-        self.get_json(&path, true).await
+        self.get_json(&path).await
     }
 
     pub async fn set_secret(&self, name: &str, req: &SecretSetRequest) -> Result<SecretValue> {
@@ -99,18 +109,12 @@ impl KeyVaultClient {
     pub async fn delete_secret(&self, name: &str) -> Result<()> {
         crate::validate::validate_secret_name(name)?;
         let path = format!("/secrets/{name}");
-        let _ = self.send_core(Method::DELETE, &path, true, None).await?;
+        let _ = self.send_core(Method::DELETE, &path, None).await?;
         Ok(())
     }
 
-    async fn get_json<T: DeserializeOwned>(
-        &self,
-        path: &str,
-        attach_api_version: bool,
-    ) -> Result<T> {
-        let bytes = self
-            .send_core(Method::GET, path, attach_api_version, None)
-            .await?;
+    async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let bytes = self.send_core(Method::GET, path, None).await?;
         serde_json::from_slice::<T>(&bytes).map_err(|e| KeyVaultError::Deserialize(e.to_string()))
     }
 
@@ -126,20 +130,20 @@ impl KeyVaultClient {
     {
         let value =
             serde_json::to_value(body).map_err(|e| KeyVaultError::Deserialize(e.to_string()))?;
-        let bytes = self.send_core(method, path, true, Some(value)).await?;
+        let bytes = self.send_core(method, path, Some(value)).await?;
         serde_json::from_slice::<T>(&bytes).map_err(|e| KeyVaultError::Deserialize(e.to_string()))
     }
 
+    /// Path-relative request: always appends the `api-version` query (only the
+    /// absolute `nextLink` path skips it — a link already carries its own).
     async fn send_core(
         &self,
         method: Method,
         path: &str,
-        attach_api_version: bool,
         body: Option<serde_json::Value>,
     ) -> Result<bytes::Bytes> {
         let url = format!("{}{}", self.base_url, path);
-        self.send_core_url(method, &url, attach_api_version, body, false)
-            .await
+        self.send_core_url(method, &url, true, body, false).await
     }
 
     /// Unified transport for both path-relative and absolute (`nextLink`)
