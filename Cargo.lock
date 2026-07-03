@@ -443,10 +443,8 @@ dependencies = [
 name = "azapptoolkit-permissions"
 version = "0.13.0"
 dependencies = [
- "azapptoolkit-core",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]
