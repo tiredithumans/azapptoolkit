@@ -38,7 +38,7 @@ pub struct SecretAttributes {
 }
 
 /// `GET /secrets/{name}` — full value included.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SecretValue {
     pub value: String,
     pub id: String,
@@ -48,6 +48,22 @@ pub struct SecretValue {
     pub content_type: Option<String>,
     #[serde(default)]
     pub tags: Option<std::collections::HashMap<String, String>>,
+}
+
+/// Manual impl so a stray `{:?}` can't log the secret value — the read-side
+/// twin of [`SecretSetRequest`]'s redacted Debug. (No zeroize-on-drop here:
+/// the value is moved into the IPC DTO the user asked to view, so a Drop impl
+/// would only forbid that field move without closing any real exposure.)
+impl std::fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretValue")
+            .field("value", &"<redacted>")
+            .field("id", &self.id)
+            .field("attributes", &self.attributes)
+            .field("content_type", &self.content_type)
+            .field("tags", &self.tags)
+            .finish()
+    }
 }
 
 /// Body for `PUT /secrets/{name}`. Only `value` is required; everything else
@@ -165,6 +181,17 @@ mod tests {
         let item: SecretItem =
             serde_json::from_str(r#"{"id":"https://v.vault.azure.net/secrets/foo"}"#).unwrap();
         assert_eq!(item.name(), Some("foo"));
+    }
+
+    #[test]
+    fn secret_value_debug_redacts_the_secret() {
+        let sv: SecretValue = serde_json::from_str(
+            r#"{"value":"s3cret-material","id":"https://v.vault.azure.net/secrets/foo/1"}"#,
+        )
+        .unwrap();
+        let dbg = format!("{sv:?}");
+        assert!(!dbg.contains("s3cret-material"), "leaked: {dbg}");
+        assert!(dbg.contains("<redacted>"));
     }
 
     #[test]
