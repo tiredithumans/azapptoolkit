@@ -172,3 +172,52 @@ pub async fn bulk_scope_sharepoint_access(
     )
     .await
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkAddOwnerArgs<'a> {
+    tenant_id: &'a str,
+    object_ids: &'a [String],
+    principal_id: &'a str,
+}
+
+/// Adds one directory principal as an owner of each selected app. Already-owner
+/// apps are reported `skipped` (the backend pre-reads live owners).
+pub async fn bulk_add_owner(
+    tenant_id: &str,
+    object_ids: &[String],
+    principal_id: &str,
+) -> Result<BulkAddOwnerResult, UiError> {
+    invoke_result(
+        "bulk_add_owner",
+        BulkAddOwnerArgs {
+            tenant_id,
+            object_ids,
+            principal_id,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkDisableSignInArgs<'a> {
+    tenant_id: &'a str,
+    object_ids: &'a [String],
+}
+
+/// Disables sign-in for each selected app (sets `accountEnabled: false` on its
+/// service principal) — reversible from the enterprise app's Overview toggle.
+pub async fn bulk_disable_sign_in(
+    tenant_id: &str,
+    object_ids: &[String],
+) -> Result<BulkDisableSignInResult, UiError> {
+    invoke_result(
+        "bulk_disable_sign_in",
+        BulkDisableSignInArgs {
+            tenant_id,
+            object_ids,
+        },
+    )
+    .await
+}

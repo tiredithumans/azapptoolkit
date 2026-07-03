@@ -254,11 +254,11 @@ success with every `DowngradeOutcome` flag `false`.
 
 ## Structured audit signals over issue-text parsing
 
-The audit view's facets/cards key off structured `AuditItem` fields (`risk_level`,
-`credential_status`, `unused`, `last_sign_in`, `sign_in_report_available`) rather than
-`starts_with(...)` on free-text issues — `score_one` populates the sign-in fields after
-`score_application` (which stays sign-in-agnostic, defaulting them). When adding a new facet/card,
-prefer a structured flag on `AuditItem` over matching an advisory string.
+The Security workbench's finding groups and filters key off structured `AuditItem` fields
+(`risk_level`, `credential_status`, `unused`, `last_sign_in`, `sign_in_report_available`) rather
+than `starts_with(...)` on free-text issues — `score_one` populates the sign-in fields after
+`score_application` (which stays sign-in-agnostic, defaulting them). When adding a new finding
+group or filter, prefer a structured flag on `AuditItem` over matching an advisory string.
 
 ## SP-only principals in the audit (no local application)
 
@@ -290,7 +290,7 @@ foreign-tenant (OIDC/multi-tenant) enterprise apps, managed identities, orphaned
   (`application` | `service_principal` | `managed_identity`, `#[serde(default)]` so pre-field
   cached runs deserialize as `Application`). For SP rows `object_id` is the **SP object id**.
 - **Frontend routing keys off `principal_kind`** (structured-signals rule): the `no_local_app`
-  finding chip; Open → enterprise / MI detail (`open_enterprise_on_tab` /
+  finding group; Open → enterprise / MI detail (`open_enterprise_on_tab` /
   `open_managed_identity_on_tab`); scope Fixes carry a `ScopeFixTarget` — `AppReg` rows call the
   `remediation::remediate_scope_*` wrappers (which `get_application` first), SP rows call the
   SP-only cores (`grant_managed_identity_scoped_exchange_access` /

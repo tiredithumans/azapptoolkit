@@ -1,9 +1,9 @@
-//! GUI tests for the Security-audit table's SP-only rows — principals scored
+//! GUI tests for the Security workbench's SP-only rows — principals scored
 //! without a local application object (foreign enterprise apps, managed
 //! identities, orphaned SPs). Pins the three behaviors that keep them safe and
 //! useful: they never enter the bulk selection (the bulk commands loop
-//! app-registration cores), the "No app registration" finding filters to them,
-//! and their scope Fix routes to the SP-only command instead of the
+//! app-registration cores), the "No local app registration" group collects
+//! them, and their scope Fix routes to the SP-only command instead of the
 //! app-registration remediation wrapper.
 #![cfg(target_arch = "wasm32")]
 
@@ -16,7 +16,7 @@ use azapptoolkit_core::audit::{
 };
 use azapptoolkit_dto::audit::AuditRunResult;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
-use azapptoolkit_web_rs::views::audit_view::AuditView;
+use azapptoolkit_web_rs::views::security_view::SecurityView;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
@@ -50,11 +50,12 @@ fn cached_run() -> AuditRunResult {
     }
 }
 
-async fn mount_audit() -> ts::Mounted {
+async fn mount_security() -> ts::Mounted {
     ts::reset();
     ts::mock_ok("get_cached_audit", &cached_run());
-    let m = ts::mount_view(|| view! { <AuditView /> });
-    ts::wait_for(|| ts::body_contains("Foreign App")).await;
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    // The Findings pane (default tab) renders group headers once hydrated.
+    ts::wait_for(|| ts::body_contains("Org-wide mailbox access")).await;
     m
 }
 
@@ -70,8 +71,10 @@ fn click_button(label: &str) {
 }
 
 #[wasm_bindgen_test]
-async fn sp_rows_are_excluded_from_selection() {
-    let m = mount_audit().await;
+async fn sp_rows_are_excluded_from_selection_on_the_apps_pane() {
+    let m = mount_security().await;
+    m.session.security_tab.set("apps".to_string());
+    ts::wait_for(|| !ts::query_all("tbody tr").is_empty()).await;
     // Only the app-registration row renders a checkbox; the SP row shows the
     // explanatory dash instead.
     assert_eq!(
@@ -95,29 +98,41 @@ async fn sp_rows_are_excluded_from_selection() {
 }
 
 #[wasm_bindgen_test]
-async fn no_local_app_finding_filters_to_sp_rows() {
-    let m = mount_audit().await;
-    assert_eq!(ts::query_all("tbody tr").len(), 2);
-    m.session.audit_finding.set("no_local_app".to_string());
-    ts::wait_for(|| ts::query_all("tbody tr").len() == 1).await;
-    let row = &ts::query_all("tbody tr")[0];
+async fn no_local_app_group_collects_sp_rows_without_checkboxes() {
+    let m = mount_security().await;
+    m.session
+        .audit_expanded_group
+        .set(Some("no_local_app".to_string()));
+    ts::wait_for(|| !ts::query_all("tbody tr").is_empty()).await;
+    let rows = ts::query_all("tbody tr");
+    assert_eq!(rows.len(), 1, "only the SP-only principal is in this group");
     assert!(
-        row.text_content()
+        rows[0]
+            .text_content()
             .unwrap_or_default()
             .contains("Foreign App"),
-        "the SP-only row survives the no_local_app finding filter"
+        "the SP-only row lands in the no_local_app group"
+    );
+    assert!(
+        ts::query_all("tbody input[type=checkbox]").is_empty(),
+        "SP rows render no checkbox even in an actionable group"
     );
 }
 
 #[wasm_bindgen_test]
 async fn sp_mailbox_fix_routes_to_the_sp_only_command() {
-    let _m = mount_audit().await;
+    let m = mount_security().await;
     ts::mock_ok(
         "grant_managed_identity_scoped_exchange_access",
         &fixtures::exchange_access_result(),
     );
+    // Expand the org-wide mailbox group; the SP row's Fix lives there (the app
+    // row carries no remediation in this fixture).
+    m.session
+        .audit_expanded_group
+        .set(Some("orgwide_mailbox".to_string()));
+    ts::wait_for(|| ts::body_contains("Scope 1 mailbox permission")).await;
 
-    // The SP row's Fix (the app row carries no remediation in this fixture).
     click_button("Scope 1 mailbox permission to specific mailboxes");
     ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
     ts::set_textarea_value(".modal textarea", "Sales Team");

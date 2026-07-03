@@ -258,9 +258,13 @@ pub fn audit_item(name: &str, risk: RiskLevel, issues: &[String]) -> AuditItem {
     }
 }
 
-/// A populated cached audit run spanning every severity + the main finding kinds
-/// (over-privileged, expired, org-wide mailbox/SharePoint, ownership, unused), so
-/// the Home posture tile and the Security audit facets all light up.
+/// A populated cached audit run spanning every severity + every finding group
+/// the Security workbench renders (expired, org-wide mailbox/SharePoint,
+/// redundant, ownership, unused, over-privileged, high-risk delegated,
+/// SP-only, and the scoped/healthy counterparts), so the Home posture tile and
+/// every findings group light up. Per-row Fix remediations are attached where
+/// the finding has one (the mutations stay unmocked in the demo and degrade to
+/// the demo-unsupported toast).
 pub fn audit_run_result() -> AuditRunResult {
     let mut over_privileged = audit_item(
         "Contoso CRM",
@@ -268,17 +272,72 @@ pub fn audit_run_result() -> AuditRunResult {
         &[format!("{} Mail.ReadWrite.All", issue::HIGH_RISK_APP_PERMS)],
     );
     over_privileged.credential_status = CredentialStatus::Expired;
+    over_privileged.remediations = vec![RemediationAction {
+        kind: RemediationKind::RemoveExpiredCredentials,
+        label: "Remove 1 expired credential".to_string(),
+        detail: "Removes: legacy-secret".to_string(),
+        targets: Vec::new(),
+    }];
 
-    let mailbox = audit_item(
+    let mut mailbox = audit_item(
         "Fabrikam Mail Sync",
         RiskLevel::High,
         &[issue::ORG_WIDE_MAILBOX.to_string()],
     );
-    let sharepoint = audit_item(
+    mailbox.remediations = vec![RemediationAction {
+        kind: RemediationKind::ScopeMailboxAccess,
+        label: "Scope 1 mailbox permission to specific mailboxes".to_string(),
+        detail: "Confines via Exchange RBAC: Mail.ReadWrite".to_string(),
+        targets: vec!["Mail.ReadWrite".to_string()],
+    }];
+    let mut sharepoint = audit_item(
         "Northwind SharePoint Bot",
         RiskLevel::High,
         &[issue::ORG_WIDE_SHAREPOINT.to_string()],
     );
+    sharepoint.remediations = vec![RemediationAction {
+        kind: RemediationKind::ScopeSharePointAccess,
+        label: "Restrict 1 SharePoint permission to selected sites".to_string(),
+        detail: "Converts to Sites.Selected: Sites.ReadWrite.All".to_string(),
+        targets: vec!["Sites.ReadWrite.All".to_string()],
+    }];
+    let mut redundant = audit_item(
+        "Trey Research Sync",
+        RiskLevel::Medium,
+        &[format!(
+            "{} Mail.Read (covered by Mail.ReadWrite)",
+            issue::REDUNDANT_APP_PERMS
+        )],
+    );
+    redundant.remediations = vec![RemediationAction {
+        kind: RemediationKind::RemoveRedundantPermissions,
+        label: "Remove 1 redundant permission".to_string(),
+        detail: "Removes: Mail.Read".to_string(),
+        targets: vec!["Mail.Read".to_string()],
+    }];
+    let delegated = audit_item(
+        "Woodgrove Portal",
+        RiskLevel::Medium,
+        &[format!(
+            "{} Directory.AccessAsUser.All",
+            issue::HIGH_RISK_DELEGATED_PERMS
+        )],
+    );
+    // A foreign-tenant enterprise app (no local app registration) — exercises
+    // the no_local_app group, its non-selectable rows, and the SP-only scope
+    // Fix routing.
+    let mut foreign_sp = audit_item(
+        "Fourth Coffee Connector",
+        RiskLevel::High,
+        &[format!("{} Mail.Read", issue::ORG_WIDE_MAILBOX)],
+    );
+    foreign_sp.principal_kind = AuditPrincipalKind::ServicePrincipal;
+    foreign_sp.remediations = vec![RemediationAction {
+        kind: RemediationKind::ScopeMailboxAccess,
+        label: "Scope 1 mailbox permission to specific mailboxes".to_string(),
+        detail: "Confines via Exchange RBAC: Mail.Read".to_string(),
+        targets: vec!["Mail.Read".to_string()],
+    }];
 
     let mut no_owners = audit_item(
         "Adventure Works API",
@@ -337,11 +396,14 @@ pub fn audit_run_result() -> AuditRunResult {
 
     AuditRunResult {
         tenant_id: "demo-tenant".to_string(),
-        total_apps: 12,
+        total_apps: 13,
         items: vec![
             over_privileged,
             mailbox,
             sharepoint,
+            redundant,
+            delegated,
+            foreign_sp,
             no_owners,
             single_owner,
             second_over,

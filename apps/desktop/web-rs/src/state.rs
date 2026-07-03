@@ -101,13 +101,19 @@ pub struct Session {
     // into it (its card's secret/cert counts have no matching facet).
     pub enterprise_facet: RwSignal<String>,
     pub mi_facet: RwSignal<String>,
-    // The security audit's filter is two INDEPENDENT, intersecting dimensions
-    // (filter = severity AND finding), so the single old `audit_facet` is split
-    // in two. Both are lifted + reset on tenant switch for the same
-    // cross-tenant-leakage reason as the other facets; `open_posture_with_facet`
-    // routes a Home-dashboard metric to whichever dimension it belongs to.
+    // The All-apps audit pane's ONE filter dimension (risk severity). Lifted +
+    // reset on tenant switch for the same cross-tenant-leakage reason as the
+    // other facets; Home's Critical/High/Medium drills seed it via
+    // `open_posture_with_facet`. (The old second dimension, `audit_finding`,
+    // is gone — finding-shaped browsing lives in the Findings pane's groups,
+    // driven by `audit_expanded_group` below.)
     pub audit_severity: RwSignal<String>,
-    pub audit_finding: RwSignal<String>,
+    // Which finding group the Findings pane has expanded (accordion — one at a
+    // time; `None` = all collapsed). Holds a `groups::GROUP_CATALOG` key.
+    // Lifted so Home's finding drills land with the right group open, and MUST
+    // reset on tenant switch (a stale expansion would leak the prior tenant's
+    // context into the next tenant's findings).
+    pub audit_expanded_group: RwSignal<Option<String>>,
     pub credentials_facet: RwSignal<String>,
     // One-shot "open the filter drawer on arrival" flag. The Enterprise list's
     // facet chips live in a drawer collapsed by default, so a drill would land
@@ -162,10 +168,10 @@ pub struct Session {
     pub last_app_tab: RwSignal<String>,
     pub last_enterprise_tab: RwSignal<String>,
     pub last_mi_tab: RwSignal<String>,
-    // Active sub-tab of the unified Security surface ("posture" | "credentials"
-    // | "grants"). Lifted to the session so the Home cards and command palette
-    // can deep-link straight to a sub-tab, and so the choice survives navigating
-    // away and back.
+    // Active sub-tab of the Security workbench ("findings" | "apps" |
+    // "credentials" | "grants"). Lifted to the session so the Home cards and
+    // command palette can deep-link straight to a sub-tab, and so the choice
+    // survives navigating away and back.
     pub security_tab: RwSignal<String>,
     // In-app toast stack + a monotonic id source. Rendered once by
     // `ToastHost` near the shell root; pushed via the helpers below.
@@ -198,7 +204,7 @@ impl Session {
         self.enterprise_facet.set(String::from("all"));
         self.mi_facet.set(String::from("all"));
         self.audit_severity.set(String::from("all"));
-        self.audit_finding.set(String::from("all"));
+        self.audit_expanded_group.set(None);
         self.credentials_facet.set(String::from("all"));
         self.pending_open_filters.set(false);
         self.view.set(ActiveView::Home);
@@ -379,9 +385,9 @@ impl Session {
         self.view.set(view);
     }
 
-    /// Navigate to the unified Security surface on a specific sub-tab
-    /// (`"posture"` | `"credentials"` | `"grants"`). Used by the Home cards and
-    /// command palette to deep-link past the default Posture tab.
+    /// Navigate to the Security workbench on a specific sub-tab (`"findings"`
+    /// | `"apps"` | `"credentials"` | `"grants"`). Used by the Home cards and
+    /// command palette to deep-link past the default Findings tab.
     pub fn open_security(&self, tab: &str) {
         self.security_tab.set(tab.to_string());
         self.view.set(ActiveView::Security);
@@ -451,33 +457,30 @@ impl Session {
         self.view.set(ActiveView::ManagedIdentities);
     }
 
-    /// Navigate to the Security surface's Posture (audit) sub-tab pre-filtered to
-    /// an audit facet (`"critical"` | `"high"` | `"ownership"` | `"unused"` | …).
-    /// Used by the Home dashboard's Security Posture metrics. The audit view
-    /// loads the cached run on mount, so the drilled facet lands on populated
-    /// data without re-running the scan.
-    ///
-    /// The audit filter is now two intersecting dimensions (severity + finding),
-    /// so route the single metric string to whichever dimension it names and
-    /// reset the other to "all" — a Home metric seeds exactly its own subset.
+    /// Drill from a Home "Security Posture" metric into the Security
+    /// workbench. Severity metrics (`"critical"` | `"high"` | `"medium"` |
+    /// `"low"`) land on the **All apps** pane with that severity filter set;
+    /// finding metrics (`"expired"`, `"ownership"`, `"orgwide_mailbox"`, …)
+    /// land on the **Findings** pane with that group expanded. The workbench
+    /// hydrates the cached run on mount, so the drill lands on populated data
+    /// without re-running the scan.
     pub fn open_posture_with_facet(&self, facet: &str) {
         match facet {
             "critical" | "high" | "medium" | "low" => {
                 self.audit_severity.set(facet.to_string());
-                self.audit_finding.set(String::from("all"));
+                self.open_security("apps");
             }
             "all" => {
-                self.audit_severity.set(String::from("all"));
-                self.audit_finding.set(String::from("all"));
+                self.audit_expanded_group.set(None);
+                self.open_security("findings");
             }
-            // Any other value is a finding-dimension facet (expiring, unused,
-            // ownership, orgwide_mailbox, …).
+            // Any other value is a finding-group key (unused, ownership,
+            // orgwide_mailbox, …).
             _ => {
-                self.audit_finding.set(facet.to_string());
-                self.audit_severity.set(String::from("all"));
+                self.audit_expanded_group.set(Some(facet.to_string()));
+                self.open_security("findings");
             }
         }
-        self.open_security("posture");
     }
 
     /// Navigate to the Security surface's Credential-expiry sub-tab pre-filtered
@@ -602,7 +605,7 @@ pub fn provide_session() {
         enterprise_facet: RwSignal::new(String::from("all")),
         mi_facet: RwSignal::new(String::from("all")),
         audit_severity: RwSignal::new(String::from("all")),
-        audit_finding: RwSignal::new(String::from("all")),
+        audit_expanded_group: RwSignal::new(None),
         credentials_facet: RwSignal::new(String::from("all")),
         pending_open_filters: RwSignal::new(false),
         selected_app_ids: RwSignal::new(HashSet::new()),
@@ -617,7 +620,7 @@ pub fn provide_session() {
         last_app_tab: RwSignal::new(String::from("overview")),
         last_enterprise_tab: RwSignal::new(String::from("overview")),
         last_mi_tab: RwSignal::new(String::from("overview")),
-        security_tab: RwSignal::new(String::from("posture")),
+        security_tab: RwSignal::new(String::from("findings")),
         enterprise_apps_reload: RwSignal::new(0),
         audit_reload: RwSignal::new(0),
         toasts: RwSignal::new_local(Vec::new()),

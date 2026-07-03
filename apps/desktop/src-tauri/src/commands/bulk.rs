@@ -27,8 +27,9 @@ use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
 use crate::dto::applications::CreateApplicationInput;
 use crate::dto::bulk::{
-    AppRemovalSummary, BulkCreateOutcome, BulkCreateResult, BulkCreateSpec, BulkDeleteFailure,
-    BulkDeleteResult, BulkGrantOutcome, BulkGrantResult, BulkProgress, BulkRemoveExpiredResult,
+    AppRemovalSummary, BulkAddOwnerResult, BulkCreateOutcome, BulkCreateResult, BulkCreateSpec,
+    BulkDeleteFailure, BulkDeleteResult, BulkDisableOutcome, BulkDisableSignInResult,
+    BulkGrantOutcome, BulkGrantResult, BulkOwnerOutcome, BulkProgress, BulkRemoveExpiredResult,
     BulkRemoveRedundantOutcome, BulkRemoveRedundantResult, BulkScopeOutcome, BulkScopeResult,
 };
 use crate::state::AppState;
@@ -722,6 +723,153 @@ pub async fn bulk_scope_sharepoint_access(
         },
     );
     Ok(BulkScopeResult {
+        outcomes,
+        cancelled: cancel.is_cancelled(),
+    })
+}
+
+/// Adds `principal_id` as an owner of each selected app. Reuses the same
+/// mutation as the per-app path (`add_application_owner`'s core), pre-reading
+/// each app's live owners so an existing owner is reported `skipped` instead of
+/// tripping Graph's already-an-owner 400. Sequential + cancel-aware (the
+/// selection is a small admin-chosen set); degrades to a per-app `error`. One
+/// detail-state invalidation after the loop covers detail + audit for every
+/// changed app (owners are on no list payload).
+#[tauri::command]
+pub async fn bulk_add_owner(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    tenant_id: String,
+    object_ids: Vec<String>,
+    principal_id: String,
+) -> Result<BulkAddOwnerResult, UiError> {
+    state.audit_cancel.reset();
+    let cancel = state.audit_cancel.clone();
+    let client = state.graph_for(&tenant_id);
+    let total = object_ids.len();
+    let mut outcomes = Vec::new();
+    let mut any_added = false;
+
+    for (i, object_id) in object_ids.into_iter().enumerate() {
+        if cancel.is_cancelled() {
+            break;
+        }
+        emit(
+            &app_handle,
+            BulkProgress {
+                done: i,
+                total,
+                current_app: Some(object_id.clone()),
+                cancelled: false,
+                in_flight_cap: None,
+            },
+        );
+        let outcome = match client.list_owners(&object_id).await {
+            Ok(owners) if owners.iter().any(|o| o.id == principal_id) => BulkOwnerOutcome {
+                object_id,
+                added: false,
+                skipped: true,
+                error: None,
+            },
+            Ok(_) => match client.add_owner(&object_id, &principal_id).await {
+                Ok(()) => {
+                    any_added = true;
+                    BulkOwnerOutcome {
+                        object_id,
+                        added: true,
+                        skipped: false,
+                        error: None,
+                    }
+                }
+                Err(e) => BulkOwnerOutcome {
+                    object_id,
+                    added: false,
+                    skipped: false,
+                    error: Some(UiError::from(e).message),
+                },
+            },
+            Err(e) => BulkOwnerOutcome {
+                object_id,
+                added: false,
+                skipped: false,
+                error: Some(UiError::from(e).message),
+            },
+        };
+        outcomes.push(outcome);
+    }
+
+    if any_added {
+        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
+    }
+    emit(
+        &app_handle,
+        BulkProgress {
+            done: total,
+            total,
+            current_app: None,
+            cancelled: cancel.is_cancelled(),
+            in_flight_cap: None,
+        },
+    );
+    Ok(BulkAddOwnerResult {
+        outcomes,
+        cancelled: cancel.is_cancelled(),
+    })
+}
+
+/// Disables sign-in for each selected (unused) app by looping the single-app
+/// remediation ([`remediation::remediate_disable_sign_in`]) so the SP
+/// resolution, reversibility semantics, and cache busting match the one-click
+/// fix. Sequential + cancel-aware; per-app `error` on failure (e.g. an app
+/// with no service principal).
+#[tauri::command]
+pub async fn bulk_disable_sign_in(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    tenant_id: String,
+    object_ids: Vec<String>,
+) -> Result<BulkDisableSignInResult, UiError> {
+    state.audit_cancel.reset();
+    let cancel = state.audit_cancel.clone();
+    let total = object_ids.len();
+    let mut outcomes = Vec::new();
+
+    for (i, object_id) in object_ids.into_iter().enumerate() {
+        if cancel.is_cancelled() {
+            break;
+        }
+        emit(
+            &app_handle,
+            BulkProgress {
+                done: i,
+                total,
+                current_app: Some(object_id.clone()),
+                cancelled: false,
+                in_flight_cap: None,
+            },
+        );
+        let error = super::remediation::remediate_disable_sign_in(
+            state.clone(),
+            tenant_id.clone(),
+            object_id.clone(),
+        )
+        .await
+        .err()
+        .map(|e| e.message);
+        outcomes.push(BulkDisableOutcome { object_id, error });
+    }
+
+    emit(
+        &app_handle,
+        BulkProgress {
+            done: total,
+            total,
+            current_app: None,
+            cancelled: cancel.is_cancelled(),
+            in_flight_cap: None,
+        },
+    );
+    Ok(BulkDisableSignInResult {
         outcomes,
         cancelled: cancel.is_cancelled(),
     })
