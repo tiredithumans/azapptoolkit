@@ -679,11 +679,6 @@ impl EntraAuthService {
             .oid
             .ok_or_else(|| AuthError::TokenExchange("id token missing oid".into()))?;
 
-        let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
-        // Initial sign-in: no requested-scope fallback (matches the original
-        // `unwrap_or_default`); the grant response always echoes `scope` here.
-        let scopes = parse_scopes(token.scope.as_deref(), &[]);
-
         let tenant = TenantContext {
             tenant_id: tenant_id.clone(),
             account_oid: account_oid.clone(),
@@ -691,21 +686,13 @@ impl EntraAuthService {
             display_name: claims.name,
         };
 
-        self.cache.put(
-            tenant_id.clone(),
-            &initial_scopes,
-            AccessToken {
-                token: token.access_token,
-                expires_at,
-                scopes,
-            },
-        );
+        // Initial sign-in: no requested-scope fallback (matches the original
+        // `unwrap_or_default`); the grant response always echoes `scope` here.
+        self.store_token_outcome(&tenant_id, &account_oid, &initial_scopes, &[], token)
+            .await?;
         self.known_tenants
             .lock()
             .insert(tenant_id.clone(), tenant.clone());
-        if let Some(refresh) = token.refresh_token {
-            save_refresh_token(&tenant_id, &account_oid, &refresh)?;
-        }
         Ok(SignInOutcome { tenant })
     }
 
@@ -756,24 +743,17 @@ impl EntraAuthService {
             ));
         }
 
-        let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
-        let issued_scopes = parse_scopes(token.scope.as_deref(), scopes);
-
-        if let Some(refresh) = token.refresh_token {
-            save_refresh_token(&tenant.tenant_id, &tenant.account_oid, &refresh)?;
-        }
         // Cache under the *requested* `scopes` (not `auth_scopes`) so the next
         // silent acquisition for the same set hits this entry. `scope_key`
         // canonicalizes, so order doesn't matter.
-        self.cache.put(
-            tenant_id.to_string(),
+        self.store_token_outcome(
+            &tenant.tenant_id,
+            &tenant.account_oid,
             scopes,
-            AccessToken {
-                token: token.access_token,
-                expires_at,
-                scopes: issued_scopes,
-            },
-        );
+            scopes,
+            token,
+        )
+        .await?;
         Ok(())
     }
 
@@ -819,6 +799,41 @@ impl EntraAuthService {
             .entry(key)
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone()
+    }
+
+    /// Shared tail of every token-yielding flow (`sign_in`,
+    /// `consent_for_scopes`, `reauthenticate`, `access_token_inner`): computes
+    /// expiry, parses the issued scopes (`scope_fallback` covers responses
+    /// that omit the `scope` echo), persists a rotated refresh token, and
+    /// seeds the access-token cache under `cache_scopes`. The keyring write is
+    /// a blocking OS syscall (Windows Credential Manager iterates numbered
+    /// chunk entries), so it runs off the async worker via `spawn_blocking` —
+    /// centralizing here is what keeps the interactive flows from stalling
+    /// other tokio tasks with an inline write.
+    async fn store_token_outcome(
+        &self,
+        tenant_id: &str,
+        account_oid: &str,
+        cache_scopes: &[String],
+        scope_fallback: &[String],
+        token: TokenResponse,
+    ) -> Result<AccessToken> {
+        let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
+        let scopes = parse_scopes(token.scope.as_deref(), scope_fallback);
+        if let Some(refresh) = token.refresh_token {
+            let (t, oid) = (tenant_id.to_string(), account_oid.to_string());
+            tokio::task::spawn_blocking(move || save_refresh_token(&t, &oid, &refresh))
+                .await
+                .map_err(|e| AuthError::Keyring(format!("keyring write task failed: {e}")))??;
+        }
+        let access = AccessToken {
+            token: token.access_token,
+            expires_at,
+            scopes,
+        };
+        self.cache
+            .put(tenant_id.to_string(), cache_scopes, access.clone());
+        Ok(access)
     }
 
     async fn access_token_inner(
@@ -901,24 +916,14 @@ impl EntraAuthService {
             Err(e) => return Err(e),
         };
 
-        let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
-        let issued_scopes = parse_scopes(token.scope.as_deref(), scopes);
-
-        if let Some(refresh) = token.refresh_token {
-            // Blocking keyring write — off the async worker (see the read above).
-            let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
-            tokio::task::spawn_blocking(move || save_refresh_token(&t, &oid, &refresh))
-                .await
-                .map_err(|e| AuthError::Keyring(format!("keyring write task failed: {e}")))??;
-        }
-        let access = AccessToken {
-            token: token.access_token,
-            expires_at,
-            scopes: issued_scopes,
-        };
-        self.cache
-            .put(tenant_id.to_string(), scopes, access.clone());
-        Ok(access)
+        self.store_token_outcome(
+            &tenant.tenant_id,
+            &tenant.account_oid,
+            scopes,
+            scopes,
+            token,
+        )
+        .await
     }
 
     pub async fn sign_out(&self, tenant: &TenantContext) -> Result<()> {
@@ -990,21 +995,14 @@ impl EntraAuthService {
             ));
         }
 
-        let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
-        let scopes = parse_scopes(token.scope.as_deref(), &initial_scopes);
-
-        if let Some(refresh) = token.refresh_token {
-            save_refresh_token(&tenant.tenant_id, &tenant.account_oid, &refresh)?;
-        }
-        self.cache.put(
-            tenant.tenant_id.clone(),
+        self.store_token_outcome(
+            &tenant.tenant_id,
+            &tenant.account_oid,
             &initial_scopes,
-            AccessToken {
-                token: token.access_token,
-                expires_at,
-                scopes,
-            },
-        );
+            &initial_scopes,
+            token,
+        )
+        .await?;
         // Restore the (validated) context: a prior `InvalidGrant` removed it, and
         // `tenants()` / consent lookups read `known_tenants`.
         self.known_tenants

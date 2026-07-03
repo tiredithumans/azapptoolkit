@@ -20,6 +20,7 @@ use azapptoolkit_core::http_retry::{
     BASE_DELAY_MS, MAX_RETRIES, next_backoff_ms, parse_retry_after_seconds, sleep_before_retry,
     sleep_with_jitter,
 };
+use azapptoolkit_core::net::same_origin;
 use azapptoolkit_core::token::BearerProvider;
 
 use crate::error::{GraphError, Result};
@@ -411,13 +412,13 @@ impl GraphClient {
         let status = resp.status();
         if !status.is_success() {
             let code = status.as_u16();
+            let retry_after = parse_retry_after_seconds(
+                resp.headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
+            );
             let body = resp.text().await.unwrap_or_default();
-            return Err(match code {
-                401 => GraphError::Unauthorized,
-                403 => GraphError::Forbidden(body),
-                404 => GraphError::NotFound(body),
-                _ => GraphError::Api { status: code, body },
-            });
+            return Err(map_error_status(code, body, retry_after));
         }
         let bytes = resp
             .bytes()
@@ -513,13 +514,13 @@ impl GraphClient {
         let status = resp.status();
         if !status.is_success() {
             let code = status.as_u16();
+            let retry_after = parse_retry_after_seconds(
+                resp.headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
+            );
             let body = resp.text().await.unwrap_or_default();
-            return Err(match code {
-                401 => GraphError::Unauthorized,
-                403 => GraphError::Forbidden(body),
-                404 => GraphError::NotFound(body),
-                _ => GraphError::Api { status: code, body },
-            });
+            return Err(map_error_status(code, body, retry_after));
         }
         resp.bytes()
             .await
@@ -1079,20 +1080,22 @@ fn parse_claims_challenge(www_authenticate: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-/// True when `candidate` has the same scheme/host/port as `base`. Used to
-/// reject `@odata.nextLink` values that point off the expected Graph origin
-/// before the bearer token is attached. Embedded credentials (`user:pass@host`)
-/// are rejected outright: `Url::origin()` ignores userinfo, so a link carrying
-/// it would otherwise pass the origin compare, and Graph never emits one.
-fn same_origin(base: &str, candidate: &str) -> bool {
-    match (url::Url::parse(base), url::Url::parse(candidate)) {
-        (Ok(b), Ok(c)) => {
-            if !c.username().is_empty() || c.password().is_some() {
-                return false;
-            }
-            b.origin() == c.origin()
-        }
-        _ => false,
+/// Maps a non-success status from the one-shot scoped transport
+/// ([`GraphClient::scoped_get`] / `scoped_send_core`) to the same typed error
+/// the retrying transport returns, so a throttled scoped call surfaces as
+/// [`GraphError::Throttled`] (ui code `throttled`, retryable) rather than a
+/// generic `Api`. Only the mapping is shared — the one-shot helpers still
+/// deliberately skip the retry/throttle loop.
+fn map_error_status(code: u16, body: String, retry_after: Option<u64>) -> GraphError {
+    match code {
+        401 => GraphError::Unauthorized,
+        403 => GraphError::Forbidden(body),
+        404 => GraphError::NotFound(body),
+        429 => GraphError::Throttled {
+            retry_after_secs: retry_after,
+        },
+        c if c >= 500 => GraphError::Server { status: c, body },
+        _ => GraphError::Api { status: code, body },
     }
 }
 

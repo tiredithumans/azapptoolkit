@@ -81,7 +81,13 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                 Err(e) if e.code == "cancelled" => {
                     session.toast_success("Backup cancelled.");
                 }
-                Err(e) => error.set(Some(e.message)),
+                // A dead session mid-backup gets the Re-authenticate toast
+                // action (not a dead-end banner); other errors keep the banner.
+                Err(e) => {
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(e.message));
+                    }
+                }
             }
             busy.set(false);
             progress.set(None);
@@ -98,10 +104,16 @@ pub fn DisasterRecoveryView() -> impl IntoView {
         };
         leptos::task::spawn_local(async move {
             match backup::save_backup_to_file(&b, "json").await {
-                Ok(Some(path)) => session.toast_success(format!("Backup saved to {path}")),
-                Ok(None) => 0,
-                Err(e) => session.toast_error(format!("Couldn't save backup: {}", e.message), None),
-            };
+                Ok(Some(path)) => {
+                    session.toast_success(format!("Backup saved to {path}"));
+                }
+                Ok(None) => {} // dialog cancelled
+                Err(e) => {
+                    if !session.report_if_session_dead(&e) {
+                        session.toast_error(format!("Couldn't save backup: {}", e.message), None);
+                    }
+                }
+            }
         });
     };
 
@@ -119,10 +131,18 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                         plan.set(Some(p));
                         loaded.set(Some(b));
                     }
-                    Err(e) => restore_error.set(Some(e.message)),
+                    Err(e) => {
+                        if !session.report_if_session_dead(&e) {
+                            restore_error.set(Some(e.message));
+                        }
+                    }
                 },
                 Ok(None) => {} // dialog cancelled
-                Err(e) => restore_error.set(Some(e.message)),
+                Err(e) => {
+                    if !session.report_if_session_dead(&e) {
+                        restore_error.set(Some(e.message));
+                    }
+                }
             }
         });
     };
@@ -147,7 +167,11 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                     ));
                     report.set(Some(r));
                 }
-                Err(e) => restore_error.set(Some(e.message)),
+                Err(e) => {
+                    if !session.report_if_session_dead(&e) {
+                        restore_error.set(Some(e.message));
+                    }
+                }
             }
             restoring.set(false);
             restore_progress.set(None);
@@ -164,10 +188,16 @@ pub fn DisasterRecoveryView() -> impl IntoView {
         };
         leptos::task::spawn_local(async move {
             match backup::save_restore_report_to_file(&r, "json").await {
-                Ok(Some(path)) => session.toast_success(format!("Report saved to {path}")),
-                Ok(None) => 0,
-                Err(e) => session.toast_error(format!("Couldn't save report: {}", e.message), None),
-            };
+                Ok(Some(path)) => {
+                    session.toast_success(format!("Report saved to {path}"));
+                }
+                Ok(None) => {} // dialog cancelled
+                Err(e) => {
+                    if !session.report_if_session_dead(&e) {
+                        session.toast_error(format!("Couldn't save report: {}", e.message), None);
+                    }
+                }
+            }
         });
     });
 

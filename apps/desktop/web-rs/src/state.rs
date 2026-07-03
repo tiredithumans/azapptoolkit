@@ -208,7 +208,12 @@ impl Session {
         self.credentials_facet.set(String::from("all"));
         self.pending_open_filters.set(false);
         self.view.set(ActiveView::Home);
+        // Close ALL the shell-owned dialogs — a tenant switch mid-dialog would
+        // otherwise leave a stale form (create app / SSO wizard) floating over
+        // the new tenant's Home.
         self.cache_open.set(false);
+        self.create_open.set(false);
+        self.sso_wizard_open.set(false);
         self.pending_app_tab.set(None);
         self.pending_enterprise_tab.set(None);
     }
@@ -566,26 +571,38 @@ impl Session {
         });
     }
 
-    /// Surface a failed command. When the error means the **session is dead** —
-    /// the refresh token expired/revoked (`refresh_missing`) or there's no
-    /// session at all (`not_signed_in`) — show a persistent error toast whose
-    /// action re-authenticates in place (see [`Self::spawn_reauth`]) instead of a
-    /// dead-end message, so the user recovers without the manual Sign Out → Sign
-    /// In. Every other error falls back to a plain `toast_error`.
+    /// When `e` means the **session is dead** — the refresh token
+    /// expired/revoked (`refresh_missing`) or there's no session at all
+    /// (`not_signed_in`) — show the persistent error toast whose action
+    /// re-authenticates in place (see [`Self::spawn_reauth`]) and return
+    /// `true`; otherwise show nothing and return `false`. Surfaces with their
+    /// own error affordance (an inline banner, a contextual toast) call this
+    /// first so a dead session still gets the recovery action instead of a
+    /// dead-end message, without growing another copy of the code set.
     ///
     /// The two codes are the wire contract from `azapptoolkit_dto`'s
     /// `From<AuthError>`: `InvalidGrant`/`RefreshTokenMissing` → `refresh_missing`,
     /// `NotSignedIn` → `not_signed_in`.
+    pub fn report_if_session_dead(&self, e: &azapptoolkit_dto::UiError) -> bool {
+        if !matches!(e.code.as_str(), "refresh_missing" | "not_signed_in") {
+            return false;
+        }
+        let session = *self;
+        self.push_toast(
+            ToastKind::Error,
+            "Your session has expired — re-authenticate to continue.",
+            Some("Re-authenticate".to_string()),
+            Some(std::rc::Rc::new(move || session.spawn_reauth())),
+        );
+        true
+    }
+
+    /// Surface a failed command: the dead-session recovery toast when it
+    /// applies (see [`Self::report_if_session_dead`]), else a plain
+    /// `toast_error`. This is the central error sink `use_command` routes
+    /// through.
     pub fn report_command_error(&self, e: &azapptoolkit_dto::UiError) {
-        if matches!(e.code.as_str(), "refresh_missing" | "not_signed_in") {
-            let session = *self;
-            self.push_toast(
-                ToastKind::Error,
-                "Your session has expired — re-authenticate to continue.",
-                Some("Re-authenticate".to_string()),
-                Some(std::rc::Rc::new(move || session.spawn_reauth())),
-            );
-        } else {
+        if !self.report_if_session_dead(e) {
             self.toast_error(e.message.clone(), None);
         }
     }
@@ -669,6 +686,34 @@ mod tests {
                 });
             });
         }
+    }
+
+    #[test]
+    fn report_if_session_dead_ignores_ordinary_errors() {
+        with_session(|session| {
+            // An ordinary command failure is the caller's to surface (inline
+            // banner / contextual toast) — no toast from the helper.
+            assert!(!session.report_if_session_dead(&UiError::new("graph_error", "boom", true)));
+            session
+                .toasts
+                .with_untracked(|list| assert!(list.is_empty()));
+        });
+    }
+
+    #[test]
+    fn tenant_switch_closes_shell_dialogs() {
+        // A tenant switch mid-dialog must not leave a stale create-app form or
+        // SSO wizard floating over the new tenant's Home (same cross-tenant
+        // footgun as the lifted searches/facets).
+        with_session(|session| {
+            session.cache_open.set(true);
+            session.create_open.set(true);
+            session.sso_wizard_open.set(true);
+            session.set_active_tenant(None);
+            assert!(!session.cache_open.get_untracked());
+            assert!(!session.create_open.get_untracked());
+            assert!(!session.sso_wizard_open.get_untracked());
+        });
     }
 
     #[test]
