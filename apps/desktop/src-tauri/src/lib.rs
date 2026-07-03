@@ -98,6 +98,7 @@ pub fn run() {
             commands::audit::get_cached_audit,
             commands::audit::export_audit_csv,
             commands::audit::save_audit_to_file,
+            commands::remediation::remediate_disable_sign_in,
             commands::remediation::remediate_remove_expired_credentials,
             commands::remediation::remediate_remove_redundant_permissions,
             commands::remediation::remediate_scope_mailbox_access,

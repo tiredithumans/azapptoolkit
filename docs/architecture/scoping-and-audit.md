@@ -176,6 +176,20 @@ On success the command busts caches (`invalidate_app_lists`) — and, unlike mos
 `result` signal is a snapshot; clear the item's `remediations` on success (button gone) and re-run
 for fresh scores.
 
+Two kinds vary the pattern:
+
+- **`AddOwner`** (Rule 14 ownership gap) has **no dedicated handler** — the guided user-picker
+  modal (`views/dialogs/add_owner.rs`) calls the existing `add_application_owner`, which already
+  busts the detail + audit caches. Safe because it's purely additive. `build_remediations` takes
+  the owner count (`app.owners.as_ref().map(Vec::len)` — the same data Rule 14 keys off); `None`
+  (owners not fetched, incl. every SP-only row) attaches nothing.
+- **`DisableSignIn`** (unused app) is attached by the **audit runner's sign-in post-pass**, not
+  `score_application` — `unused` is a post-pass flag (the sign-in report is fetched after scoring),
+  and it's skipped when the SP is already disabled. Safe because it's reversible: the handler
+  (`remediate_disable_sign_in`) re-resolves the SP from the live application and sets
+  `accountEnabled: false`; the enterprise app's Overview toggle re-enables. SP-only unused rows
+  don't get it (their Open lands on the enterprise/MI detail, which has the toggle).
+
 ## Redundant application permissions (Rule 18)
 
 `subsuming_app_permissions` in `azapptoolkit-core::audit` is the table of "broader permission

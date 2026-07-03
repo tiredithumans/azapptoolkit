@@ -52,6 +52,20 @@ pub async fn remediate_remove_redundant_permissions(
     .await
 }
 
+/// Disables sign-in for an unused app by setting `accountEnabled: false` on its
+/// service principal — reversible from the enterprise app's Overview toggle.
+/// The backend re-resolves the SP from the live application.
+pub async fn remediate_disable_sign_in(tenant_id: &str, object_id: &str) -> Result<(), UiError> {
+    invoke_result(
+        "remediate_disable_sign_in",
+        AppTargetArgs {
+            tenant_id,
+            object_id,
+        },
+    )
+    .await
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScopeMailboxArgs<'a> {
