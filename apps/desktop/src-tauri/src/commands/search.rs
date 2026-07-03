@@ -17,6 +17,7 @@ use azapptoolkit_graph::GraphClient;
 use tauri::State;
 
 use crate::commands::applications::{app_name_index_key, search_corpus_key, sp_index_key};
+use crate::commands::guid::is_guid;
 use crate::dto::UiError;
 use crate::dto::search::{GlobalSearchResults, SearchHit};
 use crate::state::AppState;
@@ -291,26 +292,6 @@ fn finalize(hits: &mut [(u8, &str, SearchHit)]) -> Vec<SearchHit> {
         .collect()
 }
 
-/// Strict 8-4-4-4-12 hex check (case-insensitive). No braces, no urn-prefix.
-/// `pub(crate)`: the Expose-an-API commands validate client app ids with it.
-pub(crate) fn is_guid(input: &str) -> bool {
-    let bytes = input.as_bytes();
-    if bytes.len() != 36 {
-        return false;
-    }
-    for (i, b) in bytes.iter().enumerate() {
-        let want_dash = matches!(i, 8 | 13 | 18 | 23);
-        if want_dash {
-            if *b != b'-' {
-                return false;
-            }
-        } else if !b.is_ascii_hexdigit() {
-            return false;
-        }
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,21 +372,6 @@ mod tests {
         );
         assert_eq!(apps.len(), 1);
         assert_eq!(ents.len(), 1);
-    }
-
-    #[test]
-    fn guid_parser_accepts_canonical_form_case_insensitive() {
-        assert!(is_guid("00000003-0000-0000-c000-000000000000"));
-        assert!(is_guid("ABCDEF12-3456-7890-ABCD-EF1234567890"));
-    }
-
-    #[test]
-    fn guid_parser_rejects_braces_urn_and_wrong_length() {
-        assert!(!is_guid(""));
-        assert!(!is_guid("not-a-guid"));
-        assert!(!is_guid("{00000003-0000-0000-c000-000000000000}"));
-        assert!(!is_guid("urn:uuid:00000003-0000-0000-c000-000000000000"));
-        assert!(!is_guid("00000003-0000-0000-c000-00000000000")); // too short
     }
 
     #[test]

@@ -22,16 +22,15 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
-use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_core::models::{
     AppRoleAssignment, Application, ApplicationExposeApi, DirectoryObject,
     FederatedIdentityCredential, GroupSummary, KeyCredential, PasswordCredential, ServicePrincipal,
 };
 use azapptoolkit_graph::{GraphClient, GraphError};
 
-use crate::commands::applications::{extract_auth_fields, sp_index_key};
+use crate::commands::applications::{extract_auth_fields, sp_index_cached};
 use crate::commands::dispatch::dispatch_capped;
-use crate::commands::throttle::ConcurrencyThrottle;
+use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
 use crate::dto::backup::{
     AppRegistrationBackup, AppRoleAssigneeRef, AppRoleGrantRef, BACKUP_SCHEMA_VERSION,
@@ -76,14 +75,7 @@ pub async fn backup_tenant(
     // `?` (e.g. the index reads below failing) must not leave a stale tracker
     // halving the shared per-tenant client's cap on unrelated traffic.
     let throttle = Arc::new(ConcurrencyThrottle::new(INITIAL_DR_CONCURRENCY));
-    client.set_throttle_observer(throttle.clone());
-    struct ObserverGuard(Arc<GraphClient>);
-    impl Drop for ObserverGuard {
-        fn drop(&mut self) {
-            self.0.clear_throttle_observer();
-        }
-    }
-    let _observer_guard = ObserverGuard(client.clone());
+    let _observer_guard = ThrottleGuard::attach(client.clone(), throttle.clone());
 
     // Enumerate the estate up front so progress has a real denominator. The SP
     // index reuses the cache the Enterprise Apps list populates (it's the same
@@ -259,7 +251,7 @@ pub async fn save_backup_to_file(
             "tenant backup is JSON only",
         ));
     }
-    super::audit::save_export_via_dialog(
+    super::export::save_export_via_dialog(
         &app_handle,
         "tenant-backup",
         "json",
@@ -305,27 +297,6 @@ pub fn cancel_dr(state: State<'_, AppState>) {
 }
 
 // ---------------- internals ----------------
-
-/// The per-tenant service-principal index, reusing the cache the Enterprise
-/// Apps / App Registrations lists populate (same `sp_index_key`) so a backup
-/// right after browsing those lists doesn't re-pull the whole `/servicePrincipals`
-/// scan. Falls back to a live fetch (and seeds the cache) on a miss.
-async fn sp_index_cached(
-    state: &AppState,
-    client: &GraphClient,
-    tenant_id: &str,
-) -> Result<Vec<ServicePrincipal>, GraphError> {
-    let key = sp_index_key(tenant_id);
-    if let Some(cached) = state
-        .cache
-        .get::<Vec<ServicePrincipal>>(CacheKind::Lists, &key)
-    {
-        return Ok(cached);
-    }
-    let sps = client.list_service_principals_index().await?;
-    state.cache.put(CacheKind::Lists, key, &sps);
-    Ok(sps)
-}
 
 /// Backs up one chunk (≤ [`BATCH_CHUNK`]) of app registrations: the full-config
 /// reads and the federated-credential lists each go out as one `$batch` POST,
@@ -695,7 +666,7 @@ async fn backup_managed_identities(
             source_principal_id: sp.id.clone(),
             source_app_id: sp.app_id.clone(),
             display_name: sp.display_name.clone(),
-            subtype: mi_subtype_label(subtype).to_string(),
+            subtype: mi_subtype_wire_label(subtype).to_string(),
             arm_resource_id: user_assigned_arm_id(&sp.alternative_names),
             held_app_roles,
             ..Default::default()
@@ -850,7 +821,7 @@ fn user_assigned_arm_id<S: AsRef<str>>(alternative_names: &[S]) -> Option<String
 
 /// Stable camelCase label for [`MiSubtype`], matching its serde wire form so the
 /// backup's `subtype` string round-trips against the same vocabulary the UI uses.
-fn mi_subtype_label(subtype: MiSubtype) -> &'static str {
+fn mi_subtype_wire_label(subtype: MiSubtype) -> &'static str {
     match subtype {
         MiSubtype::SystemAssigned => "systemAssigned",
         MiSubtype::UserAssigned => "userAssigned",
@@ -932,12 +903,15 @@ mod tests {
 
     #[test]
     fn mi_subtype_label_matches_camel_case_wire_form() {
-        assert_eq!(mi_subtype_label(MiSubtype::UserAssigned), "userAssigned");
         assert_eq!(
-            mi_subtype_label(MiSubtype::SystemAssigned),
+            mi_subtype_wire_label(MiSubtype::UserAssigned),
+            "userAssigned"
+        );
+        assert_eq!(
+            mi_subtype_wire_label(MiSubtype::SystemAssigned),
             "systemAssigned"
         );
-        assert_eq!(mi_subtype_label(MiSubtype::Unknown), "unknown");
+        assert_eq!(mi_subtype_wire_label(MiSubtype::Unknown), "unknown");
     }
 
     #[test]

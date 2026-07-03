@@ -27,6 +27,21 @@ the project adheres to
   into per-domain files. The two near-identical service-principal batch-prewarm
   functions now share one core, and the dead `GraphError::Url` variant was removed.
 
+- **Backend command layer consolidated** (no behavior change): the generic file-export
+  plumbing (CSV field encoding with the formula-injection guard, the save-dialog +
+  write pipeline) moved from `commands::audit` — which seven other domains were
+  importing it from — into a dedicated `commands::export`; three byte-identical v4
+  GUID generators and two divergent `is_guid` validators collapsed into one
+  `commands::guid`; the tenant cache-key + tiered-invalidation policy (the
+  cross-tenant-leakage contract) got its own named home, `commands/applications/
+  cache.rs`, killing a duplicated `enterprise_key` definition that could silently
+  drift; the DR backup now uses the shared `ThrottleGuard` RAII instead of a local
+  re-implementation and shares its cached SP-index read with the consent audit; the
+  expired-credential selection rule the audit, single-app fix, and bulk sweep must
+  agree on is single-sourced in `azapptoolkit-core::audit`; and the Authentication
+  tab's get/set now share one DTO (wire-identical). The unused `azapptoolkit-core` /
+  `thiserror` dependencies were dropped from the permissions crate.
+
 ### Fixed
 
 - **Azure Resource Manager paging now refuses off-origin `nextLink`s** before the
