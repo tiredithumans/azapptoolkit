@@ -1,5 +1,45 @@
 use super::*;
 
+/// `PATCH /servicePrincipals/{id}` setting the single-sign-on mode (e.g. `saml`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServicePrincipalSsoModePatch {
+    pub preferred_single_sign_on_mode: String,
+}
+
+/// `PATCH /servicePrincipals/{id}` activating a token-signing certificate (by
+/// thumbprint) as the preferred SAML signing key.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServicePrincipalSigningKeyPatch {
+    pub preferred_token_signing_key_thumbprint: String,
+}
+
+/// `$select` projection for a single `ServicePrincipal` read — the full set of
+/// fields the typed [`ServicePrincipal`] model deserializes. Directory-object
+/// resources (`servicePrincipal` included) need an explicit `$select` to
+/// reliably return non-default properties; without it Graph may omit fields the
+/// detail view reads (and injects a `@microsoft.graph.tips` nag).
+fn default_service_principal_select() -> &'static [&'static str] {
+    &[
+        "id",
+        "appId",
+        "displayName",
+        "accountEnabled",
+        "appRoleAssignmentRequired",
+        "servicePrincipalType",
+        "passwordCredentials",
+        "keyCredentials",
+        "appRoles",
+        "oauth2PermissionScopes",
+        "appOwnerOrganizationId",
+        "alternativeNames",
+        "tags",
+        "createdDateTime",
+        "notes",
+    ]
+}
+
 /// The security audit's lean SP projection. `score_one` reads only `id` and
 /// `accountEnabled` (and matches on `appId`); the full SP for a first-party
 /// resource (Microsoft Graph, Office 365 Exchange Online, …) carries hundreds
@@ -177,46 +217,67 @@ impl GraphClient {
     /// ids are fetched, and any error is swallowed: the per-app fallback still
     /// works, so resilience is unchanged.
     pub async fn prewarm_service_principals_lean(&self, app_ids: &[String]) {
+        self.prewarm_sps(
+            app_ids,
+            CacheKind::ServicePrincipal,
+            SP_LEAN_SELECT,
+            "SP",
+            |id| self.sp_lean_cache_key(id),
+        )
+        .await
+    }
+
+    /// Shared core of [`Self::prewarm_service_principals_lean`] and
+    /// [`Self::prewarm_resource_sps`] — the twins differed only in cache
+    /// `kind`, key derivation, and `$select`. Batch-resolves the
+    /// not-yet-cached `app_ids` (one `$batch` POST per 20) and seeds `kind`
+    /// under `key(id)`, so the single lookup each prewarm mirrors is a later
+    /// cache hit. Best-effort by contract: any error is swallowed (the
+    /// per-item fallback still resolves), and the fetch is capped at the
+    /// cache size so seeding can't LRU-evict its own entries before the
+    /// caller's loop reads them.
+    async fn prewarm_sps(
+        &self,
+        app_ids: &[String],
+        kind: CacheKind,
+        select: &'static str,
+        label: &'static str,
+        key: impl Fn(&str) -> String,
+    ) {
         let mut missing: Vec<&String> = app_ids
             .iter()
             .filter(|id| {
                 self.cache
-                    .get::<Option<ServicePrincipal>>(
-                        CacheKind::ServicePrincipal,
-                        &self.sp_lean_cache_key(id),
-                    )
+                    .get::<Option<ServicePrincipal>>(kind, &key(id))
                     .is_none()
             })
             .collect();
         if missing.is_empty() {
             return;
         }
-        // The SP bucket holds at most `max_size` entries (LRU): prewarming past
-        // it would evict the earliest entries before the caller's loop reads
-        // them, silently re-creating the per-app GETs the prewarm exists to
-        // remove. Cap and say so — the remainder resolves per-app, exactly the
-        // pre-prewarm behavior.
         let cap = self.cache.config().max_size;
         if missing.len() > cap {
             tracing::info!(
                 missing = missing.len(),
                 cap,
-                "SP prewarm capped at the cache size; the remainder resolves per-app"
+                "{label} prewarm capped at the cache size; the remainder resolves per-item"
             );
             missing.truncate(cap);
         }
         let urls: Vec<String> = missing
             .iter()
             .map(|id| {
-                // Build the relative sub-request URL with a properly percent-encoded
-                // `$filter` value (spaces/quotes), matching the single lookup's query.
-                let mut u = url::Url::parse("https://graph.invalid/servicePrincipals")
-                    .expect("static URL parses");
-                u.query_pairs_mut()
-                    .append_pair("$filter", &format!("appId eq '{}'", escape_odata(id)))
-                    .append_pair("$select", SP_LEAN_SELECT)
-                    .append_pair("$top", "1");
-                format!("/servicePrincipals?{}", u.query().unwrap_or(""))
+                // `batch_sub_url` percent-encodes the query values, so the
+                // sub-request URL stays byte-identical to the single lookup's.
+                let filter = format!("appId eq '{}'", escape_odata(id));
+                batch_sub_url(
+                    "/servicePrincipals",
+                    &[
+                        ("$filter", filter.as_str()),
+                        ("$select", select),
+                        ("$top", "1"),
+                    ],
+                )
             })
             .collect();
 
@@ -225,17 +286,18 @@ impl GraphClient {
             Err(err) => {
                 tracing::debug!(
                     ?err,
-                    "SP prewarm batch failed; per-app lookups will resolve"
+                    "{label} prewarm batch failed; per-item lookups will resolve"
                 );
                 return;
             }
         };
         for (id, page) in missing.iter().zip(pages) {
-            // A failed sub-request leaves the cache cold; the per-app lookup retries.
+            // A failed sub-request leaves the cache cold; the per-item lookup
+            // retries. An empty page caches `None`, exactly like the single
+            // lookup it mirrors.
             if let Ok(page) = page {
                 let sp = page.items.into_iter().next();
-                self.cache
-                    .put(CacheKind::ServicePrincipal, self.sp_lean_cache_key(id), &sp);
+                self.cache.put(kind, key(id), &sp);
             }
         }
     }
@@ -330,7 +392,7 @@ impl GraphClient {
         } else {
             "servicePrincipalType ne 'ManagedIdentity'"
         };
-        let search = format!("\"displayName:{}\"", term.replace('"', " "));
+        let search = search_phrase("displayName", term);
         let top_s = top.to_string();
         let params: [(&str, &str); 5] = [
             ("$search", search.as_str()),
@@ -521,65 +583,13 @@ impl GraphClient {
     /// swallowed: the per-resource fallback still works, so resilience is
     /// unchanged.
     pub async fn prewarm_resource_sps(&self, resource_app_ids: &[String]) {
-        let mut missing: Vec<&String> = resource_app_ids
-            .iter()
-            .filter(|id| {
-                self.cache
-                    .get::<Option<ServicePrincipal>>(CacheKind::Permissions, &self.sp_cache_key(id))
-                    .is_none()
-            })
-            .collect();
-        if missing.is_empty() {
-            return;
-        }
-        // The Permissions bucket holds at most `max_size` entries (LRU):
-        // prewarming past it would evict the earliest entries before the
-        // caller's loop reads them, silently re-creating the per-resource GETs
-        // the prewarm exists to remove. Cap and say so — the remainder resolves
-        // per-resource, exactly the pre-prewarm behavior.
-        let cap = self.cache.config().max_size;
-        if missing.len() > cap {
-            tracing::info!(
-                missing = missing.len(),
-                cap,
-                "resource-SP prewarm capped at the cache size; the remainder resolves per-resource"
-            );
-            missing.truncate(cap);
-        }
-        let urls: Vec<String> = missing
-            .iter()
-            .map(|id| {
-                // Build the relative sub-request URL with a properly percent-encoded
-                // `$filter` value (spaces/quotes), matching the single lookup's query.
-                let mut u = url::Url::parse("https://graph.invalid/servicePrincipals")
-                    .expect("static URL parses");
-                u.query_pairs_mut()
-                    .append_pair("$filter", &format!("appId eq '{}'", escape_odata(id)))
-                    .append_pair("$select", RESOURCE_SP_SELECT)
-                    .append_pair("$top", "1");
-                format!("/servicePrincipals?{}", u.query().unwrap_or(""))
-            })
-            .collect();
-
-        let pages: Vec<Result<Paged<ServicePrincipal>>> = match self.batch_get_json(&urls).await {
-            Ok(p) => p,
-            Err(err) => {
-                tracing::debug!(
-                    ?err,
-                    "resource-SP prewarm batch failed; per-resource lookups will resolve"
-                );
-                return;
-            }
-        };
-        for (id, page) in missing.iter().zip(pages) {
-            // A failed sub-request leaves the cache cold; the per-resource
-            // lookup retries. An empty page caches `None`, exactly like
-            // resolve_resource_sp.
-            if let Ok(page) = page {
-                let sp = page.items.into_iter().next();
-                self.cache
-                    .put(CacheKind::Permissions, self.sp_cache_key(id), &sp);
-            }
-        }
+        self.prewarm_sps(
+            resource_app_ids,
+            CacheKind::Permissions,
+            RESOURCE_SP_SELECT,
+            "resource-SP",
+            |id| self.sp_cache_key(id),
+        )
+        .await
     }
 }

@@ -33,9 +33,6 @@ pub enum GraphError {
 
     #[error("protocol: {0}")]
     Protocol(String),
-
-    #[error("url: {0}")]
-    Url(#[from] url::ParseError),
 }
 
 impl From<serde_json::Error> for GraphError {
@@ -64,7 +61,6 @@ impl GraphError {
             GraphError::Deserialize(_) => "deserialize_error",
             GraphError::Token(_) => "token_error",
             GraphError::Protocol(_) => "protocol_error",
-            GraphError::Url(_) => "url_error",
         }
     }
 }

@@ -38,12 +38,7 @@ impl GraphClient {
         let filter = object_ids
             .iter()
             .filter(|id| !id.is_empty())
-            .map(|id| {
-                format!(
-                    "targetResources/any(t:t/id eq '{}')",
-                    id.replace('\'', "''")
-                )
-            })
+            .map(|id| format!("targetResources/any(t:t/id eq '{}')", escape_odata(id)))
             .collect::<Vec<_>>()
             .join(" or ");
         let mut url = url::Url::parse(&format!("{}/auditLogs/directoryAudits", self.base_url))

@@ -20,6 +20,12 @@ the project adheres to
   the new `Capability::role_names()`. Also removed two dead public helpers
   (`capabilities_for_plane`, `ScopeKind::target_noun`) and derived the cache's
   per-kind bucket array size from `CacheKind::ALL` instead of a hand-synced literal.
+- **Graph client restructured for maintainability** (no behavior change): the
+  transport/retry core, pagination helpers, and request/patch body types moved out
+  of the 1,150-line `client.rs` into `client/transport.rs` and their domain modules
+  (all import paths preserved via re-exports); the 2,700-line test monolith split
+  into per-domain files. The two near-identical service-principal batch-prewarm
+  functions now share one core, and the dead `GraphError::Url` variant was removed.
 
 ### Fixed
 
