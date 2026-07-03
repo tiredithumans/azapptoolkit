@@ -26,6 +26,16 @@ the project adheres to
   (all import paths preserved via re-exports); the 2,700-line test monolith split
   into per-domain files. The two near-identical service-principal batch-prewarm
   functions now share one core, and the dead `GraphError::Url` variant was removed.
+- **Exchange client restructured the same way** (no behavior change): the 1,136-line
+  `client.rs` split into `client/transport.rs` (envelope POST + retry loop with the
+  bodyless-403 diagnostics capture), `client/rbac.rs` (service principals, scopes,
+  role assignments, legacy AAP, verification), `client/groups.rs` (recipient groups
+  + the managed scope group + the OPATH filter builder), and `client/tests.rs`; the
+  four optional `Get-*` lookups now share one `first_optional_as` projection, and an
+  empty single-object cmdlet result is reported honestly as a protocol error instead
+  of a fabricated HTTP-200 API error. Key Vault dropped a dead transport parameter
+  and its unused `SecretProperties` alias, and both the ARM and Key Vault paging
+  loops gained a defensive page cap against self-referencing `nextLink`s.
 
 ### Fixed
 

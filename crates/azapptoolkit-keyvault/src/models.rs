@@ -124,9 +124,6 @@ pub struct SecretAttributesRequest {
     pub not_before: Option<DateTime<Utc>>,
 }
 
-/// Alias for public consumers who want a stable name.
-pub type SecretProperties = SecretAttributes;
-
 mod optional_unix_timestamp {
     use chrono::{DateTime, TimeZone, Utc};
     use serde::{Deserialize, Deserializer, Serializer};
