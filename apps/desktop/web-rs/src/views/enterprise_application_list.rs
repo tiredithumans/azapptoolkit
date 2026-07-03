@@ -37,14 +37,14 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
     // "Filter this list" query, lifted to the session so the top-bar Global
     // Search can seed it (picking an Enterprise Application there lands the user
     // here with the list pre-filtered to that name).
-    let raw_search = session.enterprise_search;
+    let raw_search = session.tenant_ui.enterprise_search;
     let search = use_debounced(raw_search.into(), LIST_FILTER_DEBOUNCE_MS);
 
     // Facet over the loaded page (all | enabled | disabled | foreign), lifted to
     // the session (like the search above) so the Home dashboard's Enterprise
     // metrics can seed it. Credential status is the App Registration lens, not
     // the enterprise-app lens, so it's not offered here.
-    let ent_filter = session.enterprise_facet;
+    let ent_filter = session.tenant_ui.enterprise_facet;
     // Unset date picker (None) leaves that side of the creation-date range open;
     // together they bound creation date to an inclusive window.
     let created_after: RwSignal<Option<NaiveDate>> = RwSignal::new(None);
@@ -59,9 +59,9 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
     // one-shot flag to expand the drawer once so the chip is visible (this is the
     // sole consumer, so no view-guard is needed).
     Effect::new(move |_| {
-        if session.pending_open_filters.get() {
+        if session.tenant_ui.pending_open_filters.get() {
             filters_open.set(true);
-            session.pending_open_filters.set(false);
+            session.tenant_ui.pending_open_filters.set(false);
         }
     });
     let active_filters = Signal::derive(move || {
@@ -369,7 +369,7 @@ fn VirtualRows(
                         >
                             <Button
                                 appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                on_click=Box::new(move |_| session.sso_wizard_open.set(true))
+                                on_click=Box::new(move |_| session.tenant_ui.sso_wizard_open.set(true))
                             >
                                 "+ New SSO application"
                             </Button>

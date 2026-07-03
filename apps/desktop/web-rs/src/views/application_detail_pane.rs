@@ -76,10 +76,11 @@ pub fn ApplicationDetailPane(
     // last-viewed tab so the workflow tab survives switching apps. The deep-link
     // is consumed once so a later in-app selection doesn't re-trigger it.
     let initial_tab = session
+        .tenant_ui
         .pending_app_tab
         .get_untracked()
         .unwrap_or_else(|| session.last_app_tab.get_untracked());
-    session.pending_app_tab.set(None);
+    session.tenant_ui.pending_app_tab.set(None);
     // Thaw's `TabList` is string-keyed and two-way bound, so the active tab stays
     // a `String`; `AppTab` is only the bridge that clamps stale values and drives
     // the exhaustive match below.

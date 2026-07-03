@@ -87,8 +87,15 @@ async fn sp_rows_are_excluded_from_selection_on_the_apps_pane() {
         .expect("select-all bar renders")
         .unchecked_into();
     select_all.click();
-    ts::wait_for(|| !m.session.selected_audit_ids.get_untracked().is_empty()).await;
-    let selected = m.session.selected_audit_ids.get_untracked();
+    ts::wait_for(|| {
+        !m.session
+            .tenant_ui
+            .selected_audit_ids
+            .get_untracked()
+            .is_empty()
+    })
+    .await;
+    let selected = m.session.tenant_ui.selected_audit_ids.get_untracked();
     assert!(selected.contains("obj-Local App"));
     assert!(
         !selected.contains("obj-Foreign App"),
@@ -101,6 +108,7 @@ async fn sp_rows_are_excluded_from_selection_on_the_apps_pane() {
 async fn no_local_app_group_collects_sp_rows_without_checkboxes() {
     let m = mount_security().await;
     m.session
+        .tenant_ui
         .audit_expanded_group
         .set(Some("no_local_app".to_string()));
     ts::wait_for(|| !ts::query_all("tbody tr").is_empty()).await;
@@ -129,6 +137,7 @@ async fn sp_mailbox_fix_routes_to_the_sp_only_command() {
     // Expand the org-wide mailbox group; the SP row's Fix lives there (the app
     // row carries no remediation in this fixture).
     m.session
+        .tenant_ui
         .audit_expanded_group
         .set(Some("orgwide_mailbox".to_string()));
     ts::wait_for(|| ts::body_contains("Scope 1 mailbox permission")).await;

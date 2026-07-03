@@ -9,7 +9,6 @@
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use zeroize::Zeroize;
@@ -83,7 +82,9 @@ fn register_native_store() -> std::result::Result<(), String> {
 /// In-memory access token. The bearer string is zeroized on drop so freed
 /// heap pages cannot leak token material to a later allocation, and `Debug`
 /// renders the token as `<redacted>` so it cannot appear in tracing logs.
-#[derive(Clone, Serialize, Deserialize)]
+/// Deliberately NOT serde-serializable: the type system enforces the
+/// memory-only contract (nothing in the workspace ever persisted one).
+#[derive(Clone)]
 pub struct AccessToken {
     pub token: String,
     pub expires_at: DateTime<Utc>,

@@ -6,7 +6,7 @@
 //! [`azapptoolkit_core::BearerProvider`] so the desktop layer wires one token
 //! adapter across audiences.
 //!
-//! Only the operations the desktop flow needs for M8 are implemented:
+//! Only the operations the desktop Key Vault view needs are implemented:
 //! `list_secrets`, `get_secret`, `set_secret`, `delete_secret`.
 
 pub mod client;
@@ -16,4 +16,4 @@ pub mod validate;
 
 pub use client::{DEFAULT_API_VERSION, KeyVaultClient};
 pub use error::{KeyVaultError, Result};
-pub use models::{SecretItem, SecretProperties, SecretSetRequest, SecretValue};
+pub use models::{SecretItem, SecretSetRequest, SecretValue};

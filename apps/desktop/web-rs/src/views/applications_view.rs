@@ -18,7 +18,7 @@ pub fn ApplicationsView() -> impl IntoView {
                 <span class="view-header__title">"App Registrations"</span>
                 <div class="view-header__actions">
                     {move || {
-                        let n = session.selected_app_ids.with(|s| s.len());
+                        let n = session.tenant_ui.selected_app_ids.with(|s| s.len());
                         (n > 0)
                             .then(|| {
                                 view! {
