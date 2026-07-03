@@ -1,5 +1,33 @@
 use super::*;
 
+/// Body for `POST /applications/{id}/federatedIdentityCredentials`. `audiences`
+/// defaults to `["api://AzureADTokenExchange"]` (the value Entra recommends for
+/// token exchange; only the "Other issuer" flow may override it). `description`
+/// is serialized even when `None` (as JSON `null`), matching the prior
+/// hand-built body.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FederatedCredentialRequest {
+    pub name: String,
+    pub issuer: String,
+    pub subject: String,
+    pub audiences: Vec<String>,
+    pub description: Option<String>,
+}
+
+/// Body for `PATCH /applications/{id}/federatedIdentityCredentials/{ficId}`.
+/// Graph rejects attempts to change `name` (it is immutable), so the field is
+/// deliberately absent. `description: None` serializes as JSON `null` to clear
+/// a previously-set description.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FederatedCredentialPatch {
+    pub issuer: String,
+    pub subject: String,
+    pub audiences: Vec<String>,
+    pub description: Option<String>,
+}
+
 impl GraphClient {
     pub async fn add_password(
         &self,

@@ -1,5 +1,45 @@
 use super::*;
 
+/// `PATCH /servicePrincipals/{id}` setting the single-sign-on mode (e.g. `saml`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServicePrincipalSsoModePatch {
+    pub preferred_single_sign_on_mode: String,
+}
+
+/// `PATCH /servicePrincipals/{id}` activating a token-signing certificate (by
+/// thumbprint) as the preferred SAML signing key.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServicePrincipalSigningKeyPatch {
+    pub preferred_token_signing_key_thumbprint: String,
+}
+
+/// `$select` projection for a single `ServicePrincipal` read — the full set of
+/// fields the typed [`ServicePrincipal`] model deserializes. Directory-object
+/// resources (`servicePrincipal` included) need an explicit `$select` to
+/// reliably return non-default properties; without it Graph may omit fields the
+/// detail view reads (and injects a `@microsoft.graph.tips` nag).
+fn default_service_principal_select() -> &'static [&'static str] {
+    &[
+        "id",
+        "appId",
+        "displayName",
+        "accountEnabled",
+        "appRoleAssignmentRequired",
+        "servicePrincipalType",
+        "passwordCredentials",
+        "keyCredentials",
+        "appRoles",
+        "oauth2PermissionScopes",
+        "appOwnerOrganizationId",
+        "alternativeNames",
+        "tags",
+        "createdDateTime",
+        "notes",
+    ]
+}
+
 /// The security audit's lean SP projection. `score_one` reads only `id` and
 /// `accountEnabled` (and matches on `appId`); the full SP for a first-party
 /// resource (Microsoft Graph, Office 365 Exchange Online, …) carries hundreds

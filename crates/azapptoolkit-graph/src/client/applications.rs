@@ -1,5 +1,192 @@
 use super::*;
 
+#[derive(Debug, Default, Clone)]
+pub struct AppListQuery {
+    pub search: Option<String>,
+    pub top: Option<u32>,
+    pub select: Option<Vec<&'static str>>,
+    /// `$expand` clause (e.g. `"owners($select=id)"`). Only the audit uses this
+    /// (to count owners inline without a per-app round trip); the list views
+    /// leave it `None` to keep page payloads lean.
+    pub expand: Option<&'static str>,
+}
+
+impl AppListQuery {
+    pub fn with_search(mut self, s: impl Into<String>) -> Self {
+        self.search = Some(s.into());
+        self
+    }
+
+    pub fn with_top(mut self, n: u32) -> Self {
+        self.top = Some(n);
+        self
+    }
+
+    pub fn with_expand(mut self, expand: &'static str) -> Self {
+        self.expand = Some(expand);
+        self
+    }
+
+    pub fn with_select(mut self, fields: Vec<&'static str>) -> Self {
+        self.select = Some(fields);
+        self
+    }
+}
+
+/// Body for `POST /applications`. Only fields set on the request are sent
+/// (Graph tolerates missing optional fields).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateApplicationRequest {
+    pub display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in_audience: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Partial update for `PATCH /applications/{id}`. Only fields set on the
+/// patch are sent, matching the PS `Update-AzApp` semantics.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in_audience: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Full replacement of the application's declared permissions. Graph
+    /// treats this as a set-operation — every call overwrites the existing
+    /// array, so callers must send the full desired state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_resource_access: Option<Vec<RequiredResourceAccess>>,
+}
+
+/// `implicitGrantSettings` under an application's `web` block: whether the
+/// authorization endpoint may issue access / ID tokens directly (the implicit
+/// flow). Unset fields are omitted so a partial patch only touches what it sets.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImplicitGrantSettingsPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_access_token_issuance: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_id_token_issuance: Option<bool>,
+}
+
+/// `web` block of an application patch: reply (redirect) URLs, an optional
+/// logout URL, and the implicit-grant flags. Unset fields are omitted so a
+/// partial patch only touches what it sets.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationWebPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_uris: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logout_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implicit_grant_settings: Option<ImplicitGrantSettingsPatch>,
+}
+
+/// `spa` block of an application SSO patch: single-page-app redirect URLs.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationSpaPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_uris: Option<Vec<String>>,
+}
+
+/// `PATCH /applications/{id}` carrying SSO fields (`identifierUris`, `web`,
+/// `spa`). Replaces the previously hand-built JSON in the SSO commands; unset
+/// fields are omitted so each caller patches only what it provides.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationSsoPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identifier_uris: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web: Option<ApplicationWebPatch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spa: Option<ApplicationSpaPatch>,
+}
+
+/// `api` block of an Expose-an-API patch. Graph treats each array as a **full
+/// replacement** — every PATCH overwrites the existing list — so callers
+/// re-read live state and send the complete desired set. Unset fields are
+/// omitted so a scopes-only patch leaves `preAuthorizedApplications` (and the
+/// unmodeled `api` properties) untouched.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiApplicationPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth2_permission_scopes: Option<Vec<OAuth2PermissionScope>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_authorized_applications: Option<Vec<PreAuthorizedApplication>>,
+}
+
+/// `PATCH /applications/{id}` carrying the Expose-an-API fields
+/// (`identifierUris` + the `api` block). Kept distinct from
+/// [`ApplicationSsoPatch`] (which also writes `identifierUris`, but with SAML
+/// entity-id semantics); unset fields are omitted so each call patches only
+/// what it provides.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationExposeApiPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identifier_uris: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api: Option<ApiApplicationPatch>,
+}
+
+/// `publicClient` block of an application patch: mobile / desktop reply
+/// (redirect) URLs. Unset fields are omitted so a partial patch only touches
+/// what it sets.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationPublicClientPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_uris: Option<Vec<String>>,
+}
+
+/// `PATCH /applications/{id}` carrying the Authentication-tab fields: the `web`
+/// block (reply URLs + logout URL + implicit-grant flags), the `spa` reply
+/// URLs, the `publicClient` (mobile/desktop) reply URLs, and
+/// `isFallbackPublicClient` (the portal's "Allow public client flows" toggle).
+/// Kept distinct from [`ApplicationSsoPatch`] (which is SSO-semantic and used by
+/// the SSO commands); unset fields are omitted so each save patches only what it
+/// provides.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationAuthenticationPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web: Option<ApplicationWebPatch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spa: Option<ApplicationSpaPatch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_client: Option<ApplicationPublicClientPatch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_fallback_public_client: Option<bool>,
+}
+
+fn default_application_select() -> &'static [&'static str] {
+    &[
+        "id",
+        "appId",
+        "displayName",
+        "description",
+        "signInAudience",
+        "publisherDomain",
+        "createdDateTime",
+        "passwordCredentials",
+        "keyCredentials",
+        "requiredResourceAccess",
+        "verifiedPublisher",
+        "servicePrincipalLockConfiguration",
+        "isFallbackPublicClient",
+    ]
+}
+
 /// `$select` for the DR backup's single-shot app read: the typed-model fields
 /// **plus** the Authentication (`web`/`spa`/`publicClient`) and Expose-an-API
 /// (`identifierUris`/`api`) blocks the per-tab paths fetch separately, so one

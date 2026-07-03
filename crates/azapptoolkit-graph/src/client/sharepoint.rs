@@ -102,3 +102,115 @@ impl GraphClient {
             .await
     }
 }
+
+/// Translates a user-supplied SharePoint URL into the Graph `/sites/...`
+/// lookup path used by [`GraphClient::get_site_by_url`].
+///
+/// A clean site URL (`https://contoso.sharepoint.com/sites/Marketing`) maps to
+/// `/sites/{host}:/sites/Marketing`, and the bare tenant root to `/sites/{host}`.
+/// But "Copy link" in SharePoint hands users a *document* URL that embeds an app
+/// token segment (`/:x:/r/` for Excel, `:w:` Word, `:b:` PDF, `:f:` folder, …),
+/// a redirect marker, the document library, the file, and a query string — e.g.
+/// `https://contoso.sharepoint.com/:x:/r/sites/Marketing/Shared%20Documents/Book.xlsx?d=w..&web=1`.
+/// Passing that through verbatim makes Graph reject the `:x:` segment with
+/// `Resource not found for the segment ':x:'`. When an app token is present we
+/// strip the decoration and keep only the site collection (managed path + name),
+/// which is what the permissions endpoints operate on. URLs without an app token
+/// are passed through unchanged so subsite paths keep resolving as before.
+fn site_lookup_path(site_url: &str) -> String {
+    let trimmed = site_url.trim().trim_end_matches('/');
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    // Drop any query string / fragment (sharing links carry ?d=..&csf=1&web=1&e=..).
+    let without_query = without_scheme
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(without_scheme);
+    let (host, rest) = match without_query.split_once('/') {
+        Some((h, p)) => (h, p),
+        None => (without_query, ""),
+    };
+    let mut segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    // A leading `:x:`-style app token marks a document "Copy link" URL.
+    if segs
+        .first()
+        .is_some_and(|s| s.len() >= 2 && s.starts_with(':') && s.ends_with(':'))
+    {
+        segs.remove(0);
+        // Drop the `r` (redirect) / `s` (share) marker that follows the token.
+        if segs.first().is_some_and(|s| matches!(*s, "r" | "s")) {
+            segs.remove(0);
+        }
+        // The remaining path runs past the site collection into the document
+        // library + file; keep only the managed path and site/personal name.
+        if let Some(i) = segs
+            .iter()
+            .position(|s| matches!(*s, "sites" | "teams" | "personal"))
+        {
+            segs.truncate(i + 2);
+        }
+    }
+    let rel = segs.join("/");
+    if rel.is_empty() {
+        format!("/sites/{host}")
+    } else {
+        format!("/sites/{host}:/{rel}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn site_lookup_path_handles_clean_root_and_subsite_urls() {
+        // Clean site collection URL.
+        assert_eq!(
+            site_lookup_path("https://contoso.sharepoint.com/sites/Marketing"),
+            "/sites/contoso.sharepoint.com:/sites/Marketing"
+        );
+        // Trailing slash is tolerated.
+        assert_eq!(
+            site_lookup_path("https://contoso.sharepoint.com/sites/Marketing/"),
+            "/sites/contoso.sharepoint.com:/sites/Marketing"
+        );
+        // Bare tenant root has no relative path.
+        assert_eq!(
+            site_lookup_path("https://contoso.sharepoint.com"),
+            "/sites/contoso.sharepoint.com"
+        );
+        // Subsite paths (no app token) are preserved verbatim.
+        assert_eq!(
+            site_lookup_path("https://contoso.sharepoint.com/sites/Marketing/Team"),
+            "/sites/contoso.sharepoint.com:/sites/Marketing/Team"
+        );
+    }
+
+    #[test]
+    fn site_lookup_path_strips_document_copy_link_decoration() {
+        // The "Copy link" form that produced `Resource not found for the
+        // segment ':x:'`: app token + redirect + library + file + query string.
+        assert_eq!(
+            site_lookup_path(
+                "https://contoso.sharepoint.com/:x:/r/sites/Marketing/Shared%20Documents/Book.xlsx?d=w123&csf=1&web=1&e=abc"
+            ),
+            "/sites/contoso.sharepoint.com:/sites/Marketing"
+        );
+        // Word doc on a Teams-provisioned site.
+        assert_eq!(
+            site_lookup_path(
+                "https://contoso.sharepoint.com/:w:/r/teams/Sales/Docs/Plan.docx?web=1"
+            ),
+            "/sites/contoso.sharepoint.com:/teams/Sales"
+        );
+        // OneDrive (personal) sharing link.
+        assert_eq!(
+            site_lookup_path(
+                "https://contoso-my.sharepoint.com/:b:/r/personal/user_contoso_com/Documents/Report.pdf?csf=1"
+            ),
+            "/sites/contoso-my.sharepoint.com:/personal/user_contoso_com"
+        );
+    }
+}
