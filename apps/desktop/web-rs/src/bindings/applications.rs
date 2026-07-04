@@ -345,14 +345,14 @@ pub async fn get_application_authentication(
 struct SetAuthArgs<'a> {
     tenant_id: &'a str,
     object_id: &'a str,
-    input: &'a ApplicationAuthenticationDto,
+    input: &'a SetApplicationAuthenticationInput,
 }
 
 /// Full-replace write of the Authentication-tab settings.
 pub async fn set_application_authentication(
     tenant_id: &str,
     object_id: &str,
-    input: &ApplicationAuthenticationDto,
+    input: &SetApplicationAuthenticationInput,
 ) -> Result<(), UiError> {
     invoke_result(
         "set_application_authentication",

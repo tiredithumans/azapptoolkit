@@ -4,6 +4,7 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 
+use crate::bindings::ServicePrincipalIdArgs;
 pub use azapptoolkit_dto::sso::*;
 
 #[derive(Serialize)]
@@ -42,20 +43,13 @@ pub async fn create_oidc_sso_application(
     .await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SpArgs<'a> {
-    tenant_id: &'a str,
-    service_principal_id: &'a str,
-}
-
 pub async fn get_sso_config(
     tenant_id: &str,
     service_principal_id: &str,
 ) -> Result<SsoConfigDto, UiError> {
     invoke_result(
         "get_sso_config",
-        SpArgs {
+        ServicePrincipalIdArgs {
             tenant_id,
             service_principal_id,
         },

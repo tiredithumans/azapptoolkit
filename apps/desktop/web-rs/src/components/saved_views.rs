@@ -6,23 +6,13 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::state::use_session;
+use crate::util::{ls_get, ls_set};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SavedView {
     name: String,
     facet: String,
     search: String,
-}
-
-fn ls_get(key: &str) -> Option<String> {
-    let storage = web_sys::window()?.local_storage().ok().flatten()?;
-    storage.get_item(key).ok().flatten()
-}
-
-fn ls_set(key: &str, value: &str) {
-    if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-        let _ = storage.set_item(key, value);
-    }
 }
 
 /// A row of saved-view chips plus a save-current control. `facet`/`search` are
