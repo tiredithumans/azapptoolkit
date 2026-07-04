@@ -12,6 +12,7 @@ pub mod federated_tab;
 pub mod overview_tab;
 pub mod owners_tab;
 pub mod permissions_tab;
+pub mod usage_panel;
 
 pub use app_tab::AppTab;
 pub use enterprise_tab::EnterpriseTab;
