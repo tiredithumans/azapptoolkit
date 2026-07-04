@@ -9,6 +9,12 @@ the project adheres to
 
 ### Changed
 
+- **CSS token housekeeping** (internal hygiene, no visual change): finished the
+  design-token migration in `styles.css` — dropped the dead compatibility aliases
+  (`--shadow-sm`→`--shadow-2`, `--shadow-md`→`--shadow-4`, `--surface-elevated`→
+  `--surface-raised`) after repointing their uses, and swept hardcoded 4px-grid
+  spacing and 12px font-sizes onto the existing `--space-*` / `--text-*` tokens
+  where a token exactly equals the value. Pixel-identical output.
 - **Design polish — iconography pass, posture-card hierarchy, labeled compare panes**
   (visual only, no behavior change). Chrome buttons now draw from the shared `Icon`
   catalog so one action reads the same everywhere: the dock chip close (`×`) and
