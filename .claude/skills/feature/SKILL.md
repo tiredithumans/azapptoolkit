@@ -6,42 +6,48 @@ argument-hint: "[feature description] — e.g., 'add feature batch approve apps'
 
 # Feature — scaffold branches, commands, and stubs for new features
 
-Create a complete feature scaffolding: branch → backend command + handler → frontend stub → wiring. Follow the repo's conventions and run verification at each step.
+Create a complete feature scaffolding: branch → backend command + handler → frontend binding → wiring. Follow the repo's conventions and run verification at each step.
 
 ## 0. Determine scope & naming
 
 - From the argument (or ask): what is the feature?
-  - New domain command → new file in `src-tauri/src/commands/<domain>.rs` + stub in `web-rs/src/bindings/<domain>.rs`.
+  - New domain command → the right module under `src-tauri/src/commands/` + a binding in `web-rs/src/bindings/<domain>.rs`. Note `commands/` has domain **subdirectories** (`applications/`, `sso/`) as well as single files — extend the existing module for the domain rather than adding a parallel file.
   - New WASM component → new file in `web-rs/src/components/` or `web-rs/src/views/`.
   - New crate → new dir in `crates/` + update workspace Cargo.toml.
-- Determine the scope for Conventional Commits: `desktop`, `core`, `auth`, `graph`, `exchange`.
-- Suggest branch name: `<scope>/<short-slug>` (e.g., `desktop/batch-approve`).
+- Conventional-commit scope: use the canonical list in AGENTS.md (Git & version control — exactly 9 scopes, enforced by the commit-validator hook). Don't invent scopes.
+- Suggest branch name: `<type>/<short-slug>` where `<type>` is the conventional-commit type (e.g., `feat/batch-approve`, `fix/token-refresh`).
 
 ## 1. Branch
 
 - Create feature branch:
 ```bash
-git checkout -b <scope>/<short-slug> origin/main
+git checkout -b <type>/<short-slug> origin/main
 ```
 - If on `main`, this creates a clean branch. If already on one, suggest rebasing.
 
-## 2. Scaffolding — backend command (`src-tauri/src/commands/<domain>.rs`)
+## 2. Scaffolding — backend command (`src-tauri/src/commands/`)
 
-Create or extend the handler file. Use this pattern:
+Create or extend the domain's handler module. Use this pattern:
 ```rust
-use crate::state::{AppState, UiError};
+use tauri::State;
+
+use crate::dto::UiError;
+use crate::state::AppState;
 
 #[tauri::command]
-pub async fn <name>(state: State<AppState>, args: <ArgType>) -> Result<ReturnType, UiError> {
+pub async fn <name>(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    object_id: String,
+) -> Result<ReturnType, UiError> {
     // ... implementation
 }
 ```
 
-- Use `#[tauri::command] async fn`.
-- Accept `State<'_, AppState>` as first param.
-- Return `Result<T, UiError>`.
-- Frontend args use `#[serde(rename_all = "camelCase")]` in `web-rs`.
-- Check token scopes if the feature needs extra-scope tokens (e.g., `AppState.ensure_audit_log()`).
+- Use `#[tauri::command] async fn`, `State<'_, AppState>` first, `Result<T, UiError>` return.
+- Rust params stay snake_case — the Tauri macro maps the camelCase arg keys the frontend sends.
+- New module file? Register it in `src-tauri/src/commands/mod.rs`.
+- Check token scopes if the feature needs extra-scope tokens (e.g., `AppState::ensure_audit_log()`).
 
 ## 3. Register the handler (`src-tauri/src/lib.rs`)
 
@@ -54,28 +60,39 @@ let builder = tauri::Builder::default()
     ]);
 ```
 
-## 4. Create the frontend stub (`web-rs/src/bindings/<domain>.rs`)
+## 4. Create the frontend binding (`web-rs/src/bindings/<domain>.rs`)
 
-Create or extend the typed stub:
-```typescript
-import { invoke_result } from "$lib/ipc";
+Typed Rust stub over `tauri_sys` — mirror `bindings/activity.rs`:
+```rust
+use azapptoolkit_dto::UiError;
+use serde::Serialize;
+use tauri_sys::core::invoke_result;
 
-interface <ArgType> {
-  // ...
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NameArgs<'a> {
+    tenant_id: &'a str,
+    object_id: &'a str,
 }
 
-export interface <ReturnType> {
-  // ...
-}
-
-export async function <name>(args: <ArgType>): Promise<<ReturnType>> {
-  return invoke_result("<domain>.name", args);
+pub async fn <name>(tenant_id: &str, object_id: &str) -> Result<ReturnType, UiError> {
+    invoke_result(
+        "<name>",
+        NameArgs {
+            tenant_id,
+            object_id,
+        },
+    )
+    .await
 }
 ```
 
-- Arguments are camelCase (from frontend).
-- Return type matches backend.
-- Use `invoke_result` for typed results (not `invoke`, which is generic).
+- The command name string is the **flat snake_case fn name** (`"<name>"`, no domain prefix).
+- Args struct fields are snake_case Rust; `#[serde(rename_all = "camelCase")]` produces the camelCase wire keys the Tauri macro expects. Common shapes (`TenantArg`, `ObjectIdArgs`, `AppIdArgs`, …) already exist in `bindings/common.rs` — reuse before defining a new one.
+- New module file? Add `pub mod <domain>;` to `web-rs/src/bindings/mod.rs`.
+- Use `invoke_result` for `Result<T, UiError>` commands (not bare `invoke`, which panics on a rejected promise).
+
+The command fn + `generate_handler![]` entry + binding are the 3-step parity contract; the advisory `command-parity-check.sh` hook warns if one leg is missing.
 
 ## 5. If WASM component — add to views/components
 
@@ -92,17 +109,17 @@ Run `just verify` and report any issues:
 ## 7. Output format
 
 ```
-feature: created scaffold for <scope>/<short-slug>
+feature: created scaffold for <type>/<short-slug>
 
 ## Changes
-- ✅ Branch created: `<scope>/<short-slug>` from `origin/main`
-- ✅ Backend handler: `src-tauri/src/commands/<domain>.rs`
+- ✅ Branch created: `<type>/<short-slug>` from `origin/main`
+- ✅ Backend handler: `src-tauri/src/commands/<domain>.rs` (or the domain subdirectory)
 - ✅ Handler registered in `src-tauri/src/lib.rs` (`generate_handler![]`)
-- ✅ Frontend stub: `web-rs/src/bindings/<domain>.rs` (calls `invoke_result`)
-- ✅ Scopes checked: uses `AppState.ensure_<scope>()` for extra-scope tokens
+- ✅ Frontend binding: `web-rs/src/bindings/<domain>.rs` (calls `invoke_result`)
+- ✅ Scopes checked: uses `AppState::ensure_<scope>()` for extra-scope tokens
 
 ## Next steps
-Write the implementation in `src-tauri/src/commands/<domain>.rs` and update the stub.
+Write the implementation in `src-tauri/src/commands/<domain>.rs` and update the binding.
 ```
 
 ## Failure handling

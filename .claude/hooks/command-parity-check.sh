@@ -35,7 +35,8 @@ case "$file" in
   *)  rel="$file" ;;
 esac
 
-# Only fire for files in the command chain.
+# Only fire for files in the command chain. `case` globs match `/`, so these
+# patterns cover nested modules (commands/applications/, commands/sso/) too.
 case "$rel" in
   apps/desktop/src-tauri/src/commands/*.rs) ;;
   apps/desktop/src-tauri/src/lib.rs) ;;
@@ -49,10 +50,14 @@ bindings_dir="$project/apps/desktop/web-rs/src/bindings"
 [ -d "$commands_dir" ] && [ -f "$lib_rs" ] && [ -d "$bindings_dir" ] || exit 0
 
 # 1. Declared: fn name within a few lines after a #[tauri::command] attribute.
-declared=$(grep -h -A4 '#\[tauri::command' "$commands_dir"/*.rs 2>/dev/null \
+# Recursive (-r) — command handlers live in nested modules too
+# (commands/applications/, commands/sso/); a flat glob missed those and
+# produced ~20 false stale-handler warnings per edit.
+declared=$(grep -rh -A4 --include='*.rs' '#\[tauri::command' "$commands_dir" 2>/dev/null \
   | grep -oE 'fn [a-z_0-9]+' | sed 's/^fn //' | sort -u)
 
 # 2. Registered: `commands::module::name` entries inside generate_handler![].
+# The trailing `sed` keeps only the fn name, so nesting depth doesn't matter.
 registered=$(sed -n '/generate_handler!\[/,/\]/p' "$lib_rs" 2>/dev/null \
   | tr -d ' ,' | grep '^commands::' | sed 's/.*:://' | sort -u)
 

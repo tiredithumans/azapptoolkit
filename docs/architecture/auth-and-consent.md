@@ -79,6 +79,26 @@ button must pre-acquire the token with a typed call (e.g. `AppState::ensure_arm_
   behind it is gated on that scope + Entra ID P1/P2;
   `AuditRunResult.sign_in_report_available`/`sign_in_consent_required` drive the banner/empty state.
 
+## Force re-auth in place — never make the user sign out
+
+A dead refresh token can't be re-minted silently: `InvalidGrant` / `RefreshTokenMissing` both map
+to `UiError` code **`refresh_missing`** (`NotSignedIn` → **`not_signed_in`**). The recovery is the
+`reauthenticate` command → `EntraAuthService::reauthenticate(&TenantContext)`: ONE interactive
+browser round trip (`prompt=login`, `login_hint` = the current account) that validates the
+returned `tid` + `oid` match the session (cache safety, mirroring `consent_for_scopes`; a
+different account errors) — restoring the session **without** dropping the tenant's data caches,
+which a sign-out/sign-in cycle would.
+
+- It takes the full `TenantContext`, not a bare tenant id, because `InvalidGrant` purges
+  `known_tenants` — the front-end still holds the context in `active_tenant`.
+- Front-end wiring: the top-bar **Refresh Token** button (`shell.rs`, next to the tenant chip)
+  tries silent `refresh_session` first, then falls back to `reauthenticate` on those two codes.
+  `Session::report_command_error(&UiError)` — the central error sink;
+  `use_command::run_toast_err` routes through it — shows a **Re-authenticate** toast action keyed
+  on the same two codes, else a plain error toast.
+- **Adding a new re-auth-fatal code → extend BOTH `matches!` sets** (`state.rs` + `shell.rs`);
+  they must stay in lockstep or the button and the toast disagree.
+
 ## Capability catalog — role/scope feedback rides one source of truth
 
 There is no single role that unlocks the app — it runs with the signed-in user's delegated rights

@@ -127,19 +127,27 @@ Scoping is a **family of independent authorities**, unified behind one classifie
   `scope_kind(value) -> Option<ScopeKind>` (the single "what mechanism, if any?" decision) + metadata
   (`target_noun` / `capability_key` / `admin_applicable`). `admin_applicable() == false` is the seam
   for future owner-consented mechanisms (Teams/Chat RSC) — the UI renders guidance, not an apply.
-- **Wizard** (`web-rs/components/scope_wizard.rs`, the "Grant scoped access…" button on every
-  principal's Permissions surface; a held org-wide row's **"Scope…"** opens it *pre-seeded* to that
-  permission). Uniform shell — pick permissions → choose targets → review & grant — that **dispatches
-  Step 2's target panel and Step 3's apply by `ScopeKind`**. **One mechanism per run** (picking a
-  permission locks the checklist to its mechanism). A de-emphasized **org-wide** option falls back to
-  `grant_single_permission` / `grant_managed_identity_permission`.
+- **Wizard** (`web-rs/components/scope_wizard.rs`) — the single **"Grant access"** button on every
+  principal's Permissions surface. It **subsumes the old inline "Add permission" picker** — there is
+  no separate single-grant picker. Uniform shell: **select permissions → choose access → review &
+  grant**. Step 1 is the **full live catalog** (the reusable multi-select `PermissionPicker`, every
+  resource + Application/Delegated; **`ApplicationOnly` for a bare SP**, whose org-wide grant is
+  app-role-only) used as a cart — the wizard owns `selected: Vec<PickerSelection>` and the picker
+  emits toggles. `mechanism` is `Some(kind)` only when the cart is non-empty *and* every item is an
+  Application permission mapping to the **same** `ScopeKind`; delegated / mixed / non-scopable ⇒
+  `None` ⇒ org-wide only. Step 2 **dispatches the target panel and the apply by `ScopeKind`**.
+  **One mechanism per run**; a held org-wide row's **"Scope…"** opens it *pre-seeded* with the full
+  `PickerSelection`. The de-emphasized **org-wide** path falls back to `grant_single_permission` per
+  item (app reg) / `grant_managed_identity_permission` grouped by resource (bare SP).
 
 Per-mechanism apply (each does grant-before-strip, so a failure never strands the principal):
 
-- **Exchange** — declare-only: `declare_app_permission` per permission (manifest only, no runtime
-  grant) then `grant_exchange_mailbox_access(Some([…]))` /
-  `grant_managed_identity_scoped_exchange_access` with `remove_unscoped=true`. Targets:
-  `ManagedScopeGroupPanel` (mailbox group membership) or existing groups.
+- **Exchange** — declare-only: `declare_app_permission` per permission using the cart's id
+  (manifest only, **no** runtime grant) then `grant_exchange_mailbox_access(Some([…]))` /
+  `grant_managed_identity_scoped_exchange_access` with `remove_unscoped=true`. RBAC for
+  Applications authorizes independently of the Entra grant — reach is the **union**, so leaving an
+  org-wide Entra grant in place defeats the scoping. Targets: `ManagedScopeGroupPanel` (mailbox
+  group membership) or existing groups.
 - **SharePoint** — `commands::sharepoint::convert_site_access_to_selected` (works for an app SP *and*
   an MI — caller passes the SP object id + app id): grant `Sites.Selected` (idempotent) → grant
   per-site access → **only if ≥1 site grant landed** strip the broad `Sites.*` grant
@@ -259,6 +267,44 @@ The Security workbench's finding groups and filters key off structured `AuditIte
 than `starts_with(...)` on free-text issues — `score_one` populates the sign-in fields after
 `score_application` (which stays sign-in-agnostic, defaulting them). When adding a new finding
 group or filter, prefer a structured flag on `AuditItem` over matching an advisory string.
+
+## Finding groups, filters & bulk-action pairing
+
+The Findings pane renders `groups::group_findings` — the `GROUP_CATALOG`, keyed by the **same**
+finding keys `filter::matches_finding` understands. Classification delegates to
+`matches_finding`, so each marker predicate lives exactly once. Actionable groups are ranked by
+impact (Σ `risk_score`); healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a
+collapsed disclosure.
+
+- **`expired` matches only `CredentialStatus::Expired`** — expiring-soon lives in the
+  Credential-expiry lens, not this finding.
+- **Load-bearing asymmetry:** `scoped_mailbox` matches with `.contains(SCOPED_VIA_RBAC)` while
+  every sibling finding uses `.starts_with` — the marker sits mid-issue, not at the front. The
+  `filter.rs` tests pin this; a "normalize everything to `starts_with`" sweep silently empties
+  the finding.
+- **Shared counts, one source:** `audit_view/posture.rs::posture_counts` feeds both the Security
+  tab's posture strip and the Home posture card (severity row + Top-findings counts), so the
+  numbers can't disagree. The Home card's ranked Top-findings list reuses
+  `groups::ranked_actionable_findings`, so the finding *order* and tone can't disagree either.
+- **Bulk-action pairing:** `groups::group_bulk_actions(key)` pairs each finding group with the
+  fix that addresses **that rule**: Expired → RemoveExpired, Org-wide mailbox/SharePoint → Scope,
+  Redundant → RemoveRedundant, Ownership → AddOwner, Unused → DisableSignIn + Delete. Advisory
+  groups get none — the old Over-privileged → RemoveRedundant cross-rule mapping is retired; do
+  not reintroduce it. **No Grant consent on audit surfaces.** "Fix all N" only seeds
+  `selected_audit_ids` with the group's *eligible* (Application-kind) ids — the
+  `BulkActionBar`'s typed-confirm / target forms still gate execution.
+
+## Bulk remediations reuse the single-app cores, sequentially
+
+`bulk_remove_redundant_permissions` / `bulk_scope_mailbox_access` / `bulk_scope_sharepoint_access`
+(`commands/bulk.rs`) loop the per-app remediation paths
+(`remediation::remediate_remove_redundant_permissions`, `exchange::grant_exchange_mailbox_access`
+with `permissions: None` = all, `remediation::remediate_scope_sharepoint_access`) — **not** the
+`dispatch_capped` spawn fan-out, because those cores take `State` (not `Send` into a spawn) and
+the selection is a small admin-chosen set. They `reset()` + poll `audit_cancel`, emit
+`bulk-progress` (no `in_flight_cap`), and degrade to a per-app `error` rather than aborting; each
+per-app core busts its own cache. The scope targets (mailbox groups / site URLs + role) are
+**uniform across the selection**.
 
 ## SP-only principals in the audit (no local application)
 

@@ -124,10 +124,28 @@ if not subject:
 
 pattern = (
     r"^(feat|fix|docs|chore|refactor|test|build|ci|perf|style|revert|deps)"
-    r"(\([^)]+\))?!?:\s.+$"
+    r"(\(([^)]+)\))?!?:\s.+$"
 )
-if re.match(pattern, subject):
-    sys.exit(0)
+m = re.match(pattern, subject)
+if m:
+    # A scope, when present, must be one of the canonical nine. AGENTS.md
+    # ("Git & version control") is the single source for this list — update
+    # it there first, then mirror here. Scopeless subjects stay valid.
+    scope = m.group(3)
+    scopes = {
+        "desktop", "core", "auth", "graph", "exchange",
+        "keyvault", "permissions", "ci", "docs",
+    }
+    if scope is None or scope in scopes:
+        sys.exit(0)
+    sys.stderr.write(
+        "[conventional-commit-validator] Unknown commit scope.\n"
+        f"  subject:  {subject}\n"
+        f"  scope:    ({scope})\n"
+        "  scopes:   desktop core auth graph exchange keyvault permissions ci docs"
+        " — or omit the scope\n"
+    )
+    sys.exit(2)
 
 sys.stderr.write(
     "[conventional-commit-validator] Subject does not match Conventional Commits.\n"

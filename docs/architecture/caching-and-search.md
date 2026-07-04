@@ -80,6 +80,42 @@ gated on "something actually changed."** Audit remediations, `remove_exchange_ma
 `downgrade_application_permission`, the `bulk_*` commands, and the SSO create flows all follow it
 (see [scoping-and-audit.md](./scoping-and-audit.md) for the remediation case).
 
+## `CacheKind::ServicePrincipal` self-invalidates in the graph client
+
+The per-app SP cache is keyed by **`appId`**, but the SP mutators take an SP **object** id — a
+targeted single-key bust isn't possible without an extra lookup. So this kind invalidates in the
+graph client, **not** via the command-side aggregators: `delete_service_principal`,
+`patch_service_principal`, and `set_service_principal_tags` call a private tenant-prefix sweep
+(`invalidate_sp_cache`) on `Ok` — the can't-miss option. `set_service_principal_app_roles` rides
+this via `patch_service_principal`. **`invalidate_app_lists` does not touch this kind** — don't
+rely on it for SP-field freshness.
+
+Related: `ensure_service_principal` returns `(ServicePrincipal, bool)` where the bool is
+**created**. First-grant paths (`grant_single_permission`, `grant_admin_consent[_core]`, the bulk
+grant) call `invalidate_app_lists` only when an SP was newly created; otherwise the cheaper
+detail + audit bust suffices.
+
+## Batched Graph fan-out + the adaptive throttle
+
+Large per-object fan-outs (the security audit, DR backup) ride two shared pieces — reuse them for
+any new heavy fan-out; don't hand-roll a second tracker or a raw per-item loop:
+
+- **Graph JSON batching** — `client.batch_get_json[_with_headers]`
+  (`graph/src/client/batch.rs`): 20 GETs per POST, results returned in input order, inner-429
+  sub-requests re-batched. Advanced queries inside a batch (e.g. `memberOf` `$count`) need the
+  **per-sub-request** header form — the outer POST's headers don't reach sub-requests.
+  Whole-batch failures must degrade to per-object reads, never fail the run.
+- **`ConcurrencyThrottle`** (`commands/throttle.rs`) — wired as the client's `ThrottleObserver`
+  and fed to `dispatch_capped` as `|| throttle.current_limit()`, so the in-flight cap halves on
+  429 and recovers when quiet. Attach/detach with the `ThrottleGuard::attach(client, tracker)`
+  RAII (used by the audit and the bulk fan-outs) so an early `?` can't leave a stale observer
+  halving the shared per-tenant client's cap.
+
+The write fan-outs (bulk delete / grant / remove-expired, DR backup writes) **can't `$batch`** —
+Graph batches GETs — so their win is bounded concurrency + adaptive 429 backoff, not round-trip
+collapse. They emit the live cap in `BulkProgress.in_flight_cap` (additive `Option`; the DR view
+shows it plus a back-off notice).
+
 ## The site-sweep cache invalidates on site-permission mutations
 
 The Resource Access reverse-lookup caches a **complete** site sweep under `{tenant}|site_sweep`

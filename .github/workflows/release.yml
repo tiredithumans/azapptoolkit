@@ -19,7 +19,7 @@ concurrency:
 jobs:
   # Fail fast (before the long cross-platform build) on a mis-tagged release:
   # version drift between the tag and the manifests, or a placeholder updater
-  # key. Re-runs the RustSec scan against the exact lockfile this tag builds.
+  # key. Re-runs the RustSec scans against the exact lockfiles this tag builds.
   guard:
     runs-on: ubuntu-latest
     steps:
@@ -79,6 +79,10 @@ jobs:
       # ship unscanned — gate it here so a new advisory fails the release.
       - name: audit (workspace)
         run: just audit
+      # web-rs has its own Cargo.lock the root scan never sees, and that WASM
+      # tree ships inside the webview with IPC access — scan it at release too.
+      - name: audit (web-rs lockfile)
+        run: just web-audit
 
   # Per-platform bundles + signed updater artifacts. Each leg uploads its whole
   # bundle/ tree as an artifact; the `release` job assembles one cross-platform

@@ -136,10 +136,18 @@ web-clippy:
 web-test:
     cargo test --locked
 
-# Run every CI gate locally, in order. Run this before declaring a change done.
-# Frontend tests run before the (slower) web build, matching the CI web job and
-# failing fast on a logic regression.
+# Run the core CI gates locally, in order. Run this before declaring a change
+# done. Frontend tests run before the (slower) web build, matching the CI web
+# job and failing fast on a logic regression. NOT the whole of CI: the
+# dependency audit/deny gates and the browser GUI tests are covered by
+# `verify-full` below; actionlint stays CI-side unless installed locally.
 verify: fmt-check clippy test web-fmt-check web-clippy web-test web-build
+
+# Full CI parity: verify + both RustSec scans + both deny policies + the
+# browser GUI tests. web-itest runs LAST because it needs a local browser +
+# matching WebDriver (see its recipe) — the machine-independent gates fail
+# first on a box without one.
+verify-full: verify audit web-audit deny web-deny web-itest
 
 # --- Dependency policy (CI audit/deny jobs) ---------------------------------
 
