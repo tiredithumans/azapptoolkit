@@ -12,8 +12,8 @@
 //! Progress events ride the same `bulk-progress` channel so the frontend can
 //! share a single listener.
 
+use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
@@ -31,7 +31,7 @@ use crate::dto::bulk::{
     BulkGrantOutcome, BulkGrantResult, BulkOwnerOutcome, BulkProgress, BulkRemoveExpiredResult,
     BulkRemoveRedundantOutcome, BulkRemoveRedundantResult, BulkScopeOutcome, BulkScopeResult,
 };
-use crate::state::AppState;
+use crate::state::{AppState, CancelFlag};
 
 const CONCURRENCY: usize = 4;
 
@@ -419,91 +419,68 @@ pub async fn bulk_create_applications(
     validate_only: bool,
 ) -> Result<BulkCreateResult, UiError> {
     state.audit_cancel.reset();
-
-    let client = state.graph_for(&tenant_id);
-    let total = specs.len();
     let cancel = state.audit_cancel.clone();
-    let mut outcomes = Vec::new();
+    let client = state.graph_for(&tenant_id);
 
-    for (i, spec) in specs.into_iter().enumerate() {
-        if cancel.is_cancelled() {
-            break;
-        }
-        emit(
-            &app_handle,
-            BulkProgress {
-                done: i,
-                total,
-                current_app: Some(spec.display_name.clone()),
-                cancelled: false,
-                in_flight_cap: None,
-            },
-        );
-
-        // Validate.
-        if spec.display_name.trim().is_empty() {
-            outcomes.push(BulkCreateOutcome {
-                display_name: spec.display_name,
-                status: "invalid".into(),
-                app_id: None,
-                message: Some("display name is required".into()),
-            });
-            continue;
-        }
-        if let Some(aud) = &spec.sign_in_audience
-            && !VALID_AUDIENCES.contains(&aud.as_str())
-        {
-            outcomes.push(BulkCreateOutcome {
-                display_name: spec.display_name,
-                status: "invalid".into(),
-                app_id: None,
-                message: Some(format!("unrecognised signInAudience: {aud}")),
-            });
-            continue;
-        }
-        if validate_only {
-            outcomes.push(BulkCreateOutcome {
-                display_name: spec.display_name,
-                status: "valid".into(),
-                app_id: None,
-                message: None,
-            });
-            continue;
-        }
-
-        let input = CreateApplicationInput {
-            display_name: spec.display_name.clone(),
-            sign_in_audience: spec.sign_in_audience,
-            description: spec.description,
-            ..Default::default()
-        };
-        match super::applications::create_application_core(&client, input).await {
-            Ok(r) => outcomes.push(BulkCreateOutcome {
-                display_name: r.application.display_name,
-                status: "created".into(),
-                app_id: Some(r.application.app_id),
-                message: None,
-            }),
-            Err(e) => outcomes.push(BulkCreateOutcome {
-                display_name: spec.display_name,
-                status: "failed".into(),
-                app_id: None,
-                message: Some(e.message),
-            }),
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    emit(
+    let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
-        BulkProgress {
-            done: total,
-            total,
-            current_app: None,
-            cancelled: cancel.is_cancelled(),
-            in_flight_cap: None,
+        &cancel,
+        specs,
+        |spec| spec.display_name.clone(),
+        |spec| {
+            let client = client.clone();
+            async move {
+                // Validate.
+                if spec.display_name.trim().is_empty() {
+                    return BulkCreateOutcome {
+                        display_name: spec.display_name,
+                        status: "invalid".into(),
+                        app_id: None,
+                        message: Some("display name is required".into()),
+                    };
+                }
+                if let Some(aud) = &spec.sign_in_audience
+                    && !VALID_AUDIENCES.contains(&aud.as_str())
+                {
+                    return BulkCreateOutcome {
+                        display_name: spec.display_name,
+                        status: "invalid".into(),
+                        app_id: None,
+                        message: Some(format!("unrecognised signInAudience: {aud}")),
+                    };
+                }
+                if validate_only {
+                    return BulkCreateOutcome {
+                        display_name: spec.display_name,
+                        status: "valid".into(),
+                        app_id: None,
+                        message: None,
+                    };
+                }
+                let input = CreateApplicationInput {
+                    display_name: spec.display_name.clone(),
+                    sign_in_audience: spec.sign_in_audience,
+                    description: spec.description,
+                    ..Default::default()
+                };
+                match super::applications::create_application_core(&client, input).await {
+                    Ok(r) => BulkCreateOutcome {
+                        display_name: r.application.display_name,
+                        status: "created".into(),
+                        app_id: Some(r.application.app_id),
+                        message: None,
+                    },
+                    Err(e) => BulkCreateOutcome {
+                        display_name: spec.display_name,
+                        status: "failed".into(),
+                        app_id: None,
+                        message: Some(e.message),
+                    },
+                }
+            }
         },
-    );
+    )
+    .await;
 
     let any_created = !validate_only && outcomes.iter().any(|o| o.status == "created");
     if any_created {
@@ -512,7 +489,7 @@ pub async fn bulk_create_applications(
     Ok(BulkCreateResult {
         validate_only,
         outcomes,
-        cancelled: cancel.is_cancelled(),
+        cancelled,
     })
 }
 
@@ -532,59 +509,44 @@ pub async fn bulk_remove_redundant_permissions(
 ) -> Result<BulkRemoveRedundantResult, UiError> {
     state.audit_cancel.reset();
     let cancel = state.audit_cancel.clone();
-    let total = object_ids.len();
-    let mut outcomes = Vec::new();
 
-    for (i, object_id) in object_ids.into_iter().enumerate() {
-        if cancel.is_cancelled() {
-            break;
-        }
-        emit(
-            &app_handle,
-            BulkProgress {
-                done: i,
-                total,
-                current_app: Some(object_id.clone()),
-                cancelled: false,
-                in_flight_cap: None,
-            },
-        );
-        let outcome = match super::remediation::remediate_remove_redundant_permissions(
-            state.clone(),
-            tenant_id.clone(),
-            object_id.clone(),
-        )
-        .await
-        {
-            Ok(r) => BulkRemoveRedundantOutcome {
-                object_id,
-                removed: r.removed,
-                skipped: r.skipped,
-                error: None,
-            },
-            Err(e) => BulkRemoveRedundantOutcome {
-                object_id,
-                removed: Vec::new(),
-                skipped: Vec::new(),
-                error: Some(e.message),
-            },
-        };
-        outcomes.push(outcome);
-    }
-
-    emit(
+    let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
-        BulkProgress {
-            done: total,
-            total,
-            current_app: None,
-            cancelled: cancel.is_cancelled(),
-            in_flight_cap: None,
+        &cancel,
+        object_ids,
+        |id| id.clone(),
+        |object_id| {
+            let state = state.clone();
+            let tenant_id = tenant_id.clone();
+            async move {
+                match super::remediation::remediate_remove_redundant_permissions(
+                    state,
+                    tenant_id,
+                    object_id.clone(),
+                )
+                .await
+                {
+                    Ok(r) => BulkRemoveRedundantOutcome {
+                        object_id,
+                        removed: r.removed,
+                        skipped: r.skipped,
+                        error: None,
+                    },
+                    Err(e) => BulkRemoveRedundantOutcome {
+                        object_id,
+                        removed: Vec::new(),
+                        skipped: Vec::new(),
+                        error: Some(e.message),
+                    },
+                }
+            }
         },
-    );
+    )
+    .await;
+
     Ok(BulkRemoveRedundantResult {
         outcomes,
-        cancelled: cancel.is_cancelled(),
+        cancelled,
     })
 }
 
@@ -606,50 +568,37 @@ pub async fn bulk_scope_mailbox_access(
 ) -> Result<BulkScopeResult, UiError> {
     state.audit_cancel.reset();
     let cancel = state.audit_cancel.clone();
-    let total = object_ids.len();
-    let mut outcomes = Vec::new();
 
-    for (i, object_id) in object_ids.into_iter().enumerate() {
-        if cancel.is_cancelled() {
-            break;
-        }
-        emit(
-            &app_handle,
-            BulkProgress {
-                done: i,
-                total,
-                current_app: Some(object_id.clone()),
-                cancelled: false,
-                in_flight_cap: None,
-            },
-        );
-        let error = super::exchange::grant_exchange_mailbox_access(
-            state.clone(),
-            tenant_id.clone(),
-            object_id.clone(),
-            None,
-            groups.clone(),
-            true,
-        )
-        .await
-        .err()
-        .map(|e| e.message);
-        outcomes.push(BulkScopeOutcome { object_id, error });
-    }
-
-    emit(
+    let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
-        BulkProgress {
-            done: total,
-            total,
-            current_app: None,
-            cancelled: cancel.is_cancelled(),
-            in_flight_cap: None,
+        &cancel,
+        object_ids,
+        |id| id.clone(),
+        |object_id| {
+            let state = state.clone();
+            let tenant_id = tenant_id.clone();
+            let groups = groups.clone();
+            async move {
+                let error = super::exchange::grant_exchange_mailbox_access(
+                    state,
+                    tenant_id,
+                    object_id.clone(),
+                    None,
+                    groups,
+                    true,
+                )
+                .await
+                .err()
+                .map(|e| e.message);
+                BulkScopeOutcome { object_id, error }
+            }
         },
-    );
+    )
+    .await;
+
     Ok(BulkScopeResult {
         outcomes,
-        cancelled: cancel.is_cancelled(),
+        cancelled,
     })
 }
 
@@ -670,49 +619,37 @@ pub async fn bulk_scope_sharepoint_access(
 ) -> Result<BulkScopeResult, UiError> {
     state.audit_cancel.reset();
     let cancel = state.audit_cancel.clone();
-    let total = object_ids.len();
-    let mut outcomes = Vec::new();
 
-    for (i, object_id) in object_ids.into_iter().enumerate() {
-        if cancel.is_cancelled() {
-            break;
-        }
-        emit(
-            &app_handle,
-            BulkProgress {
-                done: i,
-                total,
-                current_app: Some(object_id.clone()),
-                cancelled: false,
-                in_flight_cap: None,
-            },
-        );
-        let error = super::remediation::remediate_scope_sharepoint_access(
-            state.clone(),
-            tenant_id.clone(),
-            object_id.clone(),
-            site_urls.clone(),
-            role.clone(),
-        )
-        .await
-        .err()
-        .map(|e| e.message);
-        outcomes.push(BulkScopeOutcome { object_id, error });
-    }
-
-    emit(
+    let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
-        BulkProgress {
-            done: total,
-            total,
-            current_app: None,
-            cancelled: cancel.is_cancelled(),
-            in_flight_cap: None,
+        &cancel,
+        object_ids,
+        |id| id.clone(),
+        |object_id| {
+            let state = state.clone();
+            let tenant_id = tenant_id.clone();
+            let site_urls = site_urls.clone();
+            let role = role.clone();
+            async move {
+                let error = super::remediation::remediate_scope_sharepoint_access(
+                    state,
+                    tenant_id,
+                    object_id.clone(),
+                    site_urls,
+                    role,
+                )
+                .await
+                .err()
+                .map(|e| e.message);
+                BulkScopeOutcome { object_id, error }
+            }
         },
-    );
+    )
+    .await;
+
     Ok(BulkScopeResult {
         outcomes,
-        cancelled: cancel.is_cancelled(),
+        cancelled,
     })
 }
 
@@ -734,74 +671,57 @@ pub async fn bulk_add_owner(
     state.audit_cancel.reset();
     let cancel = state.audit_cancel.clone();
     let client = state.graph_for(&tenant_id);
-    let total = object_ids.len();
-    let mut outcomes = Vec::new();
-    let mut any_added = false;
 
-    for (i, object_id) in object_ids.into_iter().enumerate() {
-        if cancel.is_cancelled() {
-            break;
-        }
-        emit(
-            &app_handle,
-            BulkProgress {
-                done: i,
-                total,
-                current_app: Some(object_id.clone()),
-                cancelled: false,
-                in_flight_cap: None,
-            },
-        );
-        let outcome = match client.list_owners(&object_id).await {
-            Ok(owners) if owners.iter().any(|o| o.id == principal_id) => BulkOwnerOutcome {
-                object_id,
-                added: false,
-                skipped: true,
-                error: None,
-            },
-            Ok(_) => match client.add_owner(&object_id, &principal_id).await {
-                Ok(()) => {
-                    any_added = true;
-                    BulkOwnerOutcome {
+    let (outcomes, cancelled) = run_bulk_seq(
+        &app_handle,
+        &cancel,
+        object_ids,
+        |id| id.clone(),
+        |object_id| {
+            let client = client.clone();
+            let principal_id = principal_id.clone();
+            async move {
+                match client.list_owners(&object_id).await {
+                    Ok(owners) if owners.iter().any(|o| o.id == principal_id) => BulkOwnerOutcome {
                         object_id,
-                        added: true,
-                        skipped: false,
+                        added: false,
+                        skipped: true,
                         error: None,
-                    }
+                    },
+                    Ok(_) => match client.add_owner(&object_id, &principal_id).await {
+                        Ok(()) => BulkOwnerOutcome {
+                            object_id,
+                            added: true,
+                            skipped: false,
+                            error: None,
+                        },
+                        Err(e) => BulkOwnerOutcome {
+                            object_id,
+                            added: false,
+                            skipped: false,
+                            error: Some(UiError::from(e).message),
+                        },
+                    },
+                    Err(e) => BulkOwnerOutcome {
+                        object_id,
+                        added: false,
+                        skipped: false,
+                        error: Some(UiError::from(e).message),
+                    },
                 }
-                Err(e) => BulkOwnerOutcome {
-                    object_id,
-                    added: false,
-                    skipped: false,
-                    error: Some(UiError::from(e).message),
-                },
-            },
-            Err(e) => BulkOwnerOutcome {
-                object_id,
-                added: false,
-                skipped: false,
-                error: Some(UiError::from(e).message),
-            },
-        };
-        outcomes.push(outcome);
-    }
+            }
+        },
+    )
+    .await;
 
-    if any_added {
+    // One detail-state bust covers detail + audit for every changed app (owners
+    // are on no list payload). Derived from the outcomes after the run.
+    if outcomes.iter().any(|o| o.added) {
         super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
     }
-    emit(
-        &app_handle,
-        BulkProgress {
-            done: total,
-            total,
-            current_app: None,
-            cancelled: cancel.is_cancelled(),
-            in_flight_cap: None,
-        },
-    );
     Ok(BulkAddOwnerResult {
         outcomes,
-        cancelled: cancel.is_cancelled(),
+        cancelled,
     })
 }
 
@@ -819,36 +739,79 @@ pub async fn bulk_disable_sign_in(
 ) -> Result<BulkDisableSignInResult, UiError> {
     state.audit_cancel.reset();
     let cancel = state.audit_cancel.clone();
-    let total = object_ids.len();
-    let mut outcomes = Vec::new();
 
-    for (i, object_id) in object_ids.into_iter().enumerate() {
+    let (outcomes, cancelled) = run_bulk_seq(
+        &app_handle,
+        &cancel,
+        object_ids,
+        |id| id.clone(),
+        |object_id| {
+            let state = state.clone();
+            let tenant_id = tenant_id.clone();
+            async move {
+                let error = super::remediation::remediate_disable_sign_in(
+                    state,
+                    tenant_id,
+                    object_id.clone(),
+                )
+                .await
+                .err()
+                .map(|e| e.message);
+                BulkDisableOutcome { object_id, error }
+            }
+        },
+    )
+    .await;
+
+    Ok(BulkDisableSignInResult {
+        outcomes,
+        cancelled,
+    })
+}
+
+/// Shared scaffold for the **sequential** bulk commands (create / remove-redundant
+/// / scope-mailbox / scope-sharepoint / add-owner / disable-sign-in). These stay
+/// sequential on purpose: each per-app core takes `State` (not `Send`, so it can't
+/// cross into a `dispatch_capped` spawn) and the selection is a small admin-chosen
+/// set — the win here is dedup, not concurrency.
+///
+/// Runs `per_item` on each `items` element in order, emitting a `bulk-progress`
+/// event (`done = i`, `in_flight_cap: None` — there's no fan-out to back off)
+/// with `label(&item)` as the current app *before* each item, then a final
+/// `done = total` event. Polls the shared cancel flag between items (already
+/// in-flight work finishes). Returns `(outcomes, cancelled)`; callers apply their
+/// own cache invalidation from the outcomes. The caller resets the flag and
+/// clones it (the `reset()` must stay at the command top, the AGENTS.md footgun).
+async fn run_bulk_seq<T, O, Fut>(
+    app_handle: &AppHandle,
+    cancel: &CancelFlag,
+    items: Vec<T>,
+    label: impl Fn(&T) -> String,
+    per_item: impl Fn(T) -> Fut,
+) -> (Vec<O>, bool)
+where
+    Fut: Future<Output = O>,
+{
+    let total = items.len();
+    let mut outcomes = Vec::with_capacity(total);
+    for (i, item) in items.into_iter().enumerate() {
         if cancel.is_cancelled() {
             break;
         }
         emit(
-            &app_handle,
+            app_handle,
             BulkProgress {
                 done: i,
                 total,
-                current_app: Some(object_id.clone()),
+                current_app: Some(label(&item)),
                 cancelled: false,
                 in_flight_cap: None,
             },
         );
-        let error = super::remediation::remediate_disable_sign_in(
-            state.clone(),
-            tenant_id.clone(),
-            object_id.clone(),
-        )
-        .await
-        .err()
-        .map(|e| e.message);
-        outcomes.push(BulkDisableOutcome { object_id, error });
+        outcomes.push(per_item(item).await);
     }
-
     emit(
-        &app_handle,
+        app_handle,
         BulkProgress {
             done: total,
             total,
@@ -857,10 +820,7 @@ pub async fn bulk_disable_sign_in(
             in_flight_cap: None,
         },
     );
-    Ok(BulkDisableSignInResult {
-        outcomes,
-        cancelled: cancel.is_cancelled(),
-    })
+    (outcomes, cancel.is_cancelled())
 }
 
 fn emit(app_handle: &AppHandle, progress: BulkProgress) {
