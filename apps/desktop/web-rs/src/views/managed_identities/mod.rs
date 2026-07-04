@@ -27,6 +27,7 @@ use crate::components::saved_views::SavedViews;
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
+use crate::hooks::use_list_export::use_list_export;
 use crate::state::use_session;
 
 use row::render_row;
@@ -69,32 +70,12 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
     // export so "what you see is what you export" (the backend serializes these
     // passed rows; filters live here). Kept in step by an Effect in
     // `LoadedManagedIdentities`; the `Arc` makes each snapshot a pointer copy.
-    let export_rows: StoredValue<Arc<Vec<ManagedIdentityDto>>> =
-        StoredValue::new(Arc::new(Vec::new()));
-    let exporting = RwSignal::new(false);
-    let do_export = move |format: &'static str| {
-        if exporting.get_untracked() {
-            return;
-        }
-        let rows = export_rows.get_value();
-        if rows.is_empty() {
-            return;
-        }
-        exporting.set(true);
-        leptos::task::spawn_local(async move {
-            let count = rows.len();
-            match managed_identity::save_managed_identities_to_file(&rows, format).await {
-                Ok(Some(path)) => {
-                    session.toast_success(format!("Exported {count} managed identities to {path}"));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    session.report_command_error(&e);
-                }
-            }
-            exporting.set(false);
-        });
-    };
+    let (export_rows, exporting, do_export) = use_list_export(
+        |rows: Arc<Vec<ManagedIdentityDto>>, format| async move {
+            managed_identity::save_managed_identities_to_file(&rows, format).await
+        },
+        "managed identities",
+    );
 
     let identities = LocalResource::new(move || {
         let tenant = tenant.get();
