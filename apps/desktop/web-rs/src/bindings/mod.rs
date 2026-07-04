@@ -48,4 +48,4 @@ pub mod usage;
 pub use azapptoolkit_core::identity::{SignInOutcome, TenantContext};
 
 // Re-exported so callers can use them without a relative import path.
-pub use common::{KeyIdArgs, ObjectIdArgs, TenantArg};
+pub use common::{AppIdArgs, KeyIdArgs, ObjectIdArgs, ServicePrincipalIdArgs, TenantArg};

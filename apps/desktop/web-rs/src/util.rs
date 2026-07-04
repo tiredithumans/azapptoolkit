@@ -42,6 +42,28 @@ where
     }
 }
 
+/// Reads a `localStorage` value by key, returning `None` when the key is
+/// absent or the storage API is unavailable. Shared by the credential
+/// rotate-vault prefill (`credentials_tab`) and the saved-views persistence
+/// (`saved_views`), where it had been independently redefined byte-for-byte.
+pub fn ls_get(key: &str) -> Option<String> {
+    web_sys::window()?
+        .local_storage()
+        .ok()
+        .flatten()?
+        .get_item(key)
+        .ok()
+        .flatten()
+}
+
+/// Writes a `localStorage` value (fire-and-forget; a storage failure is
+/// silently ignored). Paired with [`ls_get`].
+pub fn ls_set(key: &str, value: &str) {
+    if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = storage.set_item(key, value);
+    }
+}
+
 /// Copies `value` to the system clipboard (fire-and-forget). Shared by the
 /// detail panes and the SSO summary, all of which surface copy-to-clipboard
 /// fields.

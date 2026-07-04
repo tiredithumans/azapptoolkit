@@ -4,6 +4,7 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 
+use crate::bindings::AppIdArgs;
 pub use azapptoolkit_dto::activity::{ActivityLogItem, SignInActivityDto};
 
 #[derive(Serialize)]
@@ -34,13 +35,6 @@ pub async fn list_directory_audits_for_app(
     .await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SignInArgs<'a> {
-    tenant_id: &'a str,
-    app_id: &'a str,
-}
-
 /// Most recent recorded sign-in for an app's service principal (keyed on appId).
 /// Always `Ok` — a missing scope/license/consent comes back as a populated
 /// `SignInActivityDto` with `available = false` (or `consent_required = true`).
@@ -48,5 +42,5 @@ pub async fn get_app_sign_in_activity(
     tenant_id: &str,
     app_id: &str,
 ) -> Result<SignInActivityDto, UiError> {
-    invoke_result("get_app_sign_in_activity", SignInArgs { tenant_id, app_id }).await
+    invoke_result("get_app_sign_in_activity", AppIdArgs { tenant_id, app_id }).await
 }

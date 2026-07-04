@@ -4,7 +4,7 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 
-use crate::bindings::TenantArg;
+use crate::bindings::{ServicePrincipalIdArgs, TenantArg};
 pub use azapptoolkit_dto::enterprise_application::*;
 
 pub async fn list_enterprise_applications(
@@ -13,20 +13,13 @@ pub async fn list_enterprise_applications(
     invoke_result("list_enterprise_applications", TenantArg { tenant_id }).await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DetailArgs<'a> {
-    tenant_id: &'a str,
-    service_principal_id: &'a str,
-}
-
 pub async fn get_enterprise_application_detail(
     tenant_id: &str,
     service_principal_id: &str,
 ) -> Result<EnterpriseApplicationDetail, UiError> {
     invoke_result(
         "get_enterprise_application_detail",
-        DetailArgs {
+        ServicePrincipalIdArgs {
             tenant_id,
             service_principal_id,
         },
@@ -41,7 +34,7 @@ pub async fn list_enterprise_app_assignments(
 ) -> Result<Vec<AppAssignmentDto>, UiError> {
     invoke_result(
         "list_enterprise_app_assignments",
-        DetailArgs {
+        ServicePrincipalIdArgs {
             tenant_id,
             service_principal_id,
         },
@@ -57,7 +50,7 @@ pub async fn delete_enterprise_application(
 ) -> Result<(), UiError> {
     invoke_result(
         "delete_enterprise_application",
-        DetailArgs {
+        ServicePrincipalIdArgs {
             tenant_id,
             service_principal_id,
         },
@@ -126,7 +119,7 @@ pub async fn list_sp_group_memberships(
 ) -> Result<Vec<GroupMembershipDto>, UiError> {
     invoke_result(
         "list_sp_group_memberships",
-        DetailArgs {
+        ServicePrincipalIdArgs {
             tenant_id,
             service_principal_id,
         },
@@ -186,7 +179,7 @@ pub async fn get_enterprise_app_provisioning(
 ) -> Result<Vec<ProvisioningJobDto>, UiError> {
     invoke_result(
         "get_enterprise_app_provisioning",
-        DetailArgs {
+        ServicePrincipalIdArgs {
             tenant_id,
             service_principal_id,
         },

@@ -6,6 +6,7 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 use tauri_sys::core::invoke_result;
 
+use crate::bindings::AppIdArgs;
 pub use azapptoolkit_dto::exchange::*;
 
 #[derive(Serialize)]
@@ -40,13 +41,6 @@ pub async fn grant_exchange_mailbox_access(
         },
     )
     .await
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AppArgs<'a> {
-    tenant_id: &'a str,
-    app_id: &'a str,
 }
 
 #[derive(Serialize)]
@@ -95,7 +89,7 @@ pub async fn list_exchange_role_assignments(
 ) -> Result<Vec<ExchangeRoleAssignmentDto>, UiError> {
     invoke_result(
         "list_exchange_role_assignments",
-        AppArgs { tenant_id, app_id },
+        AppIdArgs { tenant_id, app_id },
     )
     .await
 }
@@ -106,7 +100,7 @@ pub async fn remove_exchange_mailbox_access(
 ) -> Result<ExchangeAccessRemovalResult, UiError> {
     invoke_result(
         "remove_exchange_mailbox_access",
-        AppArgs { tenant_id, app_id },
+        AppIdArgs { tenant_id, app_id },
     )
     .await
 }
@@ -126,7 +120,7 @@ pub async fn list_exchange_scope_group(
     tenant_id: &str,
     app_id: &str,
 ) -> Result<ExchangeScopeGroupDto, UiError> {
-    invoke_result("list_exchange_scope_group", AppArgs { tenant_id, app_id }).await
+    invoke_result("list_exchange_scope_group", AppIdArgs { tenant_id, app_id }).await
 }
 
 /// Adds mailboxes to the managed scope group, creating it on first use.

@@ -25,6 +25,7 @@ use crate::components::virtual_list::VirtualList;
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
+use crate::hooks::use_list_export::use_list_export;
 use crate::state::{OpenItemKind, use_session};
 use crate::util::created_in_range;
 use crate::views::pairing::jump_to_paired_app;
@@ -80,35 +81,12 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
     // export so "what you see is what you export". Kept in step by the
     // `use_filtered_list` export hook; the `Arc` makes each snapshot a pointer
     // copy.
-    let export_rows: StoredValue<Arc<Vec<EnterpriseApplicationDto>>> =
-        StoredValue::new(Arc::new(Vec::new()));
-    let exporting = RwSignal::new(false);
-    let do_export = move |format: &'static str| {
-        if exporting.get_untracked() {
-            return;
-        }
-        let rows = export_rows.get_value();
-        if rows.is_empty() {
-            return;
-        }
-        exporting.set(true);
-        leptos::task::spawn_local(async move {
-            let count = rows.len();
-            match enterprise_application::save_enterprise_applications_to_file(&rows, format).await
-            {
-                Ok(Some(path)) => {
-                    session.toast_success(format!(
-                        "Exported {count} enterprise applications to {path}"
-                    ));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    session.report_command_error(&e);
-                }
-            }
-            exporting.set(false);
-        });
-    };
+    let (export_rows, exporting, do_export) = use_list_export(
+        |rows: Arc<Vec<EnterpriseApplicationDto>>, format| async move {
+            enterprise_application::save_enterprise_applications_to_file(&rows, format).await
+        },
+        "enterprise applications",
+    );
 
     let sps = LocalResource::new(move || {
         let tenant = tenant.get();
