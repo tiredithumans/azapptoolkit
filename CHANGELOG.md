@@ -22,6 +22,20 @@ the project adheres to
   `bindings/common.rs`). The dialog-dense `credentials_tab`/`expose_api_tab` splits
   were deliberately left for later — extracting their dialogs would thread 10+
   signals through props and touch the Suspend-reset footgun for no real gain.
+- **The desktop backend's largest command modules were decomposed** (no behavior,
+  wire, or cancel/progress change): `run_audit`'s ~380-line orchestrator split its
+  best-effort tenant-wide prefetch blocks into named `async fn`s and bundled
+  `score_one`'s ~10 parameters into one `Arc<ScoreCtx>` (each scoring task now clones
+  one `Arc`, not a dozen values); the six sequential bulk commands share one
+  `run_bulk_seq` scaffold (the AGENTS.md-pinned "per-app cores take `State`, so these
+  stay sequential" invariant kept — plus the leftover fixed 50 ms create-loop pause
+  removed); `commands/sso.rs` split into `sso/mod.rs` + a self-contained `sso/claims.rs`
+  claims-policy codec, and `get_sso_config`'s previously untested service-principal
+  field spelunking became a tested `extract_sp_sso_fields`; the seven
+  `AppState::ensure_*_token` probes collapse onto one private `ensure_scoped_token`
+  core (centralizing the hand-maintained CAE/adapter pairing); and the five SharePoint
+  pre-acquire blocks share a `sharepoint_client_checked` helper mirroring
+  `exchange_client_checked`.
 - **Internal: the audit engine is now a module directory** (`azapptoolkit-core::audit`
   split into `permissions` / `types` / `scoring` / `credentials` submodules with a
   re-exporting `mod.rs`) — no behavior or wire-format change; every public path and

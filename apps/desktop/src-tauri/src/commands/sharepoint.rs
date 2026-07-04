@@ -33,6 +33,24 @@ fn should_remove_orgwide(remove_orgwide: bool, any_site_granted: bool) -> bool {
     remove_orgwide && any_site_granted
 }
 
+/// Pre-acquires the `Sites.FullControl.All` token with a typed call — so a
+/// not-yet-consented SharePoint scope surfaces as `consent_required` (the tab
+/// shows a "Grant consent" button) instead of a generic `token_error` from deep
+/// inside the scoped Graph call — then returns the tenant's Graph client.
+/// Mirrors `exchange_client_checked`; every SharePoint command routes its
+/// pre-acquire through here so the "consent_required survives the BearerProvider"
+/// contract lives in one place.
+async fn sharepoint_client_checked(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<Arc<azapptoolkit_graph::GraphClient>, UiError> {
+    state
+        .ensure_sharepoint_token(tenant_id)
+        .await
+        .map_err(UiError::from)?;
+    Ok(state.graph_for(tenant_id))
+}
+
 /// Maps a SharePoint Graph error to a `UiError`, replacing a 403's message with
 /// the `sharepoint_sites_selected` role guidance. A forbidden *after* the
 /// `Sites.FullControl.All` scope is consented means the signed-in user lacks the
@@ -73,14 +91,7 @@ pub async fn grant_site_access(
     site_url: String,
     roles: Vec<String>,
 ) -> Result<GrantSiteAccessResult, UiError> {
-    // Pre-acquire the SharePoint scope so a missing-consent rejection surfaces
-    // as `consent_required` (the tab shows a "Grant consent" button) instead of
-    // a generic token error from inside the scoped Graph call.
-    state
-        .ensure_sharepoint_token(&tenant_id)
-        .await
-        .map_err(UiError::from)?;
-    let client = state.graph_for(&tenant_id);
+    let client = sharepoint_client_checked(&state, &tenant_id).await?;
     let site = client
         .get_site_by_url(&site_url)
         .await
@@ -105,14 +116,7 @@ pub async fn list_site_permissions(
     tenant_id: String,
     site_url: String,
 ) -> Result<Vec<SitePermissionDto>, UiError> {
-    // Pre-acquire the SharePoint scope so a missing-consent rejection surfaces
-    // as `consent_required` (the tab shows a "Grant consent" button) instead of
-    // a generic token error from inside the scoped Graph call.
-    state
-        .ensure_sharepoint_token(&tenant_id)
-        .await
-        .map_err(UiError::from)?;
-    let client = state.graph_for(&tenant_id);
+    let client = sharepoint_client_checked(&state, &tenant_id).await?;
     let site = client
         .get_site_by_url(&site_url)
         .await
@@ -132,14 +136,7 @@ pub async fn remove_site_permission(
     site_url: String,
     permission_id: String,
 ) -> Result<(), UiError> {
-    // Pre-acquire the SharePoint scope so a missing-consent rejection surfaces
-    // as `consent_required` (the tab shows a "Grant consent" button) instead of
-    // a generic token error from inside the scoped Graph call.
-    state
-        .ensure_sharepoint_token(&tenant_id)
-        .await
-        .map_err(UiError::from)?;
-    let client = state.graph_for(&tenant_id);
+    let client = sharepoint_client_checked(&state, &tenant_id).await?;
     let site = client
         .get_site_by_url(&site_url)
         .await
@@ -179,13 +176,8 @@ pub async fn convert_site_access_to_selected(
     role: String,
     remove_orgwide: bool,
 ) -> Result<SiteScopeResult, UiError> {
-    // Pre-acquire the SharePoint scope (the per-site grants ride it) so a
-    // missing-consent rejection surfaces as `consent_required` for the UI.
-    state
-        .ensure_sharepoint_token(&tenant_id)
-        .await
-        .map_err(UiError::from)?;
-    let client = state.graph_for(&tenant_id);
+    // The per-site grants ride the SharePoint scope, pre-acquired here.
+    let client = sharepoint_client_checked(&state, &tenant_id).await?;
     let (graph_sp_id, role_value_by_id) = graph_role_index(&client).await?;
 
     // Reverse-lookup the Sites.Selected appRole id so we can grant it.
@@ -391,13 +383,7 @@ pub async fn sweep_site_permissions(
 ) -> Result<SiteSweepResult, UiError> {
     state.sweep_cancel.reset();
 
-    // Pre-acquire the SharePoint scope so a missing-consent rejection surfaces
-    // as `consent_required` (the view shows a "Grant consent" button).
-    state
-        .ensure_sharepoint_token(&tenant_id)
-        .await
-        .map_err(UiError::from)?;
-    let client = state.graph_for(&tenant_id);
+    let client = sharepoint_client_checked(&state, &tenant_id).await?;
 
     let sites = client
         .list_all_sites(MAX_SITES_PER_SWEEP)
