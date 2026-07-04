@@ -4,8 +4,10 @@
 
 use std::rc::Rc;
 
+use leptos::ev;
 use leptos::prelude::*;
 use thaw::{Spinner, SpinnerSize};
+use wasm_bindgen::JsCast;
 
 use crate::bindings::{applications, updater};
 use crate::components::global_search::GlobalSearch;
@@ -14,6 +16,7 @@ use crate::components::open_items_dock::OpenItemsDock;
 use crate::components::open_items_workspace::OpenItemsWorkspace;
 use crate::components::toast::{ToastHost, ToastKind};
 use crate::components::update_splash::UpdateSplash;
+use crate::hooks::use_escape::use_escape;
 use crate::state::{ActiveView, use_session};
 use crate::views::dialogs::{
     cache_diagnostics_dialog::CacheDiagnosticsDialog, create_app_dialog::CreateAppDialog,
@@ -155,6 +158,32 @@ pub fn AppShell(children: Children) -> impl IntoView {
         });
     };
 
+    // Overflow "…" popover in the signed-in user block — holds the low-frequency
+    // utilities (cache diagnostics, manual update check, version) so the user
+    // block itself slims to identity + Sign Out. Local open flag; closed on an
+    // outside mousedown and on Escape.
+    let menu_open = RwSignal::new(false);
+    let overflow_ref = NodeRef::<leptos::html::Div>::new();
+    let outside_handle = window_event_listener(ev::mousedown, move |evt| {
+        if !menu_open.get_untracked() {
+            return;
+        }
+        let Some(root) = overflow_ref.get() else {
+            return;
+        };
+        let target = evt
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Node>().ok());
+        if !root.contains(target.as_ref()) {
+            menu_open.set(false);
+        }
+    });
+    on_cleanup(move || outside_handle.remove());
+    use_escape(
+        move || menu_open.get_untracked(),
+        move || menu_open.set(false),
+    );
+
     let nav_row_view = move |label: &'static str, icon: IconName, target: ActiveView| {
         let class = move || {
             let mut c = String::from("nav__item");
@@ -180,25 +209,6 @@ pub fn AppShell(children: Children) -> impl IntoView {
         }
     };
 
-    let nav_row_action = move |label: &'static str, icon: IconName, flag: RwSignal<bool>| {
-        // `aria-expanded` reflects the dialog's open signal so AT knows the
-        // button controls a currently-open/closed surface.
-        let aria_expanded = move || flag.get();
-        view! {
-            <button
-                class="nav__item"
-                type="button"
-                title=label
-                aria-expanded=aria_expanded
-                aria-haspopup="dialog"
-                on:click=move |_| flag.set(true)
-            >
-                <span class="nav__icon"><Icon name=icon size=18 /></span>
-                <span class="nav__label">{label}</span>
-            </button>
-        }
-    };
-
     view! {
         <div class="shell">
             <nav class="shell__nav">
@@ -207,21 +217,30 @@ pub fn AppShell(children: Children) -> impl IntoView {
                     <span class="shell__brand-text">"azapptoolkit"</span>
                 </div>
                 <div class="shell__nav-list">
+                    // Nav IA: three labeled groups (Inventory / Security /
+                    // Operations) via `shell__nav-section-label`. Readiness is a
+                    // real page, so it lives in the Security group — not down in
+                    // the user block with the utilities.
+                    <div class="shell__nav-section-label">"Inventory"</div>
                     {nav_row_view("Home", IconName::Home, ActiveView::Home)}
                     {nav_row_view("App Registrations", IconName::AppWindow, ActiveView::Apps)}
                     {nav_row_view("Enterprise Applications", IconName::Building, ActiveView::EnterpriseApps)}
                     {nav_row_view("Managed Identities", IconName::Server, ActiveView::ManagedIdentities)}
-                    <div class="shell__nav-section-label">"Tools"</div>
+                    <div class="shell__nav-section-label">"Security"</div>
                     {nav_row_view("Security", IconName::ShieldCheck, ActiveView::Security)}
                     {nav_row_view("Permission Tester", IconName::Search, ActiveView::PermissionTester)}
                     {nav_row_view("Resource Access", IconName::Database, ActiveView::ResourceAccess)}
+                    {nav_row_view("Readiness", IconName::CheckCircle, ActiveView::Readiness)}
+                    <div class="shell__nav-section-label">"Operations"</div>
                     {nav_row_view("Bulk Actions", IconName::Wrench, ActiveView::BulkActions)}
                     {nav_row_view("Disaster Recovery", IconName::Download, ActiveView::DisasterRecovery)}
                     {nav_row_view("Key Vault", IconName::Key, ActiveView::KeyVault)}
                     // Logged-in user block — kept inside the scrollable nav list
-                    // (directly below Tools) so it stays attached to the nav and
-                    // scrolls with it, instead of being pinned to the bottom of a
-                    // tall rail where a long content list pushes it out of view.
+                    // (directly below Operations) so it stays attached to the nav
+                    // and scrolls with it, instead of being pinned to the bottom of
+                    // a tall rail where a long content list pushes it out of view.
+                    // Slimmed to identity + Sign Out + an overflow "…" popover;
+                    // Refresh Token moved to the top bar (next to the tenant chip).
                     <div class="shell__user">
                         <div class="shell__user-info">
                             {move || Suspend::new(async move {
@@ -236,80 +255,6 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                 }}
                             </span>
                         </div>
-                        // Live readiness checklist — what the signed-in user holds
-                        // (active roles + consented scopes) vs. what each feature
-                        // needs. Above Refresh Token because that button is often
-                        // the fix for a stale-role "?" this page surfaces.
-                        <button
-                            class="nav__item shell__user-readiness"
-                            type="button"
-                            title="Access readiness — check which roles and scopes you currently have for each feature"
-                            aria-current=move || (view.get() == ActiveView::Readiness).then_some("page")
-                            on:click=move |_| session.set_view(ActiveView::Readiness)
-                        >
-                            <span class="nav__icon"><Icon name=IconName::ShieldCheck size=18 /></span>
-                            <span class="nav__label">"Readiness"</span>
-                        </button>
-                        // Re-mint tokens without dropping the session, e.g. to pick
-                        // up a PIM role activated after sign-in — and, if the
-                        // session has expired, re-authenticate in place. Styled as
-                        // a `nav__item` so it collapses to icon-only on a narrow rail.
-                        <button
-                            class="nav__item shell__user-refresh"
-                            type="button"
-                            title="Refresh token — re-applies roles activated since sign-in (e.g. an active PIM role) without signing out; if your session has expired, opens a browser to re-authenticate in place"
-                            disabled=move || refreshing.get()
-                            on:click=on_refresh_token
-                        >
-                            <span class="nav__icon">
-                                {move || {
-                                    if refreshing.get() {
-                                        view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
-                                            .into_any()
-                                    } else {
-                                        view! { <Icon name=IconName::Refresh size=18 /> }.into_any()
-                                    }
-                                }}
-                            </span>
-                            <span class="nav__label">
-                                {move || {
-                                    if reauthing.get() {
-                                        "Re-authenticating…"
-                                    } else if refreshing.get() {
-                                        "Refreshing…"
-                                    } else {
-                                        "Refresh Token"
-                                    }
-                                }}
-                            </span>
-                        </button>
-                        // Cache diagnostics inspector — sits directly above Sign Out
-                        // in the user block. Reuses `nav_row_action` so it renders as
-                        // a full-width `nav__item` matching the buttons around it.
-                        {nav_row_action("Cache", IconName::Activity, session.tenant_ui.cache_open)}
-                        // Manual update check — pairs with the version readout
-                        // below; opens the changelog splash if an update is found.
-                        <button
-                            class="nav__item shell__user-check-updates"
-                            type="button"
-                            title="Check for updates"
-                            disabled=move || checking.get()
-                            on:click=on_check_updates
-                        >
-                            <span class="nav__icon">
-                                {move || {
-                                    if checking.get() {
-                                        view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
-                                            .into_any()
-                                    } else {
-                                        view! { <Icon name=IconName::Download size=18 /> }.into_any()
-                                    }
-                                }}
-                            </span>
-                            <span class="nav__label">
-                                {move || if checking.get() { "Checking…" } else { "Check for updates" }}
-                            </span>
-                        </button>
                         // Styled as a `nav__item` so it collapses to an icon-only
                         // button (hiding the label) when the rail narrows — the same
                         // way the nav links do — instead of disappearing.
@@ -325,21 +270,168 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                 {move || if signing_out.get() { "Signing out…" } else { "Sign Out" }}
                             </span>
                         </button>
-                        // App version, baked at compile time. The release bumps the
-                        // web-rs crate version in lockstep with the app (tauri.conf +
-                        // workspace), so CARGO_PKG_VERSION here is the shipped version.
-                        <div class="shell__version">{concat!("v", env!("CARGO_PKG_VERSION"))}</div>
+                        // Overflow "…" popover for the low-frequency utilities:
+                        // cache diagnostics, manual update check, version. Opens
+                        // upward (the block is at the bottom of the rail); closes on
+                        // outside-click / Escape (wired above).
+                        <div class="shell__overflow" node_ref=overflow_ref>
+                            <button
+                                class="nav__item shell__overflow-trigger"
+                                type="button"
+                                title="More — cache diagnostics, check for updates, version"
+                                aria-haspopup="menu"
+                                aria-expanded=move || menu_open.get()
+                                on:click=move |_| menu_open.update(|o| *o = !*o)
+                            >
+                                <span class="nav__icon"><Icon name=IconName::More size=18 /></span>
+                                <span class="nav__label">"More"</span>
+                            </button>
+                            <Show when=move || menu_open.get()>
+                                <div class="shell__overflow-menu" role="menu">
+                                    <button
+                                        class="shell__overflow-item"
+                                        type="button"
+                                        role="menuitem"
+                                        aria-haspopup="dialog"
+                                        on:click=move |_| {
+                                            session.tenant_ui.cache_open.set(true);
+                                            menu_open.set(false);
+                                        }
+                                    >
+                                        <span class="nav__icon"><Icon name=IconName::Activity size=16 /></span>
+                                        <span>"Cache diagnostics"</span>
+                                    </button>
+                                    <button
+                                        class="shell__overflow-item"
+                                        type="button"
+                                        role="menuitem"
+                                        disabled=move || checking.get()
+                                        on:click=move |ev| {
+                                            on_check_updates(ev);
+                                            menu_open.set(false);
+                                        }
+                                    >
+                                        <span class="nav__icon">
+                                            {move || {
+                                                if checking.get() {
+                                                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                                        .into_any()
+                                                } else {
+                                                    view! { <Icon name=IconName::Download size=16 /> }.into_any()
+                                                }
+                                            }}
+                                        </span>
+                                        <span>
+                                            {move || if checking.get() { "Checking…" } else { "Check for updates" }}
+                                        </span>
+                                    </button>
+                                    // App version, baked at compile time. The release
+                                    // bumps the web-rs crate version in lockstep with
+                                    // the app, so CARGO_PKG_VERSION is the shipped one.
+                                    <div class="shell__overflow-version">
+                                        {concat!("Version ", env!("CARGO_PKG_VERSION"))}
+                                    </div>
+                                </div>
+                            </Show>
+                        </div>
                     </div>
                 </div>
             </nav>
             <div class="shell__main">
                 {demo_banner()}
                 <header class="shell__topbar">
-                    <div class="shell__topbar-left"></div>
+                    // Left: the persistent app-level page identity — the nav
+                    // section group as a crumb + the active view's title (mirrors
+                    // the page's `SectionHeader` so identity survives content
+                    // scroll). Derived from `session.view`, not the page header.
+                    <div class="shell__topbar-left">
+                        <div class="shell__topbar-title">
+                            <span class="shell__topbar-crumb">
+                                {move || topbar_labels(view.get()).0}
+                            </span>
+                            <span class="shell__topbar-view">
+                                {move || topbar_labels(view.get()).1}
+                            </span>
+                        </div>
+                    </div>
                     <div class="shell__topbar-center">
                         <GlobalSearch />
                     </div>
-                    <div class="shell__topbar-right" />
+                    // Right: the signed-in tenant chip (org display name + primary
+                    // verified domain) + the Refresh-token affordance (silent
+                    // refresh, then interactive re-auth if the session is dead).
+                    <div class="shell__topbar-right">
+                        <div class="shell__tenant-chip" title="Signed-in tenant">
+                            <span class="shell__tenant-chip-icon">
+                                <Icon name=IconName::Building size=14 />
+                            </span>
+                            <span class="shell__tenant-chip-text">
+                                {move || Suspend::new(async move {
+                                    match org.await.as_ref() {
+                                        Some(o) => {
+                                            let domain = o
+                                                .verified_domains
+                                                .iter()
+                                                .find(|d| d.is_default == Some(true))
+                                                .or_else(|| o.verified_domains.first())
+                                                .map(|d| d.name.clone());
+                                            view! {
+                                                <span class="shell__tenant-chip-name">
+                                                    {o.display_name.clone()}
+                                                </span>
+                                                {domain
+                                                    .map(|d| {
+                                                        view! {
+                                                            <span class="shell__tenant-chip-domain">{d}</span>
+                                                        }
+                                                    })}
+                                            }
+                                                .into_any()
+                                        }
+                                        None => {
+                                            view! {
+                                                <span class="shell__tenant-chip-name">
+                                                    {tenant
+                                                        .get_untracked()
+                                                        .and_then(|t| t.username.clone())
+                                                        .unwrap_or_else(|| "—".to_string())}
+                                                </span>
+                                            }
+                                                .into_any()
+                                        }
+                                    }
+                                })}
+                            </span>
+                        </div>
+                        <button
+                            class="ui-icon-btn shell__topbar-refresh"
+                            type="button"
+                            aria-label="Refresh token"
+                            title=move || {
+                                if reauthing.get() {
+                                    "Re-authenticating…"
+                                } else if refreshing.get() {
+                                    "Refreshing token…"
+                                } else {
+                                    "Refresh token — re-applies roles activated since sign-in \
+                                     (e.g. an active PIM role) without signing out; if your \
+                                     session has expired, opens a browser to re-authenticate \
+                                     in place"
+                                }
+                            }
+                            disabled=move || refreshing.get()
+                            on:click=on_refresh_token
+                        >
+                            {move || {
+                                if refreshing.get() {
+                                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                        .into_any()
+                                } else {
+                                    view! { <Icon name=IconName::Refresh size=16 /> }.into_any()
+                                }
+                            }}
+                        </button>
+                    </div>
                 </header>
                 // The content area + the workspace overlay share one positioned
                 // wrapper (the `1fr` grid row); the dock is the row below it.
@@ -411,6 +503,27 @@ pub fn AppShell(children: Children) -> impl IntoView {
                 }}
             </Show>
         </div>
+    }
+}
+
+/// The persistent top-bar identity for `view`: `(crumb, title)`. The crumb is
+/// the nav section group (Inventory / Security / Operations — the P5 IA), giving
+/// the app-level "where am I" context; the title mirrors the page's
+/// `SectionHeader` so the anchor keeps naming the page once its header scrolls
+/// out of view.
+fn topbar_labels(view: ActiveView) -> (&'static str, &'static str) {
+    match view {
+        ActiveView::Home => ("Inventory", "Overview"),
+        ActiveView::Apps => ("Inventory", "App Registrations"),
+        ActiveView::EnterpriseApps => ("Inventory", "Enterprise Applications"),
+        ActiveView::ManagedIdentities => ("Inventory", "Managed Identities"),
+        ActiveView::Security => ("Security", "Security"),
+        ActiveView::PermissionTester => ("Security", "Permission Tester"),
+        ActiveView::ResourceAccess => ("Security", "Resource Access"),
+        ActiveView::Readiness => ("Security", "Access readiness"),
+        ActiveView::BulkActions => ("Operations", "Bulk Actions"),
+        ActiveView::DisasterRecovery => ("Operations", "Disaster Recovery"),
+        ActiveView::KeyVault => ("Operations", "Key Vault"),
     }
 }
 

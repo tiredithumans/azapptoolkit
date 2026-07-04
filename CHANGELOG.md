@@ -9,6 +9,20 @@ the project adheres to
 
 ### Changed
 
+- **Shell refresh — the top bar earns its keep and the nav rail regroups** (muscle-memory
+  reorg, no feature change): the previously-empty top-bar thirds now carry the
+  persistent app-level anchor — the left shows the active view's nav-group crumb +
+  title (mirrors the page `SectionHeader` so identity survives content scroll) and the
+  right adds a signed-in **tenant chip** (org name + primary verified domain, previously
+  buried in the nav user block) plus the **Refresh token** affordance (silent
+  `refresh_session` → interactive `reauthenticate` fallback, unchanged behavior). The
+  left navigation is regrouped into three labeled sections — **Inventory** (Home / App
+  Registrations / Enterprise Applications / Managed Identities), **Security** (Security /
+  Permission Tester / Resource Access / **Readiness**, promoted up out of the user block
+  since it's a real page), **Operations** (Bulk Actions / Disaster Recovery / Key Vault).
+  The signed-in user block slims to identity + Sign Out with an overflow "…" popover
+  (closes on outside-click / Escape) holding the low-frequency utilities — cache
+  diagnostics, check-for-updates, and the version string.
 - **UI consistency pass — one page-header, one loading, one failure grammar** (design
   unification; visuals ≈ unchanged): every page now uses the single `SectionHeader`
   (uppercase category eyebrow + title) — the App Registrations and Enterprise
