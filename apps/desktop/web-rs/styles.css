@@ -472,9 +472,10 @@ h3 {
   margin-top: var(--space-2);
   border-top: 1px solid var(--border);
   /* Lives at the end of the scrollable `shell__nav-list`, directly below the
-   * Tools group, so it stays attached to the nav and scrolls with it instead of
-   * being pinned to the bottom of a tall rail (where a long content list pushed
-   * it out of view). `flex-shrink:0` keeps the buttons from compressing. */
+   * Operations group, so it stays attached to the nav and scrolls with it
+   * instead of being pinned to the bottom of a tall rail (where a long content
+   * list pushed it out of view). `flex-shrink:0` keeps the buttons from
+   * compressing. */
   flex-shrink: 0;
 }
 .shell__user-info {
@@ -484,18 +485,67 @@ h3 {
   padding: 0 var(--space-2);
   overflow: hidden;
 }
-.shell__user-refresh {
-  width: 100%;
-}
-.shell__user-refresh:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
 .shell__user-signout {
   width: 100%;
 }
-.shell__user-check-updates {
+
+/* Overflow "…" popover in the user block — the low-frequency utilities (cache
+ * diagnostics, update check, version). The wrapper is the positioning context
+ * for the menu, which opens UPWARD (the block sits at the bottom of the rail). */
+.shell__overflow {
+  position: relative;
+}
+.shell__overflow-trigger {
   width: 100%;
+}
+.shell__overflow-menu {
+  position: absolute;
+  bottom: calc(100% + var(--space-1));
+  left: 0;
+  right: 0;
+  min-width: 200px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-1);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+.shell__overflow-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  font: inherit;
+  font-size: var(--text-base);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+.shell__overflow-item:hover {
+  background: var(--bg-subtle);
+}
+.shell__overflow-item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.shell__overflow-item:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.shell__overflow-version {
+  padding: var(--space-2) 12px var(--space-1);
+  margin-top: 2px;
+  border-top: 1px solid var(--border);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
 }
 /* Changelog splash for a pending app update. */
 .update-splash {
@@ -576,12 +626,6 @@ h3 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.shell__version {
-  padding: var(--space-1) var(--space-2) 0;
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-  text-align: center;
-}
 
 .shell__nav-list {
   display: flex;
@@ -645,6 +689,68 @@ h3 {
   gap: var(--space-3);
 }
 .shell__topbar-right > :last-child {
+  flex-shrink: 0;
+}
+/* Left third: the persistent page identity (nav-group crumb + view title). */
+.shell__topbar-title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.15;
+}
+.shell__topbar-crumb {
+  font-size: var(--text-caption);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.shell__topbar-view {
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Right third: signed-in tenant chip (org name + primary domain) + the
+   refresh-token affordance. */
+.shell__tenant-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  max-width: 240px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-subtle);
+}
+.shell__tenant-chip-icon {
+  display: inline-flex;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.shell__tenant-chip-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.15;
+}
+.shell__tenant-chip-name {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shell__tenant-chip-domain {
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shell__topbar-refresh {
   flex-shrink: 0;
 }
 .shell__content-wrap {
@@ -2643,8 +2749,6 @@ h3 {
     min-height: 0;
   }
   .shell__user-info { display: none; }
-  /* Text-only metadata with no icon — hide on the icon-only rail, like user-info. */
-  .shell__version { display: none; }
   .nav__item .nav__label { display: none; }
   .nav__item {
     justify-content: center;
@@ -2664,6 +2768,8 @@ h3 {
     padding: 0 var(--space-3);
   }
   .shell__topbar-left { display: none; }
+  /* Compact the tenant chip to just the org name (drop the domain line). */
+  .shell__tenant-chip-domain { display: none; }
   .shell__content { padding: var(--space-3); }
   .global-search { width: 100%; }
   .dashboard { padding: var(--space-4); }
@@ -2676,6 +2782,9 @@ h3 {
   :root {
     --nav-width: 48px;
   }
+  /* Reclaim the top bar for the full-width search + refresh button; the tenant
+     is single per session and still named in the nav user block. */
+  .shell__tenant-chip { display: none; }
   .nav__item {
     padding: 10px 6px;
   }
