@@ -29,6 +29,7 @@ use crate::components::virtual_list::VirtualList;
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
+use crate::hooks::use_list_export::use_list_export;
 use crate::state::{OpenItemKind, use_session};
 use crate::util::created_in_range;
 use crate::views::pairing::jump_to_paired_enterprise;
@@ -77,32 +78,12 @@ pub fn ApplicationList() -> impl IntoView {
     // export so "what you see is what you export". Kept in step by the
     // `use_filtered_list` export hook; the `Arc` makes each snapshot a pointer
     // copy, not a row-by-row clone of the filtered list.
-    let export_rows: StoredValue<Arc<Vec<ApplicationListRowDto>>> =
-        StoredValue::new(Arc::new(Vec::new()));
-    let exporting = RwSignal::new(false);
-    let do_export = move |format: &'static str| {
-        if exporting.get_untracked() {
-            return;
-        }
-        let rows = export_rows.get_value();
-        if rows.is_empty() {
-            return;
-        }
-        exporting.set(true);
-        leptos::task::spawn_local(async move {
-            let count = rows.len();
-            match applications::save_applications_to_file(&rows, format).await {
-                Ok(Some(path)) => {
-                    session.toast_success(format!("Exported {count} app registrations to {path}"));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    session.report_command_error(&e);
-                }
-            }
-            exporting.set(false);
-        });
-    };
+    let (export_rows, exporting, do_export) = use_list_export(
+        |rows: Arc<Vec<ApplicationListRowDto>>, format| async move {
+            applications::save_applications_to_file(&rows, format).await
+        },
+        "app registrations",
+    );
 
     let apps = LocalResource::new(move || {
         let tenant = tenant.get();

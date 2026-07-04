@@ -49,7 +49,7 @@ use views::{
     enterprise_applications_view::EnterpriseApplicationsView, home_dashboard::HomeDashboard,
     key_vault_view::KeyVaultView, managed_identities::ManagedIdentitiesView,
     permission_tester_view::PermissionTesterView, readiness_view::ReadinessView,
-    resource_access_view::ResourceAccessView, security_view::SecurityView, shell::AppShell,
+    resource_access::ResourceAccessView, security_view::SecurityView, shell::AppShell,
     sign_in::SignInScreen,
 };
 

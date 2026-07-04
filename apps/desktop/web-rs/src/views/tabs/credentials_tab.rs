@@ -20,6 +20,7 @@ use crate::components::modal_shell::ModalShell;
 use crate::components::ui::CopyableId;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
+use crate::util::{ls_get, ls_set};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::dialogs::secret_reveal_dialog::SecretRevealDialog;
 use crate::views::dialogs::upload_certificate_dialog::UploadCertificateDialog;
@@ -96,22 +97,6 @@ fn remove_button(
 /// scoping `SavedViews` uses).
 fn last_vault_key(tenant_id: &str) -> String {
     format!("azapptoolkit:lastvault:{tenant_id}")
-}
-
-fn ls_get(key: &str) -> Option<String> {
-    web_sys::window()?
-        .local_storage()
-        .ok()
-        .flatten()?
-        .get_item(key)
-        .ok()
-        .flatten()
-}
-
-fn ls_set(key: &str, value: &str) {
-    if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-        let _ = storage.set_item(key, value);
-    }
 }
 
 /// The portal's "Expires" presets for a new client secret: label + lifetime in

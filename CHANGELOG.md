@@ -9,6 +9,19 @@ the project adheres to
 
 ### Changed
 
+- **Frontend view code split for maintainability** (no behavior or DOM change): the
+  enterprise-application detail pane finished its module-directory split (Overview /
+  Owners / Credentials / the small Provisioning-Activity-CA panels moved out of
+  `mod.rs`); `resource_access_view.rs` became a `resource_access/` directory (Sites
+  and Mailboxes panels in their own files); the lazily-loading Usage panel moved out
+  of `permissions_tab.rs`; the three list views' identical export snapshot + double-
+  submit guard + toast logic collapsed into one `use_list_export` hook and the
+  Managed Identities list now renders through the shared `ListScaffold` like the
+  other two; and the duplicated `ls_get`/`ls_set` localStorage helpers plus the
+  recurring two-field IPC arg shapes were single-sourced (`util.rs`,
+  `bindings/common.rs`). The dialog-dense `credentials_tab`/`expose_api_tab` splits
+  were deliberately left for later — extracting their dialogs would thread 10+
+  signals through props and touch the Suspend-reset footgun for no real gain.
 - **The desktop backend's largest command modules were decomposed** (no behavior,
   wire, or cancel/progress change): `run_audit`'s ~380-line orchestrator split its
   best-effort tenant-wide prefetch blocks into named `async fn`s and bundled
@@ -65,21 +78,6 @@ the project adheres to
   remembered individually there, and two dialog flags had already been missed
   (fixed in the prior release wave). A pinning test asserts every field returns
   to its sentinel. No behavior change beyond that structural guarantee.
-
-- **Backend command layer consolidated** (no behavior change): the generic file-export
-  plumbing (CSV field encoding with the formula-injection guard, the save-dialog +
-  write pipeline) moved from `commands::audit` — which seven other domains were
-  importing it from — into a dedicated `commands::export`; three byte-identical v4
-  GUID generators and two divergent `is_guid` validators collapsed into one
-  `commands::guid`; the tenant cache-key + tiered-invalidation policy (the
-  cross-tenant-leakage contract) got its own named home, `commands/applications/
-  cache.rs`, killing a duplicated `enterprise_key` definition that could silently
-  drift; the DR backup now uses the shared `ThrottleGuard` RAII instead of a local
-  re-implementation and shares its cached SP-index read with the consent audit; the
-  expired-credential selection rule the audit, single-app fix, and bulk sweep must
-  agree on is single-sourced in `azapptoolkit-core::audit`; and the Authentication
-  tab's get/set now share one DTO (wire-identical). The unused `azapptoolkit-core` /
-  `thiserror` dependencies were dropped from the permissions crate.
 
 ### Fixed
 
