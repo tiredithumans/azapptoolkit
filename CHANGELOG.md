@@ -7,6 +7,18 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **Release/CI hardening:** the `release.yml` `guard` job now runs `cargo audit` against the
+  workspace-excluded `web-rs` lockfile too (via `just web-audit`), so a fresh advisory in the
+  IPC-privileged frontend tree fails fast before the build matrix spends minutes.
+- **Developer tooling:** new `just verify-full` recipe runs full CI parity locally — `just verify`
+  plus both RustSec scans, both `cargo deny` policies, and the browser GUI tests (`web-itest`). The
+  agent instructions (`AGENTS.md`) were put on an invariant-plus-pointer diet with deep detail moved
+  into `docs/architecture/` (new `frontend-workspace.md`, `release-updater-demo.md`), and the
+  contributor hooks/skills were realigned to the actual release, verify, and branch-protection flow.
+  No application behavior change.
+
 ## [0.14.0] - 2026-07-04
 
 ### Changed
