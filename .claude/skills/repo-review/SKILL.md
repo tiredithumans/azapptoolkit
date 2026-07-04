@@ -1,6 +1,6 @@
 ---
-name: review
-description: Review PRs and commits for this repo — diff base → head, run verify gates on the right branches, check conventional-commits, flag scope/tenant-cache footguns. Use when the user says "review", "approve this PR", or asks for a review of their changes.
+name: repo-review
+description: Review PRs and commits for this repo — diff base → head, run verify gates on the right branches, check conventional-commits, flag scope/tenant-cache footguns. Use when the user says "repo review", "review this PR", "approve this PR", or asks for a review of their changes.
 argument-hint: "[PR number, commit sha, or branch name]"
 ---
 
