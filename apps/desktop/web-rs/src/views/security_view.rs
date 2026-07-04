@@ -23,6 +23,7 @@ use thaw::{
     Spinner, SpinnerSize,
 };
 
+use crate::components::icon::{Icon, IconName};
 use crate::components::ui::{Callout, SectionHeader};
 use crate::state::use_session;
 use crate::util::keep_alive;
@@ -130,12 +131,14 @@ fn PostureStrip() -> impl IntoView {
                 >
                     <MenuTrigger slot>
                         <Button
+                            class="btn-icon-label"
                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
                             disabled=Signal::derive(move || {
                                 ctrl.exporting.get() || ctrl.result.with(|r| r.is_none())
                             })
                         >
-                            "Export ▾"
+                            "Export"
+                            <Icon name=IconName::ChevronDown size=16 />
                         </Button>
                     </MenuTrigger>
                     <MenuItem value="csv".to_string()>"Export as CSV…"</MenuItem>

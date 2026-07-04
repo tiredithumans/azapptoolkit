@@ -17,7 +17,7 @@ use crate::bindings::diagnostics::{self, ListCacheKindDto};
 use crate::bindings::enterprise_application::{self, EnterpriseApplicationDto};
 use crate::components::date_range_filter::DateRangeFilter;
 use crate::components::filter_chip::FilterChip;
-use crate::components::icon::IconName;
+use crate::components::icon::{Icon, IconName};
 use crate::components::list_scaffold::ListScaffold;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList};
@@ -148,10 +148,12 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
                     busy=Signal::derive(move || refreshing.get())
                 />
                 <Button
+                    class="btn-icon-label"
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(move |_| session.tenant_ui.sso_wizard_open.set(true))
                 >
-                    "+ New SSO application"
+                    <Icon name=IconName::Plus size=16 />
+                    "New SSO application"
                 </Button>
             </SectionHeader>
             <div class="apps-view__body">
@@ -350,10 +352,12 @@ fn VirtualRows(
                                 .to_string()
                         >
                             <Button
+                                class="btn-icon-label"
                                 appearance=Signal::derive(|| ButtonAppearance::Primary)
                                 on_click=Box::new(move |_| session.tenant_ui.sso_wizard_open.set(true))
                             >
-                                "+ New SSO application"
+                                <Icon name=IconName::Plus size=16 />
+                                "New SSO application"
                             </Button>
                         </EmptyState>
                     }

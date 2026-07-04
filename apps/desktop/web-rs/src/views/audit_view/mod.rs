@@ -18,6 +18,7 @@ mod sort;
 
 pub(crate) use controller::AuditController;
 pub(crate) use findings::FindingsPane;
+pub(crate) use groups::ranked_actionable_findings;
 
 use azapptoolkit_core::audit::{AuditItem, AuditPrincipalKind, RiskLevel};
 use leptos::prelude::*;

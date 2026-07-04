@@ -166,6 +166,33 @@ pub(super) fn group_findings(items: &[AuditItem]) -> Vec<FindingGroup> {
     groups
 }
 
+/// The Findings pane's Actionable groups, in the SAME impact ranking, as
+/// `(key, title, tone)` — for surfaces outside the workbench (the Home posture
+/// card) that echo the order + severity tone without re-deriving them. Healthy
+/// groups are excluded; empty groups stay (the caller decides whether a
+/// zero-count finding is worth showing). `tone` is the group's worst-severity
+/// colour, matching the workbench's finding-group tone dot.
+pub(crate) fn ranked_actionable_findings(
+    items: &[AuditItem],
+) -> Vec<(&'static str, &'static str, &'static str)> {
+    group_findings(items)
+        .into_iter()
+        .filter(|g| matches!(g.spec.section, GroupSection::Actionable))
+        .map(|g| (g.spec.key, g.spec.title, tone(g.worst)))
+        .collect()
+}
+
+/// Maps a risk level to the shared tone-dot colour vocabulary (the same mapping
+/// `finding_group_view` uses inline).
+fn tone(level: RiskLevel) -> &'static str {
+    match level {
+        RiskLevel::Critical => "critical",
+        RiskLevel::High => "danger",
+        RiskLevel::Medium => "warning",
+        RiskLevel::Low => "ok",
+    }
+}
+
 /// The bulk fix(es) a group's `BulkActionBar` offers — paired with the rule the
 /// action actually fixes (this is where the old `audit_bulk_actions` mapping of
 /// Over-privileged → RemoveRedundant, a *different* rule, was retired).

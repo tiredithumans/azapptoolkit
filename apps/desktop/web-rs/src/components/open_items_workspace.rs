@@ -5,6 +5,9 @@
 
 use leptos::prelude::*;
 
+use crate::components::icon::{Icon, IconName};
+use crate::components::open_items_dock::chip_kind;
+use crate::components::type_chip::TypeChip;
 use crate::hooks::use_escape::use_escape;
 use crate::state::{OpenItem, OpenItemKind, Session, use_session};
 use crate::views::application_detail_pane::ApplicationDetailPane;
@@ -65,6 +68,16 @@ pub fn OpenItemsWorkspace() -> impl IntoView {
 fn open_item_window(session: Session, item: OpenItem) -> impl IntoView {
     let id = item.id;
     let entity_id = item.entity_id;
+    let app_kind = chip_kind(item.kind);
+    // Live title from the session signal (same pattern as the dock chip) so the
+    // pane label self-corrects when the detail loads with a real name — and so a
+    // 2-up compare labels each pane with its kind + name.
+    let title = move || {
+        session
+            .open_items
+            .with(|l| l.iter().find(|it| it.id == id).map(|it| it.title.clone()))
+            .unwrap_or_default()
+    };
     let shown = move || session.shown_items.with(|s| s.contains(&id));
     // Two panes are shown side-by-side — only then does "Full" (collapse to just
     // this pane) do anything, so it's hidden in the single-pane view.
@@ -107,27 +120,36 @@ fn open_item_window(session: Session, item: OpenItem) -> impl IntoView {
     view! {
         <div class="workspace__pane" style:display=move || if shown() { "flex" } else { "none" }>
             <div class="workspace__pane-bar">
-                <Show when=comparing>
+                // Echoes the dock chip: kind glyph + the item's live title, so a
+                // side-by-side compare labels which pane is which.
+                <div class="workspace__pane-title">
+                    <TypeChip kind=app_kind />
+                    <span class="workspace__pane-name">{title}</span>
+                </div>
+                <div class="workspace__pane-actions">
+                    <Show when=comparing>
+                        <button
+                            type="button"
+                            class="workspace__pane-full"
+                            aria-label="Collapse to just this pane"
+                            title="Collapse to just this pane (full width)"
+                            on:click=move |_| session.focus_item(id, false)
+                        >
+                            <Icon name=IconName::Maximize size=14 />
+                        </button>
+                    </Show>
                     <button
                         type="button"
-                        class="workspace__pane-full"
-                        title="Collapse to just this pane (full width)"
-                        on:click=move |_| session.focus_item(id, false)
+                        class="workspace__pane-close"
+                        aria-label="Hide this pane"
+                        title="Hide this pane (it stays in the Open dock)"
+                        on:click=move |_| {
+                            session.shown_items.update(|s| s.retain(|x| *x != id));
+                        }
                     >
-                        "⤢ Full"
+                        <Icon name=IconName::Close size=14 />
                     </button>
-                </Show>
-                <button
-                    type="button"
-                    class="workspace__pane-close"
-                    aria-label="Hide this pane"
-                    title="Hide this pane (it stays in the Open dock)"
-                    on:click=move |_| {
-                        session.shown_items.update(|s| s.retain(|x| *x != id));
-                    }
-                >
-                    "✕"
-                </button>
+                </div>
             </div>
             {inner}
         </div>

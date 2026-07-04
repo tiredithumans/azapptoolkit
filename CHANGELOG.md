@@ -9,6 +9,21 @@ the project adheres to
 
 ### Changed
 
+- **Design polish — iconography pass, posture-card hierarchy, labeled compare panes**
+  (visual only, no behavior change). Chrome buttons now draw from the shared `Icon`
+  catalog so one action reads the same everywhere: the dock chip close (`×`) and
+  workspace pane close (`✕`) — two different glyphs for the same "close" — collapse
+  onto one `Close` icon; the pane "⤢ Full" control becomes a `Maximize` icon (new
+  catalog entry); "Export ▾" becomes **Export** + a `ChevronDown`; and the "+ New
+  app" / "+ New SSO application" / "New app registration" primary buttons lead with a
+  `Plus` icon (label kept, `+` prefix dropped). The Home **Security Posture** card is
+  reworked from a flat 9-metric grid into a hierarchy — a large **Critical / High /
+  Medium** severity row above a ranked **Top findings** list (tone dot · title · count
+  · chevron) that reuses the Security workbench's impact ordering (`GROUP_CATALOG`) and
+  the shared `posture_counts`, so it rhymes with the pane it opens (same drill targets).
+  Workspace compare panes get a real title bar — the dock chip's kind glyph + the item's
+  live name — so a 2-up side-by-side labels which pane is which, and the overlay panes
+  lift onto a deeper `--shadow-16` layer. A button-ladder note is added to `styles.css`.
 - **Shell refresh — the top bar earns its keep and the nav rail regroups** (muscle-memory
   reorg, no feature change): the previously-empty top-bar thirds now carry the
   persistent app-level anchor — the left shows the active view's nav-group crumb +

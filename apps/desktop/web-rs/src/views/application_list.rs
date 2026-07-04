@@ -20,7 +20,7 @@ use crate::bindings::diagnostics::{self, ListCacheKindDto};
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::date_range_filter::DateRangeFilter;
 use crate::components::filter_chip::FilterChip;
-use crate::components::icon::IconName;
+use crate::components::icon::{Icon, IconName};
 use crate::components::list_scaffold::ListScaffold;
 use crate::components::select_all_bar::SelectAllBar;
 use crate::components::type_chip::{AppKind, TypeChip};
@@ -164,10 +164,12 @@ pub fn ApplicationList() -> impl IntoView {
                     busy=Signal::derive(move || refreshing.get())
                 />
                 <Button
+                    class="btn-icon-label"
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(move |_| session.open_create_app())
                 >
-                    "+ New app"
+                    <Icon name=IconName::Plus size=16 />
+                    "New app"
                 </Button>
             </SectionHeader>
             <div class="apps-view__body">
@@ -402,10 +404,12 @@ fn VirtualRows(
                             body="Create your first app registration to get started.".to_string()
                         >
                             <Button
+                                class="btn-icon-label"
                                 appearance=Signal::derive(|| ButtonAppearance::Primary)
                                 on_click=Box::new(move |_| session.open_create_app())
                             >
-                                "+ New app"
+                                <Icon name=IconName::Plus size=16 />
+                                "New app"
                             </Button>
                         </EmptyState>
                     }

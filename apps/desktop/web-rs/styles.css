@@ -880,18 +880,42 @@ h3 {
 .workspace__pane-bar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: var(--space-2);
   margin-bottom: var(--space-1);
 }
+/* Kind glyph + live name on the left (echoes the dock chip); the Full/close
+   icon buttons stay pinned on the right so a 2-up compare labels its panes. */
+.workspace__pane-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.workspace__pane-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--weight-semibold);
+}
+.workspace__pane-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
 .workspace__pane-bar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text-muted);
   font: inherit;
   font-size: var(--text-sm);
-  padding: 2px 8px;
+  padding: 4px 6px;
   cursor: pointer;
 }
 .workspace__pane-bar button:hover {
@@ -1153,7 +1177,9 @@ h3 {
   margin: 0;
   overflow-x: hidden;
   box-sizing: border-box;
-  box-shadow: var(--shadow-4);
+  /* Deeper elevation in the overlay layer — the pane floats above the
+     (now full-width) list, formalizing the workspace as its own surface. */
+  box-shadow: var(--shadow-16);
   border: 1px solid var(--border);
 }
 .app-detail__body {
@@ -1218,7 +1244,7 @@ h3 {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-4);
+  box-shadow: var(--shadow-16);
   overflow: auto;
   min-height: 0;
   padding: var(--space-4);
@@ -1628,6 +1654,68 @@ h3 {
 .dash-link:hover {
   background: var(--accent-soft);
   color: var(--accent);
+}
+/* Home Security Posture card: a severity row (large drill boxes) above a ranked
+   "Top findings" list that rhymes with the Security workbench's Findings pane
+   (tone dot · title · count · chevron). Same drill targets, scannable order. */
+.posture-severities {
+  gap: var(--space-2);
+}
+.posture-severities .dash-metric {
+  flex: 1 1 0;
+}
+.posture-severities .dash-metric__num {
+  font-size: 28px;
+}
+.posture-findings {
+  display: grid;
+  gap: var(--space-1);
+}
+.posture-finding {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2);
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.posture-finding:hover {
+  background: var(--accent-soft);
+}
+.posture-finding:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.posture-finding__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.posture-finding__count {
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+.posture-finding__count--critical,
+.posture-finding__count--danger {
+  color: var(--danger);
+}
+.posture-finding__count--warning {
+  color: var(--warning);
+}
+.posture-finding__count--ok {
+  color: var(--text-muted);
+}
+.posture-finding__chevron {
+  flex: none;
+  color: var(--text-muted);
 }
 .data-table th,
 .data-table td {
@@ -2368,6 +2456,24 @@ h3 {
 /* =====================================================================
  * UI primitives (.ui-*) — used by src/components/ui/*
  * =====================================================================*/
+
+/* ---- Button ladder ----------------------------------------------------
+ * One emphasis level per role, so every surface reads the same way:
+ *   Primary   (ButtonAppearance::Primary)   — the ONE advancing action per
+ *              surface (Run audit, New app, New SSO). At most one per group.
+ *   Secondary (ButtonAppearance::Secondary) — alternatives / sibling actions
+ *              (View all, Cancel, Show more).
+ *   Subtle    (ButtonAppearance::Subtle)    — chrome (Export, dock/pane close,
+ *              Full) and the .ui-icon-btn icon buttons.
+ *   --danger  (.button--danger)             — destructive (Delete, Remove).
+ * Catalog <Icon>s ride inside these — never a second glyph set — so the same
+ * action shows the same icon everywhere (Plus = create, Close = dismiss). */
+
+/* A Primary/Subtle text button that leads or trails a catalog <Icon>: thaw's
+   .thaw-button is inline-flex but sets no gap, so add one. */
+.btn-icon-label {
+  gap: var(--space-1);
+}
 
 /* ---- Card ---- */
 .ui-card {
