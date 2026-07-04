@@ -15,7 +15,7 @@ use wasm_bindgen::JsCast;
 use crate::bindings::permission_tester::{self, PermissionTestResult};
 use crate::bindings::{TenantContext, auth, search};
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::SectionHeader;
+use crate::components::ui::{Callout, SectionHeader};
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 
@@ -402,7 +402,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                     .get()
                     .then(|| {
                         view! {
-                            <div class="alert alert--warn">
+                            <Callout tone="warn">
                                 "Testing SharePoint access needs the Sites.FullControl.All admin permission (it's required even to read a site's permissions). Grant consent to continue — you must be a SharePoint or Global administrator."
                                 <div class="actions-row">
                                     <Button
@@ -413,7 +413,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                                         "Grant consent"
                                     </Button>
                                 </div>
-                            </div>
+                            </Callout>
                         }
                     })
             }}

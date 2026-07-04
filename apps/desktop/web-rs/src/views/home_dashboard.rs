@@ -5,12 +5,12 @@
 
 use azapptoolkit_core::audit::CredentialStatus;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
+use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::bindings::managed_identity::MiSubtype;
 use crate::bindings::{applications, audit, credentials, enterprise_application, managed_identity};
 use crate::components::icon::{Icon, IconName};
-use crate::components::ui::SectionHeader;
+use crate::components::ui::{DetailLoadError, SectionHeader, Skeleton};
 use crate::state::{ActiveView, use_session};
 use crate::views::audit_view::posture::posture_counts;
 
@@ -86,17 +86,14 @@ pub fn HomeDashboard() -> impl IntoView {
 
     view! {
         <main class="dashboard">
-            <SectionHeader
-                title="Overview".to_string()
-                crumb="Tenant inventory and health at a glance".to_string()
-            />
+            <SectionHeader title="Overview".to_string() crumb="Home".to_string() />
             <div class="dash-grid">
                 <section class="dash-card">
                     <h3 class="dash-card__title">
                         <Icon name=IconName::AppWindow size=18 />
                         "App Registrations"
                     </h3>
-                    <Suspense fallback=card_spinner>
+                    <Suspense fallback=card_skeleton>
                         {move || Suspend::new(async move {
                             match apps.await {
                                 Some(Ok(rows)) => {
@@ -141,7 +138,15 @@ pub fn HomeDashboard() -> impl IntoView {
                                     }
                                         .into_any()
                                 }
-                                Some(Err(e)) => card_error(e.message, reload).into_any(),
+                                Some(Err(e)) => {
+                                    view! {
+                                        <DetailLoadError
+                                            error=e
+                                            on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                        />
+                                    }
+                                        .into_any()
+                                }
                                 None => {
                                     view! {
                                         <Body1>"Couldn't load app registrations for this tenant."</Body1>
@@ -158,7 +163,7 @@ pub fn HomeDashboard() -> impl IntoView {
                         <Icon name=IconName::Building size=18 />
                         "Enterprise Applications"
                     </h3>
-                    <Suspense fallback=card_spinner>
+                    <Suspense fallback=card_skeleton>
                         {move || Suspend::new(async move {
                             match enterprise.await {
                                 Some(Ok(items)) => {
@@ -198,7 +203,15 @@ pub fn HomeDashboard() -> impl IntoView {
                                     }
                                         .into_any()
                                 }
-                                Some(Err(e)) => card_error(e.message, reload).into_any(),
+                                Some(Err(e)) => {
+                                    view! {
+                                        <DetailLoadError
+                                            error=e
+                                            on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                        />
+                                    }
+                                        .into_any()
+                                }
                                 None => {
                                     view! {
                                         <Body1>"Couldn't load enterprise applications for this tenant."</Body1>
@@ -215,7 +228,7 @@ pub fn HomeDashboard() -> impl IntoView {
                         <Icon name=IconName::Server size=18 />
                         "Managed Identities"
                     </h3>
-                    <Suspense fallback=card_spinner>
+                    <Suspense fallback=card_skeleton>
                         {move || Suspend::new(async move {
                             match managed.await {
                                 Some(Ok(items)) => {
@@ -259,7 +272,15 @@ pub fn HomeDashboard() -> impl IntoView {
                                     }
                                         .into_any()
                                 }
-                                Some(Err(e)) => card_error(e.message, reload).into_any(),
+                                Some(Err(e)) => {
+                                    view! {
+                                        <DetailLoadError
+                                            error=e
+                                            on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                        />
+                                    }
+                                        .into_any()
+                                }
                                 None => {
                                     view! {
                                         <Body1>"Couldn't load managed identities for this tenant."</Body1>
@@ -273,7 +294,7 @@ pub fn HomeDashboard() -> impl IntoView {
 
                 <section class="dash-card">
                     <h3 class="dash-card__title">"Credential Health"</h3>
-                    <Suspense fallback=card_spinner>
+                    <Suspense fallback=card_skeleton>
                         {move || Suspend::new(async move {
                             match creds.await {
                                 Some(Ok(rows)) => {
@@ -325,7 +346,15 @@ pub fn HomeDashboard() -> impl IntoView {
                                     }
                                         .into_any()
                                 }
-                                Some(Err(e)) => card_error(e.message, reload).into_any(),
+                                Some(Err(e)) => {
+                                    view! {
+                                        <DetailLoadError
+                                            error=e
+                                            on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                        />
+                                    }
+                                        .into_any()
+                                }
                                 None => {
                                     view! {
                                         <Body1>"Couldn't load credential data for this tenant."</Body1>
@@ -339,7 +368,7 @@ pub fn HomeDashboard() -> impl IntoView {
 
                 <section class="dash-card">
                     <h3 class="dash-card__title">"Security Posture"</h3>
-                    <Suspense fallback=card_spinner>
+                    <Suspense fallback=card_skeleton>
                         {move || Suspend::new(async move {
                             match cached_audit.await {
                                 Some(r) => {
@@ -446,22 +475,15 @@ pub fn HomeDashboard() -> impl IntoView {
     }
 }
 
-fn card_error(message: String, reload: RwSignal<u32>) -> impl IntoView {
+/// Loading placeholder for a dashboard card — a big count block plus two metric
+/// lines, matching the card's loaded geometry (skeletons for content regions;
+/// spinners are reserved for in-button busy affordances).
+fn card_skeleton() -> impl IntoView {
     view! {
-        <Body1 class="form-error">{message}</Body1>
-        <Button
-            appearance=Signal::derive(|| ButtonAppearance::Secondary)
-            on_click=Box::new(move |_| reload.update(|n| *n += 1))
-        >
-            "Retry"
-        </Button>
-    }
-}
-
-fn card_spinner() -> impl IntoView {
-    view! {
-        <div class="centered-pad">
-            <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" />
+        <div style="display:flex;flex-direction:column;gap:10px;" aria-busy="true">
+            <Skeleton width="64px".to_string() height="30px".to_string() />
+            <Skeleton width="80%".to_string() height="12px".to_string() />
+            <Skeleton width="60%".to_string() height="12px".to_string() />
         </div>
     }
 }

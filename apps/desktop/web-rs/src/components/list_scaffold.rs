@@ -1,7 +1,9 @@
 //! Shared chrome for the tenant list views (App Registrations, Enterprise
-//! Applications): the header (title + an actions slot), the always-visible
-//! search box, the collapsible filter drawer (saved views + an extra-filter
-//! slot), and a body slot for the loaded rows.
+//! Applications): the always-visible search box, the collapsible filter drawer
+//! (saved views + an extra-filter slot), and a body slot for the loaded rows.
+//!
+//! The page title + header actions live in the view's `SectionHeader` *above*
+//! the card, so the card itself starts at its search box (no duplicated title).
 //!
 //! The facet chips and the virtualized rows depend on loaded data, so they live
 //! in the body (`children`) — typically a `Suspense` whose loaded body uses
@@ -16,8 +18,6 @@ use crate::components::ui::SearchInput;
 
 #[component]
 pub fn ListScaffold(
-    /// Header title, e.g. `"App Registrations"`.
-    title: &'static str,
     /// Filter query, lifted to the session so global search can seed it. Shared
     /// with `SavedViews` and the view's own debounce.
     search: RwSignal<String>,
@@ -32,9 +32,6 @@ pub fn ListScaffold(
     /// Count of active filters, badged on the toggle.
     #[prop(into)]
     active_filters: Signal<usize>,
-    /// Header action buttons (export, refresh, …).
-    #[prop(optional, into)]
-    actions: ViewFn,
     /// Extra filter controls inside the drawer (date range, …).
     #[prop(optional, into)]
     drawer: ViewFn,
@@ -43,10 +40,6 @@ pub fn ListScaffold(
 ) -> impl IntoView {
     view! {
         <section class="app-list">
-            <header class="app-list__header">
-                <strong>{title}</strong>
-                <div class="list-header-actions">{actions.run()}</div>
-            </header>
             <SearchInput value=search placeholder=search_placeholder />
             <FilterToggle open=filters_open active_count=active_filters />
             <Show when=move || filters_open.get()>
