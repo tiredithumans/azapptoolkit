@@ -9,6 +9,21 @@ the project adheres to
 
 ### Changed
 
+- **UI consistency pass — one page-header, one loading, one failure grammar** (design
+  unification; visuals ≈ unchanged): every page now uses the single `SectionHeader`
+  (uppercase category eyebrow + title) — the App Registrations and Enterprise
+  Applications views moved off the old `.view-header`, and `ListScaffold` lost its
+  `title`/`actions` props so the list card starts at its search box instead of
+  re-rendering the page title a second time (the `.view-header*` and
+  `.app-list__header` CSS is deleted). Loading fallbacks follow one rule — skeletons
+  for content regions, spinners only for in-button busy: the Home dashboard cards and
+  the detail tabs (Authentication / Expose an API / Conditional Access / Activity /
+  Federated credentials) now fall back to a `DetailSkeleton`/`SkeletonList` matching
+  the region instead of a centered spinner. Failure states collapse onto two
+  primitives: `DetailLoadError` is now the universal "section failed → message +
+  Retry" block (detail panes, all three list views, and the dashboard cards route
+  through it), and a new `Callout` (info/ok/warn/danger) is the single home for the
+  scattered `.alert` boxes, adopted at the consent prompts and audit notices.
 - **Frontend view code split for maintainability** (no behavior or DOM change): the
   enterprise-application detail pane finished its module-directory split (Overview /
   Owners / Credentials / the small Provisioning-Activity-CA panels moved out of

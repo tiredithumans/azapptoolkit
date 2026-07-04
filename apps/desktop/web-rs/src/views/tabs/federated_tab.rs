@@ -14,7 +14,7 @@ use crate::bindings::applications::{
     UpdateFederatedCredentialInput,
 };
 use crate::bindings::managed_identity;
-use crate::components::ui::DataTable;
+use crate::components::ui::{DataTable, SkeletonList};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -507,9 +507,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
 
             {move || cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
 
-            <Suspense fallback=move || {
-                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" /> }
-            }>
+            <Suspense fallback=move || view! { <SkeletonList rows=3 /> }>
                 {move || Suspend::new(async move {
                     match creds.await {
                         Ok(list) => {

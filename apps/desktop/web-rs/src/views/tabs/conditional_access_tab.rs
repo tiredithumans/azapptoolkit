@@ -5,12 +5,12 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
+use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::conditional_access::{self, ConditionalAccessPolicyDto};
 use crate::components::requires_role::RequiresRole;
-use crate::components::ui::DataTable;
+use crate::components::ui::{DataTable, SkeletonList};
 use crate::state::use_session;
 
 use crate::util::no_tenant;
@@ -59,9 +59,7 @@ pub fn ConditionalAccessPanel(#[prop(into)] app_id: Signal<String>) -> impl Into
                 "Conditional Access policies that target this application (directly, or via an \"All apps\" / grouping include). Requires Policy.Read.All consent and an Entra ID P1/P2 license."
             </Body1>
 
-            <Suspense fallback=move || {
-                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" /> }
-            }>
+            <Suspense fallback=move || view! { <SkeletonList rows=4 /> }>
                 {move || Suspend::new(async move {
                     match policies.await {
                         Ok(list) => ca_table(list).into_any(),

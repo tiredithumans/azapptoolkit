@@ -331,6 +331,10 @@ h3 {
   background: var(--warning-soft);
   border: 1px solid var(--warning);
 }
+.alert--danger {
+  background: var(--danger-soft);
+  border: 1px solid var(--danger);
+}
 
 .badge {
   display: inline-block;
@@ -846,24 +850,6 @@ h3 {
   white-space: nowrap;
 }
 
-/* ---------- View headers (per-view, inside shell content) ---------- */
-.view-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-bottom: var(--space-4);
-}
-.view-header__title {
-  font-size: var(--text-lg);
-  font-weight: var(--weight-semibold);
-  letter-spacing: -0.005em;
-}
-.view-header__actions {
-  display: flex;
-  gap: var(--space-2);
-}
-
 /* ---------- Apps view ---------- */
 .apps-view {
   display: grid;
@@ -898,16 +884,7 @@ h3 {
   background: var(--surface);
   box-shadow: var(--shadow-2);
 }
-.app-list__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  font-size: var(--text-md);
-  font-weight: var(--weight-semibold);
-  padding-bottom: var(--space-1);
-}
-/* Right-aligned action cluster in a list header (export + refresh). */
+/* Right-aligned action cluster in a list/section header (export + refresh). */
 .list-header-actions {
   display: flex;
   align-items: center;
@@ -2438,6 +2415,19 @@ h3 {
   line-height: 1.5;
 }
 
+/* ---- Load-error (DetailLoadError): the one "section failed → Retry" block ---- */
+.ui-load-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  color: var(--danger);
+}
+.ui-load-error__code {
+  opacity: 0.6;
+  font-size: 0.85em;
+}
+
 /* ---- Skeleton ---- */
 .ui-skel {
   display: block;
@@ -2676,9 +2666,6 @@ h3 {
   .shell__topbar-left { display: none; }
   .shell__content { padding: var(--space-3); }
   .global-search { width: 100%; }
-  /* Let a crowded header (title + selection bar + primary action) wrap onto a
-     second row instead of overflowing. */
-  .view-header { flex-wrap: wrap; }
   .dashboard { padding: var(--space-4); }
 }
 
@@ -2703,10 +2690,9 @@ h3 {
     gap: var(--space-3);
     margin-top: var(--space-3);
   }
-  .view-header__title {
+  .ui-section-header__title {
     font-size: var(--text-md);
   }
-  .view-header__actions,
   .selection-bar,
   .list-header-actions {
     flex-wrap: wrap;

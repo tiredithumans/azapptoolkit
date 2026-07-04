@@ -19,6 +19,7 @@ use crate::bindings::expose_api::{
     self, ExposeApiDto, SetPreAuthorizedAppInput, UpsertApiScopeInput,
 };
 use crate::components::modal_shell::ModalShell;
+use crate::components::ui::DetailSkeleton;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -66,9 +67,7 @@ pub fn ExposeApiTab(
 
     view! {
         <div class="expose-api-tab">
-            <Suspense fallback=move || {
-                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" /> }
-            }>
+            <Suspense fallback=move || view! { <DetailSkeleton /> }>
                 {move || Suspend::new(async move {
                     match state.await {
                         Ok(dto) => {

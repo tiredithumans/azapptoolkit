@@ -13,7 +13,7 @@ use std::sync::Arc;
 use chrono::NaiveDate;
 use leptos::ev;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::applications::{self, ApplicationListRowDto};
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
@@ -24,13 +24,13 @@ use crate::components::icon::IconName;
 use crate::components::list_scaffold::ListScaffold;
 use crate::components::select_all_bar::SelectAllBar;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{EmptyState, IconButton, SkeletonList};
+use crate::components::ui::{DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList};
 use crate::components::virtual_list::VirtualList;
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
 use crate::hooks::use_list_export::use_list_export;
-use crate::state::{OpenItemKind, use_session};
+use crate::state::{ActiveView, OpenItemKind, use_session};
 use crate::util::created_in_range;
 use crate::views::pairing::jump_to_paired_enterprise;
 
@@ -117,91 +117,118 @@ pub fn ApplicationList() -> impl IntoView {
     };
 
     view! {
-        <ListScaffold
-            title="App Registrations"
-            search=raw_search
-            search_placeholder="Filter App Registrations…"
-            saved_view_key="apps"
-            facet=cred_filter
-            filters_open=filters_open
-            active_filters=active_filters
-            actions=move || {
-                view! {
-                    <Button
-                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                        disabled=Signal::derive(move || exporting.get())
-                        on_click=Box::new(move |_| do_export("csv"))
-                    >
-                        "Export CSV"
-                    </Button>
-                    <Button
-                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                        disabled=Signal::derive(move || exporting.get())
-                        on_click=Box::new(move |_| do_export("json"))
-                    >
-                        "Export JSON"
-                    </Button>
-                    <IconButton
-                        icon=IconName::Refresh
-                        aria_label="Refresh App Registrations".to_string()
-                        title="Refresh".to_string()
-                        on_click=Callback::new(on_refresh)
-                        busy=Signal::derive(move || refreshing.get())
-                    />
-                }
-            }
-            drawer=move || {
-                view! { <DateRangeFilter after=created_after before=created_before noun="apps" /> }
-            }
-        >
-            <Suspense fallback=move || view! { <SkeletonList rows=8 /> }>
+        <div class="apps-view">
+            <SectionHeader title="App Registrations".to_string() crumb="Inventory".to_string()>
                 {move || {
-                    // Re-runs only on an actual refetch (tenant switch / reload
-                    // bump): the filters are read inside `LoadedApps`' memos,
-                    // not here, so typing or a chip click never tears the
-                    // loaded subtree down.
-                    Suspend::new(async move {
-                        match apps.await {
-                            Ok(items) => {
-                                view! {
-                                    <LoadedApps
-                                        items=items
-                                        search=search
-                                        cred_filter=cred_filter
-                                        created_after=created_after
-                                        created_before=created_before
-                                        filters_open=filters_open
-                                        export_rows=export_rows
-                                    />
-                                }
-                                    .into_any()
+                    let n = session.tenant_ui.selected_app_ids.with(|s| s.len());
+                    (n > 0)
+                        .then(|| {
+                            view! {
+                                <span class="selection-bar">
+                                    <span class="selection-bar__count">{format!("{n} selected")}</span>
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                        on_click=Box::new(move |_| session.set_view(ActiveView::BulkActions))
+                                    >
+                                        "Bulk Actions…"
+                                    </Button>
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                        on_click=Box::new(move |_| session.clear_app_selection())
+                                    >
+                                        "Clear"
+                                    </Button>
+                                </span>
                             }
-                            Err(err) => {
-                                // A list load can fail transiently (429 / network); offer
-                                // an in-context Retry instead of a dead-end message (the
-                                // dashboard cards do the same).
-                                view! {
-                                    <div class="app-list__error">
-                                        <Body1 class="form-error">
-                                            {format!("Failed to load: {}", err.message)}
-                                        </Body1>
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                            on_click=Box::new(move |_| {
-                                                reload.update(|n| *n = n.wrapping_add(1))
-                                            })
-                                        >
-                                            "Retry"
-                                        </Button>
-                                    </div>
-                                }
-                                    .into_any()
-                            }
-                        }
-                    })
+                        })
                 }}
-            </Suspense>
-        </ListScaffold>
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                    disabled=Signal::derive(move || exporting.get())
+                    on_click=Box::new(move |_| do_export("csv"))
+                >
+                    "Export CSV"
+                </Button>
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                    disabled=Signal::derive(move || exporting.get())
+                    on_click=Box::new(move |_| do_export("json"))
+                >
+                    "Export JSON"
+                </Button>
+                <IconButton
+                    icon=IconName::Refresh
+                    aria_label="Refresh App Registrations".to_string()
+                    title="Refresh".to_string()
+                    on_click=Callback::new(on_refresh)
+                    busy=Signal::derive(move || refreshing.get())
+                />
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                    on_click=Box::new(move |_| session.open_create_app())
+                >
+                    "+ New app"
+                </Button>
+            </SectionHeader>
+            <div class="apps-view__body">
+                <ListScaffold
+                    search=raw_search
+                    search_placeholder="Filter App Registrations…"
+                    saved_view_key="apps"
+                    facet=cred_filter
+                    filters_open=filters_open
+                    active_filters=active_filters
+                    drawer=move || {
+                        view! {
+                            <DateRangeFilter after=created_after before=created_before noun="apps" />
+                        }
+                    }
+                >
+                    <Suspense fallback=move || view! { <SkeletonList rows=8 /> }>
+                        {move || {
+                            // Re-runs only on an actual refetch (tenant switch / reload
+                            // bump): the filters are read inside `LoadedApps`' memos,
+                            // not here, so typing or a chip click never tears the
+                            // loaded subtree down.
+                            Suspend::new(async move {
+                                match apps.await {
+                                    Ok(items) => {
+                                        view! {
+                                            <LoadedApps
+                                                items=items
+                                                search=search
+                                                cred_filter=cred_filter
+                                                created_after=created_after
+                                                created_before=created_before
+                                                filters_open=filters_open
+                                                export_rows=export_rows
+                                            />
+                                        }
+                                            .into_any()
+                                    }
+                                    Err(err) => {
+                                        // A list load can fail transiently (429 / network);
+                                        // offer an in-context Retry through the shared
+                                        // load-failure primitive (same as the detail panes
+                                        // and dashboard cards).
+                                        view! {
+                                            <DetailLoadError
+                                                error=err
+                                                on_retry=Callback::new(move |_| {
+                                                    reload.update(|n| *n = n.wrapping_add(1))
+                                                })
+                                                class="app-list__error".to_string()
+                                            />
+                                        }
+                                            .into_any()
+                                    }
+                                }
+                            })
+                        }}
+                    </Suspense>
+                </ListScaffold>
+            </div>
+        </div>
     }
 }
 

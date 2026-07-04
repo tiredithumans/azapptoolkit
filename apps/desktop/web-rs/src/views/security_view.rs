@@ -23,7 +23,7 @@ use thaw::{
     Spinner, SpinnerSize,
 };
 
-use crate::components::ui::SectionHeader;
+use crate::components::ui::{Callout, SectionHeader};
 use crate::state::use_session;
 use crate::util::keep_alive;
 use crate::views::audit_view::posture::PostureCounts;
@@ -94,7 +94,7 @@ fn PostureStrip() -> impl IntoView {
 
     view! {
         <div class="posture-strip">
-            <SectionHeader title="Security".to_string() crumb="Tenant health".to_string()>
+            <SectionHeader title="Security".to_string() crumb="Posture".to_string()>
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(move |_| ctrl.run())
@@ -193,7 +193,7 @@ fn PostureStrip() -> impl IntoView {
                 ctrl.scan_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
             }}
             {move || {
-                ctrl.export_msg.get().map(|m| view! { <div class="alert alert--ok">{m}</div> })
+                ctrl.export_msg.get().map(|m| view! { <Callout tone="ok">{m}</Callout> })
             }}
             // AuditLog.Read.All consent prompt — the sign-in activity report
             // (behind the Unused finding) needs it. Offered when the last run
@@ -203,7 +203,7 @@ fn PostureStrip() -> impl IntoView {
                     .get()
                     .then(|| {
                         view! {
-                            <div class="alert alert--warn">
+                            <Callout tone="warn">
                                 "Unused-app detection needs the AuditLog.Read.All permission (it reads each app's last sign-in). Grant consent to enable it — requires a Global Reader / Security Reader / Reports Reader role and Entra ID P1 or P2."
                                 <div class="actions-row">
                                     <Button
@@ -214,7 +214,7 @@ fn PostureStrip() -> impl IntoView {
                                         "Grant consent & re-run"
                                     </Button>
                                 </div>
-                            </div>
+                            </Callout>
                         }
                     })
             }}

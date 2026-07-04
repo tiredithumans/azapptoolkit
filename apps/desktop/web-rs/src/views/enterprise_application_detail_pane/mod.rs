@@ -148,7 +148,16 @@ pub fn EnterpriseApplicationDetailPane(
                                 .into_any()
                         }
                         Err(err) => {
-                            view! { <DetailLoadError error=err reload=reload /> }.into_any()
+                            view! {
+                                <DetailLoadError
+                                    error=err
+                                    on_retry=Callback::new(move |_| {
+                                        reload.update(|n| *n = n.wrapping_add(1))
+                                    })
+                                    class="app-detail__body".to_string()
+                                />
+                            }
+                                .into_any()
                         }
                     }
                 })}

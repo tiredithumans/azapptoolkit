@@ -60,8 +60,8 @@ async fn error_state_offers_retry_that_reloads() {
 
     ts::wait_for(|| ts::body_contains("Application not found")).await;
     // The Err branch is no longer a dead-end: a Retry button re-runs the load.
-    ts::wait_for(|| ts::query(".detail-load-error button").is_some()).await;
+    ts::wait_for(|| ts::query(".ui-load-error button").is_some()).await;
     let before = ts::call_count("get_application_detail");
-    ts::click(".detail-load-error button");
+    ts::click(".ui-load-error button");
     ts::wait_for(|| ts::call_count("get_application_detail") > before).await;
 }

@@ -250,7 +250,16 @@ pub fn ManagedIdentityDetailPane(
                                 .into_any()
                         }
                         Err(e) => {
-                            view! { <DetailLoadError error=e reload=reload /> }.into_any()
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |_| {
+                                        reload.update(|n| *n = n.wrapping_add(1))
+                                    })
+                                    class="app-detail__body".to_string()
+                                />
+                            }
+                                .into_any()
                         }
                     }
                     })

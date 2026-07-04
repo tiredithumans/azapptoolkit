@@ -7,12 +7,12 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
+use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::bindings::activity::{self, ActivityLogItem};
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::auth;
-use crate::components::ui::DataTable;
+use crate::components::ui::{DataTable, Skeleton, SkeletonList};
 use crate::state::use_session;
 
 use crate::util::no_tenant;
@@ -69,9 +69,7 @@ pub fn ActivityPanel(
                 "Administrative changes recorded in the Entra ID audit log for this application (and its paired object, when present). Requires AuditLog.Read.All consent and an Entra ID P1/P2 license; retained for 30 days."
             </Body1>
 
-            <Suspense fallback=move || {
-                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" /> }
-            }>
+            <Suspense fallback=move || view! { <SkeletonList rows=5 /> }>
                 {move || Suspend::new(async move {
                     match logs.await {
                         Ok(list) => activity_table(list).into_any(),
@@ -114,7 +112,7 @@ fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
         <div class="signin-summary">
             <strong>"Sign-in activity"</strong>
             <Suspense fallback=move || {
-                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" /> }
+                view! { <Skeleton width="50%".to_string() height="14px".to_string() /> }
             }>
                 {move || Suspend::new(async move {
                     match activity.await {

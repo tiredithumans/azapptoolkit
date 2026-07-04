@@ -15,6 +15,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
 
 use crate::bindings::applications::{self, ApplicationAuthenticationDto, ApplicationDetail};
+use crate::components::ui::DetailSkeleton;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 
@@ -63,9 +64,7 @@ pub fn AuthenticationTab(
 
     view! {
         <div class="authentication-tab">
-            <Suspense fallback=move || {
-                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" /> }
-            }>
+            <Suspense fallback=move || view! { <DetailSkeleton /> }>
                 {move || Suspend::new(async move {
                     match settings.await {
                         Ok(dto) => {

@@ -17,7 +17,9 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::components::icon::IconName;
-use crate::components::ui::{EmptyState, IconButton, SearchInput, SectionHeader, SkeletonList};
+use crate::components::ui::{
+    DetailLoadError, EmptyState, IconButton, SearchInput, SectionHeader, SkeletonList,
+};
 use crate::components::virtual_list::VirtualList;
 
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
@@ -105,7 +107,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
     view! {
         <div class="mi-view">
             <div>
-                <SectionHeader title="Managed Identities".to_string() crumb="Identities".to_string()>
+                <SectionHeader title="Managed Identities".to_string() crumb="Inventory".to_string()>
                     <div class="list-header-actions">
                         <Button
                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
@@ -167,24 +169,18 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                     }
                                     Err(e) => {
                                         // A list load can fail transiently (429 /
-                                        // network); offer an in-context Retry instead
-                                        // of a dead-end message (the App Registrations
-                                        // list does the same). Plain reload — the
-                                        // header Refresh keeps the cache-busting job.
+                                        // network); offer an in-context Retry through the
+                                        // shared load-failure primitive (the App
+                                        // Registrations list does the same). Plain reload —
+                                        // the header Refresh keeps the cache-busting job.
                                         view! {
-                                            <div class="app-list__error">
-                                                <Body1 class="form-error">
-                                                    {format!("Failed to load: {}", e.message)}
-                                                </Body1>
-                                                <Button
-                                                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                                    on_click=Box::new(move |_| {
-                                                        list_reload.update(|n| *n = n.wrapping_add(1))
-                                                    })
-                                                >
-                                                    "Retry"
-                                                </Button>
-                                            </div>
+                                            <DetailLoadError
+                                                error=e
+                                                on_retry=Callback::new(move |_| {
+                                                    list_reload.update(|n| *n = n.wrapping_add(1))
+                                                })
+                                                class="app-list__error".to_string()
+                                            />
                                         }
                                             .into_any()
                                     }

@@ -11,6 +11,7 @@ use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::consent::{self, OAuth2GrantDto};
 use crate::components::audit_dashboard::AuditDashboard;
+use crate::components::ui::Callout;
 use crate::state::use_session;
 
 #[component]
@@ -45,11 +46,11 @@ pub fn ConsentGrantsView() -> impl IntoView {
                 (risky > 0)
                     .then(|| {
                         view! {
-                            <div class="alert alert--warn">
+                            <Callout tone="warn">
                                 {format!(
                                     "{risky} grant(s) include high-risk scopes ({admin_risky} admin-consented for all users).",
                                 )}
-                            </div>
+                            </Callout>
                         }
                             .into_any()
                     })
