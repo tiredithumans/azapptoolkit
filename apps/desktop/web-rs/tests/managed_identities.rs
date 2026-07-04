@@ -53,7 +53,9 @@ async fn retry_after_error_refetches() {
     );
 
     let _m = ts::mount_view(|| view! { <ManagedIdentitiesView /> });
-    ts::wait_for(|| ts::body_contains("Failed to load")).await;
+    // The MI list now renders its load failure via the shared `DetailLoadError`
+    // (raw `UiError` message, no "Failed to load:" prefix) — see the P3 grammar.
+    ts::wait_for(|| ts::body_contains("Too many requests")).await;
 
     // The transient failure clears: Retry refetches in place (no remount).
     ts::mock_ok(
