@@ -11,8 +11,9 @@ use crate::bindings::managed_identity::MiSubtype;
 use crate::bindings::{applications, audit, credentials, enterprise_application, managed_identity};
 use crate::components::icon::{Icon, IconName};
 use crate::components::ui::{DetailLoadError, SectionHeader, Skeleton};
-use crate::state::{ActiveView, use_session};
-use crate::views::audit_view::posture::posture_counts;
+use crate::state::{ActiveView, Session, use_session};
+use crate::views::audit_view::posture::{PostureCounts, posture_counts};
+use crate::views::audit_view::ranked_actionable_findings;
 
 #[component]
 pub fn HomeDashboard() -> impl IntoView {
@@ -124,6 +125,7 @@ pub fn HomeDashboard() -> impl IntoView {
                                                 "View all"
                                             </Button>
                                             <Button
+                                                class="btn-icon-label"
                                                 appearance=Signal::derive(|| {
                                                     ButtonAppearance::Primary
                                                 })
@@ -132,7 +134,8 @@ pub fn HomeDashboard() -> impl IntoView {
                                                     session.open_create_app();
                                                 })
                                             >
-                                                "+ New app registration"
+                                                <Icon name=IconName::Plus size=16 />
+                                                "New app registration"
                                             </Button>
                                         </div>
                                     }
@@ -376,75 +379,54 @@ pub fn HomeDashboard() -> impl IntoView {
                                     // workbench's posture strip — the numbers
                                     // here and there can never disagree.
                                     let c = posture_counts(&r.items);
-                                    let (crit, high, medium) = (c.critical, c.high, c.medium);
-                                    let expired = c.expired;
-                                    let over_privileged = c.over_privileged;
-                                    let orgwide_mailbox = c.orgwide_mailbox;
-                                    let orgwide_sharepoint = c.orgwide_sharepoint;
-                                    let ownership = c.unowned;
-                                    let unused = c.unused;
+                                    // Ranked finding order from the workbench's
+                                    // Findings pane (impact desc) — imported, not
+                                    // re-hardcoded — so the card rhymes with what
+                                    // it opens. Keep only the findings the card
+                                    // drills into, and only non-empty ones (a
+                                    // zero-count line is noise, mirroring the pane
+                                    // hiding empty Actionable groups).
+                                    let findings: Vec<_> = ranked_actionable_findings(&r.items)
+                                        .into_iter()
+                                        .filter_map(|(key, title, tone)| {
+                                            let n = posture_count_for(&c, key).filter(|n| *n > 0)?;
+                                            Some(finding_row(n, title, tone, key, session))
+                                        })
+                                        .collect();
+                                    let clean = findings.is_empty();
                                     view! {
-                                        <div class="dash-metrics">
+                                        // Severity row up top — large, box geometry,
+                                        // still clickable drills.
+                                        <div class="dash-metrics posture-severities">
                                             {metric_link(
-                                                crit,
+                                                c.critical,
                                                 "Critical",
                                                 "danger",
                                                 move || session.open_posture_with_facet("critical"),
                                             )}
                                             {metric_link(
-                                                high,
+                                                c.high,
                                                 "High",
                                                 "danger",
                                                 move || session.open_posture_with_facet("high"),
                                             )}
                                             {metric_link(
-                                                medium,
+                                                c.medium,
                                                 "Medium",
                                                 "warning",
                                                 move || session.open_posture_with_facet("medium"),
                                             )}
-                                            {metric_link(
-                                                expired,
-                                                "Expired",
-                                                "warning",
-                                                move || session.open_posture_with_facet("expired"),
-                                            )}
-                                            {metric_link(
-                                                over_privileged,
-                                                "Over-privileged",
-                                                "danger",
-                                                move || session.open_posture_with_facet("high_risk_perms"),
-                                            )}
-                                            {metric_link(
-                                                orgwide_mailbox,
-                                                "Org-wide mailbox",
-                                                "warning",
-                                                move || {
-                                                    session.open_posture_with_facet("orgwide_mailbox")
-                                                },
-                                            )}
-                                            {metric_link(
-                                                orgwide_sharepoint,
-                                                "Org-wide SharePoint",
-                                                "warning",
-                                                move || {
-                                                    session
-                                                        .open_posture_with_facet("orgwide_sharepoint")
-                                                },
-                                            )}
-                                            {metric_link(
-                                                ownership,
-                                                "Unowned",
-                                                "warning",
-                                                move || session.open_posture_with_facet("ownership"),
-                                            )}
-                                            {metric_link(
-                                                unused,
-                                                "Unused",
-                                                "warning",
-                                                move || session.open_posture_with_facet("unused"),
-                                            )}
                                         </div>
+                                        // Ranked "Top findings" list below.
+                                        {clean
+                                            .then(|| {
+                                                view! {
+                                                    <p class="muted">
+                                                        "No priority findings — the tenant looks healthy."
+                                                    </p>
+                                                }
+                                            })}
+                                        <div class="posture-findings">{findings}</div>
                                         <Button
                                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                             on_click=Box::new(move |_| session.open_security("findings"))
@@ -485,6 +467,50 @@ fn card_skeleton() -> impl IntoView {
             <Skeleton width="80%".to_string() height="12px".to_string() />
             <Skeleton width="60%".to_string() height="12px".to_string() />
         </div>
+    }
+}
+
+/// The posture count the card surfaces for a finding key — `None` for the
+/// findings the card doesn't drill into (redundant / delegated / no-local-app),
+/// so they're dropped from the ranked list (SAME drill targets as before).
+/// Counts come from `PostureCounts`, the one shared source, so the card and the
+/// Security workbench can't disagree.
+fn posture_count_for(c: &PostureCounts, key: &str) -> Option<usize> {
+    Some(match key {
+        "expired" => c.expired,
+        "orgwide_mailbox" => c.orgwide_mailbox,
+        "orgwide_sharepoint" => c.orgwide_sharepoint,
+        "high_risk_perms" => c.over_privileged,
+        "ownership" => c.unowned,
+        "unused" => c.unused,
+        _ => return None,
+    })
+}
+
+/// One ranked "Top findings" line: tone dot · title · count · chevron, drilling
+/// into the matching pre-filtered Security workbench pane. Rhymes with the
+/// pane's finding-group header (reuses its `finding-group__tone--*` dot classes).
+fn finding_row(
+    n: usize,
+    title: &'static str,
+    tone: &'static str,
+    key: &'static str,
+    session: Session,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class="posture-finding"
+            title=format!("Show {title}")
+            on:click=move |_| session.open_posture_with_facet(key)
+        >
+            <span class=format!("finding-group__tone finding-group__tone--{tone}")></span>
+            <span class="posture-finding__title">{title}</span>
+            <span class=format!(
+                "posture-finding__count posture-finding__count--{tone}",
+            )>{n}</span>
+            <Icon name=IconName::ChevronRight size=16 class="posture-finding__chevron" />
+        </button>
     }
 }
 

@@ -6,6 +6,7 @@
 
 use leptos::prelude::*;
 
+use crate::components::icon::{Icon, IconName};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::state::{OpenItem, OpenItemKind, Session, use_session};
 
@@ -49,8 +50,9 @@ pub fn OpenItemsDock() -> impl IntoView {
 }
 
 /// The `AppKind` glyph for a dock chip. The dock doesn't carry an MI's subtype,
-/// so a managed identity shows the generic chip.
-fn chip_kind(kind: OpenItemKind) -> AppKind {
+/// so a managed identity shows the generic chip. Shared with the workspace
+/// pane-bar so a chip and its pane's title show the same kind glyph.
+pub(crate) fn chip_kind(kind: OpenItemKind) -> AppKind {
     match kind {
         OpenItemKind::AppReg => AppKind::AppRegistration,
         OpenItemKind::Enterprise => AppKind::EnterpriseApp,
@@ -106,7 +108,7 @@ fn dock_chip(session: Session, item: OpenItem) -> impl IntoView {
                     session.close_item(id);
                 }
             >
-                "×"
+                <Icon name=IconName::Close size=14 />
             </button>
         </div>
     }

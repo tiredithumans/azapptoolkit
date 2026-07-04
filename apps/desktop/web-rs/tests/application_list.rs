@@ -86,7 +86,7 @@ async fn empty_tenant_shows_create_cta() {
     // filters" copy meant for a filtered-empty list.
     ts::wait_for(|| ts::query(".ui-empty__title").is_some()).await;
     assert_eq!(ts::text(".ui-empty__title"), "No app registrations yet");
-    assert!(ts::text(".ui-empty").contains("+ New app"));
+    assert!(ts::text(".ui-empty").contains("New app"));
 }
 
 #[wasm_bindgen_test]
