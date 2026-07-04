@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-04
+
 ### Changed
 
 - **CSS token housekeeping** (internal hygiene, no visual change): finished the
