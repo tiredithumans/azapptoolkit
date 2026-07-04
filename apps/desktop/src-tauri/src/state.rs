@@ -352,18 +352,47 @@ impl AppState {
         })
     }
 
+    /// Shared core for every `ensure_*_token` probe below: pre-acquires (and
+    /// caches) the token for `scopes` so a not-yet-consented scope surfaces as
+    /// the typed [`AuthError::ConsentRequired`] (the UI offers a "Grant consent"
+    /// button) instead of being flattened to a generic `token_error` deep inside
+    /// a `ScopedTokenAdapter`/`BearerProvider` boundary. On success the token is
+    /// cached and the subsequent client call reuses it, so the happy path costs
+    /// no extra round trip.
+    ///
+    /// `cae` MUST match the CAE-ness of the adapter that later consumes the same
+    /// scope set: the token cache key omits CAE-ness, so a non-CAE pre-warm would
+    /// make a `new_cae` adapter reuse a non-CAE token (and vice versa). The Graph
+    /// scopes ride `new_cae` (cae = true); ARM / Exchange / Log Analytics stay
+    /// non-CAE (cae = false). This is the CAE/adapter pairing each wrapper's doc
+    /// comment cross-references — keeping the branch in one place.
+    async fn ensure_scoped_token(
+        &self,
+        tenant_id: &str,
+        scopes: Vec<String>,
+        cae: bool,
+    ) -> azapptoolkit_auth::Result<()> {
+        if cae {
+            self.auth
+                .access_token_for_scopes_cae(tenant_id, &scopes, None)
+                .await?;
+        } else {
+            self.auth
+                .access_token_for_scopes(tenant_id, &scopes)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Acquires (and caches) the ARM token up front, surfacing a *typed* auth
     /// error — notably [`AuthError::ConsentRequired`] — before any ARM call.
     /// The `BearerProvider` boundary flattens errors to `String`, so a command
     /// that wants the UI to distinguish "needs consent" must probe here first;
     /// on success the token is cached and the subsequent `ArmClient` call reuses
-    /// it, so the happy path costs no extra round trip.
+    /// it, so the happy path costs no extra round trip. Non-CAE (like the ARM adapter).
     pub async fn ensure_arm_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
         let scopes = EntraAuthService::resource_default_scopes(self.auth.cloud().arm_resource());
-        self.auth
-            .access_token_for_scopes(tenant_id, &scopes)
-            .await?;
-        Ok(())
+        self.ensure_scoped_token(tenant_id, scopes, false).await
     }
 
     /// Acquires (and caches) the `Policy.ReadWrite.ApplicationConfiguration`
@@ -373,49 +402,37 @@ impl AppState {
     /// `consent_required` raised inside a scoped Graph call would reach the UI as
     /// a generic `token_error`), so an SSO command that wants the UI to show a
     /// "Grant consent" button must probe here first. On success the token is
-    /// cached and the subsequent claims Graph call reuses it. Mirrors
-    /// [`Self::ensure_arm_token`].
+    /// cached and the subsequent claims Graph call reuses it. CAE (Graph adapter).
     pub async fn ensure_policy_write_token(
         &self,
         tenant_id: &str,
     ) -> azapptoolkit_auth::Result<()> {
         let scopes = self.auth.default_graph_policy_write_scopes();
-        self.auth
-            .access_token_for_scopes_cae(tenant_id, &scopes, None)
-            .await?;
-        Ok(())
+        self.ensure_scoped_token(tenant_id, scopes, true).await
     }
 
     /// Acquires (and caches) the `Sites.FullControl.All` token up front, so a
     /// missing-consent rejection surfaces as the typed
     /// [`AuthError::ConsentRequired`] (the SharePoint site access section offers a "Grant
     /// consent" button) instead of being flattened to a generic `token_error`
-    /// inside the scoped SharePoint Graph call. Mirrors
-    /// [`Self::ensure_policy_write_token`].
+    /// inside the scoped SharePoint Graph call. CAE (Graph adapter).
     pub async fn ensure_sharepoint_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
         let scopes = self.auth.default_graph_sharepoint_scopes();
-        self.auth
-            .access_token_for_scopes_cae(tenant_id, &scopes, None)
-            .await?;
-        Ok(())
+        self.ensure_scoped_token(tenant_id, scopes, true).await
     }
 
     /// Acquires (and caches) the `GroupMember.ReadWrite.All` token up front, so
     /// a not-yet-consented scope surfaces as the typed
     /// [`AuthError::ConsentRequired`] (the group-membership panel offers a
     /// "Grant consent" button) instead of being flattened to a generic
-    /// `token_error` inside the scoped Graph call. Mirrors
-    /// [`Self::ensure_sharepoint_token`] (CAE, matching the `new_cae` adapter
-    /// that consumes this scope set).
+    /// `token_error` inside the scoped Graph call. CAE, matching the `new_cae`
+    /// adapter that consumes this scope set.
     pub async fn ensure_group_member_token(
         &self,
         tenant_id: &str,
     ) -> azapptoolkit_auth::Result<()> {
         let scopes = self.auth.default_graph_group_member_scopes();
-        self.auth
-            .access_token_for_scopes_cae(tenant_id, &scopes, None)
-            .await?;
-        Ok(())
+        self.ensure_scoped_token(tenant_id, scopes, true).await
     }
 
     /// Acquires (and caches) the `AuditLog.Read.All` token up front, so the audit
@@ -423,53 +440,41 @@ impl AppState {
     /// [`AuthError::ConsentRequired`] → the audit view offers a "Grant consent"
     /// button to enable unused-app detection) from a license/availability failure.
     /// `AuditLog.Read.All` — not `Reports.Read.All` — is the scope the
-    /// `servicePrincipalSignInActivities` report requires. Mirrors
-    /// [`Self::ensure_sharepoint_token`]; the cached token is reused by the
-    /// subsequent sign-in activity fetch, so the happy path costs no extra round trip.
+    /// `servicePrincipalSignInActivities` report requires. CAE, matching the
+    /// `new_cae` Graph adapter that consumes this scope set (so the cached token
+    /// already advertises cp1); the cached token is reused by the subsequent
+    /// sign-in activity fetch, so the happy path costs no extra round trip.
     pub async fn ensure_audit_log_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
         let scopes = self.auth.default_graph_audit_log_scopes();
-        // Acquire via the CAE path (matching the new_cae Graph adapter that
-        // consumes this scope set) so the cached token already advertises cp1 —
-        // the token cache key omits CAE-ness, so a non-CAE pre-warm here would
-        // make the adapter reuse a non-CAE token. (ARM/Exchange stay non-CAE.)
-        self.auth
-            .access_token_for_scopes_cae(tenant_id, &scopes, None)
-            .await?;
-        Ok(())
+        self.ensure_scoped_token(tenant_id, scopes, true).await
     }
 
     /// Acquires (and caches) the `outlook.office365.com/Exchange.Manage` token
     /// up front, so a not-yet-consented Exchange scope surfaces as the typed
     /// [`AuthError::ConsentRequired`] (the Exchange/Permissions views offer a
     /// "Grant consent" button) instead of being flattened to a generic
-    /// `token_error` inside the `ScopedTokenAdapter`'s `bearer()` call. Mirrors
-    /// [`Self::ensure_sharepoint_token`]; the cached token is reused by the
-    /// subsequent Exchange admin-API call, so the happy path costs no extra
-    /// round trip. Note a *consented-but-RBAC-blocked* user still passes this
-    /// (a token is issued) and instead gets a 403 from the admin API.
+    /// `token_error` inside the `ScopedTokenAdapter`'s `bearer()` call. The
+    /// cached token is reused by the subsequent Exchange admin-API call, so the
+    /// happy path costs no extra round trip. Note a *consented-but-RBAC-blocked*
+    /// user still passes this (a token is issued) and instead gets a 403 from the
+    /// admin API. Non-CAE (like the Exchange adapter).
     pub async fn ensure_exchange_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
         let scopes = self.auth.default_exchange_scopes();
-        self.auth
-            .access_token_for_scopes(tenant_id, &scopes)
-            .await?;
-        Ok(())
+        self.ensure_scoped_token(tenant_id, scopes, false).await
     }
 
     /// Acquires (and caches) the Log Analytics query token up front
     /// (`https://api.loganalytics.azure.com/.default`, sovereign variants per
     /// cloud), surfacing the typed [`AuthError::ConsentRequired`] before any
-    /// usage query so the panel can offer a "Grant consent" button. Mirrors
-    /// [`Self::ensure_arm_token`] (non-CAE, like ARM/Exchange).
+    /// usage query so the panel can offer a "Grant consent" button. Non-CAE
+    /// (like ARM/Exchange).
     pub async fn ensure_log_analytics_token(
         &self,
         tenant_id: &str,
     ) -> azapptoolkit_auth::Result<()> {
         let scopes =
             EntraAuthService::resource_default_scopes(self.auth.cloud().log_analytics_resource());
-        self.auth
-            .access_token_for_scopes(tenant_id, &scopes)
-            .await?;
-        Ok(())
+        self.ensure_scoped_token(tenant_id, scopes, false).await
     }
 
     /// Returns a cached Azure Monitor Logs query client for `tenant_id`,
