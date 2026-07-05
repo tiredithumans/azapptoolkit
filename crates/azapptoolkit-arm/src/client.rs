@@ -11,12 +11,15 @@ use azapptoolkit_core::net::{redacted_host, same_origin};
 use azapptoolkit_core::token::BearerProvider;
 
 use crate::error::{ArmError, Result};
-use crate::models::{LogAnalyticsWorkspace, Paged, RoleAssignment, RoleDefinition, Subscription};
+use crate::models::{
+    KeyVaultResource, LogAnalyticsWorkspace, Paged, RoleAssignment, RoleDefinition, Subscription,
+};
 
 pub const ARM_BASE: &str = "https://management.azure.com";
 const SUBSCRIPTIONS_API: &str = "2022-12-01";
 const AUTHORIZATION_API: &str = "2022-04-01";
 const LOG_ANALYTICS_WORKSPACES_API: &str = "2022-10-01";
+const KEYVAULT_API: &str = "2023-07-01";
 
 pub struct ArmClient {
     http: reqwest::Client,
@@ -68,6 +71,36 @@ impl ArmClient {
         self.collect_paged(
             &url,
             &[("api-version", AUTHORIZATION_API), ("$filter", &filter)],
+        )
+        .await
+    }
+
+    /// Key Vaults in `subscription_id` the signed-in user can see (control
+    /// plane). Each returned `id` is the ARM resource path, which doubles as the
+    /// scope for [`Self::list_role_assignments_at_scope`].
+    pub async fn list_key_vaults(&self, subscription_id: &str) -> Result<Vec<KeyVaultResource>> {
+        let url = format!(
+            "{}/subscriptions/{subscription_id}/providers/Microsoft.KeyVault/vaults",
+            self.base_url
+        );
+        self.collect_paged(&url, &[("api-version", KEYVAULT_API)])
+            .await
+    }
+
+    /// Role assignments granted **directly at** `scope` (a vault / resource /
+    /// resource-group / subscription ARM path). The `atScope()` filter excludes
+    /// assignments inherited from ancestor scopes, so this answers "who is
+    /// explicitly granted on this resource" — the actionable least-privilege
+    /// view — rather than drowning it in every inherited subscription Owner.
+    pub async fn list_role_assignments_at_scope(&self, scope: &str) -> Result<Vec<RoleAssignment>> {
+        let url = format!(
+            "{}/{}/providers/Microsoft.Authorization/roleAssignments",
+            self.base_url.trim_end_matches('/'),
+            scope.trim_start_matches('/').trim_end_matches('/'),
+        );
+        self.collect_paged(
+            &url,
+            &[("api-version", AUTHORIZATION_API), ("$filter", "atScope()")],
         )
         .await
     }
@@ -409,6 +442,71 @@ mod tests {
 
         let subs = client(&server.uri()).list_subscriptions().await.unwrap();
         assert_eq!(subs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn lists_key_vaults() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/subscriptions/sub-1/providers/Microsoft.KeyVault/vaults",
+            ))
+            .and(query_param("api-version", KEYVAULT_API))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    {"id": "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv-1", "name": "kv-1"},
+                    {"id": "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv-2"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let vaults = client(&server.uri())
+            .list_key_vaults("sub-1")
+            .await
+            .unwrap();
+        assert_eq!(vaults.len(), 2);
+        assert_eq!(vaults[0].name.as_deref(), Some("kv-1"));
+        // name is optional and absent on the second.
+        assert_eq!(vaults[1].name, None);
+        assert!(vaults[1].id.as_deref().unwrap().ends_with("kv-2"));
+    }
+
+    #[tokio::test]
+    async fn role_assignments_at_scope_uses_atscope_filter_and_reads_principal_type() {
+        let server = MockServer::start().await;
+        let scope =
+            "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv-1";
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "{scope}/providers/Microsoft.Authorization/roleAssignments"
+            )))
+            .and(query_param("api-version", AUTHORIZATION_API))
+            .and(query_param("$filter", "atScope()"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{
+                    "id": "/ra/1",
+                    "properties": {
+                        "roleDefinitionId": "/providers/Microsoft.Authorization/roleDefinitions/def-1",
+                        "scope": scope,
+                        "principalId": "sp-1",
+                        "principalType": "ServicePrincipal"
+                    }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let got = client(&server.uri())
+            .list_role_assignments_at_scope(scope)
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].properties.principal_id.as_deref(), Some("sp-1"));
+        assert_eq!(
+            got[0].properties.principal_type.as_deref(),
+            Some("ServicePrincipal")
+        );
     }
 
     #[tokio::test]
