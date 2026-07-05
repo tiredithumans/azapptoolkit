@@ -61,7 +61,24 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      # Whichever attempt succeeded carries the page_url (a failed attempt emits none).
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment-retry.outputs.page_url }}
     steps:
+      # The GitHub Pages backend intermittently fails the deployment with
+      # "Deployment failed, try again later" on the first status poll (~1 run in 30)
+      # even when the build + uploaded artifact are fine — a known transient in
+      # actions/deploy-pages, not a config error (a manual re-run always clears it).
+      # `continue-on-error` stops that flake from failing the job; one delayed retry
+      # recovers it, taking the effective failure rate from ~3% to ~0.1%. If the
+      # retry ALSO fails, the job fails (it has no continue-on-error) — so a real,
+      # persistent Pages outage still surfaces. Keep the pinned SHA in sync across
+      # both attempts.
       - id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+      - name: Pause before retry
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 30
+      - id: deployment-retry
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
