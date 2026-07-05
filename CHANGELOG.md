@@ -7,6 +7,16 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Key Vault reverse lookup** — a third tab in Resource Access sweeps every reachable Key Vault's
+  direct Azure RBAC role assignments and shows which principals (apps, managed identities, users)
+  hold which role on which vault. Filter by principal to see the vaults an app can reach, or by
+  vault to see who can touch it; broadly-privileged roles (Owner, Key Vault Administrator, …) are
+  flagged. Progress-streamed, cancellable, and backend-cached like the Sites sweep; reads use the
+  signed-in user's Azure Reader rights (ARM scope, consented on demand). Complements the existing
+  per-managed-identity Azure-roles view (the forward direction).
+
 ### Changed
 
 - **Release/CI hardening:** the `release.yml` `guard` job now runs `cargo audit` against the

@@ -2,6 +2,52 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Progress for the Key Vault RBAC reverse-lookup sweep — one tick per vault
+/// scanned. Mirrors `SiteSweepProgress`; camelCase for the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyVaultSweepProgress {
+    pub done: usize,
+    pub total: usize,
+    pub current_vault: Option<String>,
+    pub cancelled: bool,
+}
+
+/// One direct Azure-RBAC role assignment on a Key Vault — the reverse-lookup's
+/// row unit ("which principal holds which role on which vault"). `principal_id`
+/// resolves to `principal_display_name` for service principals (apps + managed
+/// identities); users/groups carry only `principal_type` + the id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyVaultAccessRow {
+    pub vault_id: String,
+    pub vault_name: Option<String>,
+    /// The ARM scope the assignment sits at (the vault resource path).
+    pub scope: String,
+    pub role_name: String,
+    pub principal_id: String,
+    /// `ServicePrincipal` / `User` / `Group` from ARM, when present.
+    pub principal_type: Option<String>,
+    /// Resolved display name — filled for service principals; `None` otherwise.
+    pub principal_display_name: Option<String>,
+    /// True for broadly-privileged roles (Owner, Key Vault Administrator, …).
+    pub high_privilege: bool,
+}
+
+/// Result of a tenant-wide Key Vault RBAC sweep, with coverage so the UI can
+/// warn when a scan was partial — a vault with "no rows" that actually failed
+/// to read must never read as "no access".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyVaultSweepResult {
+    pub tenant_id: String,
+    pub total_vaults: usize,
+    pub vaults_scanned: usize,
+    pub vaults_failed: usize,
+    pub rows: Vec<KeyVaultAccessRow>,
+    pub cancelled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvSecretItemDto {
     pub name: String,

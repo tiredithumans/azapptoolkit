@@ -41,3 +41,20 @@ async fn site_sweep_stream_delivers_emitted_events() {
     assert_eq!(item.done, 5);
     assert_eq!(item.total, 20);
 }
+
+#[wasm_bindgen_test]
+async fn keyvault_sweep_stream_delivers_emitted_events() {
+    ts::reset();
+    let mut stream = events::keyvault_sweep_progress()
+        .await
+        .expect("subscribe to keyvault-sweep-progress");
+
+    ts::emit_event(
+        "keyvault-sweep-progress",
+        &fixtures::keyvault_sweep_progress(4, 12),
+    );
+
+    let item = stream.next().await.expect("one progress event");
+    assert_eq!(item.done, 4);
+    assert_eq!(item.total, 12);
+}

@@ -10,8 +10,13 @@
 //!   Filtering by app answers "which sites can this app reach?" — the
 //!   `Sites.Selected` blind spot — and filtering by site answers "which apps
 //!   can touch this site?".
+//! - **Key Vault**: a tenant-wide sweep of every reachable vault's direct Azure
+//!   RBAC role assignments (`sweep_key_vault_access`, progress-streamed,
+//!   backend-cached). Filtering by principal answers "which vaults can this app
+//!   / managed identity reach?" and filtering by vault answers "who can touch
+//!   this vault?".
 //!
-//! Both panels stay mounted across tab switches (display toggle) so an
+//! All panels stay mounted across tab switches (display toggle) so an
 //! expensive sweep/probe result survives flipping between them.
 
 use leptos::prelude::*;
@@ -19,9 +24,11 @@ use thaw::{Body1, Tab, TabList};
 
 use crate::components::ui::SectionHeader;
 
+mod keyvault;
 mod mailboxes;
 mod sites;
 
+use keyvault::KeyVaultPanel;
 use mailboxes::MailboxesPanel;
 use sites::SitesPanel;
 
@@ -32,11 +39,12 @@ pub fn ResourceAccessView() -> impl IntoView {
         <div class="page">
             <SectionHeader title="Resource Access" />
             <Body1>
-                "Reverse lookups: pick a resource plane and see which applications can reach what. (Key Vault / Azure RBAC lookups live on each managed identity's detail for now.)"
+                "Reverse lookups: pick a resource plane and see which applications and identities can reach what."
             </Body1>
             <TabList selected_value=tab>
                 <Tab value="mailboxes">"Mailboxes"</Tab>
                 <Tab value="sites">"Sites"</Tab>
+                <Tab value="keyvault">"Key Vault"</Tab>
             </TabList>
             <div style:display=move || {
                 if tab.get() == "mailboxes" { "contents" } else { "none" }
@@ -47,6 +55,11 @@ pub fn ResourceAccessView() -> impl IntoView {
                 if tab.get() == "sites" { "contents" } else { "none" }
             }>
                 <SitesPanel />
+            </div>
+            <div style:display=move || {
+                if tab.get() == "keyvault" { "contents" } else { "none" }
+            }>
+                <KeyVaultPanel />
             </div>
         </div>
     }

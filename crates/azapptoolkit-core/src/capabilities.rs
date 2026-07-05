@@ -304,6 +304,20 @@ pub static CAPABILITIES: &[Capability] = &[
                       the subscription, plus the ARM (management.azure.com) scope.",
     },
     Capability {
+        key: "keyvault_rbac_reads",
+        plane: Plane::AzureRbac,
+        label: "Key Vault RBAC reverse lookup",
+        description: "List every Key Vault and the principals holding Azure RBAC roles on it.",
+        directory_roles_any: &[("Reader", None)],
+        role_detect: RoleDetect::Indeterminate,
+        scopes: &["https://management.azure.com/.default"],
+        scope_feature: Some("arm"),
+        remediation: "Enumerating Key Vaults and their role assignments needs the Reader role (or \
+                      a custom role with Microsoft.KeyVault/vaults/read and \
+                      Microsoft.Authorization/roleAssignments/read) across the subscriptions, plus \
+                      the ARM (management.azure.com) scope.",
+    },
+    Capability {
         key: "graph_activity_usage",
         plane: Plane::AzureRbac,
         label: "Graph activity usage",

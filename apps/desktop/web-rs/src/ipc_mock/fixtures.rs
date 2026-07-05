@@ -24,7 +24,7 @@ use azapptoolkit_dto::enterprise_application::{
     GroupMembershipDto, ProvisioningJobDto,
 };
 use azapptoolkit_dto::exchange::{ExchangeAccessResult, MailScopeEntry};
-use azapptoolkit_dto::keyvault::{KvSecretItemDto, KvSecretValueDto};
+use azapptoolkit_dto::keyvault::{KeyVaultSweepProgress, KvSecretItemDto, KvSecretValueDto};
 use azapptoolkit_dto::managed_identity::{
     AppRoleGrantDto, AzureRoleDto, AzureRolesResult, ManagedIdentityDto, MiSubtype,
 };
@@ -552,6 +552,15 @@ pub fn site_sweep_progress(done: usize, total: usize) -> SiteSweepProgress {
         done,
         total,
         current_site: None,
+        cancelled: false,
+    }
+}
+
+pub fn keyvault_sweep_progress(done: usize, total: usize) -> KeyVaultSweepProgress {
+    KeyVaultSweepProgress {
+        done,
+        total,
+        current_vault: None,
         cancelled: false,
     }
 }

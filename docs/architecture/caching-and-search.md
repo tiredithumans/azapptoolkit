@@ -126,6 +126,13 @@ bust it directly: `grant_site_access`, `remove_site_permission`, and
 sweep — a security-posture surface — could show a revoked grant as still present (or miss a new
 one) for up to the audit TTL.
 
+The **Key Vault RBAC** reverse-lookup caches its completed sweep under `{tenant}|keyvault_sweep`
+(same `CacheKind::Audit` + TTL). It's a **read-only** view of ARM role assignments — the app grants
+no Key Vault roles — so there's no in-app mutation to invalidate it; the 60-minute TTL and the
+sign-out tenant sweep are the only clears (matching the managed-identity Azure-roles read caches).
+Like the site sweep, a cancelled or partially-failed run is never cached, so coverage is never
+overstated.
+
 ## Mailbox-scope verdicts are cached per principal
 
 `get_mail_permission_scopes` / `get_mail_scopes_for_principal` resolve the Permissions-tab "Scope"
