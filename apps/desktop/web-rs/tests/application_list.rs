@@ -16,6 +16,8 @@ use wasm_bindgen_test::*;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::application_list::ApplicationList;
 
+wasm_bindgen_test_configure!(run_in_browser);
+
 /// The text input the list filters on (the only non-checkbox input in the pane;
 /// row + select-all controls are checkboxes).
 const SEARCH: &str = ".app-list input:not([type=checkbox])";

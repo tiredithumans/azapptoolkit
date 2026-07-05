@@ -67,3 +67,17 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+
+# The browser GUI tests (`just web-itest`) are the slowest CI step. Each of the
+# ~21 integration-test binaries is a full debug wasm — and DWARF debuginfo is
+# ~96% of it (measured: 1954 MB → 78 MB stripped). wasm-bindgen-test-runner must
+# decode that whole module before it can run, which cost ~24s PER binary (~10 min
+# across the suite). Stripping debuginfo from the linked test wasm cuts that
+# decode to near-nothing; the runner strips debuginfo from the served module
+# anyway, so the in-browser behaviour is unchanged, and test panics assert on
+# messages (kept by console_error_panic_hook), not on wasm stack frames. Scoped to
+# `test` so `just dev` / `web-build` (profile.dev) keep their debuginfo. This is
+# NOT `strip = true`: that also drops the `name` section, making any wasm panic
+# trace fully anonymous.
+[profile.test]
+strip = "debuginfo"

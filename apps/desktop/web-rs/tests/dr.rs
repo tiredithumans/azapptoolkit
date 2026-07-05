@@ -10,6 +10,8 @@ use wasm_bindgen_test::*;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::dr::DisasterRecoveryView;
 
+wasm_bindgen_test_configure!(run_in_browser);
+
 #[wasm_bindgen_test]
 async fn backup_progress_renders_count_and_throttle_notice() {
     ts::reset();

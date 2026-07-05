@@ -9,19 +9,15 @@ the project adheres to
 
 ### Changed
 
-- **CI: frontend GUI tests consolidated into one WASM binary.** The 21 top-level
-  `tests/*.rs` browser tests are now modules under `tests/gui/`, aggregated by a
-  single `tests/gui.rs`, so `just web-itest` links, runs `wasm-bindgen`, and boots
-  headless Chrome **once** for the whole suite instead of per file. The per-binary
-  overhead (wasm-bindgen over each multi-MB debug wasm + Chrome boot/teardown,
-  ~27s × 21) was ~97% of the ~13-minute CI GUI-test step; the tests themselves run
-  in ~8s. Observed `web-itest` step: ~13 min → ~2.5 min. `test_support::reset()`
-  (every test's first call) now also clears the document body so the serially-run
-  tests share one browser page without leaking DOM between them. Because the one
-  binary monomorphizes every view together its debug wasm is large, so the
-  `web-itest` recipe raises `WASM_BINDGEN_TEST_TIMEOUT` to 120s (the runner's 20s
-  default is too short for that module to instantiate in Chrome). No test behavior
-  changed.
+- **CI: the browser GUI tests (`just web-itest`) run far faster** — `[profile.test]
+  strip = "debuginfo"` in `apps/desktop/web-rs/Cargo.toml`. Each of the ~21
+  integration-test wasm binaries was ~1.9 GB, ~96% of it DWARF debuginfo that
+  wasm-bindgen-test-runner had to decode before every run (~24s/binary, the bulk
+  of a ~13-minute CI step). Stripping debuginfo from the linked test wasm (down to
+  ~78 MB) removes that per-binary decode cost. The runner already strips debuginfo
+  from the served module, so in-browser behaviour and panic messages are
+  unchanged; only wasm stack frames (already unusable) lose line info. Scoped to
+  the `test` profile, so `just dev` / `web-build` keep their debuginfo.
 
 ### Added
 

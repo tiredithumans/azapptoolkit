@@ -10,6 +10,8 @@ use wasm_bindgen_test::*;
 use azapptoolkit_web_rs::test_support::{self as ts};
 use azapptoolkit_web_rs::views::dialogs::confirm_dialog::ConfirmDialog;
 
+wasm_bindgen_test_configure!(run_in_browser);
+
 /// The danger-styled confirm button (labelled "Delete" here).
 fn confirm_button() -> web_sys::HtmlButtonElement {
     ts::query_all("button")

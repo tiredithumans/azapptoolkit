@@ -11,6 +11,8 @@ use wasm_bindgen_test::*;
 use azapptoolkit_web_rs::bindings::events;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 
+wasm_bindgen_test_configure!(run_in_browser);
+
 #[wasm_bindgen_test]
 async fn bulk_progress_stream_delivers_emitted_events() {
     ts::reset();

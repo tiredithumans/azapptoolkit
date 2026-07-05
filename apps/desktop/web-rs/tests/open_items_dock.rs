@@ -13,6 +13,8 @@ use azapptoolkit_web_rs::components::open_items_workspace::OpenItemsWorkspace;
 use azapptoolkit_web_rs::state::OpenItemKind;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 
+wasm_bindgen_test_configure!(run_in_browser);
+
 /// Count elements matching `selector` that are actually visible (hidden ones are
 /// `display:none`, so they have no offset parent).
 fn visible_count(selector: &str) -> usize {

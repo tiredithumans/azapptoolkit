@@ -13,6 +13,8 @@ use azapptoolkit_web_rs::bindings::SignInOutcome;
 use azapptoolkit_web_rs::components::toast::ToastHost;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 
+wasm_bindgen_test_configure!(run_in_browser);
+
 #[wasm_bindgen_test]
 async fn dead_session_error_offers_reauth_action_that_calls_reauthenticate() {
     ts::reset();

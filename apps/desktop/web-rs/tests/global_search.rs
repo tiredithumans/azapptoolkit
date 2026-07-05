@@ -8,6 +8,8 @@ use wasm_bindgen_test::*;
 use azapptoolkit_web_rs::components::global_search::GlobalSearch;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 
+wasm_bindgen_test_configure!(run_in_browser);
+
 fn is_active(selector: &str) -> bool {
     ts::query(selector)
         .map(|e| e.class_name().contains("global-search__row--active"))

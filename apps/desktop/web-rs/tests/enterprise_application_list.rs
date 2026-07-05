@@ -8,6 +8,8 @@ use wasm_bindgen_test::*;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::enterprise_application_list::EnterpriseApplicationList;
 
+wasm_bindgen_test_configure!(run_in_browser);
+
 const SEARCH: &str = ".app-list input:not([type=checkbox])";
 
 #[wasm_bindgen_test]

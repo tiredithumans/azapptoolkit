@@ -17,6 +17,8 @@ use azapptoolkit_dto::managed_identity::{
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::managed_identities::ManagedIdentityDetailWindow;
 
+wasm_bindgen_test_configure!(run_in_browser);
+
 fn mi_grant_result() -> GrantManagedIdentityResult {
     GrantManagedIdentityResult {
         managed_identity_id: "mi-0".to_string(),

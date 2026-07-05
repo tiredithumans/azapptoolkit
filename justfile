@@ -11,17 +11,6 @@
 # Shebang recipes (e.g. `setup`) are unaffected — they run as their own script.
 set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 
-# wasm-bindgen-test's headless runner gives a browser only this many seconds to
-# instantiate the test module and report results before it declares "Failed to
-# detect test as having been run" (env var read in wasm-bindgen-test-runner;
-# seconds; upstream default 20). The GUI tests compile into ONE binary
-# (tests/gui.rs) that monomorphizes every view together, so its debug wasm is far
-# larger than any single-view binary and needs well over 20s to load + run all
-# ~104 tests in headless Chrome. `just`'s `export` puts it in every recipe's
-# environment cross-platform (only wasm-pack's runner reads it). Raise it if the
-# suite grows and CI starts reporting the "Failed to detect" timeout again.
-export WASM_BINDGEN_TEST_TIMEOUT := "120"
-
 # Show the recipe list when run with no arguments.
 default:
     @just --list
@@ -70,9 +59,6 @@ web-build-pages BASE="/azapptoolkit/":
 # for `--firefox`/`--geckodriver` to use Firefox instead). Deliberately NOT in
 # `verify`: that gate must run on any dev box, and this one needs a browser. The
 # `test-support` feature compiles the harness (off in the shipped Trunk build).
-# All the tests live in ONE binary (tests/gui.rs) so Chrome boots once; that
-# makes the debug wasm large, so `WASM_BINDGEN_TEST_TIMEOUT` (set above) lifts the
-# runner's 20s "detect test" ceiling.
 [working-directory('apps/desktop/web-rs')]
 web-itest *ARGS:
     wasm-pack test --headless --chrome {{ARGS}} -- --features test-support

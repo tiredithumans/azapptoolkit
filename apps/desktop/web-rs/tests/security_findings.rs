@@ -18,6 +18,8 @@ use azapptoolkit_dto::bulk::{
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::security_view::SecurityView;
 
+wasm_bindgen_test_configure!(run_in_browser);
+
 /// A run exercising every behavior under test: ownership (impact 35, must
 /// outrank expired's 8), one expired app, one unused app, an org-wide-mailbox
 /// group holding an app row AND an SP-only row (Fix-all eligibility), one
