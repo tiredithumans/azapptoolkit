@@ -9,15 +9,23 @@ the project adheres to
 
 ### Changed
 
-- **CI: the browser GUI tests (`just web-itest`) run far faster** — `[profile.test]
-  strip = "debuginfo"` in `apps/desktop/web-rs/Cargo.toml`. Each of the ~21
-  integration-test wasm binaries was ~1.9 GB, ~96% of it DWARF debuginfo that
-  wasm-bindgen-test-runner had to decode before every run (~24s/binary, the bulk
-  of a ~13-minute CI step). Stripping debuginfo from the linked test wasm (down to
-  ~78 MB) removes that per-binary decode cost. The runner already strips debuginfo
-  from the served module, so in-browser behaviour and panic messages are
-  unchanged; only wasm stack frames (already unusable) lose line info. Scoped to
-  the `test` profile, so `just dev` / `web-build` keep their debuginfo.
+- **CI: the browser GUI tests (`just web-itest`) run far faster** via two changes
+  to `apps/desktop/web-rs`:
+  - **Strip debuginfo from the test wasm** — `[profile.test] strip = "debuginfo"`.
+    Each integration-test wasm was ~1.9 GB, ~96% of it DWARF debuginfo that
+    wasm-bindgen-test-runner had to decode before every run (~24s/binary). Stripping
+    it cuts each binary to ~8–52 MB so the decode is near-free. The runner already
+    strips debuginfo from the served module, so in-browser behaviour and panic
+    messages are unchanged (only already-unusable wasm stack frames lose line info);
+    scoped to the `test` profile, so `just dev` / `web-build` keep their debuginfo.
+  - **Group the 21 one-file-per-binary tests into 3 shard binaries**
+    (`tests/gui_N.rs` pulling `tests/gui/<view>.rs` modules), so Chrome is booted 3×
+    instead of 21×. A *single* merged binary was tried first but its ~78 MB served
+    wasm exceeds what headless Chrome will instantiate (timed out even at 120s); each
+    shard is kept under ~52 MB. Tests in a shard share one page, so
+    `test_support::reset()` (every test's first call) now also clears the document
+    body. `WASM_BINDGEN_TEST_TIMEOUT=60` (justfile) gives the larger shards load
+    headroom over the runner's 20s default.
 
 ### Added
 

@@ -16,8 +16,6 @@ use azapptoolkit_dto::managed_identity::AzureRolesResult;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::managed_identities::ManagedIdentityDetailWindow;
 
-wasm_bindgen_test_configure!(run_in_browser);
-
 fn click_button(label: &str) {
     for el in ts::query_all("button") {
         if el.text_content().unwrap_or_default().trim() == label {

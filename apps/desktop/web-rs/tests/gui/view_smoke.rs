@@ -16,8 +16,6 @@ use azapptoolkit_web_rs::views::dr::DisasterRecoveryView;
 use azapptoolkit_web_rs::views::permission_tester_view::PermissionTesterView;
 use azapptoolkit_web_rs::views::resource_access::ResourceAccessView;
 
-wasm_bindgen_test_configure!(run_in_browser);
-
 async fn assert_renders_interactive() {
     ts::tick().await;
     assert!(!ts::body_text().is_empty(), "view rendered no content");

@@ -8,8 +8,6 @@ use wasm_bindgen_test::*;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::credentials_dashboard::CredentialsDashboard;
 
-wasm_bindgen_test_configure!(run_in_browser);
-
 #[wasm_bindgen_test]
 async fn loads_and_renders_rows() {
     ts::reset();

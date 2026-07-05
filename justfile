@@ -11,6 +11,15 @@
 # Shebang recipes (e.g. `setup`) are unaffected — they run as their own script.
 set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 
+# wasm-bindgen-test's headless runner gives a browser this many seconds to load
+# the test module AND report results before it declares "Failed to detect test as
+# having been run" (upstream default 20). The GUI tests are grouped into a few
+# larger shard binaries (tests/gui_N.rs, ~45-52 MB each) that each run ~25 tests
+# serially in one page, so the default is too tight a margin — 60 gives headroom
+# without slowing green runs (they finish and exit early). `just`'s `export` puts
+# it in every recipe's environment cross-platform; only wasm-pack's runner reads it.
+export WASM_BINDGEN_TEST_TIMEOUT := "60"
+
 # Show the recipe list when run with no arguments.
 default:
     @just --list
