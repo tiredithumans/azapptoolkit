@@ -87,6 +87,24 @@ pub struct RoleAssignmentProperties {
     pub scope: Option<String>,
     #[serde(default)]
     pub principal_id: Option<String>,
+    /// `User` / `Group` / `ServicePrincipal` — lets the reverse-lookup route
+    /// name resolution (only ServicePrincipal ids resolve via the Graph SP
+    /// batch) and label a row by identity kind.
+    #[serde(default)]
+    pub principal_type: Option<String>,
+}
+
+/// A Key Vault (ARM control plane), from
+/// `/subscriptions/{sub}/providers/Microsoft.KeyVault/vaults`. Only the id +
+/// name the reverse-lookup needs; the id doubles as the ARM scope for a
+/// role-assignment query.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyVaultResource {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

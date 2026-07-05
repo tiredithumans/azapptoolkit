@@ -184,6 +184,8 @@ pub fn run() {
             commands::sharepoint::sweep_site_permissions,
             commands::sharepoint::cancel_resource_sweep,
             commands::sharepoint::get_cached_site_sweep,
+            commands::keyvault_rbac::sweep_key_vault_access,
+            commands::keyvault_rbac::get_cached_key_vault_access,
             commands::permission_tester::test_mailbox_access,
             commands::permission_tester::find_mailbox_reachers,
             commands::usage::get_app_graph_usage,

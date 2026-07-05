@@ -7,6 +7,7 @@ use tauri_sys::event::{Event, listen};
 
 use super::audit::AuditProgress;
 use super::bulk::BulkProgress;
+use super::keyvault_rbac::KeyVaultSweepProgress;
 use super::permission_tester::MailboxProbeProgress;
 use super::sharepoint::SiteSweepProgress;
 use super::updater::UpdateProgress;
@@ -52,6 +53,14 @@ pub async fn site_sweep_progress() -> Result<impl Stream<Item = SiteSweepProgres
         .await
         .map_err(|e| JsErrString(format!("{e:?}")))?;
     Ok(stream.map(|ev: Event<SiteSweepProgress>| ev.payload))
+}
+
+pub async fn keyvault_sweep_progress()
+-> Result<impl Stream<Item = KeyVaultSweepProgress>, JsErrString> {
+    let stream = listen::<KeyVaultSweepProgress>("keyvault-sweep-progress")
+        .await
+        .map_err(|e| JsErrString(format!("{e:?}")))?;
+    Ok(stream.map(|ev: Event<KeyVaultSweepProgress>| ev.payload))
 }
 
 pub async fn mailbox_probe_progress()

@@ -19,6 +19,7 @@ pub(crate) mod graph_err;
 pub mod graph_roles;
 pub(crate) mod guid;
 pub mod keyvault;
+pub mod keyvault_rbac;
 pub mod managed_identity;
 pub mod permission_tester;
 pub mod permissions;
