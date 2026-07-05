@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-04
+
 ### Added
 
 - **Key Vault reverse lookup** — a third tab in Resource Access sweeps every reachable Key Vault's
