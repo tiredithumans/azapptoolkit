@@ -8,9 +8,11 @@
 //! avoiding the single-binary load cliff (a merged ~78 MB module times out in
 //! Chrome; each shard stays under the ~52 MB that provably loads).
 //!
-//! Tests within a shard run serially in one page and share its DOM;
-//! `test_support::reset()` (every test's first call) clears the body between
-//! them. Balancing is by measured wasm size — see `tests/gui_1.rs`.
+//! Tests within a shard run serially in one page and share its DOM; isolation
+//! relies on Leptos disposing each `mount_view` (and its teleported overlays) on
+//! unmount. `reset()` must NOT clear `document.body` — the runner scrapes results
+//! from the DOM, so wiping it makes the whole shard report nothing. Balancing is
+//! by measured wasm size — see `tests/gui_1.rs`.
 #![cfg(target_arch = "wasm32")]
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);

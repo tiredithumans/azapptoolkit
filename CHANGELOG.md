@@ -22,10 +22,10 @@ the project adheres to
     (`tests/gui_N.rs` pulling `tests/gui/<view>.rs` modules), so Chrome is booted 3×
     instead of 21×. A *single* merged binary was tried first but its ~78 MB served
     wasm exceeds what headless Chrome will instantiate (timed out even at 120s); each
-    shard is kept under ~52 MB. Tests in a shard share one page, so
-    `test_support::reset()` (every test's first call) now also clears the document
-    body. `WASM_BINDGEN_TEST_TIMEOUT=60` (justfile) gives the larger shards load
-    headroom over the runner's 20s default.
+    shard is kept under ~52 MB. Tests in a shard share one page and rely on Leptos
+    disposing each mounted view on unmount for isolation (the runner scrapes results
+    from the DOM, so `reset()` must NOT clear the body). `WASM_BINDGEN_TEST_TIMEOUT=60`
+    (justfile) gives the larger shards load headroom over the runner's 20s default.
 
 ### Added
 
