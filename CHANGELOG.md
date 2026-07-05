@@ -7,6 +7,16 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI: the GitHub Pages demo deploy no longer flakes red on a transient backend
+  error.** `actions/deploy-pages` intermittently reports "Deployment failed, try
+  again later" on its first status poll (~1 run in 30) even when the build and
+  uploaded artifact are fine; a manual re-run always cleared it. `pages.yml` now
+  retries the deploy step once (after a short pause) via `continue-on-error` + a
+  conditional second attempt, so the transient self-heals. A genuinely persistent
+  failure still fails the job (the retry has no `continue-on-error`).
+
 ### Changed
 
 - **CI: the browser GUI tests (`just web-itest`) run far faster** via two changes
