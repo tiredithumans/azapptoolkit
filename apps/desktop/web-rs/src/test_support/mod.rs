@@ -28,9 +28,25 @@ use crate::state::{Session, provide_session, use_session};
 // `test_support` unchanged.
 pub use crate::ipc_mock::fixtures;
 pub use crate::ipc_mock::{
-    RecordedCall, Unmocked, call_count, emit_event, last_call, mock_err, mock_ok, reset,
-    set_unmocked_mode,
+    RecordedCall, Unmocked, call_count, emit_event, last_call, mock_err, mock_ok, set_unmocked_mode,
 };
+
+/// Reset shared test state **and** clear the document body. Every test calls this
+/// first. The GUI tests all run in ONE browser page (a single `wasm-pack` binary
+/// — see `tests/gui.rs`), so unlike the old file-per-binary layout there is no
+/// fresh document between tests: clearing the body here gives each test a clean
+/// DOM and stops a prior test's mounted host — or any portaled/teleported overlay
+/// (Thaw dialogs, toasts) — leaking into the next. Delegates the
+/// mock-route/recorded-call/listener reset to [`crate::ipc_mock::reset`]; the mock
+/// bridge lives on `window`, not in the body, so it survives the sweep.
+pub fn reset() {
+    crate::ipc_mock::reset();
+    if let Some(body) = document().body() {
+        while let Some(child) = body.first_child() {
+            let _ = body.remove_child(&child);
+        }
+    }
+}
 
 /// A default signed-in tenant context, so views that guard on
 /// `session.active_tenant` proceed to fetch.

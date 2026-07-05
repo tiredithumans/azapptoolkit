@@ -28,8 +28,6 @@ use azapptoolkit_web_rs::components::permission_picker::PickerSelection;
 use azapptoolkit_web_rs::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 
-wasm_bindgen_test_configure!(run_in_browser);
-
 /// The catalog the mounted picker exposes — covers both scopable mechanisms
 /// (Exchange mail, SharePoint sites) plus a non-scopable permission, so a single
 /// fixture drives every path including the mixed/org-wide case.

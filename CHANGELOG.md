@@ -7,7 +7,18 @@ the project adheres to
 
 ## [Unreleased]
 
-## [0.15.0] - 2026-07-04
+### Changed
+
+- **CI: frontend GUI tests consolidated into one WASM binary.** The 21 top-level
+  `tests/*.rs` browser tests are now modules under `tests/gui/`, aggregated by a
+  single `tests/gui.rs`, so `just web-itest` links, runs `wasm-bindgen`, and boots
+  headless Chrome **once** for the whole suite instead of per file. The per-binary
+  overhead (wasm-bindgen over each multi-MB debug wasm + Chrome boot/teardown,
+  ~27s × 21) was ~97% of the ~13-minute CI GUI-test step; the tests themselves run
+  in ~8s. Expected `web-itest` step: ~13 min → ~2 min. `test_support::reset()`
+  (every test's first call) now also clears the document body so the serially-run
+  tests share one browser page without leaking DOM between them. No test behavior
+  changed.
 
 ### Added
 
