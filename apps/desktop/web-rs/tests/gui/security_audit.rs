@@ -18,8 +18,6 @@ use azapptoolkit_dto::audit::AuditRunResult;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::security_view::SecurityView;
 
-wasm_bindgen_test_configure!(run_in_browser);
-
 /// One app-registration row + one SP-only row (a foreign enterprise app
 /// holding an org-wide mail grant, with the scope-mailbox Fix attached).
 fn cached_run() -> AuditRunResult {

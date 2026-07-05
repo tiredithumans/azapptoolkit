@@ -7,7 +7,25 @@ the project adheres to
 
 ## [Unreleased]
 
-## [0.15.0] - 2026-07-04
+### Changed
+
+- **CI: the browser GUI tests (`just web-itest`) run far faster** via two changes
+  to `apps/desktop/web-rs`:
+  - **Strip debuginfo from the test wasm** — `[profile.test] strip = "debuginfo"`.
+    Each integration-test wasm was ~1.9 GB, ~96% of it DWARF debuginfo that
+    wasm-bindgen-test-runner had to decode before every run (~24s/binary). Stripping
+    it cuts each binary to ~8–52 MB so the decode is near-free. The runner already
+    strips debuginfo from the served module, so in-browser behaviour and panic
+    messages are unchanged (only already-unusable wasm stack frames lose line info);
+    scoped to the `test` profile, so `just dev` / `web-build` keep their debuginfo.
+  - **Group the 21 one-file-per-binary tests into 3 shard binaries**
+    (`tests/gui_N.rs` pulling `tests/gui/<view>.rs` modules), so Chrome is booted 3×
+    instead of 21×. A *single* merged binary was tried first but its ~78 MB served
+    wasm exceeds what headless Chrome will instantiate (timed out even at 120s); each
+    shard is kept under ~52 MB. Tests in a shard share one page and rely on Leptos
+    disposing each mounted view on unmount for isolation (the runner scrapes results
+    from the DOM, so `reset()` must NOT clear the body). `WASM_BINDGEN_TEST_TIMEOUT=60`
+    (justfile) gives the larger shards load headroom over the runner's 20s default.
 
 ### Added
 

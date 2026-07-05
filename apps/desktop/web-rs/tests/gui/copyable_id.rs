@@ -8,8 +8,6 @@ use wasm_bindgen_test::*;
 use azapptoolkit_web_rs::components::ui::CopyableId;
 use azapptoolkit_web_rs::test_support as ts;
 
-wasm_bindgen_test_configure!(run_in_browser);
-
 #[wasm_bindgen_test]
 async fn copy_click_shows_transient_copied_badge() {
     ts::reset();

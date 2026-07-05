@@ -8,8 +8,6 @@ use wasm_bindgen_test::*;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::key_vault_view::KeyVaultView;
 
-wasm_bindgen_test_configure!(run_in_browser);
-
 const VAULT_INPUT: &str = "input[placeholder=\"myvault\"]";
 const LIST_BTN: &str = ".row button";
 

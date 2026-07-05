@@ -15,8 +15,6 @@ use azapptoolkit_dto::permissions::{CatalogResourceSummary, ResourcePermissions,
 use azapptoolkit_web_rs::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use azapptoolkit_web_rs::test_support::{self as ts};
 
-wasm_bindgen_test_configure!(run_in_browser);
-
 const TENANT_APP_ID: &str = "app-orders";
 
 fn tenant_resource() -> CatalogResourceSummary {
