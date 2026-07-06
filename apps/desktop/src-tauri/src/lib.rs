@@ -124,6 +124,7 @@ pub fn run() {
             commands::keyvault::kv_get_secret,
             commands::keyvault::kv_set_secret,
             commands::keyvault::rotate_app_credential,
+            commands::keyvault::list_available_key_vaults,
             commands::exchange::grant_exchange_mailbox_access,
             commands::exchange::list_exchange_role_assignments,
             commands::exchange::get_mail_permission_scopes,

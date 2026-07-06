@@ -82,3 +82,16 @@ pub async fn rotate_app_credential(
 ) -> Result<RotateCredentialResult, UiError> {
     invoke_result("rotate_app_credential", RotateArgs { tenant_id, input }).await
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TenantArgs<'a> {
+    tenant_id: &'a str,
+}
+
+/// Names of Key Vaults the signed-in user can see (ARM discovery), for the vault
+/// picker. Returns an error when ARM consent is missing — callers degrade to
+/// free-text entry.
+pub async fn list_available_key_vaults(tenant_id: &str) -> Result<Vec<String>, UiError> {
+    invoke_result("list_available_key_vaults", TenantArgs { tenant_id }).await
+}

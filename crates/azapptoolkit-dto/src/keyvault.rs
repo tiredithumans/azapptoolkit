@@ -94,6 +94,10 @@ pub struct KvSetSecretInput {
 pub struct RotateCredentialInput {
     /// Application object id whose secret is being rotated.
     pub object_id: String,
+    /// Application (client) id — used to remember the vault binding per app so a
+    /// later rotation pre-selects the same vault. Optional for wire-compat.
+    #[serde(default)]
+    pub app_id: Option<String>,
     pub vault_name: String,
     pub secret_name: String,
     /// Validity of the new app secret in days (default 180, clamped 1..=730).
