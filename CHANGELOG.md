@@ -25,14 +25,23 @@ the project adheres to
   - A **management-scope-name pattern** (with an `{appId}` placeholder) that
     becomes the default name when migrating a legacy Application Access Policy —
     still overridable per migration; blank falls back to `app_scope_<AppId>`.
+  - A **Key Vault secret-name pattern** (with an `{appId}` placeholder) that
+    names the vault secret on rotation; defaults to `secret-<AppId GUID>`. (KV
+    secret names allow only letters, digits, and dashes — no underscores — so the
+    prefix is `secret-`.) A per-app remembered name still wins.
+  - A **distribution-list search** on the SSO notification-email default: search
+    mail-enabled groups / distribution lists and add a team address (e.g.
+    `sso-alerts@contoso.com`) without typing it. (Owners stay users-only — Graph
+    rejects groups as service-principal owners.)
 
 - **Key Vault vault picker with discovery + per-app memory.** The rotation
-  dialog and the Key Vault browser now show the vaults you can access
-  (discovered via Azure Resource Manager) as clickable chips beside the vault
-  field — you can still type any name. When you rotate an app registration's
-  secret into a vault, that vault (and secret name) is **remembered per app**, so
-  the next rotation pre-selects it; a tenant-level default vault fills in for apps
-  with no history yet. Only names are stored, never secrets.
+  dialog and the Key Vault browser show the vaults you can access (discovered via
+  Azure Resource Manager) in a **searchable, filter-as-you-type list** beside the
+  vault field — type to filter the full set (with a match count), or enter any
+  name directly. When you rotate an app registration's secret into a vault, that
+  vault (and secret name) is **remembered per app**, so the next rotation
+  pre-selects it; a tenant-level default vault fills in for apps with no history
+  yet. Only names are stored, never secrets.
 
 ### Changed
 
