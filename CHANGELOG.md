@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-07-05
+
 ### Fixed
 
 - **CI: the GitHub Pages demo deploy no longer flakes red on a transient backend
@@ -59,6 +61,8 @@ the project adheres to
     disposing each mounted view on unmount for isolation (the runner scrapes results
     from the DOM, so `reset()` must NOT clear the body). `WASM_BINDGEN_TEST_TIMEOUT=60`
     (justfile) gives the larger shards load headroom over the runner's 20s default.
+
+## [0.15.0] - 2026-07-04
 
 ### Added
 
