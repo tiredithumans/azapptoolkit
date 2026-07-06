@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-06
+
 ### Added
 
 - **Settings page — per-tenant operator defaults.** A new **Settings** entry in
