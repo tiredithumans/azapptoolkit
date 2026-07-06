@@ -33,6 +33,15 @@ the project adheres to
   to a real GET) — identical to the prior failed-batch degradation. Removed the
   now-unused `GraphClient::prewarm_service_principals_lean`.
 
+- **Docs: trimmed `AGENTS.md` over-prompting.** Removed the generic "Coding
+  fundamentals" bullets that restated Claude's default behaviour (style-matching,
+  scope discipline, comments-explain-why, keep-the-suite-green), keeping only the
+  security-critical + dependency-cost invariants that are specific to this repo;
+  deleted the duplicate CSP rule from **Common patterns** (it survives in
+  **Conventions & gotchas**); and collapsed Verification-playbook steps 1–4 into a
+  single pointer to `just verify` so the section leads with the CI-only detail that
+  isn't obvious. No behavioural rules changed — pure dead-weight removal.
+
 - **CI: the browser GUI tests (`just web-itest`) run far faster** via two changes
   to `apps/desktop/web-rs`:
   - **Strip debuginfo from the test wasm** — `[profile.test] strip = "debuginfo"`.
