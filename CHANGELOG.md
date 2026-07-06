@@ -7,6 +7,39 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Access Readiness now reports Exchange Online RBAC accurately instead of
+  always "? Unknown".** The `exchange_rbac` capability was tagged as an
+  unimplemented "Exchange probe" whose role verdict was hardcoded to Unknown, so
+  an operator with an **active** Exchange Administrator role still saw "?".
+  Exchange Online RBAC is activated through the Entra *Exchange Administrator*
+  directory role (roleTemplateId `29232cdf-…`), which `/me` already returns — so
+  the capability is now detected like every other directory-role capability
+  (matched by template id, with Global Administrator as a superset). An active
+  Exchange/Global Admin now reads **✓ Have**; PIM-eligible-but-inactive reads
+  **✗ Missing**. The unused `RoleDetect::ExchangeProbe` path was removed. Azure
+  RBAC remains "?" (it's genuinely per-subscription/-vault and not enumerable
+  from the directory), but its detail text now explains that and points to
+  Resource Access rather than reading like a failure.
+
+### Changed
+
+- **The "Readiness" tab moved next to Sign Out and is renamed "Access
+  Readiness".** It reports the *signed-in operator's own* permissions, not the
+  org's apps, so it now lives in the account block at the bottom of the nav rail
+  (directly above Sign Out) instead of the Security group. The page heading, tab,
+  and top-bar crumb all read "Access Readiness" consistently (the crumb group is
+  now "Account").
+
+- **Legacy Application Access Policy migration: the management-scope name now
+  defaults to `app_scope_<AppId GUID>` and is customizable.** Previously the scope
+  reused the mail-group's `azapptoolkit_<AppId>` name; it's now named separately
+  (`app_scope_<AppId>`) so a scope and its backing group never collide, and the
+  migration UI exposes an optional "Management scope name" field (blank ⇒ the
+  default). The override applies to single-app migrations; a whole-tenant run
+  always derives the per-app default so scopes can't clash.
+
 ## [0.15.1] - 2026-07-05
 
 ### Fixed

@@ -14,7 +14,7 @@
 //! those.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Spinner, SpinnerSize, Textarea};
+use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
 
 use crate::bindings::auth;
 use crate::bindings::exchange::{self, AapMigrationReport};
@@ -111,6 +111,10 @@ pub fn ExchangeScopingSection(
     // Drives the legacy Application Access Policy migration (`do_migrate`).
     let mig_cmd = use_command();
     let mig_result: RwSignal<Option<AapMigrationReport>> = RwSignal::new(None);
+    // Optional override for the management-scope name. Blank => backend default
+    // (`app_scope_<appId>`). The concrete default is surfaced as helper text.
+    let scope_name_override = RwSignal::new(String::new());
+    let default_scope_name = Signal::derive(move || format!("app_scope_{}", app_id.get()));
 
     // Bumped to refresh the assignments list (consent retry / manual refresh).
     let reload = RwSignal::new(0_u32);
@@ -237,6 +241,9 @@ pub fn ExchangeScopingSection(
         }
         mig_result.set(None);
         let app_id = app_id.get();
+        // Blank override => None, so the backend applies the `app_scope_<appId>` default.
+        let scope = scope_name_override.get_untracked().trim().to_string();
+        let scope = (!scope.is_empty()).then_some(scope);
         mig_cmd.run(
             move |r: AapMigrationReport| {
                 // Dry run mutated nothing — show the plan inline. A clean
@@ -252,8 +259,13 @@ pub fn ExchangeScopingSection(
                 }
             },
             move |tenant_id| async move {
-                exchange::migrate_application_access_policies(&tenant_id, Some(&app_id), dry_run)
-                    .await
+                exchange::migrate_application_access_policies(
+                    &tenant_id,
+                    Some(&app_id),
+                    scope.as_deref(),
+                    dry_run,
+                )
+                .await
             },
         );
     };
@@ -420,6 +432,17 @@ pub fn ExchangeScopingSection(
                             </header>
                             <Body1>
                                 "If this app is still scoped by a legacy Application Access Policy, migrate it to RBAC: a management scope is built from the policy's group, the scoped roles are assigned, the org-wide Entra grants are removed, and the policy is deleted. Preview first to see the plan."
+                            </Body1>
+                            <Field label="Management scope name (optional)">
+                                <Input
+                                    value=scope_name_override
+                                    placeholder="app_scope_<appId>"
+                                />
+                            </Field>
+                            <Body1 class="hint">
+                                "Leave blank to use the default "
+                                <code>{move || default_scope_name.get()}</code>
+                                "."
                             </Body1>
                             <div class="actions-row">
                                 <Button
