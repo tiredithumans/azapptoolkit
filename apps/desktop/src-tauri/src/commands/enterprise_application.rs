@@ -120,30 +120,33 @@ pub async fn get_enterprise_application_detail(
 ) -> Result<EnterpriseApplicationDetail, UiError> {
     let client = state.graph_for(&tenant_id);
 
-    let sp = client
-        .get_service_principal_by_object_id(&service_principal_id)
-        .await?
-        .ok_or_else(|| {
-            UiError::not_found(
-                "service_principal",
-                format!("service principal {service_principal_id} not found"),
-            )
-        })?;
+    // The SP read and the owners read both key off the input
+    // service_principal_id and are independent, so run them concurrently — the
+    // detail pane's long pole becomes one round trip, not two serial ones. Only
+    // `find_application_by_app_id` (below) depends on the SP, so it stays after.
+    let (sp, owners) = tokio::join!(
+        client.get_service_principal_by_object_id(&service_principal_id),
+        client.list_service_principal_owners(&service_principal_id),
+    );
+
+    let sp = sp?.ok_or_else(|| {
+        UiError::not_found(
+            "service_principal",
+            format!("service principal {service_principal_id} not found"),
+        )
+    })?;
+
+    // Best-effort: a transient failure or a 403 must not blank the whole detail
+    // pane, but log it rather than letting it read as "this app has no owners".
+    let owners = owners.unwrap_or_else(|e| {
+        tracing::warn!(%service_principal_id, error = %e, "failed to load enterprise-app owners; showing none");
+        Vec::new()
+    });
 
     let paired_app_registration_id = client
         .find_application_by_app_id(&sp.app_id)
         .await?
         .map(|a| a.id);
-
-    // Best-effort: a transient failure or a 403 must not blank the whole detail
-    // pane, but log it rather than letting it read as "this app has no owners".
-    let owners = client
-        .list_service_principal_owners(&service_principal_id)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(%service_principal_id, error = %e, "failed to load enterprise-app owners; showing none");
-            Vec::new()
-        });
 
     // The full SP from get_service_principal_by_object_id carries all fields.
     let dto = sp_to_enterprise_dto(sp, &tenant_id, paired_app_registration_id);

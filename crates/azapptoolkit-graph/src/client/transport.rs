@@ -536,7 +536,7 @@ pub(crate) fn search_phrase(field: &str, term: &str) -> String {
 
 /// Builds a Graph-version-root-relative sub-request URL (`/applications/{id}?…`)
 /// with percent-encoded query values, for the `$batch` helpers. Mirrors the
-/// single-call encoding `prewarm_service_principals_lean` does inline, so a
+/// single-call encoding the SP prewarm (`prewarm_sps`) does inline, so a
 /// batched read's URL is byte-identical to its per-item equivalent. `path` is
 /// already-escaped (object ids are GUIDs); only the query values are encoded.
 pub(crate) fn batch_sub_url(path: &str, query: &[(&str, &str)]) -> String {

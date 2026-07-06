@@ -19,6 +19,20 @@ the project adheres to
 
 ### Changed
 
+- **Perf: the security audit no longer fetches every service principal twice.**
+  `run_audit` already enumerates the whole tenant's service principals once (the
+  `sp_index` scan that drives the SP-only scoring phase), and that projection
+  (`id,appId,accountEnabled,…`) is a superset of the two fields per-app scoring
+  reads. The run previously *also* issued a batched lean-SP prewarm — roughly one
+  `$batch` POST per 20 app registrations (~250 extra POSTs on a 5 000-app tenant)
+  — re-fetching the same directory objects. It now seeds the audit's lean SP
+  cache from the index in memory (new `GraphClient::seed_lean_sps_from_index`),
+  cutting those POSTs to zero and reducing 429 pressure on large tenants. App
+  registrations absent from the index are left cold, so a per-app lean lookup
+  still resolves them (an SP-less app caches `None`; a truncated index falls back
+  to a real GET) — identical to the prior failed-batch degradation. Removed the
+  now-unused `GraphClient::prewarm_service_principals_lean`.
+
 - **CI: the browser GUI tests (`just web-itest`) run far faster** via two changes
   to `apps/desktop/web-rs`:
   - **Strip debuginfo from the test wasm** — `[profile.test] strip = "debuginfo"`.

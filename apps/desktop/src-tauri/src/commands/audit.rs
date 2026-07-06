@@ -92,11 +92,17 @@ pub async fn run_audit(
         )
         .await?;
 
-    // Pre-resolve every app's service principal in one $batch per 20 so each
-    // score_one SP lookup is a cache hit, not a round trip. Best-effort: a batch
-    // failure just leaves the per-app lookups to resolve as before.
+    // ONE tenant-wide service-principal enumeration feeds BOTH the SP-only audit
+    // phase (below) and every per-app SP lookup score_one makes: its projection
+    // (id/appId/accountEnabled/…) is a superset of the lean fields score_one
+    // reads, so seeding the audit's lean SP cache FROM it makes each score_one
+    // lookup a cache hit at zero extra Graph cost. This replaces the former
+    // batched lean prewarm (~1 $batch POST per 20 apps) that re-fetched the very
+    // directory objects this index scan already returns. A cold/failed index
+    // (empty vec) simply leaves the per-app lean lookups to resolve as before.
     let app_ids: Vec<String> = apps.iter().map(|a| a.app_id.clone()).collect();
-    client.prewarm_service_principals_lean(&app_ids).await;
+    let sp_index = prefetch_sp_index(&state.cache, &client, &tenant_id).await;
+    client.seed_lean_sps_from_index(&app_ids, &sp_index);
 
     // Admin-consent flags + delegated scopes from ONE tenant-wide
     // oauth2PermissionGrants read, replacing a per-app GET inside the scoring
@@ -115,7 +121,6 @@ pub async fn run_audit(
     // SP-only phase candidates: service principals whose appId has NO local
     // application object (foreign enterprise apps, managed identities, orphaned
     // SPs) and that hold at least one Graph application-permission grant.
-    let sp_index = prefetch_sp_index(&state.cache, &client, &tenant_id).await;
     let local_app_ids: HashSet<String> = apps.iter().map(|a| a.app_id.clone()).collect();
     let sp_candidates = sp_audit_candidates(sp_index, &local_app_ids, &graph_roles_by_sp);
     let total = apps.len() + sp_candidates.len();
