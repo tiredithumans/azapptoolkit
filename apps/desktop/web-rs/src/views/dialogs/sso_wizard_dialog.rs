@@ -71,6 +71,25 @@ pub fn SsoWizardDialog(
     let modal_ref: NodeRef<leptos::html::Div> = NodeRef::new();
     use_focus_trap(modal_ref, open);
 
+    // Seed the SAML notification emails from the tenant default when the wizard
+    // opens — but only if the field is still empty, so a user's edit is never
+    // clobbered (and a manually-cleared field isn't re-filled mid-session).
+    Effect::new(move |_| {
+        if !open.get() || !notification_emails.get_untracked().trim().is_empty() {
+            return;
+        }
+        let Some(t) = session.active_tenant.get_untracked() else {
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            let d = crate::bindings::defaults::get_tenant_defaults(&t.tenant_id).await;
+            let emails = d.enterprise_application.default_notification_emails;
+            if !emails.is_empty() && notification_emails.get_untracked().trim().is_empty() {
+                notification_emails.set(emails.join("\n"));
+            }
+        });
+    });
+
     // Reset everything to a clean slate (called on close / done).
     let reset = move || {
         step.set(0);

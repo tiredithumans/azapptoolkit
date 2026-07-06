@@ -49,8 +49,8 @@ use views::{
     enterprise_applications_view::EnterpriseApplicationsView, home_dashboard::HomeDashboard,
     key_vault_view::KeyVaultView, managed_identities::ManagedIdentitiesView,
     permission_tester_view::PermissionTesterView, readiness_view::ReadinessView,
-    resource_access::ResourceAccessView, security_view::SecurityView, shell::AppShell,
-    sign_in::SignInScreen,
+    resource_access::ResourceAccessView, security_view::SecurityView, settings_view::SettingsView,
+    shell::AppShell, sign_in::SignInScreen,
 };
 
 /// Boot the app: install the panic hook and mount the Leptos+Thaw root onto the
@@ -185,6 +185,7 @@ fn AuthedShell() -> impl IntoView {
                 || view! { <DisasterRecoveryView /> },
             )}
             {keep_alive(view, visited, ActiveView::Readiness, || view! { <ReadinessView /> })}
+            {keep_alive(view, visited, ActiveView::Settings, || view! { <SettingsView /> })}
         </AppShell>
     }
 }

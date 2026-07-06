@@ -260,6 +260,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                         // operator's own permissions — the same "who am I / what can
                         // I do" context as the identity above and Sign Out below.
                         {nav_row_view("Access Readiness", IconName::CheckCircle, ActiveView::Readiness)}
+                        {nav_row_view("Settings", IconName::Settings, ActiveView::Settings)}
                         // Styled as a `nav__item` so it collapses to an icon-only
                         // button (hiding the label) when the rail narrows — the same
                         // way the nav links do — instead of disappearing.
@@ -526,6 +527,7 @@ fn topbar_labels(view: ActiveView) -> (&'static str, &'static str) {
         ActiveView::PermissionTester => ("Security", "Permission Tester"),
         ActiveView::ResourceAccess => ("Security", "Resource Access"),
         ActiveView::Readiness => ("Account", "Access Readiness"),
+        ActiveView::Settings => ("Account", "Settings"),
         ActiveView::BulkActions => ("Operations", "Bulk Actions"),
         ActiveView::DisasterRecovery => ("Operations", "Disaster Recovery"),
         ActiveView::KeyVault => ("Operations", "Key Vault"),

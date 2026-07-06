@@ -90,6 +90,63 @@ pub fn OwnersTab(
         });
     };
 
+    // Adds the tenant's configured default owners in one click (additive — skips
+    // any already present; never removes). Falls back to a hint if none are set.
+    let adding_defaults = RwSignal::new(false);
+    let add_defaults = move |_| {
+        if adding_defaults.get() {
+            return;
+        }
+        adding_defaults.set(true);
+        error.set(None);
+        let tenant = session.active_tenant.get();
+        let object_id = detail.with_untracked(|d| d.application.id.clone());
+        let existing: std::collections::HashSet<String> =
+            detail.with_untracked(|d| d.owners.iter().map(|o| o.id.clone()).collect());
+        let on_changed_cb = on_changed;
+        leptos::task::spawn_local(async move {
+            let Some(t) = tenant else {
+                adding_defaults.set(false);
+                return;
+            };
+            let defaults = crate::bindings::defaults::get_tenant_defaults(&t.tenant_id).await;
+            let owners = defaults.app_registration.default_owners;
+            if owners.is_empty() {
+                error.set(Some(
+                    "No default owners configured — set them in Settings.".into(),
+                ));
+                adding_defaults.set(false);
+                return;
+            }
+            let mut added = 0usize;
+            let mut failures = Vec::new();
+            for p in owners {
+                if existing.contains(&p.id) {
+                    continue;
+                }
+                match applications::add_application_owner(&t.tenant_id, &object_id, &p.id).await {
+                    Ok(()) => added += 1,
+                    Err(e) => {
+                        failures.push(format!("{}: {}", p.display_name.unwrap_or(p.id), e.message))
+                    }
+                }
+            }
+            if !failures.is_empty() {
+                error.set(Some(format!(
+                    "{} default owner(s) failed — {}",
+                    failures.len(),
+                    failures.join("; ")
+                )));
+            } else if added > 0 {
+                session.toast_success(format!("Added {added} default owner(s)."));
+            } else {
+                session.toast_success("Default owners are already present.");
+            }
+            on_changed_cb.run(());
+            adding_defaults.set(false);
+        });
+    };
+
     let remove = move |principal_id: String| {
         if removing.get().is_some() {
             return;
@@ -356,6 +413,24 @@ pub fn OwnersTab(
                 <h3>
                     {move || if replacing.get() { "Add to target set" } else { "Add an owner" }}
                 </h3>
+                <Show when=move || !replacing.get() fallback=|| view! { <></> }>
+                    <div class="actions-row">
+                        <Button
+                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                            disabled=Signal::derive(move || adding_defaults.get())
+                            on_click=Box::new(add_defaults)
+                        >
+                            {move || {
+                                if adding_defaults.get() {
+                                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                        .into_any()
+                                } else {
+                                    view! { "Add Default Owners" }.into_any()
+                                }
+                            }}
+                        </Button>
+                    </div>
+                </Show>
                 <Field label="Search by display name or UPN (2+ chars)">
                     <Input value=raw_query placeholder="alice@contoso.com" />
                 </Field>

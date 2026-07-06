@@ -39,6 +39,9 @@ pub enum ActiveView {
     /// Disaster-recovery backup & restore: export a portable manifest of the
     /// tenant's app estate (and, in later slices, restore it into a new tenant).
     DisasterRecovery,
+    /// Per-tenant operator defaults (default owners, SSO notification emails,
+    /// scope-name pattern). An account-scoped page, not org data.
+    Settings,
 }
 
 /// Which entity surface an [`OpenItem`] points at — the three list views whose

@@ -81,6 +81,67 @@ pub(super) fn OwnersContent(
         });
     };
 
+    // Adds the tenant's configured default owners in one click (additive — skips
+    // any already present). Enterprise-app owners are users only.
+    let adding_defaults = RwSignal::new(false);
+    let add_defaults = move |_| {
+        if adding_defaults.get() {
+            return;
+        }
+        adding_defaults.set(true);
+        error.set(None);
+        let tenant_v = tenant.get();
+        let sp = sp_id.get();
+        let existing: std::collections::HashSet<String> =
+            signal.with_untracked(|d| d.owners.iter().map(|o| o.id.clone()).collect());
+        leptos::task::spawn_local(async move {
+            let Some(t) = tenant_v else {
+                adding_defaults.set(false);
+                return;
+            };
+            let defaults = crate::bindings::defaults::get_tenant_defaults(&t.tenant_id).await;
+            let owners = defaults.enterprise_application.default_owners;
+            if owners.is_empty() {
+                error.set(Some(
+                    "No default owners configured — set them in Settings.".into(),
+                ));
+                adding_defaults.set(false);
+                return;
+            }
+            let mut added = 0usize;
+            let mut failures = Vec::new();
+            for p in owners {
+                if existing.contains(&p.id) {
+                    continue;
+                }
+                match enterprise_application::add_enterprise_app_owner(&t.tenant_id, &sp, &p.id)
+                    .await
+                {
+                    Ok(()) => added += 1,
+                    Err(e) => {
+                        failures.push(format!("{}: {}", p.display_name.unwrap_or(p.id), e.message))
+                    }
+                }
+            }
+            if !failures.is_empty() {
+                error.set(Some(format!(
+                    "{} default owner(s) failed — {}",
+                    failures.len(),
+                    failures.join("; ")
+                )));
+                adding_defaults.set(false);
+            } else {
+                session.toast_success(if added > 0 {
+                    format!("Added {added} default owner(s).")
+                } else {
+                    "Default owners are already present.".to_string()
+                });
+                // Reloads the detail (refetches owners) and tears this down.
+                on_refresh.run(());
+            }
+        });
+    };
+
     view! {
         <div class="ent-owners">
             {move || {
@@ -137,6 +198,22 @@ pub(super) fn OwnersContent(
             <p class="muted">
                 "Only users can own a service principal. An owner can manage this app's single sign-on, provisioning, and user assignments."
             </p>
+            <div class="actions-row">
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                    disabled=Signal::derive(move || adding_defaults.get())
+                    on_click=Box::new(add_defaults)
+                >
+                    {move || {
+                        if adding_defaults.get() {
+                            view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                .into_any()
+                        } else {
+                            view! { "Add Default Owners" }.into_any()
+                        }
+                    }}
+                </Button>
+            </div>
             <Field label="Search users by name or UPN (2+ chars)">
                 <Input value=raw_query placeholder="alice@contoso.com" />
             </Field>
