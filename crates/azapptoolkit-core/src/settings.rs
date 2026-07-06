@@ -5,9 +5,12 @@
 //! precedence — useful for MDM-managed deployments that ship a wrapper
 //! script, and for CI/automation that should never auto-install.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+use crate::defaults::TenantDefaults;
 
 pub const SETTINGS_FILE: &str = "settings.json";
 
@@ -25,6 +28,11 @@ pub struct UserSettings {
     /// first-run config screen. See [`Self::client_id`].
     #[serde(default)]
     pub tenant_id: Option<String>,
+    /// Per-tenant operator defaults (default owners, SSO notification emails,
+    /// scope-name pattern, vault bindings), keyed by tenant id. Edited from the
+    /// Settings page via `get_tenant_defaults` / `set_tenant_defaults`.
+    #[serde(default)]
+    pub tenant_defaults: BTreeMap<String, TenantDefaults>,
 }
 
 fn default_true() -> bool {
@@ -37,6 +45,7 @@ impl Default for UserSettings {
             auto_update: true,
             client_id: None,
             tenant_id: None,
+            tenant_defaults: BTreeMap::new(),
         }
     }
 }
@@ -68,6 +77,31 @@ impl UserSettings {
         let json = serde_json::to_vec_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(config_dir.join(SETTINGS_FILE), json)
+    }
+
+    /// The defaults saved for `tenant_id`, or an empty default set if none.
+    pub fn defaults_for(&self, tenant_id: &str) -> TenantDefaults {
+        self.tenant_defaults
+            .get(tenant_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Applies the operator-editable half of `incoming` for `tenant_id` —
+    /// default owners, SSO notification emails, and the scope-name pattern —
+    /// while **preserving** the vault fields (`default_vault`, `app_vaults`),
+    /// which are owned by the credential-rotation flow, not the Settings page.
+    /// This keeps a Settings save from clobbering a binding a concurrent
+    /// rotation just recorded.
+    pub fn apply_tenant_defaults(&mut self, tenant_id: &str, incoming: TenantDefaults) {
+        let entry = self
+            .tenant_defaults
+            .entry(tenant_id.to_string())
+            .or_default();
+        entry.app_registration = incoming.app_registration;
+        entry.enterprise_application = incoming.enterprise_application;
+        entry.scope_name_pattern = incoming.scope_name_pattern;
+        // default_vault + app_vaults are intentionally preserved.
     }
 
     fn from_file(path: &Path) -> Option<Self> {
@@ -125,6 +159,7 @@ mod tests {
             auto_update: false,
             client_id: Some("11111111-1111-1111-1111-111111111111".into()),
             tenant_id: Some("contoso.onmicrosoft.com".into()),
+            tenant_defaults: BTreeMap::new(),
         };
         s.save(dir.path()).unwrap();
         // `stored` (not `load`) so an `AZAPPTOOLKIT_AUTO_UPDATE` in the test env
@@ -136,6 +171,77 @@ mod tests {
             Some("11111111-1111-1111-1111-111111111111")
         );
         assert_eq!(loaded.tenant_id.as_deref(), Some("contoso.onmicrosoft.com"));
+    }
+
+    #[test]
+    fn tenant_defaults_default_to_empty_and_round_trip() {
+        use crate::defaults::{AppRegistrationDefaults, StoredPrincipal, TenantDefaults};
+        let dir = tempdir();
+        // Absent map => empty.
+        std::fs::write(dir.path().join(SETTINGS_FILE), br#"{"auto_update": true}"#).unwrap();
+        assert!(
+            UserSettings::stored(dir.path())
+                .defaults_for("t-1")
+                .app_registration
+                .default_owners
+                .is_empty()
+        );
+
+        // Save a tenant's defaults and read them back.
+        let mut s = UserSettings::stored(dir.path());
+        s.apply_tenant_defaults(
+            "t-1",
+            TenantDefaults {
+                app_registration: AppRegistrationDefaults {
+                    default_owners: vec![StoredPrincipal {
+                        id: "u-1".into(),
+                        display_name: Some("Ada".into()),
+                        ..Default::default()
+                    }],
+                },
+                ..Default::default()
+            },
+        );
+        s.save(dir.path()).unwrap();
+        let loaded = UserSettings::stored(dir.path());
+        assert_eq!(
+            loaded.defaults_for("t-1").app_registration.default_owners[0].id,
+            "u-1"
+        );
+        // A different tenant is unaffected.
+        assert!(
+            loaded
+                .defaults_for("t-2")
+                .app_registration
+                .default_owners
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn apply_tenant_defaults_preserves_vault_fields() {
+        use crate::defaults::{AppVaultBinding, TenantDefaults};
+        let mut s = UserSettings::default();
+        // Seed a vault binding (as the rotation flow would).
+        s.tenant_defaults.insert(
+            "t-1".into(),
+            TenantDefaults {
+                default_vault: Some("kv-a".into()),
+                app_vaults: std::collections::BTreeMap::from([(
+                    "app-1".into(),
+                    AppVaultBinding {
+                        vault_name: "kv-a".into(),
+                        secret_name: Some("s".into()),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        // A Settings save (which carries no vault fields) must not wipe them.
+        s.apply_tenant_defaults("t-1", TenantDefaults::default());
+        let d = s.defaults_for("t-1");
+        assert_eq!(d.default_vault.as_deref(), Some("kv-a"));
+        assert!(d.app_vaults.contains_key("app-1"));
     }
 
     #[test]
