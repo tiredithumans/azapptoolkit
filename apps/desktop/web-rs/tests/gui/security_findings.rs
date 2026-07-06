@@ -232,6 +232,7 @@ async fn bulk_add_owner_flow_sends_the_picked_principal() {
             id: "user-1".to_string(),
             display_name: Some("Dana Admin".to_string()),
             user_principal_name: Some("dana@contoso.com".to_string()),
+            mail: None,
             odata_type: Some("#microsoft.graph.user".to_string()),
         }],
     );

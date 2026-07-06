@@ -70,6 +70,7 @@ pub fn run() {
             commands::applications::set_application_owners,
             commands::applications::search_users,
             commands::applications::search_groups,
+            commands::applications::search_distribution_lists,
             commands::applications::add_password,
             commands::applications::remove_password,
             commands::applications::remove_expired_passwords,

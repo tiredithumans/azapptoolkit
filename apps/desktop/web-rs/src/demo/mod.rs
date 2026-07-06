@@ -491,6 +491,7 @@ fn register_fixtures() {
     mock_ok("get_tenant_defaults", &f::tenant_defaults());
     mock_ok("set_tenant_defaults", &());
     mock_ok("search_users", &f::directory_user_search());
+    mock_ok("search_distribution_lists", &f::distribution_list_search());
 
     // ---- Global search (top bar) ----
     mock_ok(

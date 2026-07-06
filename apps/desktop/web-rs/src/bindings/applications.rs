@@ -210,6 +210,19 @@ pub async fn search_groups(tenant_id: &str, query: &str) -> Result<Vec<Directory
     invoke_result("search_groups", SearchUsersArgs { tenant_id, query }).await
 }
 
+/// Mail-enabled groups / distribution lists (each carrying a `mail` address),
+/// for seeding the SSO notification-email default.
+pub async fn search_distribution_lists(
+    tenant_id: &str,
+    query: &str,
+) -> Result<Vec<DirectoryObject>, UiError> {
+    invoke_result(
+        "search_distribution_lists",
+        SearchUsersArgs { tenant_id, query },
+    )
+    .await
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AddPasswordArgs<'a> {
