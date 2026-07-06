@@ -213,12 +213,17 @@ pub async fn get_mail_scopes_for_principal(
 struct MigrateArgs<'a> {
     tenant_id: &'a str,
     app_id: Option<&'a str>,
+    scope_name: Option<&'a str>,
     dry_run: bool,
 }
 
+/// `scope_name` overrides the management-scope name (default `app_scope_<AppId>`);
+/// pass `None` (or a blank string, which the backend treats as `None`) to use the
+/// default. The override applies only to single-app migrations.
 pub async fn migrate_application_access_policies(
     tenant_id: &str,
     app_id: Option<&str>,
+    scope_name: Option<&str>,
     dry_run: bool,
 ) -> Result<AapMigrationReport, UiError> {
     invoke_result(
@@ -226,6 +231,7 @@ pub async fn migrate_application_access_policies(
         MigrateArgs {
             tenant_id,
             app_id,
+            scope_name,
             dry_run,
         },
     )

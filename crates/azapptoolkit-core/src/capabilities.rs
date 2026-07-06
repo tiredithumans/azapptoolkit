@@ -59,11 +59,9 @@ pub enum RoleDetect {
     /// Active directory-role membership is enumerable from `/me` — match the
     /// user's active roles against [`Capability::directory_roles_any`]. PIM-
     /// eligible-but-inactive roles are absent (the intended nudge to activate).
+    /// Exchange Online RBAC uses this too: it's activated via the Entra
+    /// "Exchange Administrator" role, which `/me` reports like any other.
     DirectoryRole,
-    /// Best-effort Exchange RBAC probe (a benign admin-API call): success ⇒ has
-    /// it, a diagnosed 403 ⇒ missing, anything else (incl. a bodyless 403) ⇒
-    /// indeterminate.
-    ExchangeProbe,
     /// Not cheaply enumerable per-user (Azure RBAC is per-subscription/-vault) →
     /// the checklist reports "?" with guidance to verify in PIM.
     Indeterminate,
@@ -121,6 +119,7 @@ const TID_CONDITIONAL_ACCESS_ADMIN: &str = "b1be1c3e-b65d-4f19-8427-f6fa0d97feb9
 const TID_SHAREPOINT_ADMIN: &str = "f28a1f50-f6e7-4571-818b-6a12f2af6b6c";
 const TID_GROUPS_ADMIN: &str = "fdd7a751-b60b-444a-984c-02652fe8fa1c";
 const TID_USER_ADMIN: &str = "fe930be7-5e62-47db-91af-98c3a49a38b1";
+const TID_EXCHANGE_ADMIN: &str = "29232cdf-9323-42fd-ade2-1d097af3e4de";
 
 /// The catalog. Derived from `docs/operator-rbac/OPERATOR-ROLES.md`.
 pub static CAPABILITIES: &[Capability] = &[
@@ -351,8 +350,11 @@ pub static CAPABILITIES: &[Capability] = &[
         label: "Exchange mailbox scoping (RBAC for Applications)",
         description: "Scope mail/calendar/contacts permissions to specific mailboxes and resolve \
                       effective scope.",
-        directory_roles_any: &[("Exchange Administrator", None)],
-        role_detect: RoleDetect::ExchangeProbe,
+        directory_roles_any: &[
+            ("Exchange Administrator", Some(TID_EXCHANGE_ADMIN)),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
+        ],
+        role_detect: RoleDetect::DirectoryRole,
         scopes: &["https://outlook.office365.com/Exchange.Manage"],
         scope_feature: Some("exchange"),
         remediation: "Exchange RBAC for Applications needs your account in a role group \
@@ -542,17 +544,26 @@ mod tests {
     }
 
     #[test]
-    fn azure_and_exchange_capabilities_are_not_directory_enumerable() {
-        // These planes can't be verified from /me directory-role membership, so
-        // the checklist falls back to a probe ("?") — guard the detect method.
+    fn azure_rbac_is_not_directory_enumerable() {
+        // Azure RBAC is per-subscription/-vault, so it can't be verified from
+        // /me directory-role membership — guard the "?" detect method.
         assert_eq!(
             capability("keyvault_secrets").unwrap().role_detect,
             RoleDetect::Indeterminate
         );
-        assert_eq!(
-            capability("exchange_rbac").unwrap().role_detect,
-            RoleDetect::ExchangeProbe
-        );
+    }
+
+    #[test]
+    fn exchange_rbac_is_detected_via_the_entra_exchange_admin_role() {
+        // Exchange Online RBAC is activated through the Entra "Exchange
+        // Administrator" role, which /me reports — so it's directory-enumerable,
+        // not an opaque probe. The template id (not the drift-prone display name)
+        // is what the matcher keys on.
+        let cap = capability("exchange_rbac").unwrap();
+        assert_eq!(cap.role_detect, RoleDetect::DirectoryRole);
+        assert!(cap.directory_roles_any.iter().any(|(name, tid)| *name
+            == "Exchange Administrator"
+            && *tid == Some(TID_EXCHANGE_ADMIN)));
     }
 
     #[test]

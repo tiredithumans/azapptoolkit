@@ -34,17 +34,22 @@ use crate::dto::exchange::{
 };
 use crate::state::AppState;
 
-/// Scope-name convention for management scopes this toolkit creates.
+/// Default scope-name convention for management scopes this toolkit creates:
+/// `app_scope_<AppId GUID>`. Callers may override the name per migration (see
+/// [`migrate_application_access_policies`]); this is the fallback when none is
+/// given. Deliberately distinct from [`group_name_for`] so a scope and its
+/// backing mail-group never collide on name.
 fn scope_name_for(app_id: &str) -> String {
-    format!("azapptoolkit_{app_id}")
+    format!("app_scope_{app_id}")
 }
 
 /// Name (and alias basis) of the toolkit-managed mail-enabled security group
-/// whose membership defines an app's scoped-mailbox set. Mirrors
-/// [`scope_name_for`]: exactly one managed group per app, and it shares the
-/// scope's `azapptoolkit_<app_id>` convention. Because this group's DN is
-/// stable, scoping is adjusted by editing its *membership* — the management
-/// scope's `MemberOfGroup` filter never has to change.
+/// whose membership defines an app's scoped-mailbox set. One managed group per
+/// app, keyed to its `azapptoolkit_<app_id>` convention. Because this group's DN
+/// is stable, scoping is adjusted by editing its *membership* — the management
+/// scope's `MemberOfGroup` filter never has to change. (The management *scope*
+/// name follows a separate `app_scope_<app_id>` convention — see
+/// [`scope_name_for`] — and is user-overridable.)
 fn group_name_for(app_id: &str) -> String {
     format!("azapptoolkit_{app_id}")
 }
@@ -1275,11 +1280,18 @@ pub async fn remove_exchange_scope_group_members(
 /// roles, remove the unscoped Entra consent, then remove the policy. `dry_run`
 /// reports the plan without mutating anything. When `app_id` is `None`, every
 /// policy in the tenant is processed.
+///
+/// `scope_name` optionally overrides the management-scope name for this
+/// migration; when `None` (or blank) it defaults to `app_scope_<AppId GUID>`
+/// (see [`scope_name_for`]). The override is honored only for a single-app
+/// migration (`app_id` is `Some`) — a whole-tenant run always derives a distinct
+/// per-app name so the scopes can't collide.
 #[tauri::command]
 pub async fn migrate_application_access_policies(
     state: State<'_, AppState>,
     tenant_id: String,
     app_id: Option<String>,
+    scope_name: Option<String>,
     dry_run: bool,
 ) -> Result<AapMigrationReport, UiError> {
     let graph = state.graph_for(&tenant_id);
@@ -1291,6 +1303,12 @@ pub async fn migrate_application_access_policies(
     if let Some(filter_app) = &app_id {
         policies.retain(|p| p.app_id.as_deref() == Some(filter_app.as_str()));
     }
+
+    // A blank override is treated as "no override"; a whole-tenant run ignores it
+    // entirely (one name can't scope every app), falling back to the per-app default.
+    let scope_override = scope_name
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && app_id.is_some());
 
     let mut items = Vec::new();
     let mut failures = Vec::new();
@@ -1306,6 +1324,7 @@ pub async fn migrate_application_access_policies(
             &policy,
             &graph_resource_sp_id,
             &role_value_by_id,
+            scope_override.as_deref(),
             dry_run,
         )
         .await
@@ -1329,6 +1348,7 @@ async fn migrate_one(
     policy: &azapptoolkit_exchange::models::ExoApplicationAccessPolicy,
     graph_resource_sp_id: &str,
     role_value_by_id: &HashMap<String, String>,
+    scope_override: Option<&str>,
     dry_run: bool,
 ) -> Result<AapMigrationItem, String> {
     let app_id = policy.app_id.clone().ok_or("policy has no AppId")?;
@@ -1357,7 +1377,9 @@ async fn migrate_one(
         .distinguished_name
         .ok_or_else(|| format!("scope group '{scope_group}' has no distinguished name"))?;
 
-    let scope_name = scope_name_for(&app_id);
+    let scope_name = scope_override
+        .map(str::to_string)
+        .unwrap_or_else(|| scope_name_for(&app_id));
     let scope_filter = member_of_group_filter(&[dn]);
 
     // Roles come from what the app actually holds today.
@@ -1460,12 +1482,14 @@ mod tests {
     }
 
     #[test]
-    fn managed_group_and_scope_share_the_naming_convention() {
+    fn scope_and_group_names_follow_distinct_conventions() {
         let app = "71487acd-ec93-476d-bd0e-6c8b31831053";
-        // The managed group and the management scope use the same name, by
-        // design — one managed group per app, keyed to its scope.
-        assert_eq!(group_name_for(app), scope_name_for(app));
+        // The management scope and its backing mail-group are deliberately named
+        // apart so they never collide: scope = `app_scope_<app>` (user-overridable),
+        // group = `azapptoolkit_<app>`.
+        assert_eq!(scope_name_for(app), format!("app_scope_{app}"));
         assert_eq!(group_name_for(app), format!("azapptoolkit_{app}"));
+        assert_ne!(scope_name_for(app), group_name_for(app));
     }
 
     #[test]

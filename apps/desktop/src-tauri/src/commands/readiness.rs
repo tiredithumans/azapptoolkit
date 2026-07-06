@@ -136,22 +136,12 @@ fn role_for(
                 ),
             }
         }
-        // Exchange RBAC isn't cheaply enumerable per-user at the tenant level
-        // (a probe needs a real cmdlet + an app target and can false-negative on
-        // a missing object). The per-app scoping actions surface the authoritative
-        // 403 with `ExchangeError::ui_hint` when used, so report "?" with the
-        // activate-the-role nudge here.
-        RoleDetect::ExchangeProbe => (
-            Verdict::Unknown,
-            "Activate the Exchange Administrator role (active, not just PIM-eligible); a mailbox \
-             scoping action will confirm Role Management access."
-                .to_string(),
-        ),
         RoleDetect::Indeterminate => (
             Verdict::Unknown,
             format!(
-                "Not enumerable from the directory — verify the {} role in PIM for Azure \
-                 resources.",
+                "Azure RBAC is granted per subscription/resource, so it can't be read from the \
+                 directory here — verify the {} role in PIM for Azure resources, or check the \
+                 specific resource in Resource Access.",
                 cap.role_names().collect::<Vec<_>>().join(" / ")
             ),
         ),
@@ -267,13 +257,55 @@ mod tests {
     }
 
     #[test]
-    fn azure_and_exchange_roles_are_unknown() {
-        // Indeterminate (Azure) and ExchangeProbe both report "?" — they aren't
-        // directory-enumerable.
+    fn azure_rbac_role_is_unknown() {
+        // Azure RBAC is per-subscription/-vault, so it genuinely isn't
+        // directory-enumerable and honestly reports "?".
         let (v, _) = role_for(capability("keyvault_secrets").unwrap(), &[], false);
         assert_eq!(v, Verdict::Unknown);
-        let (v, _) = role_for(capability("exchange_rbac").unwrap(), &[], false);
-        assert_eq!(v, Verdict::Unknown);
+    }
+
+    #[test]
+    fn active_exchange_admin_is_have() {
+        // Regression: Exchange Online RBAC is activated via the Entra "Exchange
+        // Administrator" role, which `/me` reports — so an ACTIVE Exchange Admin
+        // must read as Have, not "?" (the user-reported bug).
+        let cap = capability("exchange_rbac").unwrap();
+        let (v, detail) = role_for(
+            cap,
+            &[role(
+                "Exchange Administrator",
+                "29232cdf-9323-42fd-ade2-1d097af3e4de",
+            )],
+            false,
+        );
+        assert_eq!(v, Verdict::Have);
+        assert!(detail.contains("Exchange Administrator"));
+
+        // Global Administrator supersets it and also satisfies the check.
+        let (v, _) = role_for(
+            cap,
+            &[role(
+                "Global Administrator",
+                "62e90394-69f5-4237-9190-012177145e10",
+            )],
+            false,
+        );
+        assert_eq!(v, Verdict::Have);
+    }
+
+    #[test]
+    fn exchange_rbac_without_the_role_is_missing() {
+        let cap = capability("exchange_rbac").unwrap();
+        let (v, detail) = role_for(
+            cap,
+            &[role(
+                "User Administrator",
+                "fe930be7-5e62-47db-91af-98c3a49a38b1",
+            )],
+            false,
+        );
+        assert_eq!(v, Verdict::Missing);
+        assert!(detail.contains("Exchange Administrator"));
     }
 
     #[test]
