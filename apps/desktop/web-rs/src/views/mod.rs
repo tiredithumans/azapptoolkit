@@ -22,6 +22,7 @@ pub mod permission_tester_view;
 pub mod readiness_view;
 pub mod resource_access;
 pub mod security_view;
+pub mod settings_view;
 pub mod shell;
 pub mod sign_in;
 pub mod tabs;

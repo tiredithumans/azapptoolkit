@@ -20,6 +20,7 @@ pub mod modal_shell;
 pub mod open_items_dock;
 pub mod open_items_workspace;
 pub mod orgwide_scope_callout;
+pub mod owner_picker;
 pub mod permission_picker;
 pub mod requires_role;
 pub mod saved_views;

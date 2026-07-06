@@ -33,6 +33,8 @@ use crate::dto::exchange::{
     ExchangeRoleAssignmentDto, ExchangeScopeGroupDto, MailScopeEntry,
 };
 use crate::state::AppState;
+use azapptoolkit_core::defaults::TenantDefaults;
+use azapptoolkit_core::settings::UserSettings;
 
 /// Default scope-name convention for management scopes this toolkit creates:
 /// `app_scope_<AppId GUID>`. Callers may override the name per migration (see
@@ -1310,6 +1312,10 @@ pub async fn migrate_application_access_policies(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && app_id.is_some());
 
+    // The per-app default follows the tenant's configured scope-name pattern
+    // (blank ⇒ the built-in `app_scope_<appId>`), set from the Settings page.
+    let tenant_defaults = UserSettings::stored(&crate::config_directory()).defaults_for(&tenant_id);
+
     let mut items = Vec::new();
     let mut failures = Vec::new();
 
@@ -1325,6 +1331,7 @@ pub async fn migrate_application_access_policies(
             &graph_resource_sp_id,
             &role_value_by_id,
             scope_override.as_deref(),
+            &tenant_defaults,
             dry_run,
         )
         .await
@@ -1349,6 +1356,7 @@ async fn migrate_one(
     graph_resource_sp_id: &str,
     role_value_by_id: &HashMap<String, String>,
     scope_override: Option<&str>,
+    tenant_defaults: &TenantDefaults,
     dry_run: bool,
 ) -> Result<AapMigrationItem, String> {
     let app_id = policy.app_id.clone().ok_or("policy has no AppId")?;
@@ -1379,7 +1387,7 @@ async fn migrate_one(
 
     let scope_name = scope_override
         .map(str::to_string)
-        .unwrap_or_else(|| scope_name_for(&app_id));
+        .unwrap_or_else(|| tenant_defaults.scope_name_for(&app_id));
     let scope_filter = member_of_group_filter(&[dn]);
 
     // Roles come from what the app actually holds today.

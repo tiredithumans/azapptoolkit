@@ -31,6 +31,8 @@ pub fn run() {
             commands::config::get_auth_config,
             commands::config::set_auth_config,
             commands::config::restart_app,
+            commands::defaults::get_tenant_defaults,
+            commands::defaults::set_tenant_defaults,
             commands::updater::check_for_update,
             commands::updater::perform_update,
             commands::auth::sign_in,

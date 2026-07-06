@@ -474,6 +474,14 @@ fn register_fixtures() {
     // ---- Readiness ----
     mock_ok("check_readiness", &f::readiness_report());
 
+    // ---- Settings (per-tenant defaults) + owner search ----
+    // get_tenant_defaults is an infallible `invoke`, so it MUST be mocked or the
+    // demo panics on the rejected-promise fallback. search_users powers the owner
+    // pickers (Settings + the Owners tabs).
+    mock_ok("get_tenant_defaults", &f::tenant_defaults());
+    mock_ok("set_tenant_defaults", &());
+    mock_ok("search_users", &f::directory_user_search());
+
     // ---- Global search (top bar) ----
     mock_ok(
         "global_search",

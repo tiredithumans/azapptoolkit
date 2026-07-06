@@ -820,6 +820,41 @@ pub fn directory_object(id_seed: &str, display_name: &str, upn: &str) -> Directo
     }
 }
 
+/// Demo users returned by `search_users` (owner pickers). Args-agnostic — any
+/// 2+ char query surfaces this set so the add-owner flow is demoable.
+pub fn directory_user_search() -> Vec<DirectoryObject> {
+    vec![
+        directory_object("search:jordan", "Jordan Lee", "jordan@contoso.com"),
+        directory_object("search:pat", "Pat Rivera", "pat@contoso.com"),
+        directory_object("search:morgan", "Morgan Diaz", "morgan@contoso.com"),
+    ]
+}
+
+/// Sample per-tenant operator defaults for the Settings page demo.
+pub fn tenant_defaults() -> azapptoolkit_core::defaults::TenantDefaults {
+    use azapptoolkit_core::defaults::{
+        AppRegistrationDefaults, EnterpriseApplicationDefaults, StoredPrincipal, TenantDefaults,
+    };
+    let owner = |seed: &str, name: &str, upn: &str| StoredPrincipal {
+        id: guid(seed),
+        display_name: Some(name.to_string()),
+        user_principal_name: Some(upn.to_string()),
+        odata_type: Some("#microsoft.graph.user".to_string()),
+    };
+    TenantDefaults {
+        app_registration: AppRegistrationDefaults {
+            default_owners: vec![owner("default:alex", "Alex Admin", "alex@contoso.com")],
+        },
+        enterprise_application: EnterpriseApplicationDefaults {
+            default_owners: vec![owner("default:sam", "Sam Owner", "sam@contoso.com")],
+            default_notification_emails: vec!["sso-alerts@contoso.com".to_string()],
+        },
+        scope_name_pattern: None,
+        default_vault: None,
+        app_vaults: Default::default(),
+    }
+}
+
 /// A held Microsoft Graph app-role grant — the Permissions/"granted" tab on an
 /// enterprise application or managed identity (`list_held_app_role_grants`).
 pub fn held_grant(value: &str) -> AppRoleGrantDto {

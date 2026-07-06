@@ -9,6 +9,7 @@ pub mod conditional_access;
 pub mod config;
 pub mod consent;
 pub mod credentials;
+pub mod defaults;
 pub mod diagnostics;
 pub(crate) mod dispatch;
 pub mod enterprise_application;
