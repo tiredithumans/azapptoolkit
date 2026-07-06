@@ -1066,6 +1066,7 @@ mod tests {
             id: "o0".into(),
             display_name: None,
             user_principal_name: None,
+            mail: None,
             odata_type: None,
         }]);
         let solo_issues =
@@ -1106,6 +1107,7 @@ mod tests {
                         id: format!("o{i}"),
                         display_name: None,
                         user_principal_name: None,
+                        mail: None,
                         odata_type: None,
                     })
                     .collect::<Vec<_>>(),
@@ -1148,6 +1150,7 @@ mod tests {
                         id: format!("o{i}"),
                         display_name: None,
                         user_principal_name: None,
+                        mail: None,
                         odata_type: None,
                     })
                     .collect::<Vec<_>>(),

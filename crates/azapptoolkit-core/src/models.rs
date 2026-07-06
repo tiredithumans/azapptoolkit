@@ -401,6 +401,10 @@ pub struct DirectoryObject {
     pub display_name: Option<String>,
     #[serde(default)]
     pub user_principal_name: Option<String>,
+    /// Mail address — populated for mail-enabled groups / distribution lists
+    /// (used as an SSO notification-email source); `None` for most objects.
+    #[serde(default)]
+    pub mail: Option<String>,
     #[serde(default, rename = "@odata.type")]
     pub odata_type: Option<String>,
 }
