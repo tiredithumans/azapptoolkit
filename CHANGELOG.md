@@ -24,6 +24,25 @@ the project adheres to
     becomes the default name when migrating a legacy Application Access Policy —
     still overridable per migration; blank falls back to `app_scope_<AppId>`.
 
+- **Key Vault vault picker with discovery + per-app memory.** The rotation
+  dialog and the Key Vault browser now show the vaults you can access
+  (discovered via Azure Resource Manager) as clickable chips beside the vault
+  field — you can still type any name. When you rotate an app registration's
+  secret into a vault, that vault (and secret name) is **remembered per app**, so
+  the next rotation pre-selects it; a tenant-level default vault fills in for apps
+  with no history yet. Only names are stored, never secrets.
+
+### Changed
+
+- **Access Readiness now checks Azure RBAC accurately instead of always "?".**
+  It enumerates your **direct** Azure role assignments across your subscriptions
+  and reports **✓ Have** when a matching assignment is found (with conservative
+  supersets — e.g. Owner/Contributor satisfy "Reader", but control-plane roles do
+  **not** stand in for Key Vault data-plane access). Because group-inherited roles
+  aren't visible to the per-user lookup, it never downgrades to a false "Missing":
+  without a confirmed direct assignment it stays "?" with guidance. Falls back to
+  the previous "?" + nudge when Azure (ARM) access hasn't been consented.
+
 ### Fixed
 
 - **Access Readiness now reports Exchange Online RBAC accurately instead of
