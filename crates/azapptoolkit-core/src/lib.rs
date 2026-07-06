@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod azure_roles;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cache;
 pub mod capabilities;
