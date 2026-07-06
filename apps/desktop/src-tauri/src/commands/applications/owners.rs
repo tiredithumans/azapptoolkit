@@ -116,3 +116,22 @@ pub async fn search_groups(
     let client = state.graph_for(&tenant_id);
     client.search_groups(q).await.map_err(Into::into)
 }
+
+/// Searches mail-enabled groups / distribution lists (returns those with a mail
+/// address) — used to seed the SSO notification-email default from a team DL.
+#[tauri::command]
+pub async fn search_distribution_lists(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    query: String,
+) -> Result<Vec<DirectoryObject>, UiError> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = state.graph_for(&tenant_id);
+    client
+        .search_distribution_lists(q)
+        .await
+        .map_err(Into::into)
+}

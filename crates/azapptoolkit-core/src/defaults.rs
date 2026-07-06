@@ -69,6 +69,13 @@ pub struct TenantDefaults {
     /// `app_scope_{appId}` default. See [`Self::scope_name_for`].
     #[serde(default)]
     pub scope_name_pattern: Option<String>,
+    /// Key Vault secret-name template for credential rotation. `{appId}` is
+    /// substituted with the app's client id. Blank/`None` ⇒ the built-in
+    /// `secret-{appId}` default. See [`Self::secret_name_for`]. (Key Vault secret
+    /// names allow only alphanumerics and dashes — no underscores — so the prefix
+    /// is `secret-`, not `secret_`.)
+    #[serde(default)]
+    pub secret_name_pattern: Option<String>,
     /// Tenant-level fallback vault for credential rotation (used when an app has
     /// no [`app_vaults`](Self::app_vaults) binding yet).
     #[serde(default)]
@@ -83,8 +90,12 @@ pub struct TenantDefaults {
 /// `commands::exchange::scope_name_for`'s default). The `{appId}` placeholder in
 /// a custom pattern is replaced with the app's client id.
 pub const DEFAULT_SCOPE_NAME_PREFIX: &str = "app_scope_";
-/// Placeholder token substituted in a custom [`TenantDefaults::scope_name_pattern`].
+/// Placeholder token substituted in a custom [`TenantDefaults::scope_name_pattern`]
+/// or [`TenantDefaults::secret_name_pattern`].
 pub const SCOPE_NAME_PLACEHOLDER: &str = "{appId}";
+/// The built-in Key Vault secret-name prefix. Uses a dash (KV secret names
+/// forbid underscores).
+pub const DEFAULT_SECRET_NAME_PREFIX: &str = "secret-";
 
 impl TenantDefaults {
     /// Resolves the management-scope name for `app_id`: the custom pattern with
@@ -94,6 +105,16 @@ impl TenantDefaults {
         match self.scope_name_pattern.as_deref().map(str::trim) {
             Some(pat) if !pat.is_empty() => pat.replace(SCOPE_NAME_PLACEHOLDER, app_id),
             _ => format!("{DEFAULT_SCOPE_NAME_PREFIX}{app_id}"),
+        }
+    }
+
+    /// Resolves the Key Vault secret name for `app_id`: the custom pattern with
+    /// `{appId}` substituted if one is set (and non-blank), else the built-in
+    /// `secret-<app_id>`. The caller should still sanitize to KV-safe characters.
+    pub fn secret_name_for(&self, app_id: &str) -> String {
+        match self.secret_name_pattern.as_deref().map(str::trim) {
+            Some(pat) if !pat.is_empty() => pat.replace(SCOPE_NAME_PLACEHOLDER, app_id),
+            _ => format!("{DEFAULT_SECRET_NAME_PREFIX}{app_id}"),
         }
     }
 }
@@ -127,6 +148,24 @@ mod tests {
     }
 
     #[test]
+    fn secret_name_defaults_to_secret_dash_appid_and_honors_a_pattern() {
+        // KV secret names forbid underscores, so the built-in prefix is `secret-`.
+        let d = TenantDefaults::default();
+        assert_eq!(d.secret_name_for("app-1"), "secret-app-1");
+        let custom = TenantDefaults {
+            secret_name_pattern: Some("kv-{appId}-rot".into()),
+            ..Default::default()
+        };
+        assert_eq!(custom.secret_name_for("app-1"), "kv-app-1-rot");
+        // Blank pattern falls back to the built-in default.
+        let blank = TenantDefaults {
+            secret_name_pattern: Some("  ".into()),
+            ..Default::default()
+        };
+        assert_eq!(blank.secret_name_for("app-1"), "secret-app-1");
+    }
+
+    #[test]
     fn round_trips_through_json() {
         let d = TenantDefaults {
             app_registration: AppRegistrationDefaults {
@@ -142,6 +181,7 @@ mod tests {
                 default_notification_emails: vec!["ops@contoso.com".into()],
             },
             scope_name_pattern: None,
+            secret_name_pattern: Some("secret-{appId}".into()),
             default_vault: Some("kv-contoso".into()),
             app_vaults: BTreeMap::from([(
                 "app-1".into(),

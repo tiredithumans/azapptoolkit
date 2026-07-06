@@ -17,11 +17,13 @@ use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
 
+use crate::bindings::applications;
 use crate::bindings::defaults::{
     self, AppRegistrationDefaults, EnterpriseApplicationDefaults, StoredPrincipal, TenantDefaults,
 };
 use crate::components::owner_picker::OwnerPicker;
 use crate::components::ui::{Callout, SectionHeader};
+use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 use crate::util::parse_lines;
 
@@ -102,6 +104,7 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
             .join("\n"),
     );
     let pattern = RwSignal::new(initial.scope_name_pattern.clone().unwrap_or_default());
+    let secret_pattern = RwSignal::new(initial.secret_name_pattern.clone().unwrap_or_default());
 
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -135,6 +138,21 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
             }
         });
     });
+    // Appends a distribution list's address to the notification-email textarea
+    // (deduped, case-insensitive).
+    let add_dl_email = Callback::new(move |email: String| {
+        emails.update(|cur| {
+            let mut lines: Vec<String> = cur
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            if !lines.iter().any(|l| l.eq_ignore_ascii_case(&email)) {
+                lines.push(email);
+            }
+            *cur = lines.join("\n");
+        });
+    });
 
     let on_save = {
         let tenant_id = tenant_id.clone();
@@ -155,6 +173,10 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                 },
                 scope_name_pattern: {
                     let p = pattern.get().trim().to_string();
+                    (!p.is_empty()).then_some(p)
+                },
+                secret_name_pattern: {
+                    let p = secret_pattern.get().trim().to_string();
                     (!p.is_empty()).then_some(p)
                 },
                 ..Default::default()
@@ -192,6 +214,25 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                 <OwnerPicker on_pick=add_ent exclude=ent_exclude />
                 <Field label="Default SSO notification emails (one per line, max 5)">
                     <Textarea value=emails />
+                </Field>
+                <Body1 class="hint">
+                    "Or search a distribution list / mail-enabled group to add its address:"
+                </Body1>
+                <DlEmailPicker on_pick=add_dl_email />
+            </section>
+
+            <section class="settings-section">
+                <h3>"Key Vault"</h3>
+                <Body1 class="hint">
+                    "Naming pattern for the Key Vault secret created when rotating a credential. \
+                     Use "
+                    <code>"{appId}"</code>
+                    " as the app's client id. Blank uses the built-in "
+                    <code>"secret-{appId}"</code>
+                    " (Key Vault secret names allow only letters, digits, and dashes — no underscores)."
+                </Body1>
+                <Field label="Secret name pattern">
+                    <Input value=secret_pattern placeholder="secret-{appId}" />
                 </Field>
             </section>
 
@@ -278,5 +319,92 @@ fn owner_list(owners: RwSignal<Vec<StoredPrincipal>>) -> impl IntoView {
                     .into_any()
             }
         }}
+    }
+}
+
+/// Distribution-list / mail-enabled-group search that emits the selected group's
+/// mail address — for seeding the SSO notification-email default without typing.
+#[component]
+fn DlEmailPicker(on_pick: Callback<String>) -> impl IntoView {
+    let session = use_session();
+    let raw_query = RwSignal::new(String::new());
+    let query = use_debounced(raw_query.into(), 300);
+
+    let candidates = LocalResource::new(move || {
+        let q = query.get();
+        let tenant = session.active_tenant.get();
+        async move {
+            let q = q.trim().to_string();
+            if q.len() < 2 {
+                return Ok::<Vec<DirectoryObject>, String>(Vec::new());
+            }
+            let Some(t) = tenant else {
+                return Ok(Vec::new());
+            };
+            applications::search_distribution_lists(&t.tenant_id, &q)
+                .await
+                .map_err(|e| e.message)
+        }
+    });
+
+    view! {
+        <div class="owner-picker">
+            <Field label="Search distribution lists (2+ chars)">
+                <Input value=raw_query placeholder="sso-alerts" />
+            </Field>
+            <Suspense fallback=move || {
+                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Searching…" /> }
+            }>
+                {move || Suspend::new(async move {
+                    let dls = match candidates.await {
+                        Ok(d) => d,
+                        Err(msg) => {
+                            return view! {
+                                <Body1 class="form-error">{format!("Search failed: {msg}")}</Body1>
+                            }
+                                .into_any();
+                        }
+                    };
+                    if dls.is_empty() {
+                        return view! { <Body1>"No matches."</Body1> }.into_any();
+                    }
+                    view! {
+                        <ul class="candidates">
+                            {dls
+                                .into_iter()
+                                .filter_map(|d| {
+                                    let mail = d.mail.clone()?;
+                                    let display = d
+                                        .display_name
+                                        .clone()
+                                        .unwrap_or_else(|| mail.clone());
+                                    let pick = mail.clone();
+                                    Some(
+                                        view! {
+                                            <li>
+                                                <div>
+                                                    <div>{display}</div>
+                                                    <div class="mono small">{mail}</div>
+                                                </div>
+                                                <Button
+                                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                                    on_click=Box::new(move |_| {
+                                                        on_pick.run(pick.clone());
+                                                        raw_query.set(String::new());
+                                                    })
+                                                >
+                                                    "Add"
+                                                </Button>
+                                            </li>
+                                        },
+                                    )
+                                })
+                                .collect_view()}
+                        </ul>
+                    }
+                        .into_any()
+                })}
+            </Suspense>
+        </div>
     }
 }

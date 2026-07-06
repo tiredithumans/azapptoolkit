@@ -250,6 +250,28 @@ impl GraphClient {
         Ok(page.items)
     }
 
+    /// Searches **mail-enabled** groups (distribution lists + mail-enabled
+    /// security / M365 groups) by display-name prefix, returning only those with
+    /// a mail address — for picking an SSO notification recipient. Unlike
+    /// [`Self::search_groups`], selects `mail`.
+    pub async fn search_distribution_lists(&self, prefix: &str) -> Result<Vec<DirectoryObject>> {
+        let filter = format!(
+            "mailEnabled eq true and startswith(displayName,'{esc}')",
+            esc = escape_odata(prefix)
+        );
+        let params: [(&str, &str); 3] = [
+            ("$filter", filter.as_str()),
+            ("$top", "20"),
+            ("$select", "id,displayName,mail"),
+        ];
+        let page: Paged<DirectoryObject> = self.get_json("/groups", &params, false).await?;
+        Ok(page
+            .items
+            .into_iter()
+            .filter(|g| g.mail.as_deref().is_some_and(|m| !m.is_empty()))
+            .collect())
+    }
+
     /// Best-effort fetch of the tenant's service-principal sign-in activity
     /// (Entra **beta** `reports/servicePrincipalSignInActivities`). Requires an
     /// `AuditLog.Read.All` token (see [`Self::with_audit_log_token`]) — the

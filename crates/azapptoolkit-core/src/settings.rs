@@ -101,6 +101,7 @@ impl UserSettings {
         entry.app_registration = incoming.app_registration;
         entry.enterprise_application = incoming.enterprise_application;
         entry.scope_name_pattern = incoming.scope_name_pattern;
+        entry.secret_name_pattern = incoming.secret_name_pattern;
         // default_vault + app_vaults are intentionally preserved.
     }
 

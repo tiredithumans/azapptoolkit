@@ -1784,6 +1784,42 @@ h3 {
 .small {
   font-size: var(--text-xs);
 }
+.vault-picker {
+  margin-top: var(--space-1);
+}
+.vault-picker__count {
+  margin-bottom: var(--space-1);
+}
+.vault-picker__list {
+  list-style: none;
+  padding: 2px;
+  margin: 0;
+  display: grid;
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.vault-picker__option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px var(--space-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.vault-picker__option:hover {
+  background: var(--bg-subtle);
+}
+.vault-picker__option--selected {
+  background: var(--accent-soft);
+  font-weight: 600;
+}
 .checkbox-row {
   display: flex;
   gap: 6px;

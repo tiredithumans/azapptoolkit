@@ -816,6 +816,7 @@ pub fn directory_object(id_seed: &str, display_name: &str, upn: &str) -> Directo
         id: guid(id_seed),
         display_name: Some(display_name.to_string()),
         user_principal_name: Some(upn.to_string()),
+        mail: None,
         odata_type: Some("#microsoft.graph.user".to_string()),
     }
 }
@@ -827,6 +828,22 @@ pub fn directory_user_search() -> Vec<DirectoryObject> {
         directory_object("search:jordan", "Jordan Lee", "jordan@contoso.com"),
         directory_object("search:pat", "Pat Rivera", "pat@contoso.com"),
         directory_object("search:morgan", "Morgan Diaz", "morgan@contoso.com"),
+    ]
+}
+
+/// Demo distribution lists returned by `search_distribution_lists` (each carries
+/// a mail address), for the SSO notification-email picker.
+pub fn distribution_list_search() -> Vec<DirectoryObject> {
+    let dl = |seed: &str, name: &str, mail: &str| DirectoryObject {
+        id: guid(seed),
+        display_name: Some(name.to_string()),
+        user_principal_name: None,
+        mail: Some(mail.to_string()),
+        odata_type: Some("#microsoft.graph.group".to_string()),
+    };
+    vec![
+        dl("dl:sso", "SSO Alerts", "sso-alerts@contoso.com"),
+        dl("dl:itops", "IT Operations", "it-ops@contoso.com"),
     ]
 }
 
@@ -850,6 +867,7 @@ pub fn tenant_defaults() -> azapptoolkit_core::defaults::TenantDefaults {
             default_notification_emails: vec!["sso-alerts@contoso.com".to_string()],
         },
         scope_name_pattern: None,
+        secret_name_pattern: None,
         default_vault: None,
         app_vaults: Default::default(),
     }
