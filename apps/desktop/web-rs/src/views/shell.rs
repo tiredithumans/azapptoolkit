@@ -218,9 +218,10 @@ pub fn AppShell(children: Children) -> impl IntoView {
                 </div>
                 <div class="shell__nav-list">
                     // Nav IA: three labeled groups (Inventory / Security /
-                    // Operations) via `shell__nav-section-label`. Readiness is a
-                    // real page, so it lives in the Security group — not down in
-                    // the user block with the utilities.
+                    // Operations) via `shell__nav-section-label`. Access Readiness
+                    // is about the *signed-in operator's* own rights, not the
+                    // org's apps, so it lives in the user block next to Sign Out
+                    // rather than in the Security group.
                     <div class="shell__nav-section-label">"Inventory"</div>
                     {nav_row_view("Home", IconName::Home, ActiveView::Home)}
                     {nav_row_view("App Registrations", IconName::AppWindow, ActiveView::Apps)}
@@ -230,7 +231,6 @@ pub fn AppShell(children: Children) -> impl IntoView {
                     {nav_row_view("Security", IconName::ShieldCheck, ActiveView::Security)}
                     {nav_row_view("Permission Tester", IconName::Search, ActiveView::PermissionTester)}
                     {nav_row_view("Resource Access", IconName::Database, ActiveView::ResourceAccess)}
-                    {nav_row_view("Readiness", IconName::CheckCircle, ActiveView::Readiness)}
                     <div class="shell__nav-section-label">"Operations"</div>
                     {nav_row_view("Bulk Actions", IconName::Wrench, ActiveView::BulkActions)}
                     {nav_row_view("Disaster Recovery", IconName::Download, ActiveView::DisasterRecovery)}
@@ -255,6 +255,11 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                 }}
                             </span>
                         </div>
+                        // Access Readiness sits with the account block (not the
+                        // Security group) because it reports the signed-in
+                        // operator's own permissions — the same "who am I / what can
+                        // I do" context as the identity above and Sign Out below.
+                        {nav_row_view("Access Readiness", IconName::CheckCircle, ActiveView::Readiness)}
                         // Styled as a `nav__item` so it collapses to an icon-only
                         // button (hiding the label) when the rail narrows — the same
                         // way the nav links do — instead of disappearing.
@@ -520,7 +525,7 @@ fn topbar_labels(view: ActiveView) -> (&'static str, &'static str) {
         ActiveView::Security => ("Security", "Security"),
         ActiveView::PermissionTester => ("Security", "Permission Tester"),
         ActiveView::ResourceAccess => ("Security", "Resource Access"),
-        ActiveView::Readiness => ("Security", "Access readiness"),
+        ActiveView::Readiness => ("Account", "Access Readiness"),
         ActiveView::BulkActions => ("Operations", "Bulk Actions"),
         ActiveView::DisasterRecovery => ("Operations", "Disaster Recovery"),
         ActiveView::KeyVault => ("Operations", "Key Vault"),

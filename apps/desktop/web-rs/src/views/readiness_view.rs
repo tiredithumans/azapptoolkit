@@ -124,7 +124,7 @@ pub fn ReadinessView() -> impl IntoView {
     view! {
         <div class="readiness">
             <div class="readiness__head">
-                <h2 class="readiness__title">"Access readiness"</h2>
+                <h2 class="readiness__title">"Access Readiness"</h2>
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                     on_click=Box::new(on_recheck)
