@@ -163,6 +163,49 @@ async fn lean_and_full_sp_lookups_do_not_share_a_cache() {
 }
 
 #[tokio::test]
+async fn seed_lean_sps_from_index_makes_the_lean_lookup_a_cache_hit() {
+    // Seeding the lean cache from an already-fetched SP index must satisfy the
+    // audit's lean lookup with NO Graph request — the whole point of reusing the
+    // index scan instead of a second batched prewarm. The mock is mounted but
+    // `.expect(1)` proves ONLY the app_id absent from the index reaches the
+    // network; the seeded app_id is served from cache.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .and(query_param("$select", "id,appId,accountEnabled"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "sp-uncached", "appId": "app-missing", "accountEnabled": false }]
+        })))
+        .expect(1) // only the unmatched app_id resolves against the server
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+
+    let sp_index: Vec<azapptoolkit_core::models::ServicePrincipal> =
+        serde_json::from_value(serde_json::json!([
+            { "id": "sp-seeded", "appId": "app-1", "accountEnabled": true }
+        ]))
+        .expect("sample SP index deserializes");
+    client.seed_lean_sps_from_index(&["app-1".to_string(), "app-missing".to_string()], &sp_index);
+
+    // Matched app_id: served from the seeded cache, zero requests.
+    let hit = client
+        .get_service_principal_by_app_id_lean("app-1")
+        .await
+        .unwrap();
+    assert_eq!(hit.as_ref().unwrap().id, "sp-seeded");
+    assert_eq!(hit.unwrap().account_enabled, Some(true));
+
+    // Unmatched app_id: left cold on purpose, so it resolves against the server
+    // (the single request `.expect(1)` accounts for).
+    let miss = client
+        .get_service_principal_by_app_id_lean("app-missing")
+        .await
+        .unwrap();
+    assert_eq!(miss.unwrap().id, "sp-uncached");
+}
+
+#[tokio::test]
 async fn list_service_principals_index_selects_superset_and_returns_all_sps() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

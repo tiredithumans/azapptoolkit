@@ -285,6 +285,18 @@ pub async fn remediate_remove_redundant_permissions(
     // resource that can't be resolved is skipped by the planner.
     let mut role_indexes: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut resource_sp_ids: HashMap<String, String> = HashMap::new();
+    // Batch-prewarm the resource SPs (one $batch POST per 20) so the resolve
+    // loop below hits the Permissions cache instead of one sequential GET per
+    // declared resource — the same optimization the admin-consent grant path
+    // already applies before its identical loop. Best-effort: a batch failure
+    // degrades to the per-resource lookups, and their failure handling is
+    // unchanged.
+    let resource_app_ids: Vec<String> = app
+        .required_resource_access
+        .iter()
+        .map(|r| r.resource_app_id.clone())
+        .collect();
+    client.prewarm_resource_sps(&resource_app_ids).await;
     for resource in &app.required_resource_access {
         if role_indexes.contains_key(&resource.resource_app_id) {
             continue;

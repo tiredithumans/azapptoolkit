@@ -91,8 +91,6 @@ docs/architecture/                   # deep-dives: auth-consent · caching-searc
 
 - **Audit remediation (one-click "Fix")** — only for findings with a safe, existing mutation (additive like AddOwner or reversible like DisableSignIn also qualify); handler **re-resolves live state**. Scorer-attached via `build_remediations`, except `DisableSignIn` (runner post-pass) and `AddOwner` (no dedicated handler; the modal reuses `add_application_owner`). Full pattern: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
-- **New external origin (CSP)** — only direct WASM frontend fetches need a `connect-src` change; backend reqwest calls don't.
-
 ## Canonical commands
 
 All build/dev/verify commands live in `/justfile`. `just` searches upward, so recipes resolve from any subdirectory. Tauri's hooks call the same recipes; update them when you change build flags.
@@ -201,13 +199,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 ## Coding fundamentals
 
-- Match the style, structure, and idioms of the file you're editing.
-- Solve the task at hand; don't refactor unrelated code or expand scope.
-- No abstraction, configuration, or generality for hypothetical futures (YAGNI).
-- Comments explain *why*, not *what*.
-- Dependencies are a cost; prefer std lib and existing workspace deps.
-- Security first: no secrets to disk, tokens scoped per resource, don't log secrets.
-- Test what you change; keep the suite green.
+- **Security-critical app:** never write secrets to disk or logs; scope tokens per resource. New dependency → check `Cargo.lock` for transitive conflicts (deps are a cost — prefer std lib + existing workspace crates).
 
 ## Git & version control
 
@@ -221,10 +213,8 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 Run the same gates CI runs before declaring a change done. `just verify` is the machine-independent core; `just verify-full` adds full CI parity. Use recipe flags from `/justfile`, don't hand-type raw `cargo` invocations.
 
-1. **Format** — `just fmt-check`
-2. **Lint** — `just clippy` (`-D warnings`)
-3. **Test** — `just test` (workspace)
-4. **Frontend** — `just web-fmt-check` + `web-clippy` (`-D warnings`, wasm target; web-rs is excluded from the root workspace so root `clippy` doesn't reach it) + `web-test` + `web-build`
+Steps 1–4 are `just verify` (fmt-check → clippy → test → web-fmt-check → web-clippy → web-test → web-build; see **Canonical commands**). The CI-only additions below carry the non-obvious detail:
+
 5. **Frontend GUI tests** *(browser-gated; in `verify-full`/CI, not `verify`)* — `just web-itest`: real Leptos views in a headless browser with the Tauri IPC mocked. Tests are `tests/gui/<view>.rs` **modules**, grouped into a few shard binaries (`tests/gui_N.rs`) via `#[path] mod`; the harness lives in `web-rs/src/test_support/`. **Two coupled perf levers — don't break either:** (a) `[profile.test] strip = "debuginfo"` (web-rs `Cargo.toml`) — each debug test wasm is ~96% DWARF that wasm-bindgen-test-runner would otherwise decode (~24s/binary); keep it `"debuginfo"`, never `strip = true` (that kills the `name` section → anonymous panic traces). (b) **sharding** — a *single* merged binary's served wasm (~78 MB) exceeds what headless Chrome will instantiate, so tests are split into shards kept **under ~52 MB each** (measure with `cargo test --no-run … && ls -la target/…/deps/gui_*.wasm`). Adding a view test: drop `tests/gui/<view>.rs`, add a `#[path] mod` to the **smallest** shard, re-measure. Tests within a shard share one page and rely on Leptos disposing each `mount_view` (and its teleported Thaw overlays) on unmount for isolation. **Do NOT make `test_support::reset()` clear `document.body`** — the wasm-bindgen-test runner scrapes results from the page DOM, so wiping the body makes the whole shard report nothing (`Failed to detect test as having been run`, empty console, 60s timeout). Renaming a CSS class / aria-label / on-screen text that a test references passes local `verify` but fails CI — the `web-test-strings-check.sh` hook warns at edit time.
 6. **Dependency audit + deny** *(required CI checks)* — `just audit` + `web-audit` (RustSec) + `deny` + `web-deny`; all four are merge-blocking. `verify-full` runs them.
 7. **actionlint** *(required CI check)* — lints the workflow YAML; runs CI-side (install locally to pre-check).

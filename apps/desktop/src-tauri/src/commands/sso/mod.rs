@@ -417,10 +417,16 @@ pub async fn get_sso_config(
 ) -> Result<SsoConfigDto, UiError> {
     let client = state.graph_for(&tenant_id);
 
-    let sp = client
-        .get_service_principal_sso_fields(&service_principal_id)
-        .await?
-        .ok_or_else(|| UiError::validation("not_found", "Service principal not found."))?;
+    // The SP SSO fields and the assigned claims-mapping policy both key off the
+    // input service_principal_id and are independent of each other (and of the
+    // SP→app→app-SSO chain below), so read them concurrently — folding the
+    // claims round trip into the first wave instead of trailing the whole chain.
+    let (sp, claims_result) = tokio::join!(
+        client.get_service_principal_sso_fields(&service_principal_id),
+        client.list_assigned_claims_mapping_policies(&service_principal_id),
+    );
+
+    let sp = sp?.ok_or_else(|| UiError::validation("not_found", "Service principal not found."))?;
     let (app_id, sso_mode, signing_thumbprint, signing_expiry, notification_emails) =
         extract_sp_sso_fields(&sp);
 
@@ -445,11 +451,9 @@ pub async fn get_sso_config(
     let reply_urls = web_redirects.clone();
     let redirect_uris = web_redirects;
 
-    // Claims: best-effort. A missing scope/consent leaves the policy unset.
-    let (claims_policy, claims_policy_id) = match client
-        .list_assigned_claims_mapping_policies(&service_principal_id)
-        .await
-    {
+    // Claims: best-effort (read concurrently in the first wave above). A missing
+    // scope/consent leaves the policy unset.
+    let (claims_policy, claims_policy_id) = match claims_result {
         Ok(policies) => match policies.into_iter().next() {
             Some(policy) => {
                 let parsed = policy

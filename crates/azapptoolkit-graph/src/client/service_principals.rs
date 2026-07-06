@@ -1,5 +1,7 @@
 use super::*;
 
+use std::collections::HashMap;
+
 /// `PATCH /servicePrincipals/{id}` setting the single-sign-on mode (e.g. `saml`).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -206,30 +208,45 @@ impl GraphClient {
         Ok(all)
     }
 
-    /// Best-effort batch pre-resolution of `app_ids` to their service principals
-    /// via Graph `$batch` (one POST per 20), seeding the
-    /// [`CacheKind::ServicePrincipal`] cache so a following per-app
-    /// [`Self::get_service_principal_by_app_id_lean`] is a cache hit instead of a
-    /// round trip — the audit's largest per-app fan-out. Uses the **lean**
-    /// projection ([`SP_LEAN_SELECT`]) under the `|lean` cache key, matching the
-    /// lean single lookup the audit uses (it never needs the full SP); the
-    /// detail pane's full-SP cache is left untouched. Only not-already-cached
-    /// ids are fetched, and any error is swallowed: the per-app fallback still
-    /// works, so resilience is unchanged.
-    pub async fn prewarm_service_principals_lean(&self, app_ids: &[String]) {
-        self.prewarm_sps(
-            app_ids,
-            CacheKind::ServicePrincipal,
-            SP_LEAN_SELECT,
-            "SP",
-            |id| self.sp_lean_cache_key(id),
-        )
-        .await
+    /// Seeds the audit's lean SP cache (`|lean` keys) from an **already-fetched**
+    /// service-principal index at **zero Graph cost**.
+    /// [`Self::list_service_principals_index`]'s projection
+    /// (`id,appId,accountEnabled,…`) is a superset of the lean fields the audit's
+    /// [`Self::get_service_principal_by_app_id_lean`] reads, so an in-memory join
+    /// by `appId` seeds every matched app registration's lean entry — the audit
+    /// already runs that index scan for its SP-only phase, so this reuses it
+    /// instead of issuing a *second* batched prewarm (~1 `$batch` POST per 20
+    /// apps) that re-fetched the same directory objects.
+    ///
+    /// App ids with **no** index match are left cold on purpose: a per-item
+    /// [`Self::get_service_principal_by_app_id_lean`] then resolves them
+    /// correctly whether the app genuinely has no SP (it caches `None`) or the
+    /// index was truncated on a very large tenant (a real GET) — the same
+    /// graceful path the old failed-batch prewarm relied on. No-op when caching
+    /// is disabled. The index SP carries no heavy `appRoles`/`oauth2` arrays, so
+    /// caching it whole under the lean key stays small (`score_one` reads only
+    /// `id` + `accountEnabled`).
+    pub fn seed_lean_sps_from_index(&self, app_ids: &[String], sp_index: &[ServicePrincipal]) {
+        if !self.cache.enabled() {
+            return;
+        }
+        let by_app_id: HashMap<&str, &ServicePrincipal> =
+            sp_index.iter().map(|sp| (sp.app_id.as_str(), sp)).collect();
+        for app_id in app_ids {
+            if let Some(sp) = by_app_id.get(app_id.as_str()) {
+                self.cache.put(
+                    CacheKind::ServicePrincipal,
+                    self.sp_lean_cache_key(app_id),
+                    &Some((*sp).clone()),
+                );
+            }
+        }
     }
 
-    /// Shared core of [`Self::prewarm_service_principals_lean`] and
-    /// [`Self::prewarm_resource_sps`] — the twins differed only in cache
-    /// `kind`, key derivation, and `$select`. Batch-resolves the
+    /// Shared core of [`Self::prewarm_resource_sps`] (and, until it was
+    /// superseded by [`Self::seed_lean_sps_from_index`], the audit's lean SP
+    /// prewarm) — callers differ only in cache `kind`, key derivation, and
+    /// `$select`. Batch-resolves the
     /// not-yet-cached `app_ids` (one `$batch` POST per 20) and seeds `kind`
     /// under `key(id)`, so the single lookup each prewarm mirrors is a later
     /// cache hit. Best-effort by contract: any error is swallowed (the
