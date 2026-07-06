@@ -70,10 +70,18 @@ pub async fn check_readiness(
         .into_iter()
         .collect();
 
+    // Azure-RBAC plane: enumerate the user's direct role assignments once
+    // (best-effort). `None` => the Azure capabilities fall back to "?".
+    let azure_held = enumerate_azure_role_ids(&state, &tenant_id).await;
+
     let mut items = Vec::with_capacity(CAPABILITIES.len());
     for cap in CAPABILITIES {
-        let (role_verdict, role_detail) =
-            role_for(cap, &active_roles, directory_roles_indeterminate);
+        let (role_verdict, role_detail) = role_for(
+            cap,
+            &active_roles,
+            directory_roles_indeterminate,
+            azure_held.as_ref(),
+        );
 
         let (scope_verdict, scope_detail) = match cap.scope_feature {
             Some(feature) => {
@@ -108,11 +116,14 @@ pub async fn check_readiness(
 
 /// The role half of a capability — pure, so it's unit-tested without a client.
 /// `directory_unreadable` is true when `/me` directory roles couldn't be read,
-/// turning every directory-role capability into "?".
+/// turning every directory-role capability into "?". `azure_held` is the set of
+/// Azure role-definition GUIDs directly assigned to the signed-in user (`None`
+/// when they couldn't be enumerated), used for the Azure-RBAC plane.
 fn role_for(
     cap: &Capability,
     active_roles: &[ActiveDirectoryRole],
     directory_unreadable: bool,
+    azure_held: Option<&HashSet<String>>,
 ) -> (Verdict, String) {
     match cap.role_detect {
         RoleDetect::DirectoryRole => {
@@ -136,16 +147,80 @@ fn role_for(
                 ),
             }
         }
-        RoleDetect::Indeterminate => (
+        RoleDetect::Indeterminate => azure_role_verdict(cap, azure_held),
+    }
+}
+
+/// Azure-RBAC verdict from the user's enumerated **direct** role assignments.
+/// Only direct assignments are visible (the `principalId` filter doesn't return
+/// group-inherited roles), so this only ever upgrades to `Have` on a confirmed
+/// assignment — it never reports `Missing` (which could be a false alarm for a
+/// role held via a group). It stays `Unknown` otherwise.
+fn azure_role_verdict(cap: &Capability, azure_held: Option<&HashSet<String>>) -> (Verdict, String) {
+    let roles: Vec<&str> = cap.role_names().collect();
+    match azure_held {
+        // Couldn't enumerate (no ARM consent / no signed-in oid / ARM error).
+        None => (
             Verdict::Unknown,
             format!(
-                "Azure RBAC is granted per subscription/resource, so it can't be read from the \
-                 directory here — verify the {} role in PIM for Azure resources, or check the \
-                 specific resource in Resource Access.",
-                cap.role_names().collect::<Vec<_>>().join(" / ")
+                "Azure RBAC is granted per subscription/resource — grant this app Azure access (or \
+                 activate the {} role in PIM) so readiness can check it.",
+                roles.join(" / ")
             ),
         ),
+        Some(held) => {
+            if roles
+                .iter()
+                .any(|name| azapptoolkit_core::azure_roles::azure_role_satisfied(name, held))
+            {
+                (
+                    Verdict::Have,
+                    "Active Azure role assignment (direct).".to_string(),
+                )
+            } else {
+                (
+                    Verdict::Unknown,
+                    format!(
+                        "No direct Azure role assignment found — you may still hold {} via a group \
+                         (not visible here) or on a specific resource; check Resource Access.",
+                        roles.join(" / ")
+                    ),
+                )
+            }
+        }
     }
+}
+
+/// Best-effort: the set of Azure role-definition GUIDs **directly** assigned to
+/// the signed-in user across all their subscriptions. `None` when it can't be
+/// determined (no signed-in oid, missing ARM consent, or an ARM error) — the
+/// caller then reports Azure capabilities as "?" rather than guessing.
+async fn enumerate_azure_role_ids(state: &AppState, tenant_id: &str) -> Option<HashSet<String>> {
+    let oid = state.auth.tenant_context(tenant_id)?.account_oid;
+    if oid.is_empty() {
+        return None;
+    }
+    // Enumeration needs ARM control-plane access; absent consent => "?".
+    state.ensure_arm_token(tenant_id).await.ok()?;
+    let arm = state.arm_for(tenant_id);
+    let subs = arm.list_subscriptions().await.ok()?;
+    let mut ids = HashSet::new();
+    for sub in subs {
+        // Partial enumeration beats none — skip a subscription we can't read.
+        if let Ok(assignments) = arm
+            .list_role_assignments_for_principal(&sub.subscription_id, &oid)
+            .await
+        {
+            for a in assignments {
+                if let Some(rid) = a.properties.role_definition_id.as_deref()
+                    && let Some(tail) = azapptoolkit_core::azure_roles::role_id_tail(rid)
+                {
+                    ids.insert(tail);
+                }
+            }
+        }
+    }
+    Some(ids)
 }
 
 fn scope_detail_text(cap: &Capability, verdict: Verdict) -> String {
@@ -210,6 +285,7 @@ mod tests {
                 "62e90394-69f5-4237-9190-012177145e10",
             )],
             false,
+            None,
         );
         assert_eq!(v, Verdict::Have);
         assert!(detail.contains("Global Administrator"));
@@ -229,6 +305,7 @@ mod tests {
                 "f28a1f50-f6e7-4571-818b-6a12f2af6b6c",
             )],
             false,
+            None,
         );
         assert_eq!(v, Verdict::Have);
         assert!(detail.contains("SharePoint Administrator"));
@@ -244,6 +321,7 @@ mod tests {
                 "fe930be7-5e62-47db-91af-98c3a49a38b1",
             )],
             false,
+            None,
         );
         assert_eq!(v, Verdict::Missing);
         assert!(detail.contains("Cloud Application Administrator"));
@@ -252,15 +330,44 @@ mod tests {
     #[test]
     fn directory_unreadable_is_unknown() {
         let cap = capability("app_registrations").unwrap();
-        let (v, _) = role_for(cap, &[], true);
+        let (v, _) = role_for(cap, &[], true, None);
         assert_eq!(v, Verdict::Unknown);
     }
 
     #[test]
-    fn azure_rbac_role_is_unknown() {
-        // Azure RBAC is per-subscription/-vault, so it genuinely isn't
-        // directory-enumerable and honestly reports "?".
-        let (v, _) = role_for(capability("keyvault_secrets").unwrap(), &[], false);
+    fn azure_rbac_unknown_when_not_enumerable() {
+        // No ARM enumeration available (None) => "?" with a grant-access nudge.
+        let cap = capability("keyvault_secrets").unwrap();
+        let (v, detail) = role_for(cap, &[], false, None);
+        assert_eq!(v, Verdict::Unknown);
+        assert!(detail.contains("Azure"));
+    }
+
+    #[test]
+    fn azure_rbac_have_when_a_direct_assignment_satisfies() {
+        // azure_role_reads needs "Reader"; a held Reader assignment => Have.
+        let reader = "acdd72a7-3385-48ef-bd42-f606fba81ae7".to_string();
+        let held: HashSet<String> = HashSet::from([reader]);
+        let (v, _) = role_for(
+            capability("azure_role_reads").unwrap(),
+            &[],
+            false,
+            Some(&held),
+        );
+        assert_eq!(v, Verdict::Have);
+    }
+
+    #[test]
+    fn azure_rbac_unknown_not_missing_when_no_direct_assignment() {
+        // Enumeration succeeded but the required role isn't directly held: stay
+        // Unknown (it may be group-inherited), never falsely Missing.
+        let held: HashSet<String> = HashSet::new();
+        let (v, _) = role_for(
+            capability("keyvault_secrets").unwrap(),
+            &[],
+            false,
+            Some(&held),
+        );
         assert_eq!(v, Verdict::Unknown);
     }
 
@@ -277,6 +384,7 @@ mod tests {
                 "29232cdf-9323-42fd-ade2-1d097af3e4de",
             )],
             false,
+            None,
         );
         assert_eq!(v, Verdict::Have);
         assert!(detail.contains("Exchange Administrator"));
@@ -289,6 +397,7 @@ mod tests {
                 "62e90394-69f5-4237-9190-012177145e10",
             )],
             false,
+            None,
         );
         assert_eq!(v, Verdict::Have);
     }
@@ -303,6 +412,7 @@ mod tests {
                 "fe930be7-5e62-47db-91af-98c3a49a38b1",
             )],
             false,
+            None,
         );
         assert_eq!(v, Verdict::Missing);
         assert!(detail.contains("Exchange Administrator"));

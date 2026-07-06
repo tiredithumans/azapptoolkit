@@ -5,6 +5,8 @@
 
 use tauri::State;
 
+use azapptoolkit_core::defaults::AppVaultBinding;
+use azapptoolkit_core::settings::UserSettings;
 use azapptoolkit_keyvault::SecretSetRequest;
 
 use crate::commands::applications::invalidate_app_credentials;
@@ -173,6 +175,28 @@ pub async fn rotate_app_credential(
     // full-tenant re-enumeration on the next list visit.
     invalidate_app_credentials(&state.cache, &tenant_id, &input.object_id);
 
+    // Remember where this app's secret went so the next rotation pre-selects the
+    // same vault (per-tenant, keyed by appId). Best-effort — a settings-write
+    // failure must not fail an otherwise-successful rotation. Stores names only,
+    // never the secret.
+    if let Some(app_id) = input.app_id.as_deref() {
+        let config_dir = crate::config_directory();
+        let mut settings = UserSettings::stored(&config_dir);
+        settings.set_app_vault_binding(
+            &tenant_id,
+            app_id,
+            AppVaultBinding {
+                vault_name: input.vault_name.clone(),
+                secret_name: Some(input.secret_name.clone()),
+            },
+        );
+        if let Err(e) = settings.save(&config_dir) {
+            warnings.push(format!(
+                "rotation succeeded, but couldn't remember the vault for next time: {e}"
+            ));
+        }
+    }
+
     Ok(RotateCredentialResult {
         new_key_id: new_cred.key_id,
         vault_name: input.vault_name,
@@ -181,6 +205,34 @@ pub async fn rotate_app_credential(
         removed_key_ids: removed,
         warnings,
     })
+}
+
+/// Lists the names of Key Vaults the signed-in user can see across all their
+/// subscriptions (ARM control-plane discovery), for the rotation/browser vault
+/// picker. A per-subscription failure is skipped (partial discovery is fine);
+/// missing ARM consent surfaces as a typed error the frontend degrades to
+/// free-text entry. Names only — no secret access here.
+#[tauri::command]
+pub async fn list_available_key_vaults(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<Vec<String>, UiError> {
+    state.ensure_arm_token(&tenant_id).await?;
+    let arm = state.arm_for(&tenant_id);
+    let subs = arm.list_subscriptions().await?;
+    // De-duped + sorted for a stable dropdown.
+    let mut names = std::collections::BTreeSet::new();
+    for sub in subs {
+        // Partial discovery beats none: skip a subscription we can't read.
+        if let Ok(vaults) = arm.list_key_vaults(&sub.subscription_id).await {
+            for v in vaults {
+                if let Some(name) = v.name {
+                    names.insert(name);
+                }
+            }
+        }
+    }
+    Ok(names.into_iter().collect())
 }
 
 fn parse_rfc3339(s: Option<&str>) -> Result<Option<chrono::DateTime<chrono::Utc>>, UiError> {

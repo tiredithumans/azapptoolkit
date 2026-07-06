@@ -35,4 +35,5 @@ pub mod toast;
 pub mod type_chip;
 pub mod ui;
 pub mod update_splash;
+pub mod vault_picker;
 pub mod virtual_list;

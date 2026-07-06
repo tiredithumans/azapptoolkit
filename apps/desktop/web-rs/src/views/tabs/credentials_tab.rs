@@ -18,6 +18,7 @@ use crate::bindings::applications::{
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
 use crate::components::ui::CopyableId;
+use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::{ls_get, ls_set};
@@ -174,6 +175,7 @@ pub fn CredentialsTab(
 ) -> impl IntoView {
     let session = use_session();
     let object_id = Signal::derive(move || detail.with(|d| d.application.id.clone()));
+    let app_id = Signal::derive(move || detail.with(|d| d.application.app_id.clone()));
     let secrets =
         Signal::derive(move || detail.with(|d| d.application.password_credentials.clone()));
     let certs = Signal::derive(move || detail.with(|d| d.application.key_credentials.clone()));
@@ -211,25 +213,46 @@ pub fn CredentialsTab(
     let rotate_result: RwSignal<Option<RotateCredentialResult>> = RwSignal::new(None);
 
     let app_name = Signal::derive(move || detail.with(|d| d.application.display_name.clone()));
-    // Opens the rotate dialog with smart prefills: the vault remembered from the
-    // last rotation in this tenant, and a Key-Vault-safe secret name derived from
-    // the app name. Only fills empty fields so an in-progress edit is preserved.
+    // Opens the rotate dialog and prefills empty fields (never clobbering an
+    // in-progress edit). Vault precedence: this app's remembered binding → the
+    // tenant default vault → the last vault used in this tenant. Secret name:
+    // the binding's remembered name → a Key-Vault-safe name from the app name.
     // Shared by the section header button and the per-row "Rotate" shortcut.
     let open_rotate = move || {
+        rotate_open.set(true);
         let tid = session
             .active_tenant
             .get()
             .map(|t| t.tenant_id)
             .unwrap_or_default();
-        if rotate_vault.get_untracked().trim().is_empty()
-            && let Some(last) = ls_get(&last_vault_key(&tid))
-        {
-            rotate_vault.set(last);
-        }
-        if rotate_secret_name.get_untracked().trim().is_empty() {
-            rotate_secret_name.set(sanitize_secret_name(&app_name.get_untracked()));
-        }
-        rotate_open.set(true);
+        let app = app_id.get_untracked();
+        let default_secret = sanitize_secret_name(&app_name.get_untracked());
+        leptos::task::spawn_local(async move {
+            let mut vault: Option<String> = None;
+            let mut secret: Option<String> = None;
+            if !tid.is_empty() {
+                let d = crate::bindings::defaults::get_tenant_defaults(&tid).await;
+                if !app.is_empty()
+                    && let Some(b) = d.app_vaults.get(&app)
+                {
+                    vault = Some(b.vault_name.clone());
+                    secret = b.secret_name.clone();
+                } else if let Some(dv) = d.default_vault {
+                    vault = Some(dv);
+                }
+                if vault.is_none() {
+                    vault = ls_get(&last_vault_key(&tid));
+                }
+            }
+            if rotate_vault.get_untracked().trim().is_empty()
+                && let Some(v) = vault
+            {
+                rotate_vault.set(v);
+            }
+            if rotate_secret_name.get_untracked().trim().is_empty() {
+                rotate_secret_name.set(secret.unwrap_or(default_secret));
+            }
+        });
     };
 
     let gencert_open = RwSignal::new(false);
@@ -360,6 +383,7 @@ pub fn CredentialsTab(
         error.set(None);
         rotate_result.set(None);
         let id = object_id.get();
+        let app = app_id.get();
         let vault = rotate_vault.get().trim().to_string();
         let secret_name = rotate_secret_name.get().trim().to_string();
         // Required-field validation runs before dispatch (was inside the spawn);
@@ -394,6 +418,7 @@ pub fn CredentialsTab(
             move |tenant_id| {
                 let input = RotateCredentialInput {
                     object_id: id,
+                    app_id: (!app.is_empty()).then_some(app),
                     vault_name: vault,
                     secret_name,
                     lifetime_days: Some(days),
@@ -878,7 +903,7 @@ pub fn CredentialsTab(
                     "Mints a new client secret, stores it as a new version of the vault secret below, then optionally removes the existing secret(s). The value is written only to Key Vault — it is never shown here."
                 </Body1>
                 <Field label="Key Vault name">
-                    <Input value=rotate_vault />
+                    <VaultPicker value=rotate_vault />
                 </Field>
                 <Field label="Secret name">
                     <Input value=rotate_secret_name />

@@ -104,6 +104,23 @@ impl UserSettings {
         // default_vault + app_vaults are intentionally preserved.
     }
 
+    /// Records where an app registration's client secret was last rotated, keyed
+    /// by the app's client id. Owned by the credential-rotation flow (the
+    /// Settings page's [`apply_tenant_defaults`](Self::apply_tenant_defaults)
+    /// deliberately preserves these), so it writes the binding directly.
+    pub fn set_app_vault_binding(
+        &mut self,
+        tenant_id: &str,
+        app_id: &str,
+        binding: crate::defaults::AppVaultBinding,
+    ) {
+        self.tenant_defaults
+            .entry(tenant_id.to_string())
+            .or_default()
+            .app_vaults
+            .insert(app_id.to_string(), binding);
+    }
+
     fn from_file(path: &Path) -> Option<Self> {
         let bytes = std::fs::read(path).ok()?;
         match serde_json::from_slice::<Self>(&bytes) {

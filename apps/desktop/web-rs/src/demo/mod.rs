@@ -470,6 +470,16 @@ fn register_fixtures() {
         "kv_get_secret",
         &f::kv_secret_value("graph-api-client-secret", "demo-value—not-a-real-secret"),
     );
+    // Vault discovery for the rotation/browser picker (fallible; unmocked would
+    // just yield no chips — mocked here so the demo shows the picker populated).
+    mock_ok(
+        "list_available_key_vaults",
+        &vec![
+            "kv-contoso-prod".to_string(),
+            "kv-contoso-dev".to_string(),
+            "kv-contoso-secrets".to_string(),
+        ],
+    );
 
     // ---- Readiness ----
     mock_ok("check_readiness", &f::readiness_report());
