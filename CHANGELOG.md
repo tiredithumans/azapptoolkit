@@ -7,6 +7,23 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Settings page — per-tenant operator defaults.** A new **Settings** entry in
+  the account section of the nav configures defaults that are stored locally
+  (per tenant, in `settings.json`) and reused so you don't re-enter them each
+  time:
+  - **Default owners** for app registrations and enterprise applications.
+    Each Owners tab gains an **"Add Default Owners"** button that adds them in
+    one click — additive (it skips owners already present and never removes).
+    Enterprise-app owners are users only, matching Entra's rules.
+  - A **default SSO notification-email list** that seeds the notification field
+    when creating a new SAML SSO configuration (only when the field is empty, so
+    it never clobbers an edit).
+  - A **management-scope-name pattern** (with an `{appId}` placeholder) that
+    becomes the default name when migrating a legacy Application Access Policy —
+    still overridable per migration; blank falls back to `app_scope_<AppId>`.
+
 ### Fixed
 
 - **Access Readiness now reports Exchange Online RBAC accurately instead of
