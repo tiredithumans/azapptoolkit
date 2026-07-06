@@ -9,11 +9,12 @@
 //! page equivalent of the old `if !open` wipe.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
+use thaw::{Body1, Button, ButtonAppearance, Field, Spinner, SpinnerSize};
 
 use crate::bindings::keyvault::{self, KvSecretItemDto, KvSecretValueDto};
 use crate::components::requires_role::RequiresRole;
 use crate::components::ui::{DataTable, SectionHeader};
+use crate::components::vault_picker::VaultPicker;
 use crate::state::{ActiveView, use_session};
 
 #[component]
@@ -101,7 +102,7 @@ pub fn KeyVaultView() -> impl IntoView {
             <RequiresRole capability_key="keyvault_secrets" />
             <div class="row">
                 <Field label="Vault name">
-                    <Input value=vault_name placeholder="myvault" />
+                    <VaultPicker value=vault_name />
                 </Field>
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
