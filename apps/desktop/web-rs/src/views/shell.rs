@@ -4,10 +4,8 @@
 
 use std::rc::Rc;
 
-use leptos::ev;
 use leptos::prelude::*;
 use thaw::{Spinner, SpinnerSize};
-use wasm_bindgen::JsCast;
 
 use crate::bindings::{applications, updater};
 use crate::components::global_search::GlobalSearch;
@@ -16,7 +14,6 @@ use crate::components::open_items_dock::OpenItemsDock;
 use crate::components::open_items_workspace::OpenItemsWorkspace;
 use crate::components::toast::{ToastHost, ToastKind};
 use crate::components::update_splash::UpdateSplash;
-use crate::hooks::use_escape::use_escape;
 use crate::state::{ActiveView, use_session};
 use crate::views::dialogs::{
     cache_diagnostics_dialog::CacheDiagnosticsDialog, create_app_dialog::CreateAppDialog,
@@ -158,32 +155,6 @@ pub fn AppShell(children: Children) -> impl IntoView {
         });
     };
 
-    // Overflow "…" popover in the signed-in user block — holds the low-frequency
-    // utilities (cache diagnostics, manual update check, version) so the user
-    // block itself slims to identity + Sign Out. Local open flag; closed on an
-    // outside mousedown and on Escape.
-    let menu_open = RwSignal::new(false);
-    let overflow_ref = NodeRef::<leptos::html::Div>::new();
-    let outside_handle = window_event_listener(ev::mousedown, move |evt| {
-        if !menu_open.get_untracked() {
-            return;
-        }
-        let Some(root) = overflow_ref.get() else {
-            return;
-        };
-        let target = evt
-            .target()
-            .and_then(|t| t.dyn_into::<web_sys::Node>().ok());
-        if !root.contains(target.as_ref()) {
-            menu_open.set(false);
-        }
-    });
-    on_cleanup(move || outside_handle.remove());
-    use_escape(
-        move || menu_open.get_untracked(),
-        move || menu_open.set(false),
-    );
-
     let nav_row_view = move |label: &'static str, icon: IconName, target: ActiveView| {
         let class = move || {
             let mut c = String::from("nav__item");
@@ -261,6 +232,40 @@ pub fn AppShell(children: Children) -> impl IntoView {
                         // I do" context as the identity above and Sign Out below.
                         {nav_row_view("Access Readiness", IconName::CheckCircle, ActiveView::Readiness)}
                         {nav_row_view("Settings", IconName::Settings, ActiveView::Settings)}
+                        // Cache diagnostics + manual update check — promoted from the
+                        // former "…" overflow popover to direct nav items so they're
+                        // one click, not two. Styled as `nav__item`s so they collapse
+                        // to icon-only when the rail narrows, matching the links above.
+                        <button
+                            class="nav__item"
+                            type="button"
+                            title="Cache diagnostics"
+                            on:click=move |_| session.tenant_ui.cache_open.set(true)
+                        >
+                            <span class="nav__icon"><Icon name=IconName::Activity size=18 /></span>
+                            <span class="nav__label">"Cache diagnostics"</span>
+                        </button>
+                        <button
+                            class="nav__item"
+                            type="button"
+                            title="Check for updates"
+                            disabled=move || checking.get()
+                            on:click=on_check_updates
+                        >
+                            <span class="nav__icon">
+                                {move || {
+                                    if checking.get() {
+                                        view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                            .into_any()
+                                    } else {
+                                        view! { <Icon name=IconName::Download size=18 /> }.into_any()
+                                    }
+                                }}
+                            </span>
+                            <span class="nav__label">
+                                {move || if checking.get() { "Checking…" } else { "Check for updates" }}
+                            </span>
+                        </button>
                         // Styled as a `nav__item` so it collapses to an icon-only
                         // button (hiding the label) when the rail narrows — the same
                         // way the nav links do — instead of disappearing.
@@ -276,69 +281,11 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                 {move || if signing_out.get() { "Signing out…" } else { "Sign Out" }}
                             </span>
                         </button>
-                        // Overflow "…" popover for the low-frequency utilities:
-                        // cache diagnostics, manual update check, version. Opens
-                        // upward (the block is at the bottom of the rail); closes on
-                        // outside-click / Escape (wired above).
-                        <div class="shell__overflow" node_ref=overflow_ref>
-                            <button
-                                class="nav__item shell__overflow-trigger"
-                                type="button"
-                                title="More — cache diagnostics, check for updates, version"
-                                aria-haspopup="menu"
-                                aria-expanded=move || menu_open.get()
-                                on:click=move |_| menu_open.update(|o| *o = !*o)
-                            >
-                                <span class="nav__icon"><Icon name=IconName::More size=18 /></span>
-                                <span class="nav__label">"More"</span>
-                            </button>
-                            <Show when=move || menu_open.get()>
-                                <div class="shell__overflow-menu" role="menu">
-                                    <button
-                                        class="shell__overflow-item"
-                                        type="button"
-                                        role="menuitem"
-                                        aria-haspopup="dialog"
-                                        on:click=move |_| {
-                                            session.tenant_ui.cache_open.set(true);
-                                            menu_open.set(false);
-                                        }
-                                    >
-                                        <span class="nav__icon"><Icon name=IconName::Activity size=16 /></span>
-                                        <span>"Cache diagnostics"</span>
-                                    </button>
-                                    <button
-                                        class="shell__overflow-item"
-                                        type="button"
-                                        role="menuitem"
-                                        disabled=move || checking.get()
-                                        on:click=move |ev| {
-                                            on_check_updates(ev);
-                                            menu_open.set(false);
-                                        }
-                                    >
-                                        <span class="nav__icon">
-                                            {move || {
-                                                if checking.get() {
-                                                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
-                                                        .into_any()
-                                                } else {
-                                                    view! { <Icon name=IconName::Download size=16 /> }.into_any()
-                                                }
-                                            }}
-                                        </span>
-                                        <span>
-                                            {move || if checking.get() { "Checking…" } else { "Check for updates" }}
-                                        </span>
-                                    </button>
-                                    // App version, baked at compile time. The release
-                                    // bumps the web-rs crate version in lockstep with
-                                    // the app, so CARGO_PKG_VERSION is the shipped one.
-                                    <div class="shell__overflow-version">
-                                        {concat!("Version ", env!("CARGO_PKG_VERSION"))}
-                                    </div>
-                                </div>
-                            </Show>
+                        // App version, baked at compile time. The release bumps the
+                        // web-rs crate version in lockstep with the app, so
+                        // CARGO_PKG_VERSION is the shipped one.
+                        <div class="shell__user-version">
+                            {concat!("Version ", env!("CARGO_PKG_VERSION"))}
                         </div>
                     </div>
                 </div>

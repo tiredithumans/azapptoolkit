@@ -22,7 +22,7 @@ use crate::bindings::defaults::{
     self, AppRegistrationDefaults, EnterpriseApplicationDefaults, StoredPrincipal, TenantDefaults,
 };
 use crate::components::owner_picker::OwnerPicker;
-use crate::components::ui::{Callout, SectionHeader};
+use crate::components::ui::{Callout, SectionHeader, TabBar, TabBarItem};
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 use crate::util::parse_lines;
@@ -109,6 +109,10 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
 
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
+    // Which defaults group is showing. All editor signals live in this scope (not
+    // the tab subtree), so switching tabs never drops in-progress edits, and the
+    // single "Save defaults" button persists every tab's fields at once.
+    let active_tab = RwSignal::new("app-reg".to_string());
 
     let app_exclude = Signal::derive(move || {
         app_owners
@@ -200,77 +204,99 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
 
     view! {
         <div class="settings-editor">
-            <section class="settings-section">
-                <h3>"App Registration defaults"</h3>
-                <Body1 class="hint">
-                    "Default owners to add with one click from an app registration's Owners tab."
-                </Body1>
-                {owner_list(app_owners)}
-                <OwnerPicker on_pick=add_app exclude=app_exclude />
-            </section>
-
-            <section class="settings-section">
-                <h3>"Enterprise Application defaults"</h3>
-                <Body1 class="hint">
-                    "Default owners (users only — Entra rejects groups as service-principal owners) \
-                     and the notification email addresses seeded into a new SAML SSO configuration."
-                </Body1>
-                {owner_list(ent_owners)}
-                <OwnerPicker on_pick=add_ent exclude=ent_exclude />
-                <Field label="Default SSO notification emails (one per line, max 5)">
-                    <Textarea value=emails />
-                </Field>
-                <Body1 class="hint">
-                    "Or search a distribution list / mail-enabled group to add its address:"
-                </Body1>
-                <DlEmailPicker on_pick=add_dl_email />
-            </section>
-
-            <section class="settings-section">
-                <h3>"Key Vault"</h3>
-                <Body1 class="hint">
-                    "Naming pattern for the Key Vault secret created when rotating a credential. \
-                     Use "
-                    <code>"{appId}"</code>
-                    " as the app's client id. Blank uses the built-in "
-                    <code>"secret-{appId}"</code>
-                    " (Key Vault secret names allow only letters, digits, and dashes — no underscores)."
-                </Body1>
-                <Field label="Secret name pattern">
-                    <Input value=secret_pattern placeholder="secret-{appId}" />
-                </Field>
-            </section>
-
-            <section class="settings-section">
-                <h3>"Management scope naming"</h3>
-                <Body1 class="hint">
-                    "Naming pattern for the Exchange management scope this toolkit creates for any \
-                     scoped-mailbox grant (and when migrating a legacy Application Access Policy). \
-                     Use "
-                    <code>"{appId}"</code>
-                    " as the app's client id. Blank uses the built-in "
-                    <code>"app_scope_{appId}"</code>
-                    "."
-                </Body1>
-                <Field label="Management scope name pattern">
-                    <Input value=pattern placeholder="app_scope_{appId}" />
-                </Field>
-            </section>
-
-            <section class="settings-section">
-                <h3>"Mail-enabled security group naming"</h3>
-                <Body1 class="hint">
-                    "Naming pattern for the toolkit-managed mail-enabled security group whose \
-                     membership defines which mailboxes a scoped app can reach. Use "
-                    <code>"{appId}"</code>
-                    " as the app's client id. Blank uses the built-in "
-                    <code>"app_scope_group_{appId}"</code>
-                    "."
-                </Body1>
-                <Field label="Mail-enabled group name pattern">
-                    <Input value=group_pattern placeholder="app_scope_group_{appId}" />
-                </Field>
-            </section>
+            <TabBar
+                items=vec![
+                    TabBarItem { value: "app-reg", label: "App Registration Defaults" },
+                    TabBarItem { value: "enterprise", label: "Enterprise Application Defaults" },
+                    TabBarItem { value: "naming", label: "Naming Defaults" },
+                ]
+                selected=active_tab
+            />
+            <div class="settings-tab">
+                {move || match active_tab.get().as_str() {
+                    "enterprise" => {
+                        view! {
+                            <section class="settings-section">
+                                <Body1 class="hint">
+                                    "Default owners (users only — Entra rejects groups as service-principal owners) \
+                                     and the notification email addresses seeded into a new SAML SSO configuration."
+                                </Body1>
+                                {owner_list(ent_owners)}
+                                <OwnerPicker on_pick=add_ent exclude=ent_exclude />
+                                <Field label="Default SSO notification emails (one per line, max 5)">
+                                    <Textarea value=emails />
+                                </Field>
+                                <Body1 class="hint">
+                                    "Or search a distribution list / mail-enabled group to add its address:"
+                                </Body1>
+                                <DlEmailPicker on_pick=add_dl_email />
+                            </section>
+                        }
+                            .into_any()
+                    }
+                    "naming" => {
+                        view! {
+                            <section class="settings-section">
+                                <h3>"Key Vault secret"</h3>
+                                <Body1 class="hint">
+                                    "Naming pattern for the Key Vault secret created when rotating a credential. \
+                                     Use "
+                                    <code>"{appId}"</code>
+                                    " as the app's client id. Blank uses the built-in "
+                                    <code>"secret-{appId}"</code>
+                                    " (Key Vault secret names allow only letters, digits, and dashes — no underscores)."
+                                </Body1>
+                                <Field label="Secret name pattern">
+                                    <Input value=secret_pattern placeholder="secret-{appId}" />
+                                </Field>
+                            </section>
+                            <section class="settings-section">
+                                <h3>"Management scope"</h3>
+                                <Body1 class="hint">
+                                    "Naming pattern for the Exchange management scope this toolkit creates for any \
+                                     scoped-mailbox grant (and when migrating a legacy Application Access Policy). \
+                                     Use "
+                                    <code>"{appId}"</code>
+                                    " as the app's client id. Blank uses the built-in "
+                                    <code>"app_scope_{appId}"</code>
+                                    "."
+                                </Body1>
+                                <Field label="Management scope name pattern">
+                                    <Input value=pattern placeholder="app_scope_{appId}" />
+                                </Field>
+                            </section>
+                            <section class="settings-section">
+                                <h3>"Mail-enabled security group"</h3>
+                                <Body1 class="hint">
+                                    "Naming pattern for the toolkit-managed mail-enabled security group whose \
+                                     membership defines which mailboxes a scoped app can reach. Use "
+                                    <code>"{appId}"</code>
+                                    " as the app's client id. Blank uses the built-in "
+                                    <code>"app_scope_group_{appId}"</code>
+                                    "."
+                                </Body1>
+                                <Field label="Mail-enabled group name pattern">
+                                    <Input value=group_pattern placeholder="app_scope_group_{appId}" />
+                                </Field>
+                            </section>
+                        }
+                            .into_any()
+                    }
+                    // "app-reg" (default): app-registration default owners.
+                    _ => {
+                        view! {
+                            <section class="settings-section">
+                                <Body1 class="hint">
+                                    "Default owners to add with one click from an app registration's Owners tab."
+                                </Body1>
+                                {owner_list(app_owners)}
+                                <OwnerPicker on_pick=add_app exclude=app_exclude />
+                            </section>
+                        }
+                            .into_any()
+                    }
+                }}
+            </div>
 
             {move || {
                 error.get().map(|e| view! { <Callout tone="danger">{e}</Callout> })
