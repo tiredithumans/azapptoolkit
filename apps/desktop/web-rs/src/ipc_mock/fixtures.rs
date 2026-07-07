@@ -867,6 +867,7 @@ pub fn tenant_defaults() -> azapptoolkit_core::defaults::TenantDefaults {
             default_notification_emails: vec!["sso-alerts@contoso.com".to_string()],
         },
         scope_name_pattern: None,
+        group_name_pattern: None,
         secret_name_pattern: None,
         default_vault: None,
         app_vaults: Default::default(),

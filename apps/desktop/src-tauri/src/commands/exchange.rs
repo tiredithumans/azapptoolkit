@@ -36,24 +36,15 @@ use crate::state::AppState;
 use azapptoolkit_core::defaults::TenantDefaults;
 use azapptoolkit_core::settings::UserSettings;
 
-/// Default scope-name convention for management scopes this toolkit creates:
-/// `app_scope_<AppId GUID>`. Callers may override the name per migration (see
-/// [`migrate_application_access_policies`]); this is the fallback when none is
-/// given. Deliberately distinct from [`group_name_for`] so a scope and its
-/// backing mail-group never collide on name.
-fn scope_name_for(app_id: &str) -> String {
-    format!("app_scope_{app_id}")
-}
-
-/// Name (and alias basis) of the toolkit-managed mail-enabled security group
-/// whose membership defines an app's scoped-mailbox set. One managed group per
-/// app, keyed to its `azapptoolkit_<app_id>` convention. Because this group's DN
-/// is stable, scoping is adjusted by editing its *membership* — the management
-/// scope's `MemberOfGroup` filter never has to change. (The management *scope*
-/// name follows a separate `app_scope_<app_id>` convention — see
-/// [`scope_name_for`] — and is user-overridable.)
-fn group_name_for(app_id: &str) -> String {
-    format!("azapptoolkit_{app_id}")
+/// Loads this tenant's operator defaults from `settings.json` (an empty set if
+/// none). It is the source of the configurable Exchange naming patterns —
+/// [`TenantDefaults::scope_name_for`] (management scope, default
+/// `app_scope_<app_id>`) and [`TenantDefaults::group_name_for`] (mail-enabled
+/// scope group, default `app_scope_group_<app_id>`). The two defaults are kept
+/// distinct so a scope and its backing group never collide on name; both apply
+/// to every Exchange scoping path (fresh grants and legacy-AAP migration).
+fn load_tenant_defaults(tenant_id: &str) -> TenantDefaults {
+    UserSettings::stored(&crate::config_directory()).defaults_for(tenant_id)
 }
 
 /// Exchange aliases allow only a restricted character set and cap at 64 chars.
@@ -405,9 +396,13 @@ async fn apply_exchange_mailbox_scope(
         ));
     }
 
-    let scope_name = scope_name_for(app_id);
+    // The management-scope name follows this tenant's configured pattern (blank ⇒
+    // the built-in `app_scope_<app_id>`), so a fresh scoped grant and the
+    // legacy-AAP migration name their scopes identically. See
+    // `TenantDefaults::scope_name_for`.
+    let scope_name = load_tenant_defaults(tenant_id).scope_name_for(app_id);
     let scope_filter = member_of_group_filter(&dns);
-    // There is exactly one management scope per app (`azapptoolkit_{app_id}`),
+    // There is exactly one management scope per app (its resolved `scope_name`),
     // and `ensure_management_scope` keeps an EXISTING scope as-is rather than
     // rewriting its filter. So if a different permission was already scoped to a
     // different group set, the groups requested *here* silently won't apply —
@@ -1170,7 +1165,7 @@ pub async fn list_exchange_scope_group(
     app_id: String,
 ) -> Result<ExchangeScopeGroupDto, UiError> {
     let exo = exchange_client_checked(&state, &tenant_id).await?;
-    let group_name = group_name_for(&app_id);
+    let group_name = load_tenant_defaults(&tenant_id).group_name_for(&app_id);
     let Some(group) = exo.get_distribution_group(&group_name).await? else {
         return Ok(ExchangeScopeGroupDto {
             group_name,
@@ -1211,7 +1206,7 @@ pub async fn add_exchange_scope_group_members(
     mailboxes: Vec<String>,
 ) -> Result<ExchangeMemberMutationResult, UiError> {
     let exo = exchange_client_checked(&state, &tenant_id).await?;
-    let group_name = group_name_for(&app_id);
+    let group_name = load_tenant_defaults(&tenant_id).group_name_for(&app_id);
     let group_created = exo.get_distribution_group(&group_name).await?.is_none();
     exo.ensure_security_group(&group_name, &sanitize_alias(&group_name))
         .await?;
@@ -1249,7 +1244,7 @@ pub async fn remove_exchange_scope_group_members(
     mailboxes: Vec<String>,
 ) -> Result<ExchangeMemberMutationResult, UiError> {
     let exo = exchange_client_checked(&state, &tenant_id).await?;
-    let group_name = group_name_for(&app_id);
+    let group_name = load_tenant_defaults(&tenant_id).group_name_for(&app_id);
 
     let mut succeeded = Vec::new();
     let mut failed = Vec::new();
@@ -1284,8 +1279,9 @@ pub async fn remove_exchange_scope_group_members(
 /// policy in the tenant is processed.
 ///
 /// `scope_name` optionally overrides the management-scope name for this
-/// migration; when `None` (or blank) it defaults to `app_scope_<AppId GUID>`
-/// (see [`scope_name_for`]). The override is honored only for a single-app
+/// migration; when `None` (or blank) it defaults to the tenant's configured
+/// pattern (see [`TenantDefaults::scope_name_for`], built-in
+/// `app_scope_<AppId GUID>`). The override is honored only for a single-app
 /// migration (`app_id` is `Some`) — a whole-tenant run always derives a distinct
 /// per-app name so the scopes can't collide.
 #[tauri::command]
@@ -1313,8 +1309,9 @@ pub async fn migrate_application_access_policies(
         .filter(|s| !s.is_empty() && app_id.is_some());
 
     // The per-app default follows the tenant's configured scope-name pattern
-    // (blank ⇒ the built-in `app_scope_<appId>`), set from the Settings page.
-    let tenant_defaults = UserSettings::stored(&crate::config_directory()).defaults_for(&tenant_id);
+    // (blank ⇒ the built-in `app_scope_<appId>`), set from the Settings page —
+    // the same pattern fresh scoped grants use.
+    let tenant_defaults = load_tenant_defaults(&tenant_id);
 
     let mut items = Vec::new();
     let mut failures = Vec::new();
@@ -1493,19 +1490,21 @@ mod tests {
     fn scope_and_group_names_follow_distinct_conventions() {
         let app = "71487acd-ec93-476d-bd0e-6c8b31831053";
         // The management scope and its backing mail-group are deliberately named
-        // apart so they never collide: scope = `app_scope_<app>` (user-overridable),
-        // group = `azapptoolkit_<app>`.
-        assert_eq!(scope_name_for(app), format!("app_scope_{app}"));
-        assert_eq!(group_name_for(app), format!("azapptoolkit_{app}"));
-        assert_ne!(scope_name_for(app), group_name_for(app));
+        // apart so they never collide: scope = `app_scope_<app>`,
+        // group = `app_scope_group_<app>`. Both defaults are user-overridable via
+        // the Settings naming patterns (resolved by `TenantDefaults`).
+        let d = TenantDefaults::default();
+        assert_eq!(d.scope_name_for(app), format!("app_scope_{app}"));
+        assert_eq!(d.group_name_for(app), format!("app_scope_group_{app}"));
+        assert_ne!(d.scope_name_for(app), d.group_name_for(app));
     }
 
     #[test]
     fn alias_is_safe_and_bounded() {
         let app = "71487acd-ec93-476d-bd0e-6c8b31831053";
-        let alias = sanitize_alias(&group_name_for(app));
+        let alias = sanitize_alias(&TenantDefaults::default().group_name_for(app));
         // A GUID-based name is already alias-safe and well under the 64 cap.
-        assert_eq!(alias, format!("azapptoolkit_{app}"));
+        assert_eq!(alias, format!("app_scope_group_{app}"));
         assert!(alias.len() <= 64);
         // Disallowed characters are dropped; length is capped.
         let messy = sanitize_alias(&format!("azapptoolkit_a b@c!{}", "x".repeat(80)));

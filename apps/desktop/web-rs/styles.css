@@ -249,6 +249,15 @@ h3 {
   margin-top: var(--space-2);
 }
 
+/* State-aware status header (existence badge + "will be created" callout or the
+   live member count) that sits above the add-mailbox field. */
+.managed-scope-group__status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+
 .member-list {
   list-style: none;
   margin: var(--space-2) 0;

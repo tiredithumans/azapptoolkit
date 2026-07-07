@@ -92,15 +92,19 @@ assignment → strip org-wide Entra grant → `invalidate_app_lists`) lives in
 The MI grant form opens an inline scope panel for a scopable permission; non-scopable ones grant
 org-wide as before.
 
-### Toolkit-managed scope group (`azapptoolkit_<app_id>`)
+### Toolkit-managed scope group (default `app_scope_group_<app_id>`)
 
-The recommended scope source is a **toolkit-managed mail-enabled security group**, named
-`azapptoolkit_<app_id>` by `group_name_for` — exactly one managed group per app. The management
-**scope** built over it is named separately: `scope_name_for` yields `app_scope_<app_id>` by default
-(deliberately distinct from the group so a scope and its backing group never collide on name), and
-the legacy-AAP-migration command accepts an optional `scope_name` override for a single-app run (blank
-⇒ the default; a whole-tenant run always derives the per-app default so scopes can't clash). Three
-commands manage the group, all in `commands::exchange`:
+The recommended scope source is a **toolkit-managed mail-enabled security group**, named by
+`TenantDefaults::group_name_for` (default `app_scope_group_<app_id>`) — exactly one managed group per
+app. The management **scope** built over it is named separately by `TenantDefaults::scope_name_for`
+(default `app_scope_<app_id>`), deliberately distinct from the group so a scope and its backing group
+never collide on name. **Both** names resolve from the tenant's configurable Settings patterns
+(`scope_name_pattern` / `group_name_pattern`, `{appId}`-templated, blank ⇒ the built-in default) and
+apply to **every** Exchange scoping path — fresh scoped grants and the legacy-AAP migration alike;
+commands load them through the `load_tenant_defaults(tenant_id)` helper rather than a hardcoded prefix.
+The legacy-AAP-migration command additionally accepts an optional `scope_name` override for a
+single-app run (blank ⇒ the pattern default; a whole-tenant run always derives the per-app default so
+scopes can't clash). Three commands manage the group, all in `commands::exchange`:
 
 - `list_exchange_scope_group` — `Get-DistributionGroup` + `Get-DistributionGroupMember`; returns
   whether the group exists, its SMTP/DN, and its members.

@@ -1,6 +1,7 @@
-//! Membership panel for the toolkit-managed mail-enabled scope group
-//! (`azapptoolkit_<appId>`): resolves the group's members and lets the user
-//! add/remove mailboxes inline. Backed by `list_/add_/remove_exchange_scope_group(_members)`.
+//! Membership panel for the toolkit-managed mail-enabled scope group (named by
+//! the tenant's group-name pattern, default `app_scope_group_<appId>`): resolves
+//! the group's members and lets the user add/remove mailboxes inline. Backed by
+//! `list_/add_/remove_exchange_scope_group(_members)`.
 //!
 //! Once an app is scoped via Exchange RBAC, the management scope's
 //! `MemberOfGroup` filter resolves this group's membership live, so adjusting
@@ -14,6 +15,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Spinner, SpinnerSize, Textare
 
 use crate::bindings::auth;
 use crate::bindings::exchange;
+use crate::components::ui::Callout;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::parse_lines;
@@ -25,7 +27,7 @@ type GroupState =
 
 #[component]
 pub fn ManagedScopeGroupPanel(
-    /// appId (client id) — resolves `azapptoolkit_<appId>`.
+    /// appId (client id) — resolves the tenant's scope group (default `app_scope_group_<appId>`).
     #[prop(into)]
     app_id: Signal<String>,
     /// Host-owned resolved group state (existence + members). The panel loads it
@@ -168,14 +170,52 @@ pub fn ManagedScopeGroupPanel(
                 })
             />
             {move || {
-                let name = group_state.get().and_then(|r| r.ok()).map(|g| g.group_name);
-                let heading = match name {
-                    Some(n) if !n.is_empty() => {
-                        format!("Mailboxes in scope — managed group “{n}”")
+                // State-aware status header: whether the group already EXISTS (with
+                // its live member count) or WILL BE CREATED on first add — the DTO
+                // always carries the resolved name, so the bare name alone can't tell
+                // them apart.
+                match group_state.get() {
+                    Some(Ok(g)) if !g.exists => {
+                        let name = g.group_name.clone();
+                        view! {
+                            <div class="managed-scope-group__status">
+                                <div>
+                                    <strong>"Mailboxes in scope"</strong>
+                                    " "
+                                    <span class="badge">"Will be created"</span>
+                                </div>
+                                <Callout tone="info" role="status">
+                                    "The managed scope group " <span class="mono">{name}</span>
+                                    " doesn't exist yet — it's created automatically when you add the "
+                                    "first mailbox below. Its membership is exactly the set of mailboxes "
+                                    "this app can reach through the scoped grant."
+                                </Callout>
+                            </div>
+                        }
+                            .into_any()
                     }
-                    _ => "Mailboxes in scope (managed group)".to_string(),
-                };
-                view! { <strong>{heading}</strong> }
+                    Some(Ok(g)) => {
+                        let name = g.group_name.clone();
+                        let n = g.members.len();
+                        let noun = if n == 1 { "mailbox" } else { "mailboxes" };
+                        view! {
+                            <div class="managed-scope-group__status">
+                                <div>
+                                    <strong>{format!("Mailboxes in scope — managed group “{name}”")}</strong>
+                                    " "
+                                    <span class="badge badge--ok">"Exists"</span>
+                                </div>
+                                <Body1 class="hint">
+                                    {format!(
+                                        "{n} {noun} in scope — the app can reach exactly these through the scoped grant.",
+                                    )}
+                                </Body1>
+                            </div>
+                        }
+                            .into_any()
+                    }
+                    _ => view! { <strong>"Mailboxes in scope (managed group)"</strong> }.into_any(),
+                }
             }}
             <Field label="Add mailboxes (one per line)">
                 <Textarea value=add_text placeholder="alice@contoso.com\nbob@contoso.com" />
@@ -223,18 +263,12 @@ pub fn ManagedScopeGroupPanel(
                         }
                             .into_any()
                     }
-                    Some(Ok(g)) if !g.exists => {
-                        view! {
-                            <Body1 class="hint">
-                                "No managed group yet — add a mailbox above to create it."
-                            </Body1>
-                        }
-                            .into_any()
-                    }
+                    // Not-yet-created: the status header's callout already explains it.
+                    Some(Ok(g)) if !g.exists => ().into_any(),
                     Some(Ok(g)) if g.members.is_empty() => {
                         view! {
                             <Body1 class="hint">
-                                "The managed group exists but has no mailboxes yet — add at least one above."
+                                "No mailboxes in scope yet — add at least one above."
                             </Body1>
                         }
                             .into_any()

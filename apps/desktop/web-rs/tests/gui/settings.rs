@@ -21,6 +21,7 @@ async fn loads_and_renders_default_sections() {
     assert!(ts::body_contains("Enterprise Application defaults"));
     assert!(ts::body_contains("Sam Owner"));
     assert!(ts::body_contains("Management scope name pattern"));
+    assert!(ts::body_contains("Mail-enabled group name pattern"));
     // The read used the harness-preset tenant.
     assert_eq!(
         ts::last_call("get_tenant_defaults")
