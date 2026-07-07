@@ -233,6 +233,10 @@ fn app_detail(a: &DemoApp) -> ApplicationDetail {
             created_date_time: f::date(2023, 3, 14),
             password_credentials: a.secrets.clone(),
             key_credentials: a.certs.clone(),
+            notes: Some(format!(
+                "Owned by the Identity Platform team — rotate {} credentials quarterly.",
+                a.name
+            )),
             ..Default::default()
         },
         service_principal: None,

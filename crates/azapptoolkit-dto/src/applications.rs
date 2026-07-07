@@ -121,6 +121,8 @@ pub struct UpdateApplicationInput {
     pub display_name: Option<String>,
     pub sign_in_audience: Option<String>,
     pub description: Option<String>,
+    /// Free-text internal notes. `Some("")` clears; `None` leaves it untouched.
+    pub notes: Option<String>,
 }
 
 /// Current Authentication-tab settings for an app registration: per-platform

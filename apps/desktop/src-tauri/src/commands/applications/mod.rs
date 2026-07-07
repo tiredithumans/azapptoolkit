@@ -313,6 +313,7 @@ pub async fn update_application(
         display_name: patch.display_name,
         sign_in_audience: patch.sign_in_audience,
         description: patch.description,
+        notes: patch.notes,
         required_resource_access: None,
     };
     client.update_application(&object_id, &graph_patch).await?;

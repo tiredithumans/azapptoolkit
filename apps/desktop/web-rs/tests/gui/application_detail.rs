@@ -27,6 +27,23 @@ async fn loads_and_renders_detail() {
 }
 
 #[wasm_bindgen_test]
+async fn overview_renders_internal_notes() {
+    ts::reset();
+    // Seed the detail fixture with internal notes; the Overview tab (default)
+    // must surface them as a read field.
+    let mut detail = fixtures::application_detail("obj-1", "app-1", "Contoso CRM");
+    detail.application.notes = Some("Rotate secrets quarterly.".to_string());
+    ts::mock_ok("get_application_detail", &detail);
+
+    let _m = ts::mount_view(
+        || view! { <ApplicationDetailPane object_id=Signal::derive(|| "obj-1".to_string()) /> },
+    );
+
+    ts::wait_for(|| ts::body_contains("Rotate secrets quarterly.")).await;
+    assert!(ts::body_contains("Internal notes"));
+}
+
+#[wasm_bindgen_test]
 async fn header_copy_shows_copied_badge() {
     ts::reset();
     ts::mock_ok(

@@ -7,6 +7,16 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **App registration — editable Internal notes.** The Overview tab now shows an
+  **Internal notes** field (Microsoft Graph `application.notes`, the same
+  free-text property the Entra portal surfaces under *Branding & properties*).
+  It reads in the overview and is editable in the same **Edit → Save** form as
+  display name / sign-in audience / description; clearing the box removes the
+  note. Saving reuses the existing `update_application` path, so the cached
+  detail is refreshed automatically.
+
 ## [0.16.0] - 2026-07-06
 
 ### Added
