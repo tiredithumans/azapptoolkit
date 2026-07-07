@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-07-07
+
 ### Changed
 
 - **Settings — organized into three tabs.** The per-tenant operator defaults are
