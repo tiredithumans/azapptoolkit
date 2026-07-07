@@ -88,11 +88,11 @@ impl UserSettings {
     }
 
     /// Applies the operator-editable half of `incoming` for `tenant_id` —
-    /// default owners, SSO notification emails, and the scope-name pattern —
-    /// while **preserving** the vault fields (`default_vault`, `app_vaults`),
-    /// which are owned by the credential-rotation flow, not the Settings page.
-    /// This keeps a Settings save from clobbering a binding a concurrent
-    /// rotation just recorded.
+    /// default owners, SSO notification emails, and the Exchange scope-/group-name
+    /// patterns — while **preserving** the vault fields (`default_vault`,
+    /// `app_vaults`), which are owned by the credential-rotation flow, not the
+    /// Settings page. This keeps a Settings save from clobbering a binding a
+    /// concurrent rotation just recorded.
     pub fn apply_tenant_defaults(&mut self, tenant_id: &str, incoming: TenantDefaults) {
         let entry = self
             .tenant_defaults
@@ -101,6 +101,7 @@ impl UserSettings {
         entry.app_registration = incoming.app_registration;
         entry.enterprise_application = incoming.enterprise_application;
         entry.scope_name_pattern = incoming.scope_name_pattern;
+        entry.group_name_pattern = incoming.group_name_pattern;
         entry.secret_name_pattern = incoming.secret_name_pattern;
         // default_vault + app_vaults are intentionally preserved.
     }

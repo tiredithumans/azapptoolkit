@@ -1,5 +1,5 @@
 //! Per-tenant operator defaults (default owners, SSO notification emails,
-//! management-scope-name pattern) read/written from the Settings page. Persisted
+//! Exchange scope-/group-name patterns) read/written from the Settings page. Persisted
 //! in `settings.json` alongside the first-run config, using the same
 //! read-modify-write pattern as `commands::config` so untouched fields survive.
 //!
@@ -38,6 +38,10 @@ pub fn set_tenant_defaults(tenant_id: String, defaults: TenantDefaults) -> Resul
     // A blank pattern is stored as "unset" so it falls back to the built-in default.
     defaults.scope_name_pattern = defaults
         .scope_name_pattern
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    defaults.group_name_pattern = defaults
+        .group_name_pattern
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty());
 

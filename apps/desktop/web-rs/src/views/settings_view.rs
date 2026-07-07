@@ -104,6 +104,7 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
             .join("\n"),
     );
     let pattern = RwSignal::new(initial.scope_name_pattern.clone().unwrap_or_default());
+    let group_pattern = RwSignal::new(initial.group_name_pattern.clone().unwrap_or_default());
     let secret_pattern = RwSignal::new(initial.secret_name_pattern.clone().unwrap_or_default());
 
     let busy = RwSignal::new(false);
@@ -175,6 +176,10 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                     let p = pattern.get().trim().to_string();
                     (!p.is_empty()).then_some(p)
                 },
+                group_name_pattern: {
+                    let p = group_pattern.get().trim().to_string();
+                    (!p.is_empty()).then_some(p)
+                },
                 secret_name_pattern: {
                     let p = secret_pattern.get().trim().to_string();
                     (!p.is_empty()).then_some(p)
@@ -237,10 +242,11 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
             </section>
 
             <section class="settings-section">
-                <h3>"Exchange migration"</h3>
+                <h3>"Management scope naming"</h3>
                 <Body1 class="hint">
-                    "Naming pattern for the management scope created when migrating a legacy \
-                     Application Access Policy. Use "
+                    "Naming pattern for the Exchange management scope this toolkit creates for any \
+                     scoped-mailbox grant (and when migrating a legacy Application Access Policy). \
+                     Use "
                     <code>"{appId}"</code>
                     " as the app's client id. Blank uses the built-in "
                     <code>"app_scope_{appId}"</code>
@@ -248,6 +254,21 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                 </Body1>
                 <Field label="Management scope name pattern">
                     <Input value=pattern placeholder="app_scope_{appId}" />
+                </Field>
+            </section>
+
+            <section class="settings-section">
+                <h3>"Mail-enabled security group naming"</h3>
+                <Body1 class="hint">
+                    "Naming pattern for the toolkit-managed mail-enabled security group whose \
+                     membership defines which mailboxes a scoped app can reach. Use "
+                    <code>"{appId}"</code>
+                    " as the app's client id. Blank uses the built-in "
+                    <code>"app_scope_group_{appId}"</code>
+                    "."
+                </Body1>
+                <Field label="Mail-enabled group name pattern">
+                    <Input value=group_pattern placeholder="app_scope_group_{appId}" />
                 </Field>
             </section>
 

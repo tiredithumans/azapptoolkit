@@ -7,6 +7,28 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **Exchange scoping — configurable scope + group naming, applied to all scoping.**
+  Two per-tenant naming patterns on the **Settings** page now drive the names the
+  toolkit creates when it scopes an app's mailbox access via Exchange RBAC:
+  - **Management scope naming** (default `app_scope_{appId}`) — previously wired
+    only into the legacy-AAP migration, this pattern now governs the management
+    scope name for **every** Exchange scoping path, including fresh scoped-mailbox
+    grants from the Grant-access wizard. The old migration-only "Exchange
+    migration" settings section is replaced by this clearer one.
+  - **Mail-enabled security group naming** (new, default `app_scope_group_{appId}`)
+    — the toolkit-managed scope group whose membership defines which mailboxes an
+    app can reach is now configurable too. **Note:** the built-in default changed
+    from `azapptoolkit_{appId}`; a scope group already created under the old name
+    won't be auto-discovered unless you set the group pattern to
+    `azapptoolkit_{appId}`.
+- **Scope wizard — clearer managed-group status.** Step 2's mailbox panel now
+  badges whether the scope group already **exists** (with its live member count)
+  or **will be created** on first add — the previous heading implied the group
+  existed even when it didn't — and lists the group's current members so it's
+  clear exactly which mailboxes the scoping covers.
+
 ## [0.17.0] - 2026-07-06
 
 ### Added
