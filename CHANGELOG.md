@@ -7,6 +7,53 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Create enterprise applications from the Microsoft Entra gallery.** The
+  renamed **New application** button (Enterprise Applications header + the Home
+  Overview card) now opens a chooser — **Browse the Entra gallery** or **Create
+  your own** — mirroring the Azure portal. "Browse the gallery" searches the
+  `applicationTemplates` catalog and instantiates the picked app (e.g. Salesforce,
+  ServiceNow) into a paired app + service principal; single sign-on is then
+  finished on the app's SSO tab. "Create your own" opens the existing custom
+  SAML/OIDC SSO wizard. New backend: `search_application_templates` +
+  `create_gallery_application`.
+
+### Changed
+
+- **Renamed "New SSO application" → "New application".** Matches the Azure portal
+  and the app's "New app registration" convention; it now covers both the gallery
+  and custom creation paths (see Added).
+
+- **Home Overview — card action buttons align to a common baseline.** Every card's
+  action(s) now sit in a consistent row pinned to the card bottom, so the buttons
+  line up across the row instead of floating at content-dependent heights.
+- **Left nav slimmed to navigation; account actions moved to the tenant pill.**
+  The signed-in tenant pill (top right) is now an account menu: clicking it drops
+  Access Readiness, Settings, Cache diagnostics, Check for updates, Sign Out, and
+  the app version — the cluster that used to sit at the foot of the left rail. The
+  rail is now purely Inventory / Security / Operations, and the account actions
+  stay reachable from the always-visible pill even when the rail collapses. The
+  Refresh-token control stays beside the pill.
+- **Access Readiness — removed the standalone "Re-check" button.** Refreshing your
+  token (the top-right control) now re-runs the readiness check in place, since a
+  refresh is exactly when your active roles change — one action instead of
+  refresh-then-re-check.
+
+- **Global search is now a records-only finder.** The command palette (nav/tool
+  actions that appeared as a "Commands" group in the results) was removed now that
+  the nav rail and account menu cover navigation — so searching for an app is no
+  longer buried under command rows. Records (App Registrations / Enterprise
+  Applications / Managed Identities) stay keyboard-navigable, and Cmd/Ctrl-K still
+  focuses the bar.
+
+### Fixed
+
+- **Global search hint no longer shows a Mac-only shortcut or truncates.** The
+  placeholder dropped the `⌘K` reference (the focus hotkey still works with
+  Ctrl/Cmd on every platform) and is now a short "Search apps by name or GUID…"
+  tip that fits the field.
+
 ## [0.18.1] - 2026-07-07
 
 ### Changed

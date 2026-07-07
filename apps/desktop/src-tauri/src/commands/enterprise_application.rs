@@ -17,8 +17,8 @@ use azapptoolkit_graph::GraphError;
 use crate::commands::applications::{enterprise_key, invalidate_app_lists, sp_index_key};
 use crate::dto::UiError;
 use crate::dto::enterprise_application::{
-    AppAssignmentDto, EnterpriseApplicationDetail, EnterpriseApplicationDto, GroupMembershipDto,
-    ProvisioningJobDto,
+    AppAssignmentDto, ApplicationTemplateDto, EnterpriseApplicationDetail,
+    EnterpriseApplicationDto, GalleryAppSummary, GroupMembershipDto, ProvisioningJobDto,
 };
 use crate::state::AppState;
 
@@ -558,6 +558,72 @@ fn map_provisioning_job(j: SynchronizationJob) -> ProvisioningJobDto {
             .as_ref()
             .and_then(|s| s.quarantine.as_ref().and_then(|q| q.reason.clone())),
     }
+}
+
+/// Searches the Entra application gallery by display-name prefix for the "Browse
+/// the gallery" picker in the New-application flow. Returns up to 25 templates
+/// (those with a display name); a query under 2 chars returns nothing without a
+/// round trip. Reading the gallery needs no extra scope beyond the signed-in
+/// Graph token.
+#[tauri::command]
+pub async fn search_application_templates(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    query: String,
+) -> Result<Vec<ApplicationTemplateDto>, UiError> {
+    let q = query.trim();
+    if q.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let client = state.graph_for(&tenant_id);
+    let templates = client.search_application_templates(q, 25).await?;
+    Ok(templates
+        .into_iter()
+        .filter_map(|t| {
+            Some(ApplicationTemplateDto {
+                id: t.id,
+                display_name: t.display_name?,
+                publisher: t.publisher,
+                description: t.description,
+                categories: t.categories,
+                logo_url: t.logo_url,
+                supported_single_sign_on_modes: t.supported_single_sign_on_modes,
+            })
+        })
+        .collect())
+}
+
+/// Creates an enterprise application from a gallery template by instantiating it
+/// (`applicationTemplates/{id}/instantiate`) — one call that provisions the app +
+/// service principal preconfigured for that gallery app. SSO is then finished on
+/// the app's SSO tab (the template seeds the metadata). Reuses the same
+/// `Application.ReadWrite.All` write scope as the custom SSO create; busts the app
+/// lists on success so the new SP appears.
+#[tauri::command]
+pub async fn create_gallery_application(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    template_id: String,
+    display_name: String,
+) -> Result<GalleryAppSummary, UiError> {
+    let name = display_name.trim();
+    if name.is_empty() {
+        return Err(UiError::validation(
+            "invalid_display_name",
+            "Enter a name for the application.",
+        ));
+    }
+    let client = state.graph_for(&tenant_id);
+    let pair = client
+        .instantiate_application_template(&template_id, name)
+        .await?;
+    invalidate_app_lists(&state.cache, &tenant_id);
+    Ok(GalleryAppSummary {
+        object_id: pair.application.id,
+        service_principal_id: pair.service_principal.id,
+        app_id: pair.application.app_id,
+        display_name: name.to_string(),
+    })
 }
 
 #[cfg(test)]

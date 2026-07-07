@@ -504,6 +504,35 @@ impl GraphClient {
         self.send_json(Method::POST, &path, &body).await
     }
 
+    /// Searches the Microsoft Entra application gallery by display-name prefix
+    /// (`GET /applicationTemplates?$filter=startswith(displayName,'…')`), ordered
+    /// by name, capped at `top`. Reading the gallery needs no extra permission
+    /// beyond a valid Graph token (`$search` isn't supported here, so this is a
+    /// prefix match). The caller passes an already-trimmed, non-empty query.
+    pub async fn search_application_templates(
+        &self,
+        query: &str,
+        top: u32,
+    ) -> Result<Vec<ApplicationTemplate>> {
+        // OData single-quote escaping so a name like `O'Neil` can't break the
+        // filter literal: `'` → `''`.
+        let filter = format!("startswith(displayName,'{}')", query.replace('\'', "''"));
+        let top = top.to_string();
+        let params: [(&str, &str); 4] = [
+            ("$filter", filter.as_str()),
+            ("$top", top.as_str()),
+            ("$orderby", "displayName"),
+            (
+                "$select",
+                "id,displayName,publisher,description,categories,logoUrl,supportedSingleSignOnModes",
+            ),
+        ];
+        let page: Paged<ApplicationTemplate> = self
+            .get_json("/applicationTemplates", &params, false)
+            .await?;
+        Ok(page.items)
+    }
+
     /// PATCH `/applications/{id}` with a caller-built body carrying the SSO
     /// fields (`identifierUris`, `web.redirectUris`, `web.logoutUrl`,
     /// `spa.redirectUris`). Kept separate from the typed `AppPatch` so the

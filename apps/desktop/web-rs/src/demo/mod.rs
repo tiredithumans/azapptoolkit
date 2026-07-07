@@ -496,6 +496,9 @@ fn register_fixtures() {
     mock_ok("set_tenant_defaults", &());
     mock_ok("search_users", &f::directory_user_search());
     mock_ok("search_distribution_lists", &f::distribution_list_search());
+    // "New application" → Browse the gallery: template search + instantiate.
+    mock_ok("search_application_templates", &f::application_templates());
+    mock_ok("create_gallery_application", &f::gallery_app_summary());
 
     // ---- Global search (top bar) ----
     mock_ok(

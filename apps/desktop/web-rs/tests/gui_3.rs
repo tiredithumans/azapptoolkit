@@ -7,6 +7,8 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
 #[path = "gui/confirm_dialog.rs"]
 mod confirm_dialog;
+#[path = "gui/gallery.rs"]
+mod gallery;
 #[path = "gui/global_search.rs"]
 mod global_search;
 #[path = "gui/managed_identity_scoping.rs"]

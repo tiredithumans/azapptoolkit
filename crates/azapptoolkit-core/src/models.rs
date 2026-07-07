@@ -719,6 +719,27 @@ pub struct ApplicationServicePrincipal {
     pub service_principal: ServicePrincipal,
 }
 
+/// A Microsoft Entra **application gallery** template (`GET /applicationTemplates`).
+/// Instantiating one (`applicationTemplates/{id}/instantiate`) creates a paired
+/// app + service principal preconfigured for that gallery app (e.g. Salesforce).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationTemplate {
+    pub id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub publisher: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub logo_url: Option<String>,
+    #[serde(default)]
+    pub supported_single_sign_on_modes: Vec<String>,
+}
+
 /// Response of the service-principal `addTokenSigningCertificate` action — a
 /// freshly minted self-signed SAML token-signing certificate. `key` carries the
 /// base64-encoded certificate (and, for the signing entry, the private key) and

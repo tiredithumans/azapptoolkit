@@ -391,6 +391,41 @@ async fn instantiate_template_returns_app_and_sp() {
 }
 
 #[tokio::test]
+async fn search_application_templates_filters_by_name_prefix_and_parses() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/applicationTemplates"))
+        .and(query_param("$filter", "startswith(displayName,'sales')"))
+        .and(query_param("$top", "20"))
+        .and(query_param("$orderby", "displayName"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [
+                {
+                    "id": "tmpl-1",
+                    "displayName": "Salesforce",
+                    "publisher": "Salesforce.com",
+                    "categories": ["crm"],
+                    "supportedSingleSignOnModes": ["saml", "password"]
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let templates = client
+        .search_application_templates("sales", 20)
+        .await
+        .unwrap();
+    assert_eq!(templates.len(), 1);
+    assert_eq!(templates[0].id, "tmpl-1");
+    assert_eq!(templates[0].display_name.as_deref(), Some("Salesforce"));
+    assert_eq!(
+        templates[0].supported_single_sign_on_modes,
+        vec!["saml".to_string(), "password".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn patch_application_web_sends_identifier_and_reply_urls() {
     let server = MockServer::start().await;
     Mock::given(method("PATCH"))

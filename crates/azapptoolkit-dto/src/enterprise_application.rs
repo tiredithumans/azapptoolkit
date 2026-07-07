@@ -123,3 +123,30 @@ pub struct AppAssignmentDto {
     /// `app_roles`.
     pub app_role_id: String,
 }
+
+/// A Microsoft Entra application-gallery template surfaced in the "Browse the
+/// gallery" search — the fields the picker renders. Mirrors
+/// `azapptoolkit_core::models::ApplicationTemplate` (a `display_name` always
+/// present here; the command drops templates without one).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplicationTemplateDto {
+    pub id: String,
+    pub display_name: String,
+    pub publisher: Option<String>,
+    pub description: Option<String>,
+    pub categories: Vec<String>,
+    pub logo_url: Option<String>,
+    /// SSO modes the gallery app supports (e.g. `saml`, `password`, `oidc`).
+    pub supported_single_sign_on_modes: Vec<String>,
+}
+
+/// Result of creating an enterprise application from a gallery template
+/// (`instantiate`): the identifiers of the freshly created app + service
+/// principal, so the UI can confirm and refresh the list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GalleryAppSummary {
+    pub object_id: String,
+    pub service_principal_id: String,
+    pub app_id: String,
+    pub display_name: String,
+}

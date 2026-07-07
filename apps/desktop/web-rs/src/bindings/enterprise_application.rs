@@ -431,3 +431,49 @@ pub async fn save_enterprise_applications_to_file(
     )
     .await
 }
+
+/// Searches the Entra application gallery by display-name prefix for the
+/// New-application "Browse the gallery" picker (2+ chars; empty below that).
+pub async fn search_application_templates(
+    tenant_id: &str,
+    query: &str,
+) -> Result<Vec<ApplicationTemplateDto>, UiError> {
+    invoke_result(
+        "search_application_templates",
+        SearchTemplatesArgs { tenant_id, query },
+    )
+    .await
+}
+
+/// Creates an enterprise application from a gallery template (instantiate) and
+/// returns the created app + service-principal identifiers.
+pub async fn create_gallery_application(
+    tenant_id: &str,
+    template_id: &str,
+    display_name: &str,
+) -> Result<GalleryAppSummary, UiError> {
+    invoke_result(
+        "create_gallery_application",
+        CreateGalleryAppArgs {
+            tenant_id,
+            template_id,
+            display_name,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchTemplatesArgs<'a> {
+    tenant_id: &'a str,
+    query: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateGalleryAppArgs<'a> {
+    tenant_id: &'a str,
+    template_id: &'a str,
+    display_name: &'a str,
+}

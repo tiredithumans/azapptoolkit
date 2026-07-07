@@ -152,6 +152,11 @@ pub struct TenantScopedUi {
     // `create_open`) so it survives view switches and is triggered from the
     // Enterprise Apps view header.
     pub sso_wizard_open: RwSignal<bool>,
+    // "New application" chooser (Browse the gallery / Create your own) open flag,
+    // and the gallery-browse modal open flag it routes to. Both lifted to the
+    // shell like the wizard so they survive view switches.
+    pub new_app_chooser_open: RwSignal<bool>,
+    pub gallery_open: RwSignal<bool>,
 }
 
 impl TenantScopedUi {
@@ -173,6 +178,8 @@ impl TenantScopedUi {
             cache_open: RwSignal::new(false),
             create_open: RwSignal::new(false),
             sso_wizard_open: RwSignal::new(false),
+            new_app_chooser_open: RwSignal::new(false),
+            gallery_open: RwSignal::new(false),
         }
     }
 
@@ -199,6 +206,8 @@ impl TenantScopedUi {
         self.cache_open.set(false);
         self.create_open.set(false);
         self.sso_wizard_open.set(false);
+        self.new_app_chooser_open.set(false);
+        self.gallery_open.set(false);
     }
 }
 
@@ -232,6 +241,11 @@ pub struct Session {
     // "Security Posture" tile, which stays mounted (keep-alive) across view
     // switches — refetch the freshly cached run instead of showing stale state.
     pub audit_reload: RwSignal<u32>,
+    // Bumped when the operator refreshes their token (re-applying roles activated
+    // since sign-in), so a mounted Access Readiness checklist re-runs its check in
+    // place. The Refresh-token control is the single "re-check my access" trigger —
+    // there is no separate Re-check button.
+    pub readiness_reload: RwSignal<u32>,
     // Last-viewed detail tab per resource type, so switching between items keeps
     // the admin's working tab (e.g. stay on Permissions across apps) instead of
     // snapping back to Overview. A deep-link via `pending_app_tab` overrides it.
@@ -319,6 +333,12 @@ impl Session {
     /// the audit view (the Home posture tile) refetch.
     pub fn bump_audit_reload(&self) {
         self.audit_reload.update(|n| *n = n.wrapping_add(1));
+    }
+
+    /// Force the Access Readiness checklist to re-run — called after a token
+    /// refresh re-applies roles, so the checklist reflects newly-active access.
+    pub fn bump_readiness_reload(&self) {
+        self.readiness_reload.update(|n| *n = n.wrapping_add(1));
     }
 
     /// Open `entity_id` into the shared working set and focus it (1-up).
@@ -453,6 +473,25 @@ impl Session {
     /// switches.)
     pub fn open_create_app(&self) {
         self.tenant_ui.create_open.set(true);
+    }
+
+    /// Open the New-SSO-application wizard. (Lifted to the shell — mounted under
+    /// the Enterprise Apps view — so callers off that view must switch to it too.)
+    pub fn open_sso_wizard(&self) {
+        self.tenant_ui.sso_wizard_open.set(true);
+    }
+
+    /// Open the "New application" chooser (Browse the gallery / Create your own).
+    /// Like the wizard it's mounted under the Enterprise Apps view, so callers off
+    /// that view switch to it first.
+    pub fn open_new_app_chooser(&self) {
+        self.tenant_ui.new_app_chooser_open.set(true);
+    }
+
+    /// Open the gallery-browse modal (reached from the chooser's "Browse the
+    /// gallery" option).
+    pub fn open_gallery(&self) {
+        self.tenant_ui.gallery_open.set(true);
     }
 
     /// Open an app registration in the workspace on a specific tab (e.g.
@@ -680,6 +719,7 @@ pub fn provide_session() {
         security_tab: RwSignal::new(String::from("findings")),
         enterprise_apps_reload: RwSignal::new(0),
         audit_reload: RwSignal::new(0),
+        readiness_reload: RwSignal::new(0),
         toasts: RwSignal::new_local(Vec::new()),
         toast_seq: RwSignal::new(0),
     };
@@ -771,6 +811,8 @@ mod tests {
             ui.cache_open.set(true);
             ui.create_open.set(true);
             ui.sso_wizard_open.set(true);
+            ui.new_app_chooser_open.set(true);
+            ui.gallery_open.set(true);
 
             session.set_active_tenant(None);
 
@@ -792,6 +834,8 @@ mod tests {
             assert!(!ui.cache_open.get_untracked());
             assert!(!ui.create_open.get_untracked());
             assert!(!ui.sso_wizard_open.get_untracked());
+            assert!(!ui.new_app_chooser_open.get_untracked());
+            assert!(!ui.gallery_open.get_untracked());
             // And the Session-owned resets still happen alongside.
             assert_eq!(session.view.get_untracked(), ActiveView::Home);
         });
