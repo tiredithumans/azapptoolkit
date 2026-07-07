@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-07
+
 ### Changed
 
 - **Exchange scoping — configurable scope + group naming, applied to all scoping.**
