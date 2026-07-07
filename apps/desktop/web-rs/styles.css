@@ -465,40 +465,6 @@ h3 {
   flex-shrink: 0;
 }
 
-.shell__user {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  /* No horizontal padding: the parent `shell__nav-list` already insets by
-   * `space-2`, so the user buttons line up with the nav items above. */
-  padding: var(--space-2) 0 var(--space-1);
-  margin-top: var(--space-2);
-  border-top: 1px solid var(--border);
-  /* Lives at the end of the scrollable `shell__nav-list`, directly below the
-   * Operations group, so it stays attached to the nav and scrolls with it
-   * instead of being pinned to the bottom of a tall rail (where a long content
-   * list pushed it out of view). `flex-shrink:0` keeps the buttons from
-   * compressing. */
-  flex-shrink: 0;
-}
-.shell__user-info {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: 0 var(--space-2);
-  overflow: hidden;
-}
-.shell__user-signout {
-  width: 100%;
-}
-
-/* App version line at the foot of the user block (was inside the former "…"
- * overflow popover, now shown directly). Muted, non-interactive. */
-.shell__user-version {
-  padding: var(--space-1) var(--space-2) 0;
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-}
 /* Changelog splash for a pending app update. */
 .update-splash {
   display: grid;
@@ -564,21 +530,6 @@ h3 {
   display: grid;
   gap: var(--space-1);
 }
-.shell__user-name {
-  font-size: var(--text-base);
-  font-weight: var(--weight-semibold);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.shell__user-email {
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .shell__nav-list {
   display: flex;
   flex-direction: column;
@@ -666,6 +617,13 @@ h3 {
 }
 /* Right third: signed-in tenant chip (org name + primary domain) + the
    refresh-token affordance. */
+/* The tenant pill doubles as the account-menu trigger; `.shell__account` is the
+   positioning context for the dropdown, which opens downward from the pill. */
+.shell__account {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
 .shell__tenant-chip {
   display: inline-flex;
   align-items: center;
@@ -676,6 +634,19 @@ h3 {
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   background: var(--bg-subtle);
+  /* It's a <button> now: reset the UA styles and add the interactive affordance. */
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-base) var(--ease-standard);
+}
+.shell__tenant-chip:hover {
+  background: var(--surface);
+}
+.shell__tenant-chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 .shell__tenant-chip-icon {
   display: inline-flex;
@@ -701,6 +672,90 @@ h3 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.shell__tenant-chip-caret {
+  display: inline-flex;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+/* Account dropdown — the operator/tenant cluster relocated off the left rail
+   (identity, Access Readiness, Settings, cache, updates, Sign Out, version).
+   Opens downward, right-aligned to the pill; toggled/closed in shell.rs. */
+.shell__account-menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  min-width: 240px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-1);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-4);
+}
+.shell__account-menu-header {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: var(--space-2) var(--space-3);
+}
+.shell__account-menu-label {
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+}
+.shell__account-menu-user {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shell__account-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  font: inherit;
+  font-size: var(--text-base);
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+}
+.shell__account-item:hover {
+  background: var(--bg-subtle);
+}
+.shell__account-item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.shell__account-item:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.shell__account-item--selected {
+  color: var(--accent);
+  font-weight: var(--weight-semibold);
+}
+.shell__account-item--selected .nav__icon {
+  color: var(--accent);
+}
+.shell__account-divider {
+  height: 1px;
+  margin: var(--space-1) 0;
+  background: var(--border);
+}
+.shell__account-version {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
 }
 .shell__topbar-refresh {
   flex-shrink: 0;
@@ -1527,11 +1582,14 @@ h3 {
   font-weight: var(--weight-semibold);
   line-height: 1;
 }
-/* Side-by-side action buttons (e.g. App Registrations: View all + New). */
+/* Card action row. `margin-top: auto` pins it to the bottom of the flex-column
+   card so every card's buttons align to a common baseline across the row,
+   regardless of how much content (counts / metrics / findings) sits above. */
 .dash-card__actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+  margin-top: auto;
 }
 .dash-metrics {
   display: flex;
@@ -2779,6 +2837,112 @@ h3 {
   font-weight: var(--weight-semibold);
 }
 
+/* "New application" chooser — two large option buttons (Browse gallery / Create
+   your own) in the New-application flow. */
+.new-app-choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+}
+.new-app-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--motion-base) var(--ease-standard);
+}
+.new-app-choice:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.new-app-choice:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.new-app-choice__icon {
+  display: inline-flex;
+  color: var(--accent);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.new-app-choice__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.new-app-choice__title {
+  font-weight: var(--weight-semibold);
+}
+.new-app-choice__desc {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+/* Gallery-browse modal — search + a picker list of application templates. */
+.gallery-browse,
+.gallery-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.gallery-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-1);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.gallery-result {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.gallery-result:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.gallery-result:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.gallery-result--selected {
+  cursor: default;
+  border-color: var(--accent);
+}
+.gallery-result__name {
+  font-weight: var(--weight-semibold);
+}
+.gallery-result__publisher {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+.gallery-result__modes {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
 /* Security workbench sub-tab selector — four co-equal panes (Findings /
    All apps / Credential expiry / Delegated grants). */
 .security-lenses {
@@ -2861,15 +3025,6 @@ h3 {
   }
   .shell__brand-text { display: none; }
   .shell__nav-section-label { display: none; }
-  /* Collapse the footer to an icon-only sign-out (matching the nav items)
-   * rather than hiding it — keep it reachable on every page at any width. */
-  .shell__user {
-    padding: var(--space-2);
-    align-items: center;
-    min-height: 0;
-  }
-  .shell__user-info { display: none; }
-  .shell__user-version { display: none; }
   .nav__item .nav__label { display: none; }
   .nav__item {
     justify-content: center;
@@ -2903,9 +3058,10 @@ h3 {
   :root {
     --nav-width: 48px;
   }
-  /* Reclaim the top bar for the full-width search + refresh button; the tenant
-     is single per session and still named in the nav user block. */
-  .shell__tenant-chip { display: none; }
+  /* The pill is now the ONLY path to the account menu (Settings, Sign Out, …),
+     so keep it reachable — collapse it to the icon + chevron instead of hiding
+     the whole chip. */
+  .shell__tenant-chip-text { display: none; }
   .nav__item {
     padding: 10px 6px;
   }

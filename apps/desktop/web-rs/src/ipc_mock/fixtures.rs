@@ -20,8 +20,8 @@ use azapptoolkit_dto::config::AuthConfigStatus;
 use azapptoolkit_dto::credentials::CredentialRowDto;
 use azapptoolkit_dto::diagnostics::CacheStatsDto;
 use azapptoolkit_dto::enterprise_application::{
-    AppAssignmentDto, AppRolesView, EnterpriseApplicationDetail, EnterpriseApplicationDto,
-    GroupMembershipDto, ProvisioningJobDto,
+    AppAssignmentDto, AppRolesView, ApplicationTemplateDto, EnterpriseApplicationDetail,
+    EnterpriseApplicationDto, GalleryAppSummary, GroupMembershipDto, ProvisioningJobDto,
 };
 use azapptoolkit_dto::exchange::{ExchangeAccessResult, MailScopeEntry};
 use azapptoolkit_dto::keyvault::{KeyVaultSweepProgress, KvSecretItemDto, KvSecretValueDto};
@@ -833,6 +833,41 @@ pub fn directory_user_search() -> Vec<DirectoryObject> {
 
 /// Demo distribution lists returned by `search_distribution_lists` (each carries
 /// a mail address), for the SSO notification-email picker.
+/// Sample Entra application-gallery templates for the "Browse the gallery"
+/// picker (demo + GUI tests). The demo mock ignores the query, so any 2+ char
+/// search returns these.
+pub fn application_templates() -> Vec<ApplicationTemplateDto> {
+    let tmpl = |seed: &str, name: &str, publisher: &str, modes: &[&str]| ApplicationTemplateDto {
+        id: guid(seed),
+        display_name: name.to_string(),
+        publisher: Some(publisher.to_string()),
+        description: Some(format!("{name} single sign-on integration.")),
+        categories: vec!["collaboration".to_string()],
+        logo_url: None,
+        supported_single_sign_on_modes: modes.iter().map(|m| m.to_string()).collect(),
+    };
+    vec![
+        tmpl(
+            "tmpl:sf",
+            "Salesforce",
+            "Salesforce.com",
+            &["saml", "password"],
+        ),
+        tmpl("tmpl:snow", "ServiceNow", "ServiceNow", &["saml"]),
+        tmpl("tmpl:zoom", "Zoom", "Zoom Video Communications", &["saml"]),
+    ]
+}
+
+/// Result of creating an enterprise app from a gallery template (demo).
+pub fn gallery_app_summary() -> GalleryAppSummary {
+    GalleryAppSummary {
+        object_id: guid("gallery:obj"),
+        service_principal_id: guid("gallery:sp"),
+        app_id: guid("gallery:app"),
+        display_name: "Salesforce".to_string(),
+    }
+}
+
 pub fn distribution_list_search() -> Vec<DirectoryObject> {
     let dl = |seed: &str, name: &str, mail: &str| DirectoryObject {
         id: guid(seed),

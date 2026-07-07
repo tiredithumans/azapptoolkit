@@ -1,14 +1,12 @@
-//! Top-bar command bar. One launcher for the whole app: a debounced query hits
-//! the `global_search` Tauri command for directory record hits (App
-//! Registrations / Enterprise Applications / Managed Identities, each tagged
-//! with a [`TypeChip`]) and, above them, the nav/tool **commands** fuzzy-matched
-//! from [`action_list`]. Clicking a record navigates + selects it; running a
-//! command performs its side effect.
+//! Top-bar search bar. A debounced query hits the `global_search` Tauri command
+//! for directory record hits (App Registrations / Enterprise Applications /
+//! Managed Identities, each tagged with a [`TypeChip`]). Clicking a record — or
+//! Arrow Up/Down + Enter — navigates to it and opens it in the workspace; the
+//! record's name also seeds that list's filter (the search↔filter bridge).
 //!
-//! This replaces the separate Cmd/Ctrl-K modal palette: the hotkey now focuses
-//! this always-visible bar, and Arrow Up/Down + Enter navigate and run the
-//! matched commands (the palette's keyboard flow, moved onto the bar). Records
-//! stay click-to-open.
+//! Cmd/Ctrl-K focuses the bar from anywhere. Navigation and tool actions live in
+//! the nav rail + the account menu, so this bar is records-only — it is not a
+//! command palette.
 
 use leptos::ev;
 use leptos::prelude::*;
@@ -19,109 +17,7 @@ use crate::bindings::search::{self, GlobalSearchResults, SearchHit};
 use crate::components::icon::{Icon, IconName};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::hooks::use_debounced::use_debounced;
-use crate::state::{ActiveView, OpenItemKind, Session, use_session};
-
-/// One command-bar entry: a label, extra search keywords, and the side effect.
-/// `run` is a plain `fn` pointer (non-capturing) so the list is trivially `Copy`.
-#[derive(Clone, Copy)]
-struct PaletteAction {
-    label: &'static str,
-    keywords: &'static str,
-    run: fn(Session),
-}
-
-fn action_list() -> Vec<PaletteAction> {
-    vec![
-        PaletteAction {
-            label: "Go to App Registrations",
-            keywords: "apps registrations home",
-            run: |s| s.set_view(ActiveView::Apps),
-        },
-        PaletteAction {
-            label: "Go to Enterprise Applications",
-            keywords: "enterprise sso service principals",
-            run: |s| s.set_view(ActiveView::EnterpriseApps),
-        },
-        PaletteAction {
-            label: "Go to Managed Identities",
-            keywords: "mi managed identity",
-            run: |s| s.set_view(ActiveView::ManagedIdentities),
-        },
-        PaletteAction {
-            label: "Go to Security findings",
-            keywords: "risk audit health posture security findings",
-            run: |s| s.open_security("findings"),
-        },
-        PaletteAction {
-            label: "Go to Security — all audited apps",
-            keywords: "risk audit score table apps security",
-            run: |s| s.open_security("apps"),
-        },
-        PaletteAction {
-            label: "Go to Credential expiry",
-            keywords: "secrets certificates expiry rotate security",
-            run: |s| s.open_security("credentials"),
-        },
-        PaletteAction {
-            label: "Go to Delegated grants",
-            keywords: "oauth permissions consent delegated security",
-            run: |s| s.open_security("grants"),
-        },
-        PaletteAction {
-            label: "New app registration",
-            keywords: "create add register",
-            run: |s| {
-                s.set_view(ActiveView::Apps);
-                s.open_create_app();
-            },
-        },
-        PaletteAction {
-            label: "Open Bulk Actions",
-            keywords: "tools batch",
-            run: |s| s.set_view(ActiveView::BulkActions),
-        },
-        PaletteAction {
-            label: "Open Key Vault",
-            keywords: "tools secrets vault",
-            run: |s| s.set_view(ActiveView::KeyVault),
-        },
-        PaletteAction {
-            label: "Open Cache",
-            keywords: "tools debug cache diagnostics",
-            run: |s| s.tenant_ui.cache_open.set(true),
-        },
-        PaletteAction {
-            label: "Sign Out",
-            keywords: "logout exit",
-            run: sign_out_action,
-        },
-    ]
-}
-
-fn sign_out_action(session: Session) {
-    if let Some(t) = session.active_tenant.get_untracked() {
-        leptos::task::spawn_local(async move {
-            let _ = crate::bindings::auth::sign_out(&t).await;
-            session.set_active_tenant(None);
-        });
-    } else {
-        session.set_active_tenant(None);
-    }
-}
-
-/// Case-insensitive subsequence match: every char of `needle` appears in
-/// `haystack` in order. Empty needle matches everything.
-fn fuzzy_matches(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    let hay = haystack.to_lowercase();
-    let mut chars = hay.chars();
-    needle
-        .to_lowercase()
-        .chars()
-        .all(|nc| chars.any(|hc| hc == nc))
-}
+use crate::state::{ActiveView, OpenItemKind, use_session};
 
 #[component]
 pub fn GlobalSearch() -> impl IntoView {
@@ -131,23 +27,9 @@ pub fn GlobalSearch() -> impl IntoView {
     let raw_query = RwSignal::new(String::new());
     let query = use_debounced(raw_query.into(), 250);
     let focused = RwSignal::new(false);
-    // Keyboard selection over the matched commands (Arrow/Enter). Records stay
-    // click-only, so the selection only indexes into the command matches.
+    // Keyboard roving selection over the record hits (Arrow/Enter).
     let selected = RwSignal::new(0usize);
     let input_ref = NodeRef::<leptos::html::Input>::new();
-
-    // Commands matching the current query (un-debounced, synchronous).
-    let command_matches = Signal::derive(move || {
-        let q = raw_query.get();
-        let q = q.trim().to_string();
-        if q.is_empty() {
-            return Vec::new();
-        }
-        action_list()
-            .into_iter()
-            .filter(|a| fuzzy_matches(&format!("{} {}", a.label, a.keywords), &q))
-            .collect::<Vec<_>>()
-    });
 
     // Reset the highlight whenever the query changes.
     Effect::new(move |_| {
@@ -155,7 +37,7 @@ pub fn GlobalSearch() -> impl IntoView {
         selected.set(0);
     });
 
-    // Window-level Cmd/Ctrl-K focuses the bar (the palette's old hotkey).
+    // Window-level Cmd/Ctrl-K focuses the bar from anywhere.
     let handle = window_event_listener(ev::keydown, move |evt| {
         if (evt.meta_key() || evt.ctrl_key()) && evt.key().eq_ignore_ascii_case("k") {
             evt.prevent_default();
@@ -210,36 +92,25 @@ pub fn GlobalSearch() -> impl IntoView {
         }
     };
 
-    // The roving selection spans the command matches first, then the record hits
-    // (Arrow cycles the combined list; Enter activates whichever is highlighted),
-    // so a keyboard-only user can reach searched records, not just commands.
+    // Arrow keys rove the record hits; Enter opens the highlighted record.
     let on_keydown = move |evt: ev::KeyboardEvent| match evt.key().as_str() {
         "ArrowDown" => {
             evt.prevent_default();
-            let total = command_matches.with(Vec::len) + record_hits.with(Vec::len);
+            let total = record_hits.with(Vec::len);
             if total > 0 {
                 selected.update(|i| *i = (*i + 1) % total);
             }
         }
         "ArrowUp" => {
             evt.prevent_default();
-            let total = command_matches.with(Vec::len) + record_hits.with(Vec::len);
+            let total = record_hits.with(Vec::len);
             if total > 0 {
                 selected.update(|i| *i = if *i == 0 { total - 1 } else { *i - 1 });
             }
         }
         "Enter" => {
-            let cmd_count = command_matches.with(Vec::len);
             let sel = selected.get_untracked();
-            if sel < cmd_count {
-                if let Some(action) = command_matches.with(|m| m.get(sel).copied()) {
-                    evt.prevent_default();
-                    (action.run)(session);
-                    clear();
-                    blur();
-                }
-            } else if let Some((kind, hit)) = record_hits.with(|r| r.get(sel - cmd_count).cloned())
-            {
+            if let Some((kind, hit)) = record_hits.with(|r| r.get(sel).cloned()) {
                 evt.prevent_default();
                 pick_hit(session, &hit, kind, raw_query);
                 blur();
@@ -270,19 +141,14 @@ pub fn GlobalSearch() -> impl IntoView {
                     aria-controls="global-search-listbox"
                     aria-expanded=move || dropdown_visible.get().to_string()
                     aria-activedescendant=move || {
-                        // The active row is a command while `selected` is within the
-                        // command count, otherwise a record hit (offset past commands).
-                        let cmd_count = command_matches.with(Vec::len);
-                        let sel = selected.get();
-                        if sel < cmd_count {
-                            format!("gs-cmd-{sel}")
-                        } else if record_hits.with(Vec::len) > 0 {
-                            format!("gs-rec-{}", sel - cmd_count)
+                        // The active row is the highlighted record hit, if any.
+                        if record_hits.with(Vec::len) > 0 {
+                            format!("gs-rec-{}", selected.get())
                         } else {
                             String::new()
                         }
                     }
-                    placeholder="Search or run a command (⌘K) — apps, GUIDs, audit, key vault…"
+                    placeholder="Search apps by name or GUID…"
                     prop:value=move || raw_query.get()
                     on:input=on_input
                     on:focus=move |_| focused.set(true)
@@ -331,47 +197,8 @@ pub fn GlobalSearch() -> impl IntoView {
                 }
                 view! {
                     <div class="global-search__results" role="listbox" id="global-search-listbox">
-                        // Commands group — nav/tool actions fuzzy-matched against
-                        // the query, keyboard-navigable (Arrow/Enter). Rendered
-                        // synchronously above the async record hits.
-                        {move || {
-                            let matches = command_matches.get();
-                            if matches.is_empty() {
-                                return ().into_any();
-                            }
-                            let sel = selected.get();
-                            view! {
-                                <div class="global-search__group-label">"Commands"</div>
-                                {matches
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(move |(i, a)| {
-                                        let run = a.run;
-                                        let mut class = String::from("global-search__row");
-                                        if i == sel {
-                                            class.push_str(" global-search__row--active");
-                                        }
-                                        view! {
-                                            <button
-                                                class=class
-                                                type="button"
-                                                id=format!("gs-cmd-{i}")
-                                                role="option"
-                                                aria-selected=move || (i == sel).to_string()
-                                                on:mousedown=move |_| {
-                                                    run(session);
-                                                    raw_query.set(String::new());
-                                                }
-                                                on:mouseenter=move |_| selected.set(i)
-                                            >
-                                                <span class="global-search__row-title">{a.label}</span>
-                                            </button>
-                                        }
-                                    })
-                                    .collect_view()}
-                            }
-                                .into_any()
-                        }}
+                        // Record hits (App Registrations / Enterprise Applications /
+                        // Managed Identities), resolved from the async search.
                         <Suspense fallback=move || {
                             view! { <div class="global-search__empty">"Searching…"</div> }
                         }>
@@ -390,13 +217,7 @@ pub fn GlobalSearch() -> impl IntoView {
                                     }
                                         .into_any(),
                                     Some(Ok(r)) => {
-                                        // Records are keyboard-selectable after the
-                                        // commands, so their roving indices start at
-                                        // the current command count (untracked — the
-                                        // count is stable for a resolved query, and
-                                        // `selected` resets on every query change).
-                                        let cmd_count = command_matches.with_untracked(Vec::len);
-                                        view_results(r, session, raw_query, selected, cmd_count)
+                                        view_results(r, session, raw_query, selected)
                                     }
                                 }
                             })}
@@ -414,7 +235,6 @@ fn view_results(
     session: crate::state::Session,
     raw_query: RwSignal<String>,
     selected: RwSignal<usize>,
-    cmd_count: usize,
 ) -> leptos::prelude::AnyView {
     let empty = results.app_registrations.is_empty()
         && results.enterprise_apps.is_empty()
@@ -426,7 +246,7 @@ fn view_results(
         .into_any();
     }
 
-    // Roving indices continue past the commands: apps, then enterprise, then MIs.
+    // Roving indices run across the groups: apps, then enterprise, then MIs.
     let apps_n = results.app_registrations.len();
     let ent_n = results.enterprise_apps.len();
     view! {
@@ -438,7 +258,7 @@ fn view_results(
             raw_query,
             SelectionKind::AppReg,
             selected,
-            cmd_count,
+            0,
         )}
         {render_group(
             "Enterprise Applications",
@@ -448,7 +268,7 @@ fn view_results(
             raw_query,
             SelectionKind::EntApp,
             selected,
-            cmd_count + apps_n,
+            apps_n,
         )}
         {render_group(
             "Managed Identities",
@@ -458,7 +278,7 @@ fn view_results(
             raw_query,
             SelectionKind::Mi,
             selected,
-            cmd_count + apps_n + ent_n,
+            apps_n + ent_n,
         )}
     }
     .into_any()
@@ -491,8 +311,8 @@ fn render_group(
             .into_iter()
             .enumerate()
             .map(move |(i, hit)| {
-                // Combined roving index: commands occupy 0..cmd_count, then this
-                // group starts at `base`. The active class + aria-selected react to
+                // Roving index: this group starts at `base` (apps = 0, then
+                // enterprise, then MIs). The active class + aria-selected react to
                 // `selected` so Arrow keys highlight the row without rebuilding it.
                 let idx = base + i;
                 let app_id = hit.app_id.clone();
@@ -587,21 +407,6 @@ fn pick_hit(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fuzzy_matches_accepts_in_order_subsequence_case_insensitive() {
-        assert!(fuzzy_matches("Go to App Registrations", "app"));
-        assert!(fuzzy_matches("abcdef", "adf")); // non-contiguous subsequence
-        assert!(fuzzy_matches("ABC", "abc")); // case-insensitive
-        assert!(fuzzy_matches("anything", "")); // empty needle matches all
-    }
-
-    #[test]
-    fn fuzzy_matches_rejects_absent_or_out_of_order() {
-        assert!(!fuzzy_matches("Go to App Registrations", "zxq"));
-        assert!(!fuzzy_matches("abcdef", "xyz"));
-        assert!(!fuzzy_matches("abc", "cba")); // right chars, wrong order
-    }
 
     fn hit(name: &str) -> SearchHit {
         SearchHit {

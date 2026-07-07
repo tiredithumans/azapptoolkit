@@ -251,7 +251,7 @@ pub fn SsoWizardDialog(
                 aria-labelledby="sso-wizard-dialog-title"
             >
                 <div class="modal modal--wide" node_ref=modal_ref>
-                    <h3 id="sso-wizard-dialog-title">"New SSO application"</h3>
+                    <h3 id="sso-wizard-dialog-title">"New application"</h3>
                     <div class="sso-wizard__steps">
                         <Body1 class="hint">
                             {move || match step.get() {

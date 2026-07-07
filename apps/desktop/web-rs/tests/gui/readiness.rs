@@ -29,6 +29,21 @@ async fn loads_and_renders_checklist() {
 }
 
 #[wasm_bindgen_test]
+async fn token_refresh_reruns_the_check() {
+    ts::reset();
+    ts::mock_ok("check_readiness", &fixtures::readiness_report());
+
+    let m = ts::mount_view(|| view! { <ReadinessView /> });
+
+    ts::wait_for(|| ts::call_count("check_readiness") == 1).await;
+    // A token refresh bumps the shared readiness-reload signal (the shell does
+    // this on a successful refresh / re-auth) — the checklist re-runs in place,
+    // which replaces the old standalone "Re-check" button.
+    m.session.bump_readiness_reload();
+    ts::wait_for(|| ts::call_count("check_readiness") == 2).await;
+}
+
+#[wasm_bindgen_test]
 async fn error_state_renders_message() {
     ts::reset();
     ts::mock_err(

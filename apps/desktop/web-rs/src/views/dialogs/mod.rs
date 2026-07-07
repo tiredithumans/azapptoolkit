@@ -6,6 +6,8 @@ pub mod add_owner;
 pub mod cache_diagnostics_dialog;
 pub mod confirm_dialog;
 pub mod create_app_dialog;
+pub mod gallery_dialog;
+pub mod new_app_chooser_dialog;
 pub mod scope_remediation;
 pub mod secret_reveal_dialog;
 pub mod sso_wizard_dialog;

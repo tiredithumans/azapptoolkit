@@ -1,5 +1,6 @@
 //! GUI test for the global-search dropdown's keyboard navigation: record hits
-//! (not just commands) are reachable via the roving Arrow/Enter selection.
+//! are reachable via the roving Arrow/Enter selection, and Enter opens the
+//! highlighted record.
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
@@ -24,8 +25,7 @@ async fn arrow_down_moves_selection_through_record_hits_and_enter_opens() {
 
     let _m = ts::mount_view(|| view! { <GlobalSearch /> });
 
-    // Focus + type a query that matches no command, so the two records occupy
-    // roving indices 0 and 1.
+    // Focus + type a query; the two record hits occupy roving indices 0 and 1.
     ts::focus(".global-search__field");
     ts::set_input_value(".global-search__field", "zqx");
 

@@ -150,10 +150,10 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
                 <Button
                     class="btn-icon-label"
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
-                    on_click=Box::new(move |_| session.tenant_ui.sso_wizard_open.set(true))
+                    on_click=Box::new(move |_| session.open_new_app_chooser())
                 >
                     <Icon name=IconName::Plus size=16 />
-                    "New SSO application"
+                    "New application"
                 </Button>
             </SectionHeader>
             <div class="apps-view__body">
@@ -354,10 +354,10 @@ fn VirtualRows(
                             <Button
                                 class="btn-icon-label"
                                 appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                on_click=Box::new(move |_| session.tenant_ui.sso_wizard_open.set(true))
+                                on_click=Box::new(move |_| session.open_new_app_chooser())
                             >
                                 <Icon name=IconName::Plus size=16 />
-                                "New SSO application"
+                                "New application"
                             </Button>
                         </EmptyState>
                     }

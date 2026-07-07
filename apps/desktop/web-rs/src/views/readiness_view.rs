@@ -6,12 +6,13 @@
 //! `docs/operator-rbac/OPERATOR-ROLES.md`), so this page tells the user exactly
 //! which roles/scopes to activate. Each capability shows **two** verdicts — the
 //! standing role and the consented scope ("Two halves, both required") — as
-//! ✓ Have / ✗ Missing / ? Unknown. Reached from the shell's signed-in-user block
-//! (above Refresh Token). Backed by `commands::readiness::check_readiness`, which
-//! is best-effort: anything it can't prove comes back as `Unknown`.
+//! ✓ Have / ✗ Missing / ? Unknown. Reached from the account menu on the top-bar
+//! tenant pill; the top-bar "Refresh token" control re-runs this check in place
+//! (via `Session::readiness_reload`). Backed by `commands::readiness::check_readiness`,
+//! which is best-effort: anything it can't prove comes back as `Unknown`.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::Body1;
 
 use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 
@@ -104,13 +105,12 @@ fn render_report(rep: ReadinessReport) -> impl IntoView {
 pub fn ReadinessView() -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
-    // Bumped by "Re-check" so the resource refetches after a PIM activation.
-    let reload = RwSignal::new(0u32);
 
     let report = LocalResource::new(move || {
         let tenant = tenant.get();
-        // Track the reload bump so re-check refetches.
-        let _ = reload.get();
+        // Track the shared readiness-reload bump so refreshing the token (which
+        // re-applies roles) re-runs this check in place — no separate button.
+        let _ = session.readiness_reload.get();
         async move {
             match tenant {
                 Some(t) => Some(readiness::check_readiness(&t.tenant_id).await),
@@ -119,25 +119,17 @@ pub fn ReadinessView() -> impl IntoView {
         }
     });
 
-    let on_recheck = move |_| reload.update(|n| *n = n.wrapping_add(1));
-
     view! {
         <div class="readiness">
             <div class="readiness__head">
                 <h2 class="readiness__title">"Access Readiness"</h2>
-                <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                    on_click=Box::new(on_recheck)
-                >
-                    "Re-check"
-                </Button>
             </div>
             <Body1 class="hint">
                 "azapptoolkit acts with your delegated rights across three independent \
                  authorization planes — there is no single role that unlocks everything. This \
                  checks what you currently hold against what each feature needs. A PIM role you \
-                 haven't activated shows as Missing; activate it, use \"Refresh Token\" (in the \
-                 sidebar), then Re-check."
+                 haven't activated shows as Missing; activate it, then use \"Refresh token\" \
+                 (top right) — that re-applies your roles and re-runs this check."
             </Body1>
             {move || {
                 Suspend::new(async move {

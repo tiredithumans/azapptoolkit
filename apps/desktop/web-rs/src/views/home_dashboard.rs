@@ -195,14 +195,31 @@ pub fn HomeDashboard() -> impl IntoView {
                                                 move || session.open_enterprise_with_facet("foreign"),
                                             )}
                                         </div>
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                            on_click=Box::new(move |_| {
-                                                session.set_view(ActiveView::EnterpriseApps)
-                                            })
-                                        >
-                                            "View enterprise apps"
-                                        </Button>
+                                        <div class="dash-card__actions">
+                                            <Button
+                                                appearance=Signal::derive(|| {
+                                                    ButtonAppearance::Secondary
+                                                })
+                                                on_click=Box::new(move |_| {
+                                                    session.set_view(ActiveView::EnterpriseApps)
+                                                })
+                                            >
+                                                "View enterprise apps"
+                                            </Button>
+                                            <Button
+                                                class="btn-icon-label"
+                                                appearance=Signal::derive(|| {
+                                                    ButtonAppearance::Primary
+                                                })
+                                                on_click=Box::new(move |_| {
+                                                    session.set_view(ActiveView::EnterpriseApps);
+                                                    session.open_new_app_chooser();
+                                                })
+                                            >
+                                                <Icon name=IconName::Plus size=16 />
+                                                "New application"
+                                            </Button>
+                                        </div>
                                     }
                                         .into_any()
                                 }
@@ -264,14 +281,18 @@ pub fn HomeDashboard() -> impl IntoView {
                                                 },
                                             )}
                                         </div>
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                            on_click=Box::new(move |_| {
-                                                session.set_view(ActiveView::ManagedIdentities)
-                                            })
-                                        >
-                                            "View managed identities"
-                                        </Button>
+                                        <div class="dash-card__actions">
+                                            <Button
+                                                appearance=Signal::derive(|| {
+                                                    ButtonAppearance::Secondary
+                                                })
+                                                on_click=Box::new(move |_| {
+                                                    session.set_view(ActiveView::ManagedIdentities)
+                                                })
+                                            >
+                                                "View managed identities"
+                                            </Button>
+                                        </div>
                                     }
                                         .into_any()
                                 }
@@ -338,14 +359,18 @@ pub fn HomeDashboard() -> impl IntoView {
                                                 move || session.open_credentials_with_facet("30"),
                                             )}
                                         </div>
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                            on_click=Box::new(move |_| {
-                                                session.open_security("credentials")
-                                            })
-                                        >
-                                            "View credentials"
-                                        </Button>
+                                        <div class="dash-card__actions">
+                                            <Button
+                                                appearance=Signal::derive(|| {
+                                                    ButtonAppearance::Secondary
+                                                })
+                                                on_click=Box::new(move |_| {
+                                                    session.open_security("credentials")
+                                                })
+                                            >
+                                                "View credentials"
+                                            </Button>
+                                        </div>
                                     }
                                         .into_any()
                                 }
@@ -427,24 +452,36 @@ pub fn HomeDashboard() -> impl IntoView {
                                                 }
                                             })}
                                         <div class="posture-findings">{findings}</div>
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                            on_click=Box::new(move |_| session.open_security("findings"))
-                                        >
-                                            "Open security audit"
-                                        </Button>
+                                        <div class="dash-card__actions">
+                                            <Button
+                                                appearance=Signal::derive(|| {
+                                                    ButtonAppearance::Secondary
+                                                })
+                                                on_click=Box::new(move |_| {
+                                                    session.open_security("findings")
+                                                })
+                                            >
+                                                "Open security audit"
+                                            </Button>
+                                        </div>
                                     }
                                         .into_any()
                                 }
                                 None => {
                                     view! {
                                         <Body1>"No audit has been run yet."</Body1>
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                            on_click=Box::new(move |_| session.open_security("findings"))
-                                        >
-                                            "Run a security audit"
-                                        </Button>
+                                        <div class="dash-card__actions">
+                                            <Button
+                                                appearance=Signal::derive(|| {
+                                                    ButtonAppearance::Primary
+                                                })
+                                                on_click=Box::new(move |_| {
+                                                    session.open_security("findings")
+                                                })
+                                            >
+                                                "Run a security audit"
+                                            </Button>
+                                        </div>
                                     }
                                         .into_any()
                                 }
