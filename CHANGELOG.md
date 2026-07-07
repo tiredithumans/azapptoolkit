@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-07
+
 ### Added
 
 - **Create enterprise applications from the Microsoft Entra gallery.** The
