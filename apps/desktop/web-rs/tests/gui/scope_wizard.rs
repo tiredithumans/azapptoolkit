@@ -53,6 +53,18 @@ fn populated_scope_group() -> ExchangeScopeGroupDto {
     }
 }
 
+/// A scope group that does NOT exist yet — the panel must announce it will be
+/// created rather than implying it already exists.
+fn missing_scope_group() -> ExchangeScopeGroupDto {
+    ExchangeScopeGroupDto {
+        group_name: "app_scope_group_app-0".to_string(),
+        exists: false,
+        primary_smtp_address: None,
+        distinguished_name: None,
+        members: Vec::new(),
+    }
+}
+
 fn site_scope_result() -> SiteScopeResult {
     SiteScopeResult {
         granted_role_added: true,
@@ -209,6 +221,40 @@ async fn exchange_scoped_path_declares_then_scopes_without_orgwide() {
             .and_then(|v| v.as_bool()),
         Some(true)
     );
+}
+
+#[wasm_bindgen_test]
+async fn managed_group_panel_flags_a_not_yet_created_group() {
+    // Step 2's managed-mailbox panel must clearly distinguish a group that will be
+    // created on first add from one that already exists.
+    let _m = mount_wizard(None);
+    ts::mock_ok("list_exchange_scope_group", &missing_scope_group());
+
+    ts::wait_for(|| ts::body_contains("Mail.Read")).await;
+    select_permission("Mail.Read");
+    ts::wait_for(next_enabled).await;
+    click_button("Next");
+
+    // The panel resolves the (missing) group and announces it will be created.
+    ts::wait_for(|| ts::body_contains("Will be created")).await;
+    assert!(ts::body_contains("doesn't exist yet"));
+}
+
+#[wasm_bindgen_test]
+async fn managed_group_panel_marks_an_existing_group_and_lists_members() {
+    // An existing group is badged "Exists" and its members are listed so it's
+    // clear which mailboxes the scoping applies to.
+    let _m = mount_wizard(None);
+    ts::mock_ok("list_exchange_scope_group", &populated_scope_group());
+
+    ts::wait_for(|| ts::body_contains("Mail.Read")).await;
+    select_permission("Mail.Read");
+    ts::wait_for(next_enabled).await;
+    click_button("Next");
+
+    ts::wait_for(|| ts::body_contains("alice@contoso.com")).await;
+    assert!(ts::body_contains("Exists"));
+    assert!(ts::body_contains("1 mailbox in scope"));
 }
 
 #[wasm_bindgen_test]
