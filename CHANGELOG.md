@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-06
+
 ### Added
 
 - **App registration — editable Internal notes.** The Overview tab now shows an
