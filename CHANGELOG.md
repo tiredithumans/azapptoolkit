@@ -7,6 +7,18 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **Settings — organized into three tabs.** The per-tenant operator defaults are
+  now grouped under **App Registration Defaults** (default owners), **Enterprise
+  Application Defaults** (default owners + SSO notification emails), and **Naming
+  Defaults** (Key Vault secret, management scope, and mail-enabled security group
+  name patterns), replacing the single long scroll. One **Save defaults** button
+  still persists every tab at once.
+- **Left nav — removed the "More" dropdown.** Cache diagnostics and Check for
+  updates are now direct items in the account block (one click instead of two);
+  the app version shows as a line beneath Sign Out.
+
 ## [0.18.0] - 2026-07-07
 
 ### Changed

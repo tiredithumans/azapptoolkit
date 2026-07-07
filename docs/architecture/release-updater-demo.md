@@ -39,8 +39,8 @@ The front-end checks once on launch (`commands::updater::check_for_update`, swal
 on failure and in dev). If an update waits, it toasts a notification whose action opens the
 `UpdateSplash` (`web-rs/components/update_splash.rs`): changelog notes + an explicit
 **Update & restart** button (`perform_update`: `download_and_install` → `app.restart()`, byte
-progress on the `updater-progress` channel). A manual "Check for updates" button lives in the
-user-block overflow "…" popover (`shell.rs`, alongside the version string).
+progress on the `updater-progress` channel). A manual "Check for updates" button is a direct item
+in the user block (`shell.rs`, alongside the version string shown beneath Sign Out).
 
 The splash's changelog text is the updater manifest's `notes` (populated per the contract above),
 so it only lights up for releases from **v0.8.0 onward** — v0.7.0's `latest.json` predates it.

@@ -492,61 +492,10 @@ h3 {
   width: 100%;
 }
 
-/* Overflow "…" popover in the user block — the low-frequency utilities (cache
- * diagnostics, update check, version). The wrapper is the positioning context
- * for the menu, which opens UPWARD (the block sits at the bottom of the rail). */
-.shell__overflow {
-  position: relative;
-}
-.shell__overflow-trigger {
-  width: 100%;
-}
-.shell__overflow-menu {
-  position: absolute;
-  bottom: calc(100% + var(--space-1));
-  left: 0;
-  right: 0;
-  min-width: 200px;
-  z-index: 60;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: var(--space-1);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-4);
-}
-.shell__overflow-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border: none;
-  background: transparent;
-  border-radius: var(--radius-sm);
-  color: inherit;
-  font: inherit;
-  font-size: var(--text-base);
-  cursor: pointer;
-  text-align: left;
-  width: 100%;
-}
-.shell__overflow-item:hover {
-  background: var(--bg-subtle);
-}
-.shell__overflow-item:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-.shell__overflow-item:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-.shell__overflow-version {
-  padding: var(--space-2) var(--space-3) var(--space-1);
-  margin-top: 2px;
-  border-top: 1px solid var(--border);
+/* App version line at the foot of the user block (was inside the former "…"
+ * overflow popover, now shown directly). Muted, non-interactive. */
+.shell__user-version {
+  padding: var(--space-1) var(--space-2) 0;
   font-size: var(--text-xs);
   color: var(--text-muted);
 }
@@ -2804,6 +2753,32 @@ h3 {
   to { transform: scaleX(1); opacity: 1; }
 }
 
+/* Settings — per-tenant operator defaults, grouped into tabbed panes
+   (App Registration / Enterprise Application / Naming). Constrain the form
+   width for readability; the active pane and its sections stack with even
+   vertical rhythm. */
+.settings-view { max-width: 760px; }
+.settings-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.settings-tab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.settings-section h3 {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
 /* Security workbench sub-tab selector — four co-equal panes (Findings /
    All apps / Credential expiry / Delegated grants). */
 .security-lenses {
@@ -2894,6 +2869,7 @@ h3 {
     min-height: 0;
   }
   .shell__user-info { display: none; }
+  .shell__user-version { display: none; }
   .nav__item .nav__label { display: none; }
   .nav__item {
     justify-content: center;
