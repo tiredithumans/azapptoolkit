@@ -56,6 +56,11 @@ pub struct AppPatch {
     pub sign_in_audience: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Free-text internal notes (the portal's "Internal notes"). An empty string
+    /// clears it; `None` leaves it untouched. `skip_serializing_if` means this
+    /// can't send an explicit JSON `null`, so callers clear via `Some("")`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
     /// Full replacement of the application's declared permissions. Graph
     /// treats this as a set-operation — every call overwrites the existing
     /// array, so callers must send the full desired state.
@@ -184,6 +189,7 @@ fn default_application_select() -> &'static [&'static str] {
         "verifiedPublisher",
         "servicePrincipalLockConfiguration",
         "isFallbackPublicClient",
+        "notes",
     ]
 }
 

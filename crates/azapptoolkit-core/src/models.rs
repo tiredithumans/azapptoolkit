@@ -65,6 +65,11 @@ pub struct Application {
     /// "fetched, no owners". Drives the audit's ownership rules.
     #[serde(default)]
     pub owners: Option<Vec<DirectoryObject>>,
+    /// Free-text internal notes (Graph `notes`, max 1024 chars) — the portal
+    /// surfaces this as "Internal notes" under Branding & properties. Only
+    /// fetched for the detail view; the Overview tab edits it.
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 /// Microsoft publisher-verification status on an application

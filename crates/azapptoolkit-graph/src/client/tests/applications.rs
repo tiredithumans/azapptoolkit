@@ -200,6 +200,50 @@ async fn update_application_patches_only_set_fields() {
 }
 
 #[tokio::test]
+async fn update_application_sets_and_clears_notes() {
+    // Setting notes sends the text; clearing sends an empty string (the typed
+    // `AppPatch` can't emit an explicit JSON `null`, so `Some("")` is the clear).
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/applications/obj-set"))
+        .and(wiremock::matchers::body_json(
+            serde_json::json!({ "notes": "Rotate secrets quarterly." }),
+        ))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/applications/obj-clear"))
+        .and(wiremock::matchers::body_json(
+            serde_json::json!({ "notes": "" }),
+        ))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    client
+        .update_application(
+            "obj-set",
+            &AppPatch {
+                notes: Some("Rotate secrets quarterly.".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    client
+        .update_application(
+            "obj-clear",
+            &AppPatch {
+                notes: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn delete_application_returns_ok_on_204() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))

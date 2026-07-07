@@ -53,6 +53,7 @@ pub fn OverviewTab(
             .unwrap_or_else(|| "AzureADMyOrg".into()),
     );
     let description = RwSignal::new(initial_app.description.clone().unwrap_or_default());
+    let notes = RwSignal::new(initial_app.notes.clone().unwrap_or_default());
 
     // Reset form when underlying detail changes (mirrors React's useEffect).
     Effect::new(move |_| {
@@ -64,6 +65,7 @@ pub fn OverviewTab(
                 .unwrap_or_else(|| "AzureADMyOrg".into()),
         );
         description.set(app.description.clone().unwrap_or_default());
+        notes.set(app.notes.clone().unwrap_or_default());
     });
 
     let save = move |_| {
@@ -71,6 +73,7 @@ pub fn OverviewTab(
         let dn = display_name.get();
         let aud = audience.get();
         let desc = description.get();
+        let notes_val = notes.get();
         let on_changed_cb = on_changed;
         cmd.run(
             move |()| {
@@ -94,6 +97,13 @@ pub fn OverviewTab(
                 };
                 if desc_opt != app.description {
                     patch.description = desc_opt;
+                }
+                // Notes: send the trimmed value (empty string included) whenever it
+                // changed, so clearing actually reaches Graph. Unlike `description`
+                // above, an empty edit sends `Some("")` rather than omitting.
+                let notes_t = notes_val.trim();
+                if notes_t != app.notes.clone().unwrap_or_default() {
+                    patch.notes = Some(notes_t.to_string());
                 }
                 async move { applications::update_application(&tenant_id, &app.id, &patch).await }
             },
@@ -130,6 +140,9 @@ pub fn OverviewTab(
                             </Field>
                             <Field label="Description">
                                 <Textarea value=description />
+                            </Field>
+                            <Field label="Internal notes (max 1024 characters)">
+                                <Textarea value=notes />
                             </Field>
                             {move || {
                                 cmd.error
@@ -253,6 +266,15 @@ pub fn OverviewTab(
                                         <ReadField label="Description" value=d.clone() mono=false />
                                     }
                                 })}
+                            <ReadField
+                                label="Internal notes"
+                                value=app
+                                    .notes
+                                    .clone()
+                                    .filter(|n| !n.is_empty())
+                                    .unwrap_or_else(|| "—".into())
+                                mono=false
+                            />
                             <div>
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
