@@ -122,7 +122,7 @@ pub fn HomeDashboard() -> impl IntoView {
                                                     session.set_view(ActiveView::Apps)
                                                 })
                                             >
-                                                "View all"
+                                                "View app registrations"
                                             </Button>
                                             <Button
                                                 class="btn-icon-label"
