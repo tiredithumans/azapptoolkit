@@ -31,7 +31,6 @@ pub(crate) struct AuditController {
     pub peak_cap: RwSignal<usize>,
     pub scan_error: RwSignal<Option<String>>,
     pub exporting: RwSignal<bool>,
-    pub export_msg: RwSignal<Option<String>>,
     /// Per-bucket counts for the posture strip + Home card, computed once per
     /// scan (never per keystroke) without cloning the multi-MB run.
     pub posture: Memo<Option<PostureCounts>>,
@@ -64,7 +63,6 @@ impl AuditController {
         });
         let scan_error: RwSignal<Option<String>> = RwSignal::new(None);
         let exporting = RwSignal::new(false);
-        let export_msg: RwSignal<Option<String>> = RwSignal::new(None);
 
         let posture =
             Memo::new(move |_| result.with(|r| r.as_ref().map(|r| posture_counts(&r.items))));
@@ -125,7 +123,6 @@ impl AuditController {
             peak_cap,
             scan_error,
             exporting,
-            export_msg,
             posture,
             consent_needed,
             total_items,
@@ -213,15 +210,17 @@ impl AuditController {
             return;
         }
         self.exporting.set(true);
-        self.export_msg.set(None);
         leptos::task::spawn_local(async move {
             match audit::save_audit_to_file(&t.tenant_id, cancelled_items.as_deref(), format).await
             {
-                Ok(Some(path)) => self.export_msg.set(Some(format!("Saved to {path}"))),
+                // Success + failure both surface through the shared bottom-right
+                // toast system (matching the list-view exports), not a
+                // persistent inline banner.
+                Ok(Some(path)) => {
+                    self.session.toast_success(format!("Saved audit to {path}"));
+                }
                 Ok(None) => {} // user cancelled
-                Err(e) => self
-                    .export_msg
-                    .set(Some(format!("Export failed: {}", e.message))),
+                Err(e) => self.session.report_command_error(&e),
             }
             self.exporting.set(false);
         });

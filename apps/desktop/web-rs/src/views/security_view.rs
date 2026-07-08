@@ -176,9 +176,6 @@ fn PostureStrip() -> impl IntoView {
             {move || {
                 ctrl.scan_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
             }}
-            {move || {
-                ctrl.export_msg.get().map(|m| view! { <Callout tone="ok">{m}</Callout> })
-            }}
             // AuditLog.Read.All consent prompt — the sign-in activity report
             // (behind the Unused finding) needs it. Offered when the last run
             // found it un-consented; granting re-runs the audit.
