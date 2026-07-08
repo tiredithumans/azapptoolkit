@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-07-07
+
 ### Fixed
 
 - **Security-tab export no longer freezes the app.** Exporting an audit (CSV,
