@@ -19,6 +19,7 @@ use crate::bindings::applications::{self, ApplicationListRowDto};
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::date_range_filter::DateRangeFilter;
+use crate::components::export_menu::ExportMenu;
 use crate::components::filter_chip::FilterChip;
 use crate::components::icon::{Icon, IconName};
 use crate::components::list_scaffold::ListScaffold;
@@ -142,20 +143,11 @@ pub fn ApplicationList() -> impl IntoView {
                             }
                         })
                 }}
-                <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                <ExportMenu
                     disabled=Signal::derive(move || exporting.get())
-                    on_click=Box::new(move |_| do_export("csv"))
-                >
-                    "Export CSV"
-                </Button>
-                <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                    disabled=Signal::derive(move || exporting.get())
-                    on_click=Box::new(move |_| do_export("json"))
-                >
-                    "Export JSON"
-                </Button>
+                    on_select=Callback::new(do_export)
+                    options=vec![("csv", "Export as CSV…"), ("json", "Export as JSON…")]
+                />
                 <IconButton
                     icon=IconName::Refresh
                     aria_label="Refresh App Registrations".to_string()

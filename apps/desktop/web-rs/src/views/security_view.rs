@@ -18,12 +18,9 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
-use thaw::{
-    Body1, Button, ButtonAppearance, Menu, MenuItem, MenuPosition, MenuTrigger, ProgressBar,
-    Spinner, SpinnerSize,
-};
+use thaw::{Body1, Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 
-use crate::components::icon::{Icon, IconName};
+use crate::components::export_menu::ExportMenu;
 use crate::components::ui::{Callout, SectionHeader};
 use crate::state::use_session;
 use crate::util::keep_alive;
@@ -118,33 +115,17 @@ fn PostureStrip() -> impl IntoView {
                         "Cancel"
                     </Button>
                 </Show>
-                <Menu
-                    position=MenuPosition::BottomEnd
-                    on_select=move |fmt: String| {
-                        match fmt.as_str() {
-                            "csv" => ctrl.export("csv"),
-                            "json" => ctrl.export("json"),
-                            "html" => ctrl.export("html"),
-                            _ => {}
-                        }
-                    }
-                >
-                    <MenuTrigger slot>
-                        <Button
-                            class="btn-icon-label"
-                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                            disabled=Signal::derive(move || {
-                                ctrl.exporting.get() || ctrl.result.with(|r| r.is_none())
-                            })
-                        >
-                            "Export"
-                            <Icon name=IconName::ChevronDown size=16 />
-                        </Button>
-                    </MenuTrigger>
-                    <MenuItem value="csv".to_string()>"Export as CSV…"</MenuItem>
-                    <MenuItem value="json".to_string()>"Export as JSON…"</MenuItem>
-                    <MenuItem value="html".to_string()>"Export as HTML…"</MenuItem>
-                </Menu>
+                <ExportMenu
+                    disabled=Signal::derive(move || {
+                        ctrl.exporting.get() || ctrl.result.with(|r| r.is_none())
+                    })
+                    on_select=Callback::new(move |fmt| ctrl.export(fmt))
+                    options=vec![
+                        ("csv", "Export as CSV…"),
+                        ("json", "Export as JSON…"),
+                        ("html", "Export as HTML…"),
+                    ]
+                />
             </SectionHeader>
             {move || {
                 ctrl.posture

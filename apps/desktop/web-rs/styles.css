@@ -2521,6 +2521,53 @@ h3 {
   gap: var(--space-1);
 }
 
+/* ---- Export disclosure (Security tab) ----
+   A plain-DOM dropdown (mirrors `.shell__account-menu`), NOT a Thaw `Menu`:
+   the export opens the native save dialog, and triggering that from inside a
+   teleported Thaw overlay froze the webview on WebView2 as the overlay tore
+   down. `.export-menu` is the positioning context; the panel opens downward,
+   right-aligned to the trigger. */
+.export-menu {
+  position: relative;
+  display: inline-flex;
+}
+.export-menu__panel {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  min-width: 200px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-1);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-4);
+}
+.export-menu__item {
+  display: flex;
+  align-items: center;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  font: inherit;
+  font-size: var(--text-base);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.export-menu__item:hover {
+  background: var(--bg-subtle);
+}
+.export-menu__item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 /* ---- Card ---- */
 .ui-card {
   background: var(--surface-raised);
