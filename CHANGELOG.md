@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.19.2] - 2026-07-07
+
 ### Fixed
 
 - **Export confirmations now toast instead of sticking to the top.** Saving an
