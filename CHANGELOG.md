@@ -7,6 +7,23 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Security-tab export no longer freezes the app.** Exporting an audit (CSV,
+  JSON, or HTML) from the Security workbench blanked and locked up the whole
+  window on Windows, requiring a force-quit. The Export control was a Thaw `Menu`
+  overlay, and opening the native "Save file" dialog from inside that teleported
+  overlay raced its teardown and wedged the webview. It's now a plain-DOM
+  disclosure dropdown that closes before the dialog opens.
+
+### Changed
+
+- **Consistent "Export ▾" dropdown across every list.** The App Registrations,
+  Enterprise Applications, and Managed Identities tabs replaced their inline
+  "Export CSV" / "Export JSON" buttons with the same compact "Export ▾" disclosure
+  the Security tab now uses (a shared `ExportMenu` component). No behaviour change
+  beyond the surface — the same plain-DOM control on every tab.
+
 ## [0.19.0] - 2026-07-07
 
 ### Added
