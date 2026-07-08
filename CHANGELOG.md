@@ -7,6 +7,15 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Export confirmations now toast instead of sticking to the top.** Saving an
+  audit export (and the Credential-expiry / Delegated-grants lens exports) showed
+  a persistent "Saved to …" banner pinned above the content; it now appears as a
+  bottom-right toast and auto-dismisses, matching the tenant list-view exports.
+  Failures route through the same toast path (with the standard re-auth action)
+  rather than a stuck inline error.
+
 ## [0.19.1] - 2026-07-07
 
 ### Fixed

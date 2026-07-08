@@ -77,7 +77,6 @@ where
     let facet = facet.unwrap_or_else(|| RwSignal::new(String::from("all")));
     let search = RwSignal::new(String::new());
     let exporting = RwSignal::new(false);
-    let export_msg: RwSignal<Option<String>> = RwSignal::new(None);
 
     // Non-`Send` closures live in single-threaded (CSR) storage, mirroring
     // `VirtualList`'s `render_row` handling.
@@ -130,12 +129,15 @@ where
             return;
         }
         exporting.set(true);
-        export_msg.set(None);
         leptos::task::spawn_local(async move {
             match export.with_value(|f| f(data)).await {
-                Ok(Some(path)) => export_msg.set(Some(format!("Saved to {path}"))),
+                // Surface through the shared bottom-right toasts (like the
+                // list-view exports), not a persistent inline banner.
+                Ok(Some(path)) => {
+                    session.toast_success(format!("Saved to {path}"));
+                }
                 Ok(None) => {} // user cancelled
-                Err(e) => export_msg.set(Some(format!("Export failed: {}", e.message))),
+                Err(e) => session.report_command_error(&e),
             }
             exporting.set(false);
         });
@@ -206,10 +208,6 @@ where
                         }
                     })
             }}
-            {move || {
-                export_msg.get().map(|m| view! { <div class="alert alert--ok">{m}</div> })
-            }}
-
             {move || banner.with_value(|b| rows.with(|all| b(all.as_slice())))}
 
             <TabList selected_value=facet>
