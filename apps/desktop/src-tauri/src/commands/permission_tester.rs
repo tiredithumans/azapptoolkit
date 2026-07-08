@@ -29,7 +29,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
-use azapptoolkit_core::audit::MailPermissionScope;
+use azapptoolkit_core::audit::{AuditPrincipalKind, MailPermissionScope};
 use azapptoolkit_core::scoping::{is_scopable_exchange_permission, is_sharepoint_orgwide};
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_exchange::models::{
@@ -498,22 +498,24 @@ pub async fn find_mailbox_reachers(
         }
     }
 
-    // Prewarm the SP object-id → appId map in one batched read instead of one
-    // Graph GET per candidate inside the probe loop. The Exchange cmdlets and UI
-    // deep links want the appId, not the SP object id the assignment row carries;
-    // resolving that per candidate is an N-round-trip fan-out, while the batch
-    // helper collapses it to ~N/20 (results in input order, 20 per `$batch`).
-    // A prewarm miss (or whole-batch failure) just falls through to the probe's
-    // own per-candidate resolve, so this never changes a verdict.
+    // Prewarm the SP object-id → (appId, servicePrincipalType) map in one batched
+    // read instead of one Graph GET per candidate inside the probe loop. The
+    // Exchange cmdlets and UI deep links want the appId, not the SP object id the
+    // assignment row carries; the servicePrincipalType tags managed identities so
+    // a row's "Open" routes to the MI pane. Resolving that per candidate is an
+    // N-round-trip fan-out, while the batch helper collapses it to ~N/20 (results
+    // in input order, 20 per `$batch`). A prewarm miss (or whole-batch failure)
+    // just falls through to the probe's own per-candidate resolve, so this never
+    // changes a verdict.
     let candidate_ids: Vec<String> = candidates.keys().cloned().collect();
-    let app_id_by_principal: Arc<HashMap<String, String>> = Arc::new(
+    let sp_meta_by_principal: Arc<HashMap<String, (String, Option<String>)>> = Arc::new(
         match client.batch_get_service_principals(&candidate_ids).await {
             Ok(results) => candidate_ids
                 .iter()
                 .cloned()
                 .zip(results)
                 .filter_map(|(id, r)| match r {
-                    Ok(Some(sp)) => Some((id, sp.app_id)),
+                    Ok(Some(sp)) => Some((id, (sp.app_id, sp.service_principal_type))),
                     _ => None,
                 })
                 .collect(),
@@ -521,6 +523,24 @@ pub async fn find_mailbox_reachers(
                 tracing::info!(
                     ?err,
                     "mailbox probe: SP prewarm batch failed; resolving per-candidate"
+                );
+                HashMap::new()
+            }
+        },
+    );
+    // appId → application object id for every registration homed in THIS tenant.
+    // A hit means the reacher is a local app registration, so its "Open" routes to
+    // the App Registration pane by the application object id; a miss (managed
+    // identity, foreign enterprise app, or orphaned SP) routes to the enterprise /
+    // MI pane by the SP object id. Best-effort — an unreadable list just routes
+    // every row by SP object id, never changing a verdict.
+    let app_reg_index: Arc<HashMap<String, String>> = Arc::new(
+        match client.list_application_index(None).await {
+            Ok(pairs) => pairs.into_iter().collect(),
+            Err(err) => {
+                tracing::info!(
+                    ?err,
+                    "mailbox probe: application index unavailable; routing every row by SP object id"
                 );
                 HashMap::new()
             }
@@ -557,7 +577,8 @@ pub async fn find_mailbox_reachers(
             let done = done.clone();
             let cancel_for_task = cancel.clone();
             let mailbox = mailbox_shared.clone();
-            let prewarmed_app_id = app_id_by_principal.get(&principal_id).cloned();
+            let prewarmed = sp_meta_by_principal.get(&principal_id).cloned();
+            let app_reg_index = app_reg_index.clone();
             Some(tokio::spawn(async move {
                 let row = probe_candidate(
                     &client,
@@ -567,7 +588,8 @@ pub async fn find_mailbox_reachers(
                     principal_id,
                     display_name,
                     held,
-                    prewarmed_app_id,
+                    prewarmed,
+                    &app_reg_index,
                 )
                 .await;
                 let mut guard = done.lock().await;
@@ -650,35 +672,48 @@ async fn probe_candidate(
     principal_id: String,
     display_name: Option<String>,
     held_permissions: Vec<String>,
-    prewarmed_app_id: Option<String>,
+    prewarmed: Option<(String, Option<String>)>,
+    app_reg_index: &HashMap<String, String>,
 ) -> MailboxReacherRow {
-    // The Exchange cmdlets and the UI's deep links want the appId, not the SP
-    // object id the assignment row carries. Use the batch-prewarmed appId when we
-    // have it; only fall back to a per-candidate Graph read when the prewarm
-    // missed this principal (or its whole batch failed).
-    let app_id = match prewarmed_app_id {
-        Some(app_id) => app_id,
+    // The Exchange cmdlets and the UI's deep links want the appId (and the
+    // servicePrincipalType drives the row's Open routing), not the SP object id
+    // the assignment row carries. Use the batch-prewarmed pair when we have it;
+    // only fall back to a per-candidate Graph read when the prewarm missed this
+    // principal (or its whole batch failed).
+    let (app_id, service_principal_type) = match prewarmed {
+        Some(meta) => meta,
         None => match client
             .get_service_principal_by_object_id(&principal_id)
             .await
         {
-            Ok(Some(sp)) => sp.app_id,
+            Ok(Some(sp)) => (sp.app_id, sp.service_principal_type),
             other => {
                 if let Err(err) = other {
                     tracing::info!(%principal_id, ?err, "mailbox probe: SP resolve failed");
                 }
                 return MailboxReacherRow {
                     app_id: String::new(),
-                    principal_id,
                     display_name,
                     held_permissions,
                     verdict: "unknown".into(),
                     roles: Vec::new(),
                     detail: Some("Couldn't resolve the service principal.".into()),
+                    // Can't confirm a local registration; route Open to the
+                    // enterprise pane by SP object id (the reliable fallback).
+                    principal_kind: AuditPrincipalKind::ServicePrincipal,
+                    object_id: principal_id.clone(),
+                    principal_id,
                 };
             }
         },
     };
+
+    let (principal_kind, object_id) = classify_reacher(
+        &app_id,
+        &principal_id,
+        service_principal_type.as_deref(),
+        app_reg_index,
+    );
 
     let result = match exo {
         None => {
@@ -715,6 +750,35 @@ async fn probe_candidate(
         verdict: result.verdict,
         roles: result.roles,
         detail: result.detail,
+        principal_kind,
+        object_id,
+    }
+}
+
+/// Routes a reacher row to the right detail pane, mirroring the audit view's
+/// `principal_kind` routing: a managed identity opens the MI pane; an appId that
+/// resolves to a local application registration opens the App Registration pane
+/// (by the *application* object id); everything else — a foreign-tenant
+/// enterprise app or an orphaned SP — opens the enterprise pane by the SP object
+/// id. Returns `(kind, object_id)` for the Open affordance.
+fn classify_reacher(
+    app_id: &str,
+    principal_id: &str,
+    service_principal_type: Option<&str>,
+    app_reg_index: &HashMap<String, String>,
+) -> (AuditPrincipalKind, String) {
+    if service_principal_type == Some("ManagedIdentity") {
+        (
+            AuditPrincipalKind::ManagedIdentity,
+            principal_id.to_string(),
+        )
+    } else if let Some(object_id) = app_reg_index.get(app_id) {
+        (AuditPrincipalKind::Application, object_id.clone())
+    } else {
+        (
+            AuditPrincipalKind::ServicePrincipal,
+            principal_id.to_string(),
+        )
     }
 }
 
@@ -816,6 +880,43 @@ pub async fn test_site_access(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The Open affordance's routing: an SP-only reacher must never resolve to an
+    // app-registration object id (opening one would `get_application` → 404), and
+    // a local app registration must open by its *application* object id, not the
+    // SP object id.
+    #[test]
+    fn classify_reacher_routes_by_kind() {
+        let mut index = HashMap::new();
+        index.insert("local-app".to_string(), "app-object-1".to_string());
+
+        // A managed identity always routes to the MI pane by its SP object id.
+        assert_eq!(
+            classify_reacher("mi-app", "sp-mi", Some("ManagedIdentity"), &index),
+            (AuditPrincipalKind::ManagedIdentity, "sp-mi".to_string())
+        );
+        // A local app registration routes to the App Registration pane by the
+        // application object id (not the SP object id).
+        assert_eq!(
+            classify_reacher("local-app", "sp-local", Some("Application"), &index),
+            (AuditPrincipalKind::Application, "app-object-1".to_string())
+        );
+        // A foreign enterprise app (no local registration) routes to the
+        // enterprise pane by SP object id — the security-relevant boundary.
+        assert_eq!(
+            classify_reacher("foreign-app", "sp-foreign", Some("Application"), &index),
+            (
+                AuditPrincipalKind::ServicePrincipal,
+                "sp-foreign".to_string()
+            )
+        );
+        // An Exchange-only candidate (no servicePrincipalType, no local reg) also
+        // falls back to the SP object id.
+        assert_eq!(
+            classify_reacher("x", "sp-x", None, &index),
+            (AuditPrincipalKind::ServicePrincipal, "sp-x".to_string())
+        );
+    }
 
     fn row(
         role: &str,
