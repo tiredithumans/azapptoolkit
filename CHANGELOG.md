@@ -7,7 +7,26 @@ the project adheres to
 
 ## [Unreleased]
 
-## [0.19.2] - 2026-07-07
+### Added
+
+- **Resource Access → Mailboxes results are now clickable for investigation.**
+  Each app in the "who can reach this mailbox?" table gets an "Open for
+  investigation" link that routes to the right detail pane the same way the
+  Security audit does — a local app registration opens the App Registration pane,
+  a foreign enterprise app the Enterprise pane, a managed identity the Managed
+  Identity pane — landing on Permissions where the grant can be reviewed or
+  revoked.
+
+### Changed
+
+- **Mailbox reverse-lookup hides confirmed "No access" by default.** The results
+  led with every candidate app, most of them confirmed non-reachers; the table now
+  shows the apps that can reach the mailbox plus any the tool couldn't confirm, and
+  collapses confirmed "No access" behind a "Show N with no access" toggle. The
+  summary calls out how many verdicts couldn't be confirmed (an Exchange RBAC check
+  that needs admin rights), and the "Unknown" badge gained a tooltip clarifying it
+  means *possible* access, not a contradiction of a "blocked" detail line — so a
+  row that is blocked on one path but unverifiable on the other reads correctly.
 
 ### Fixed
 

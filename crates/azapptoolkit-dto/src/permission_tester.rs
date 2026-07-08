@@ -6,6 +6,7 @@
 //! permissions unioned with org-wide `Sites.*` grants). Snake-case fields; the
 //! Tauri IPC boundary handles the camelCase bridge.
 
+use azapptoolkit_core::audit::AuditPrincipalKind;
 use serde::{Deserialize, Serialize};
 
 /// Outcome of a single permission test against one resource.
@@ -74,6 +75,19 @@ pub struct MailboxReacherRow {
     /// Exchange role names backing the verdict, when Exchange answered.
     pub roles: Vec<String>,
     pub detail: Option<String>,
+    /// Which detail pane the row's "Open" affordance routes to, mirroring the
+    /// audit's routing: `Application` → the App Registration pane (`object_id`
+    /// is the application object id); `ServicePrincipal` / `ManagedIdentity` →
+    /// the enterprise / managed-identity pane (`object_id` is the SP object id).
+    /// `#[serde(default)]` → `Application` so any older payload deserializes.
+    #[serde(default)]
+    pub principal_kind: AuditPrincipalKind,
+    /// The id the "Open" affordance navigates to, per `principal_kind`: the
+    /// application object id for a local registration, otherwise the service
+    /// principal object id (equal to `principal_id`). Empty only when the SP
+    /// couldn't be resolved at all.
+    #[serde(default)]
+    pub object_id: String,
 }
 
 /// Result of probing every candidate against one mailbox. `exchange_available`

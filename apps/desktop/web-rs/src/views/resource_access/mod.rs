@@ -75,3 +75,18 @@ pub(super) fn verdict_badge(verdict: &str) -> (&'static str, &'static str) {
         _ => ("badge", "Unknown"),
     }
 }
+
+/// Hover tooltip for a verdict badge. `Unknown` is the load-bearing one: it means
+/// a path (typically the Exchange RBAC check) couldn't be evaluated, so the badge
+/// must read as "possible access, not yet verified" rather than contradicting a
+/// "blocked" line in the detail column.
+pub(super) fn verdict_tooltip(verdict: &str) -> &'static str {
+    match verdict {
+        "org_wide" => "Reaches this mailbox — and every mailbox — via an org-wide grant.",
+        "scoped" => "Reaches this mailbox through a scoped grant.",
+        "no_access" => "Confirmed: this principal cannot reach this mailbox.",
+        _ => {
+            "Access couldn’t be confirmed — an Exchange RBAC check needs Exchange administrator rights. Treat as possible access until verified."
+        }
+    }
+}
