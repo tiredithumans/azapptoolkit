@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-07-08
+
 ### Added
 
 - **Resource Access → Mailboxes results are now clickable for investigation.**
@@ -33,6 +35,9 @@ the project adheres to
   that needs admin rights), and the "Unknown" badge gained a tooltip clarifying it
   means *possible* access, not a contradiction of a "blocked" detail line — so a
   row that is blocked on one path but unverifiable on the other reads correctly.
+- **Home "App registrations" card button label.** Its "View all" button is now
+  "View app registrations", matching the other Home cards ("View enterprise apps",
+  "View managed identities", "View credentials").
 
 ## [0.19.2] - 2026-07-07
 
