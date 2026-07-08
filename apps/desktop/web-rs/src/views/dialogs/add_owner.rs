@@ -1,8 +1,9 @@
 //! Guided add-owner remediation for the Security-audit view: a button + modal
-//! that closes the Rule-14 ownership gap (no owners / single owner) by
-//! searching the directory and adding the picked user via the existing
-//! add-owner mutation. Advisory only — the admin picks and confirms; purely
-//! additive, so it can't break a working sign-in.
+//! that closes the Rule-14 ownership gap (no owners / single owner) either by
+//! one-click applying the tenant's Settings-configured default owners or by
+//! searching the directory for a specific user — both via the existing add-owner
+//! mutation. Advisory only — the admin chooses; purely additive, so it can't
+//! break a working sign-in.
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Input, Spinner, SpinnerSize};
@@ -16,10 +17,11 @@ use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
 
-/// "Add owner" remediation — searches users and adds the picked one as an
-/// owner of the app registration. Adding directly from the candidate row
-/// mirrors the Owners tab (no separate select-then-confirm step); success
-/// closes the modal and fires `on_done` so the row's Fix button clears.
+/// "Add owner" remediation — one-click applies the tenant's default owners
+/// (Settings → `app_registration.default_owners`) or searches users and adds the
+/// picked one as an owner of the app registration. Adding directly from the
+/// candidate row mirrors the Owners tab (no separate select-then-confirm step);
+/// success closes the modal and fires `on_done` so the row's Fix button clears.
 #[component]
 pub fn AddOwnerButton(
     object_id: String,
@@ -30,6 +32,7 @@ pub fn AddOwnerButton(
     let tenant = session.active_tenant;
     let open = RwSignal::new(false);
     let busy = RwSignal::new(false);
+    let adding_defaults = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let raw_query = RwSignal::new(String::new());
     let query = use_debounced(raw_query.into(), 300);
@@ -53,9 +56,12 @@ pub fn AddOwnerButton(
         }
     });
 
+    // `object_id` is consumed by both the per-row add and the default-owners
+    // handler; give each its own clone.
+    let object_id_row = object_id.clone();
     // A `Callback` (Copy) so every candidate row's click handler can capture it.
     let add = Callback::new(move |principal_id: String| {
-        if busy.get() {
+        if busy.get() || adding_defaults.get() {
             return;
         }
         let Some(t) = tenant.get() else {
@@ -63,7 +69,7 @@ pub fn AddOwnerButton(
         };
         busy.set(true);
         error.set(None);
-        let object_id = object_id.clone();
+        let object_id = object_id_row.clone();
         leptos::task::spawn_local(async move {
             match applications::add_application_owner(&t.tenant_id, &object_id, &principal_id).await
             {
@@ -81,8 +87,78 @@ pub fn AddOwnerButton(
         });
     });
 
+    // One-click apply of the tenant's Settings-configured default owners
+    // (`app_registration.default_owners`). Additive: skips anyone already an
+    // owner (via the cached detail), reports per-owner failures, and only clears
+    // the finding's Fix button (`on_done`) when nothing failed.
+    let add_defaults = Callback::new(move |_: ()| {
+        if busy.get() || adding_defaults.get() {
+            return;
+        }
+        let Some(t) = tenant.get() else {
+            return;
+        };
+        adding_defaults.set(true);
+        error.set(None);
+        let object_id = object_id.clone();
+        leptos::task::spawn_local(async move {
+            let defaults = crate::bindings::defaults::get_tenant_defaults(&t.tenant_id).await;
+            let owners = defaults.app_registration.default_owners;
+            if owners.is_empty() {
+                error.set(Some(
+                    "No default owners configured — set them in Settings.".into(),
+                ));
+                adding_defaults.set(false);
+                return;
+            }
+            // Skip anyone already an owner so a re-run doesn't error on the
+            // existing single owner. `get_application_detail` is cached.
+            let existing: std::collections::HashSet<String> =
+                match applications::get_application_detail(&t.tenant_id, &object_id).await {
+                    Ok(d) => d.owners.iter().map(|o| o.id.clone()).collect(),
+                    Err(_) => std::collections::HashSet::new(),
+                };
+            let mut added = 0usize;
+            let mut failures = Vec::new();
+            for p in owners {
+                if existing.contains(&p.id) {
+                    continue;
+                }
+                match applications::add_application_owner(&t.tenant_id, &object_id, &p.id).await {
+                    Ok(()) => added += 1,
+                    Err(e) => {
+                        failures.push(format!("{}: {}", p.display_name.unwrap_or(p.id), e.message))
+                    }
+                }
+            }
+            adding_defaults.set(false);
+            if !failures.is_empty() {
+                // Leave the modal open with the error so the operator can retry;
+                // don't clear the Fix button.
+                error.set(Some(format!(
+                    "{} default owner(s) failed — {}",
+                    failures.len(),
+                    failures.join("; ")
+                )));
+                return;
+            }
+            open.set(false);
+            raw_query.set(String::new());
+            if added > 0 {
+                session.toast_success(format!(
+                    "Added {added} default owner(s) — re-run the audit to refresh the ownership finding."
+                ));
+            } else {
+                session.toast_success(
+                    "Default owners are already present — re-run the audit to refresh.",
+                );
+            }
+            on_done.run(object_id);
+        });
+    });
+
     use_escape(
-        move || open.get_untracked() && !busy.get_untracked(),
+        move || open.get_untracked() && !busy.get_untracked() && !adding_defaults.get_untracked(),
         move || open.set(false),
     );
     let modal_ref: NodeRef<leptos::html::Div> = NodeRef::new();
@@ -110,6 +186,25 @@ pub fn AddOwnerButton(
                         <h3 id="add-owner-dialog-title">"Add an owner"</h3>
                         <Body1>
                             "Search the directory and add an owner so this application has clear accountability. Adding an owner is purely additive — it can't disrupt the app's sign-in or permissions."
+                        </Body1>
+                        <div class="actions-row">
+                            <Button
+                                appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                disabled=Signal::derive(move || busy.get() || adding_defaults.get())
+                                on_click=Box::new(move |_| add_defaults.run(()))
+                            >
+                                "Add default owners"
+                            </Button>
+                            {move || {
+                                adding_defaults
+                                    .get()
+                                    .then(|| {
+                                        view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                    })
+                            }}
+                        </div>
+                        <Body1 class="muted">
+                            "Adds the owners configured for this tenant in Settings (additive — skips anyone already an owner). Or search below to add someone specific."
                         </Body1>
                         <Input value=raw_query placeholder="Search users by name or UPN (min 2 chars)" />
                         {move || {
@@ -142,7 +237,7 @@ pub fn AddOwnerButton(
                                                                 </span>
                                                                 <Button
                                                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                                                    disabled=Signal::derive(move || busy.get())
+                                                                    disabled=Signal::derive(move || busy.get() || adding_defaults.get())
                                                                     on_click=Box::new(move |_| add.run(id.clone()))
                                                                 >
                                                                     "Add"
@@ -167,12 +262,12 @@ pub fn AddOwnerButton(
                             <Button
                                 appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                 on_click=Box::new(move |_| open.set(false))
-                                disabled=Signal::derive(move || busy.get())
+                                disabled=Signal::derive(move || busy.get() || adding_defaults.get())
                             >
                                 "Cancel"
                             </Button>
                             {move || {
-                                busy.get()
+                                (busy.get() || adding_defaults.get())
                                     .then(|| {
                                         view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
                                     })

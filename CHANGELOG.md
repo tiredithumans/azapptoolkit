@@ -16,6 +16,12 @@ the project adheres to
   a foreign enterprise app the Enterprise pane, a managed identity the Managed
   Identity pane — landing on Permissions where the grant can be reviewed or
   revoked.
+- **"Add default owners" in the audit's owner remediation.** The Security audit's
+  "Add owner" fix (for the "No owners" / "Single owner" finding) now has an "Add
+  default owners" button that applies the owners configured for the tenant in
+  Settings in one click — additive, skipping anyone already an owner — alongside
+  the existing directory search. Previously the finding could only be closed by
+  searching and picking each owner by hand.
 
 ### Changed
 
@@ -27,6 +33,8 @@ the project adheres to
   that needs admin rights), and the "Unknown" badge gained a tooltip clarifying it
   means *possible* access, not a contradiction of a "blocked" detail line — so a
   row that is blocked on one path but unverifiable on the other reads correctly.
+
+## [0.19.2] - 2026-07-07
 
 ### Fixed
 
