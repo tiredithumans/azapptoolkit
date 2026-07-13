@@ -86,7 +86,21 @@ why).
 
 The direct `rand = "0.8"` / `sha2 = "0.10"` pins in `src-tauri/Cargo.toml` (random bytes for
 client secrets in `expose_api`/`app_roles`/`managed_identity`; the SHA-256 cert thumbprint) are
-held to match what **`oauth2` 5 + Tauri 2** already resolve. Bumping to `rand` 0.10 / `sha2` 0.11
-only stacks a **duplicate** major version (neither held version carries an advisory), so leave
-them until oauth2/Tauri move first. Both lockfiles otherwise track the latest semver-compatible
-versions — `cargo update` is a no-op.
+held to match what **`oauth2` 5 + Tauri 2** already resolve. As of a full `cargo update` on
+**2026-07-13**, these are the **only two direct deps in the entire codebase behind a major**
+(web-rs is fully current), and both stay pinned. The re-eval trigger below has **not** fired:
+
+- **`rand` (0.8.7 → 0.10.2):** `oauth2` 5.0.0 — the latest oauth2 — still resolves `rand 0.8.7` /
+  `rand_core 0.6.4`. Bumping our direct dep to 0.10 leaves oauth2's `rand 0.8` in the tree
+  regardless (no dedup), and pulls `getrandom 0.3` alongside the in-tree 0.2.
+- **`sha2` (0.10.9 → 0.11.0):** `sha2 0.10.9` is shared by oauth2 5, Tauri 2.11
+  (`tauri-codegen` / `wry`) and `secret-service`, all unified on `digest 0.10`. We'd be the *only*
+  crate on 0.11, so the bump **adds** a second `sha2` **and** a second `digest` major — net *more*
+  duplication, not less.
+- **Cost with no benefit:** both need code edits — `cert.rs` (`sha2::{Digest, Sha256}`, digest
+  trait API changed 0.10→0.11) and `commands/guid.rs` (`rand::thread_rng()` → `rng()`, renamed in
+  0.9+) — while `cargo audit` is clean on both held versions, so nothing forces the move.
+
+**Re-evaluate only when `oauth2` (or Tauri) ships a release on `rand 0.9+` / `sha2 0.11`** — then a
+bump dedups the tree instead of duplicating it. Both lockfiles otherwise track the latest
+semver-compatible versions — a plain `cargo update` is a no-op.
