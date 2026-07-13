@@ -197,7 +197,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Full-collection PATCH for `appRoles` / `oauth2PermissionScopes`.** Both are not-nullable arrays Graph **full-replaces** — re-read live state, mutate, write the whole array back (never merge against a cached payload). Deleting an enabled entry needs two PATCHes: disable first, then remove (`commands/expose_api.rs`, `commands/app_roles.rs`). Exposed **app roles** edit the **paired application** when one exists (else the SP directly) and round-trip roles as **raw JSON** so the `value: null` SAML default (`msiam_access`) survives byte-for-byte (a typed `AppRole` would rewrite it to `""`). Bust with `invalidate_app_details` only.
 
-- **Crypto deps — no `rsa`; `rand`/`sha2` majors pinned on purpose.** Cert generation (`src-tauri/src/cert.rs`) uses `rcgen` on the `aws_lc_rs` backend specifically to keep `rsa` (RUSTSEC-2023-0071) out of the graph — **don't reintroduce `rsa`**. The `rand = "0.8"` / `sha2 = "0.10"` pins match what `oauth2` 5 + Tauri 2 resolve; bumping only stacks a duplicate major, so leave them until oauth2/Tauri move first. Details: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
+- **Crypto deps — no `rsa`; `rand`/`sha2` majors pinned on purpose.** Cert generation (`src-tauri/src/cert.rs`) uses `rcgen` on the `aws_lc_rs` backend specifically to keep `rsa` (RUSTSEC-2023-0071) out of the graph — **don't reintroduce `rsa`**. The `rand = "0.8"` / `sha2 = "0.10"` pins match what `oauth2` 5 + Tauri 2 resolve; a bump only duplicates a crypto major, so leave them until oauth2/Tauri move first. Evidence: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
 
 ## Coding fundamentals
 
