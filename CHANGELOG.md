@@ -7,7 +7,16 @@ the project adheres to
 
 ## [Unreleased]
 
-## [0.20.0] - 2026-07-08
+### Changed
+
+- **Full dependency refresh.** Ran `cargo update` across both lockfiles (root
+  workspace and the excluded `web-rs` WASM tree), advancing all crates to their
+  latest semver-compatible versions — notably `rustls` 0.23.42, the
+  `wasm-bindgen`/`web-sys`/`js-sys` 0.2.126/0.3.103 family, `zbus` 5.17.0, `regex`
+  1.13.0, and `uuid` 1.23.5. No manifest version requirements changed; the
+  deliberate crypto pins hold (`rand` stays on 0.8, `sha2` on 0.10, no `rsa`
+  introduced), and the web-rs tree stays within the Rust 1.96 MSRV floor. `audit`
+  and `deny` pass clean on both trees.
 
 ### Added
 
