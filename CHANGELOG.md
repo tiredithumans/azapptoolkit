@@ -18,6 +18,8 @@ the project adheres to
   introduced), and the web-rs tree stays within the Rust 1.96 MSRV floor. `audit`
   and `deny` pass clean on both trees.
 
+## [0.20.0] - 2026-07-08
+
 ### Added
 
 - **Resource Access → Mailboxes results are now clickable for investigation.**
