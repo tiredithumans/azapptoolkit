@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "azapptoolkit-arm"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "azapptoolkit-core",
  "bytes",
@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "azapptoolkit-auth"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "apple-native-keyring-store",
  "azapptoolkit-core",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "azapptoolkit-core"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "azapptoolkit-dto"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "azapptoolkit-arm",
  "azapptoolkit-auth",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "azapptoolkit-exchange"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "azapptoolkit-core",
  "bytes",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "azapptoolkit-graph"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "async-trait",
  "azapptoolkit-core",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "azapptoolkit-keyvault"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "azapptoolkit-core",
  "bytes",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "azapptoolkit-permissions"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1053,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "anyhow",
  "async-trait",

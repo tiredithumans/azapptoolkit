@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-07-15
+
 ### Fixed
 
 - **Entra app-gallery search now finds apps it was missing.** The "Browse the
@@ -44,6 +46,14 @@ the project adheres to
   deliberate crypto pins hold (`rand` stays on 0.8, `sha2` on 0.10, no `rsa`
   introduced), and the web-rs tree stays within the Rust 1.96 MSRV floor. `audit`
   and `deny` pass clean on both trees.
+
+  Re-audited for this release: no major/minor bumps are available. `rand`
+  (0.8 → 0.10) and `sha2` (0.10 → 0.11) remain the only outdated direct deps,
+  and both are blocked upstream rather than by preference — `oauth2` 5.0.0 is
+  the latest release and still requires `rand` 0.8 + `sha2` 0.10, with `sha2`
+  0.10 additionally required by `secret-service` 5.1.0 and `tauri-codegen`
+  (`tauri` 2.11.5, also latest). Bumping either would compile a *second* crypto
+  major beside the first rather than move one.
 
 ## [0.20.0] - 2026-07-08
 
