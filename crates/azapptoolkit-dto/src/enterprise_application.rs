@@ -126,8 +126,9 @@ pub struct AppAssignmentDto {
 
 /// A Microsoft Entra application-gallery template surfaced in the "Browse the
 /// gallery" search — the fields the picker renders. Mirrors
-/// `azapptoolkit_core::models::ApplicationTemplate` (a `display_name` always
-/// present here; the command drops templates without one).
+/// `azapptoolkit_core::models::ApplicationTemplate`, whose `display_name` is
+/// optional; the command falls back to the publisher, then the template id, so
+/// a nameless template stays findable instead of silently vanishing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplicationTemplateDto {
     pub id: String,
@@ -138,6 +139,24 @@ pub struct ApplicationTemplateDto {
     pub logo_url: Option<String>,
     /// SSO modes the gallery app supports (e.g. `saml`, `password`, `oidc`).
     pub supported_single_sign_on_modes: Vec<String>,
+}
+
+/// Ranked gallery matches for one query, plus the counts the picker needs to
+/// tell "nothing matched" apart from "showing the best of many" — an empty
+/// `Vec` alone can't distinguish those, and reading it as "no query yet" was
+/// what made a genuine zero-result search look like the search was broken.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GallerySearchResultsDto {
+    /// Best matches, ranked, capped at the command's display limit.
+    pub results: Vec<ApplicationTemplateDto>,
+    /// Every match, counted before the display cap.
+    pub total_matches: usize,
+    /// `true` when `total_matches` exceeded the display cap, so the picker can
+    /// say results were narrowed rather than silently showing a subset.
+    pub truncated: bool,
+    /// `true` when the gallery itself exceeded the fetch cap, so matching ran
+    /// over a partial catalog and a missing app might exist beyond it.
+    pub partial_catalog: bool,
 }
 
 /// Result of creating an enterprise application from a gallery template

@@ -50,6 +50,43 @@ bound and swept by tenant invalidation like any other. The corpus is derived fro
 so `invalidate_app_lists` busts it too; a credential-only mutation keeps all three (it changes none
 of them).
 
+## Gallery search matches in memory too — don't put the filter back on the server
+
+`search_application_templates` (the New-application → "Browse the gallery" picker) has the same
+shape as `global_search`, for the same reason: `GET /applicationTemplates` supports **no `$search`**
+and **no documented `contains()`** — only `startswith`. A server-side
+`$filter=startswith(displayName,'…')` therefore can't find "Salesforce" from "force" or
+"Office 365" from "365", which is exactly how it failed: real gallery apps were simply absent from
+results, and the picker then rendered "Type an app name to search the gallery." over the empty list,
+so a miss looked like the search had never run.
+
+So `GraphClient::list_application_templates` pulls the gallery **whole** (unfiltered, `$select`ed to
+the picker's fields, `$top=999` as a page-size hint, `@odata.nextLink` followed to completion via
+`collect_all_pages_capped`) and matching happens in memory. **Don't reintroduce a `$filter` here** —
+the graph-client test asserts `query_param_is_missing("$filter")` precisely to stop that
+"optimization" from silently restoring prefix-only search.
+
+The corpus is typed-cached under `gallery_corpus_key(tenant_id)` → `"{tenant_id}|gallery_templates"`
+(`CacheKind::Lists`, 60-min TTL) via `put_typed`/`get_typed`, so a debounced keystroke is a refcount
+clone rather than a re-deserialize of ~3k templates plus a re-lowercasing — and the per-keystroke
+Graph round trip is gone entirely. It is tenant-scoped by the universal `{tenant_id}|` convention
+even though the gallery is Microsoft's **global** catalog and not tenant data, purely so the
+sign-out prefix sweep collects it like everything else. Nothing invalidates it: no mutation in this
+app can change the gallery, so `invalidate_app_lists` deliberately does **not** name it.
+
+Two asymmetries worth keeping:
+
+- **Ranking tiers differ from `global_search`.** Gallery rows rank exact → name prefix →
+  word-boundary → substring → publisher-only, and *whether* a row matches is decided separately:
+  every whitespace token must hit the name or publisher (**AND**, not OR — ORing would make
+  "office 365" drag in every app containing "365", while ANDing still finds "Microsoft Teams" from
+  "teams microsoft").
+- **A failed gallery fetch propagates as an error**, unlike `search_corpus`, which degrades to an
+  empty corpus. An empty result set here is a *claim that no such app exists* — a lie the operator
+  can't distinguish from a broken fetch, which is the bug class this whole path exists to avoid.
+  `GallerySearchResultsDto` carries `total_matches`/`truncated`/`partial_catalog` so the picker can
+  say "showing the closest 50 of 200" or admit a partial catalog rather than imply a confident zero.
+
 ## Invalidation — only on `Ok`
 
 After a successful mutation, bust the relevant list cache (`invalidate_app_lists(...)`); never on

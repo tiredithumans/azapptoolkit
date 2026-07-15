@@ -391,14 +391,26 @@ async fn instantiate_template_returns_app_and_sp() {
 }
 
 #[tokio::test]
-async fn search_application_templates_filters_by_name_prefix_and_parses() {
+async fn list_application_templates_fetches_whole_gallery_unfiltered_and_pages() {
     let server = MockServer::start().await;
+    let base = server.uri();
+    let page2_link = format!("{base}/applicationTemplates?page=2");
+
+    // Page 1. The `$filter` assertion is the regression guard: the gallery is
+    // fetched WHOLE and matched in memory, because a server-side
+    // `startswith(displayName,…)` could never find "Salesforce" from "force".
+    // Re-adding a filter here would silently restore prefix-only search.
     Mock::given(method("GET"))
         .and(path("/applicationTemplates"))
-        .and(query_param("$filter", "startswith(displayName,'sales')"))
-        .and(query_param("$top", "20"))
-        .and(query_param("$orderby", "displayName"))
+        .and(query_param("$top", "999"))
+        .and(query_param(
+            "$select",
+            "id,displayName,publisher,description,categories,logoUrl,supportedSingleSignOnModes",
+        ))
+        .and(query_param_is_missing("$filter"))
+        .and(query_param_is_missing("$search"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "@odata.nextLink": page2_link,
             "value": [
                 {
                     "id": "tmpl-1",
@@ -411,18 +423,36 @@ async fn search_application_templates_filters_by_name_prefix_and_parses() {
         })))
         .mount(&server)
         .await;
+
+    // Page 2, reached via the nextLink — a gallery spans several pages, so
+    // taking only the first would silently drop most of the catalog.
+    Mock::given(method("GET"))
+        .and(path("/applicationTemplates"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [
+                { "id": "tmpl-2", "displayName": "ServiceNow" },
+                // No `displayName` at all — the caller decides what to do with
+                // it, so the client must still surface the row.
+                { "id": "tmpl-3", "publisher": "Nameless Corp" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
     let client = make_client(&server.uri());
-    let templates = client
-        .search_application_templates("sales", 20)
-        .await
-        .unwrap();
-    assert_eq!(templates.len(), 1);
+    let (templates, truncated) = client.list_application_templates().await.unwrap();
+
+    assert!(!truncated, "a 3-template gallery is far under the cap");
+    assert_eq!(templates.len(), 3, "both pages are concatenated");
     assert_eq!(templates[0].id, "tmpl-1");
     assert_eq!(templates[0].display_name.as_deref(), Some("Salesforce"));
     assert_eq!(
         templates[0].supported_single_sign_on_modes,
         vec!["saml".to_string(), "password".to_string()]
     );
+    assert_eq!(templates[2].id, "tmpl-3");
+    assert_eq!(templates[2].display_name, None);
 }
 
 #[tokio::test]
