@@ -432,12 +432,15 @@ pub async fn save_enterprise_applications_to_file(
     .await
 }
 
-/// Searches the Entra application gallery by display-name prefix for the
-/// New-application "Browse the gallery" picker (2+ chars; empty below that).
+/// Searches the Entra application gallery for the New-application "Browse the
+/// gallery" picker — matches anywhere in a template's name or publisher, ranked
+/// (2+ characters; an empty result set below that). The reply carries
+/// `total_matches`/`truncated`, so the picker can tell "nothing matched" from
+/// "showing the best of many".
 pub async fn search_application_templates(
     tenant_id: &str,
     query: &str,
-) -> Result<Vec<ApplicationTemplateDto>, UiError> {
+) -> Result<GallerySearchResultsDto, UiError> {
     invoke_result(
         "search_application_templates",
         SearchTemplatesArgs { tenant_id, query },

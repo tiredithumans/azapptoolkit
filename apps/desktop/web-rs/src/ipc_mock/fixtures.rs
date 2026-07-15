@@ -21,7 +21,8 @@ use azapptoolkit_dto::credentials::CredentialRowDto;
 use azapptoolkit_dto::diagnostics::CacheStatsDto;
 use azapptoolkit_dto::enterprise_application::{
     AppAssignmentDto, AppRolesView, ApplicationTemplateDto, EnterpriseApplicationDetail,
-    EnterpriseApplicationDto, GalleryAppSummary, GroupMembershipDto, ProvisioningJobDto,
+    EnterpriseApplicationDto, GalleryAppSummary, GallerySearchResultsDto, GroupMembershipDto,
+    ProvisioningJobDto,
 };
 use azapptoolkit_dto::exchange::{ExchangeAccessResult, MailScopeEntry};
 use azapptoolkit_dto::keyvault::{KeyVaultSweepProgress, KvSecretItemDto, KvSecretValueDto};
@@ -856,6 +857,25 @@ pub fn application_templates() -> Vec<ApplicationTemplateDto> {
         tmpl("tmpl:snow", "ServiceNow", "ServiceNow", &["saml"]),
         tmpl("tmpl:zoom", "Zoom", "Zoom Video Communications", &["saml"]),
     ]
+}
+
+/// Demo/GUI-test reply for `search_application_templates`. The mock ignores the
+/// query, so any 2+ char search returns every sample template as an untruncated
+/// full-catalog result.
+pub fn gallery_search_results() -> GallerySearchResultsDto {
+    let results = application_templates();
+    GallerySearchResultsDto {
+        total_matches: results.len(),
+        results,
+        truncated: false,
+        partial_catalog: false,
+    }
+}
+
+/// A gallery search that ran and matched nothing — distinct from "no query
+/// yet", which the picker must not confuse it with.
+pub fn gallery_search_no_matches() -> GallerySearchResultsDto {
+    GallerySearchResultsDto::default()
 }
 
 /// Result of creating an enterprise app from a gallery template (demo).

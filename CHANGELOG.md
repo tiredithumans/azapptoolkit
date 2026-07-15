@@ -7,6 +7,33 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Entra app-gallery search now finds apps it was missing.** The "Browse the
+  gallery" picker filtered server-side with
+  `$filter=startswith(displayName,'…')`, so it only ever matched a **prefix**:
+  searching `force` never found "Salesforce" and `365` never found "Office 365".
+  `GET /applicationTemplates` supports neither `$search` nor a documented
+  `contains()`, so the gallery is now fetched whole (paged via `@odata.nextLink`,
+  cached per tenant for 60 minutes) and matched in memory — hitting anywhere in a
+  template's display name **or publisher**, ranked exact → prefix →
+  word-boundary → substring, with multi-word queries matching regardless of word
+  order. Searching is also now instant after the first load, since each keystroke
+  no longer makes a Graph round trip. Three compounding defects went with it:
+  results were silently capped at the 25 alphabetically-first matches with no
+  "more results" signal (the reply now carries `total_matches`/`truncated`, and
+  the picker says so); templates with no `displayName` were silently dropped
+  (they now fall back to publisher, then template id); and the minimum-query gate
+  counted **bytes**, so a single-character CJK query slipped past a gate labelled
+  "2+ characters" (it now counts characters, on both sides of the IPC boundary).
+
+- **A gallery search that matches nothing now says so.** The picker rendered
+  "Type an app name to search the gallery." for *both* an empty query and a
+  zero-result search, telling operators to start typing when they already had —
+  which is what made the prefix-matching bug above read as a broken search rather
+  than a miss. It now distinguishes the two, and admits when the catalog it
+  searched was only partly loaded instead of implying the app doesn't exist.
+
 ### Changed
 
 - **Full dependency refresh.** Ran `cargo update` across both lockfiles (root

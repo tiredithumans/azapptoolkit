@@ -1,5 +1,12 @@
 use super::*;
 
+/// Upper bound on templates pulled from the application gallery by
+/// [`GraphClient::list_application_templates`]. The Entra gallery is on the
+/// order of 3k templates, so this is headroom rather than a working limit — it
+/// exists to bound a pathological/cyclic `nextLink`, and the returned
+/// `truncated` flag tells the caller if it ever bit.
+const GALLERY_TEMPLATE_CAP: usize = 10_000;
+
 #[derive(Debug, Default, Clone)]
 pub struct AppListQuery {
     pub search: Option<String>,
@@ -504,24 +511,29 @@ impl GraphClient {
         self.send_json(Method::POST, &path, &body).await
     }
 
-    /// Searches the Microsoft Entra application gallery by display-name prefix
-    /// (`GET /applicationTemplates?$filter=startswith(displayName,'…')`), ordered
-    /// by name, capped at `top`. Reading the gallery needs no extra permission
-    /// beyond a valid Graph token (`$search` isn't supported here, so this is a
-    /// prefix match). The caller passes an already-trimmed, non-empty query.
-    pub async fn search_application_templates(
-        &self,
-        query: &str,
-        top: u32,
-    ) -> Result<Vec<ApplicationTemplate>> {
-        // OData single-quote escaping so a name like `O'Neil` can't break the
-        // filter literal: `'` → `''`.
-        let filter = format!("startswith(displayName,'{}')", query.replace('\'', "''"));
-        let top = top.to_string();
-        let params: [(&str, &str); 4] = [
-            ("$filter", filter.as_str()),
-            ("$top", top.as_str()),
-            ("$orderby", "displayName"),
+    /// Fetches the **whole** Microsoft Entra application gallery
+    /// (`GET /applicationTemplates`), following `@odata.nextLink` to completion
+    /// (bounded by [`GALLERY_TEMPLATE_CAP`]). Reading the gallery needs no
+    /// extra permission beyond a valid Graph token.
+    ///
+    /// Deliberately **unfiltered**: this endpoint supports neither `$search`
+    /// nor (documented) `contains()` — only `startswith`, which can't find
+    /// "Salesforce" from "force" or "Office 365" from "365". So the gallery is
+    /// pulled once and matched in memory over a cached, pre-lowercased corpus
+    /// (`commands::enterprise_application::gallery_corpus`), the same shape
+    /// `global_search` uses for directory objects and for the same reason.
+    /// That also removes the per-keystroke round trip.
+    ///
+    /// Returns `(templates, truncated)`; `truncated` means the gallery exceeded
+    /// [`GALLERY_TEMPLATE_CAP`], so matching runs over a partial catalog.
+    pub async fn list_application_templates(&self) -> Result<(Vec<ApplicationTemplate>, bool)> {
+        // `$select` trims the payload to the fields the picker renders — the
+        // full rows also carry endpoints/provisioning metadata this never
+        // shows. `$top` is a page-size hint, so a ~3k-template gallery is a
+        // handful of round trips rather than dozens at the default page size.
+        // No `$orderby`: ranking is against the query and happens locally.
+        let params: [(&str, &str); 2] = [
+            ("$top", "999"),
             (
                 "$select",
                 "id,displayName,publisher,description,categories,logoUrl,supportedSingleSignOnModes",
@@ -530,7 +542,8 @@ impl GraphClient {
         let page: Paged<ApplicationTemplate> = self
             .get_json("/applicationTemplates", &params, false)
             .await?;
-        Ok(page.items)
+        self.collect_all_pages_capped(page, GALLERY_TEMPLATE_CAP)
+            .await
     }
 
     /// PATCH `/applications/{id}` with a caller-built body carrying the SSO
