@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-07-17
+
 ### Fixed
 
 - **Gallery search now covers the whole catalog, not a truncated slice.** The
