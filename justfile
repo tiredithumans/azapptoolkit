@@ -177,10 +177,12 @@ deny:
 
 # Same policy for the frontend tree (web-rs is its own workspace; the root
 # `deny` never reaches it). Reuses the root deny.toml so the two trees can't
-# drift to different policies.
+# drift to different policies. `--config` sits on the ROOT command: the
+# cargo-deny 0.20 CLI refactor moved it off `check` (needs cargo-deny >= 0.20;
+# CI pins the matching version in ci.yml).
 [working-directory('apps/desktop/web-rs')]
 web-deny:
-    cargo deny check --config ../../../deny.toml bans licenses sources
+    cargo deny --config ../../../deny.toml check bans licenses sources
 
 # --- Release / packaging ----------------------------------------------------
 
