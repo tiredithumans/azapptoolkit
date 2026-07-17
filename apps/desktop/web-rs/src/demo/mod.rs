@@ -497,7 +497,13 @@ fn register_fixtures() {
     mock_ok("search_users", &f::directory_user_search());
     mock_ok("search_distribution_lists", &f::distribution_list_search());
     // "New application" → Browse the gallery: template search + instantiate.
-    mock_ok("search_application_templates", &f::gallery_search_results());
+    // Args-aware so the demo runs the real substring match over the sample
+    // catalog ("force" → Salesforce) instead of echoing the whole list back for
+    // every keystroke — the very thing the picker is supposed to demonstrate.
+    mock_each("search_application_templates", |args| {
+        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        f::gallery_search_for(query)
+    });
     mock_ok("create_gallery_application", &f::gallery_app_summary());
 
     // ---- Global search (top bar) ----

@@ -7,6 +7,28 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gallery search now covers the whole catalog, not a truncated slice.** The
+  0.20.1 fetch requested `GET /applicationTemplates` with `$top=999`, but that
+  endpoint caps the page size at **200 once any query parameter is applied**
+  (and `$select` is), and a `$top` above the endpoint's max is documented to be
+  ignored, clamped, or rejected. Depending on how the tenant's Graph handled the
+  over-limit hint, the gallery could come back as a single truncated page, so the
+  in-memory search silently missed every template past the first slice — apps
+  were unreachable by substring (or any) query even though the matching logic was
+  correct. The request now uses `$top=200` (the honoured maximum) and pages
+  through the full ~3k-template gallery via `@odata.nextLink`, fetched once and
+  cached per tenant.
+- **Gallery search in the GitHub Pages demo now actually searches.** The demo
+  mocks the Tauri backend, and its `search_application_templates` stub returned
+  the entire sample catalog for every query — so the picker looked broken (every
+  keystroke showed the same list). The demo mock is now args-aware: it runs the
+  same token-AND / exact → prefix → word-boundary → substring ranking as the
+  backend over an expanded sample catalog, so `force` → Salesforce and
+  `teams` → Microsoft Teams behave in the demo as they do against a live tenant.
+  This mock bug was demo-only and independent of the fetch-truncation fix above.
+
 ## [0.20.1] - 2026-07-15
 
 ### Fixed
