@@ -50,42 +50,51 @@ bound and swept by tenant invalidation like any other. The corpus is derived fro
 so `invalidate_app_lists` busts it too; a credential-only mutation keeps all three (it changes none
 of them).
 
-## Gallery search matches in memory too — don't put the filter back on the server
+## Gallery search filters server-side — `contains(tolower(…))`, never a local corpus
 
-`search_application_templates` (the New-application → "Browse the gallery" picker) has the same
-shape as `global_search`, for the same reason: `GET /applicationTemplates` supports **no `$search`**
-and **no documented `contains()`** — only `startswith`. A server-side
-`$filter=startswith(displayName,'…')` therefore can't find "Salesforce" from "force" or
-"Office 365" from "365", which is exactly how it failed: real gallery apps were simply absent from
-results, and the picker then rendered "Type an app name to search the gallery." over the empty list,
-so a miss looked like the search had never run.
+`search_application_templates` (the New-application → "Browse the gallery" picker) is the one
+search that does **not** use the `global_search` fetch-and-match-locally shape, because the gallery
+is **~39k templates** (verified via `$count=true` — more than 10× the "~3k" the corpus design
+assumed). Pulling it whole is ~14 round trips and tens of MB per tenant; worse, on this endpoint
+`$top` is a **total result limit, not a page-size hint** — a `$top`ed request returns one slice
+with **no `@odata.nextLink`** (verified live against v1.0), so every "fetch whole with `$top`"
+variant silently searched only the first slice and real gallery apps (CrowdStrike…) were simply
+absent from results. Page size on this endpoint is controlled by the `Prefer: odata.maxpagesize`
+header, not `$top` — but paging 39k rows isn't worth it when the server can match.
 
-So `GraphClient::list_application_templates` pulls the gallery **whole** (unfiltered, `$select`ed to
-the picker's fields, `$top=999` as a page-size hint, `@odata.nextLink` followed to completion via
-`collect_all_pages_capped`) and matching happens in memory. **Don't reintroduce a `$filter` here** —
-the graph-client test asserts `query_param_is_missing("$filter")` precisely to stop that
-"optimization" from silently restoring prefix-only search.
+So `GraphClient::search_application_templates` sends the match to the server:
+`$filter=` AND-joined per-token clauses of
+`(contains(tolower(displayName),'t') or contains(tolower(publisher),'t'))`, plus `$count=true`,
+`$top=GALLERY_FETCH_POOL` (the candidate pool), and the picker's `$select`. Three spellings that
+look interchangeable are not — the graph-client test pins each:
 
-The corpus is typed-cached under `gallery_corpus_key(tenant_id)` → `"{tenant_id}|gallery_templates"`
-(`CacheKind::Lists`, 60-min TTL) via `put_typed`/`get_typed`, so a debounced keystroke is a refcount
-clone rather than a re-deserialize of ~3k templates plus a re-lowercasing — and the per-keystroke
-Graph round trip is gone entirely. It is tenant-scoped by the universal `{tenant_id}|` convention
-even though the gallery is Microsoft's **global** catalog and not tenant data, purely so the
-sign-out prefix sweep collects it like everything else. Nothing invalidates it: no mutation in this
-app can change the gallery, so `invalidate_app_lists` deliberately does **not** name it.
+- **`contains`, not `startswith`** — `startswith` can't find "Salesforce" from "force" or
+  "Office 365" from "365" (`$search` isn't supported at all).
+- **`tolower(field)` against a pre-lowercased literal** — bare `contains` is **case-sensitive**
+  here ('crowd' misses "CrowdStrike"). `contains(tolower(…))` isn't spelled out in the endpoint
+  docs (they list `$filter` only generically) but is verified working on v1.0; if it ever regresses
+  server-side, the whole search errors loudly rather than shrinking silently.
+- **Single quotes double** (`'` → `''`) inside the OData literal, or the filter is a syntax error.
 
-Two asymmetries worth keeping:
+The command then ranks the fetched pool locally (exact → name prefix → word-boundary → substring →
+publisher-only; *whether* a row matches is per-token **AND** across name/publisher, mirroring the
+server filter, so "office 365" doesn't drag in every "365" app while "teams microsoft" still finds
+Microsoft Teams) and caps display at `GALLERY_TOP`. When the server's `@odata.count` exceeds the
+fetched pool, `total_matches`/`truncated` report the server's total — "showing the closest 50 of
+51" when 400 matched is a user-visible lie.
 
-- **Ranking tiers differ from `global_search`.** Gallery rows rank exact → name prefix →
-  word-boundary → substring → publisher-only, and *whether* a row matches is decided separately:
-  every whitespace token must hit the name or publisher (**AND**, not OR — ORing would make
-  "office 365" drag in every app containing "365", while ANDing still finds "Microsoft Teams" from
-  "teams microsoft").
-- **A failed gallery fetch propagates as an error**, unlike `search_corpus`, which degrades to an
-  empty corpus. An empty result set here is a *claim that no such app exists* — a lie the operator
-  can't distinguish from a broken fetch, which is the bug class this whole path exists to avoid.
-  `GallerySearchResultsDto` carries `total_matches`/`truncated`/`partial_catalog` so the picker can
-  say "showing the closest 50 of 200" or admit a partial catalog rather than imply a confident zero.
+Each ranked reply is typed-cached per query under `gallery_search_key(tenant_id, needle)` →
+`"{tenant_id}|gallery_search|{query}"` (`CacheKind::Lists`, 60-min TTL), so retyping a recent query
+is instant. Tenant-scoped by the universal `{tenant_id}|` convention even though the gallery is
+Microsoft's **global** catalog, purely so the sign-out prefix sweep collects it like everything
+else. Nothing invalidates it: no mutation in this app can change the gallery, so
+`invalidate_app_lists` deliberately does **not** name it, and the LRU bounds the per-query keys.
+
+One asymmetry worth keeping: **a failed gallery search propagates as an error**, unlike
+`search_corpus`, which degrades to an empty corpus. An empty result set here is a *claim that no
+such app exists* — a lie the operator can't distinguish from a broken fetch, which is the bug class
+this whole path exists to avoid. (The demo's mock sets `partial_catalog: true` for the same reason:
+its curated sample catalog must not present a miss as a confident full-gallery zero.)
 
 ## Invalidation — only on `Ok`
 

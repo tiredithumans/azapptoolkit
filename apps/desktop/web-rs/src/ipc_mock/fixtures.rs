@@ -870,6 +870,12 @@ pub fn application_templates() -> Vec<ApplicationTemplateDto> {
         tmpl("tmpl:slack", "Slack", "Slack Technologies", &["saml"]),
         tmpl("tmpl:box", "Dropbox Business", "Dropbox", &["saml"]),
         tmpl("tmpl:gh", "GitHub", "GitHub, Inc.", &["saml"]),
+        tmpl(
+            "tmpl:cs",
+            "CrowdStrike Falcon Platform",
+            "CrowdStrike",
+            &["saml"],
+        ),
     ]
 }
 
@@ -956,7 +962,11 @@ pub fn gallery_search_for(query: &str) -> GallerySearchResultsDto {
         total_matches: results.len(),
         results,
         truncated: false,
-        partial_catalog: false,
+        // The demo's catalog IS partial — a dozen curated samples of a ~39k
+        // gallery. Admitting that turns a demo no-match into "the gallery was
+        // only partly loaded" instead of the confident "no gallery apps match
+        // X", which reads as a broken search to anyone who knows X exists.
+        partial_catalog: true,
     }
 }
 

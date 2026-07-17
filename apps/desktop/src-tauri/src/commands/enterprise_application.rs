@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cache::CacheKind;
-use azapptoolkit_core::models::{ServicePrincipal, SynchronizationJob};
+use azapptoolkit_core::models::{ApplicationTemplate, ServicePrincipal, SynchronizationJob};
 use azapptoolkit_graph::GraphError;
 
 use crate::commands::applications::{enterprise_key, invalidate_app_lists, sp_index_key};
@@ -573,14 +573,21 @@ const GALLERY_TOP: usize = 50;
 /// a gate the UI labels "2+ characters".
 const GALLERY_MIN_QUERY_CHARS: usize = 2;
 
-/// Cache key for the tenant's gallery corpus. Tenant-scoped by the universal
-/// `{tenant_id}|…` convention even though the gallery is Microsoft's global
-/// catalog and not tenant data — so the sign-out prefix sweep collects it like
-/// everything else. Rides `CacheKind::Lists` (60-min TTL, same as the
-/// `search_corpus` it's modelled on); no mutation in this app can change the
-/// gallery, so no invalidation path needs to name it.
-fn gallery_corpus_key(tenant_id: &str) -> String {
-    format!("{tenant_id}|gallery_templates")
+/// How many candidate rows to pull from the server per search — the pool the
+/// local ranker orders before the display cap ([`GALLERY_TOP`]) is applied.
+/// Larger than the display cap on purpose: server order is arbitrary, so with
+/// a pool equal to the display cap the best match (e.g. the exact-name hit)
+/// could sit just past the slice and never be shown.
+const GALLERY_FETCH_POOL: usize = 200;
+
+/// Cache key for one gallery search's ranked reply. Tenant-scoped by the
+/// universal `{tenant_id}|…` convention even though the gallery is Microsoft's
+/// global catalog and not tenant data — so the sign-out prefix sweep collects
+/// it like everything else. Rides `CacheKind::Lists` (60-min TTL); no mutation
+/// in this app can change the gallery, so no invalidation path needs to name
+/// it, and the LRU bounds the per-query key space.
+fn gallery_search_key(tenant_id: &str, needle_lc: &str) -> String {
+    format!("{tenant_id}|gallery_search|{needle_lc}")
 }
 
 /// One pre-lowercased gallery row: the DTO the picker renders plus the
@@ -592,94 +599,51 @@ struct GalleryRow {
     publisher_lc: String,
 }
 
-/// The tenant's gallery corpus. `partial` records that the fetch hit the
-/// template cap, so the picker can admit its catalog is incomplete rather than
-/// report a confident "no matches".
-struct GalleryCorpus {
-    rows: Vec<GalleryRow>,
-    partial: bool,
-}
-
-/// Returns the tenant's typed-cached gallery corpus, fetching the whole gallery
-/// on a miss. Typed-cached as `Arc<GalleryCorpus>` (the `search_corpus`
-/// pattern), so a debounced keystroke is a refcount clone — no per-query
-/// deserialize of ~3k templates and no per-query re-lowercasing.
-///
-/// Errors propagate: a failed gallery fetch must surface as an error, not as an
-/// empty result set that reads as "no such app".
-async fn gallery_corpus(state: &AppState, tenant_id: &str) -> Result<Arc<GalleryCorpus>, UiError> {
-    let key = gallery_corpus_key(tenant_id);
-    if let Some(hit) = state
-        .cache
-        .get_typed::<GalleryCorpus>(CacheKind::Lists, &key)
-    {
-        return Ok(hit);
+/// Maps one fetched template into the ranker's row shape, lowercasing the
+/// haystacks once.
+fn gallery_row(t: ApplicationTemplate) -> GalleryRow {
+    // A gallery template with no `displayName` is rare but real. The
+    // previous code dropped it silently, shrinking results for reasons
+    // invisible to the operator; fall back to the publisher, then the
+    // id, so the row stays findable and pickable (the confirm stage
+    // lets the operator rename it anyway).
+    let display_name = t
+        .display_name
+        .filter(|n| !n.trim().is_empty())
+        .or_else(|| t.publisher.clone())
+        .unwrap_or_else(|| t.id.clone());
+    let publisher_lc = t.publisher.as_deref().unwrap_or_default().to_lowercase();
+    GalleryRow {
+        name_lc: display_name.to_lowercase(),
+        publisher_lc,
+        dto: ApplicationTemplateDto {
+            id: t.id,
+            display_name,
+            publisher: t.publisher,
+            description: t.description,
+            categories: t.categories,
+            logo_url: t.logo_url,
+            supported_single_sign_on_modes: t.supported_single_sign_on_modes,
+        },
     }
-
-    let client = state.graph_for(tenant_id);
-    let (templates, partial) = client.list_application_templates().await?;
-    if partial {
-        tracing::warn!(
-            cap = templates.len(),
-            "application gallery exceeded the fetch cap; search covers a partial catalog"
-        );
-    }
-    // The whole gallery is ~3k templates. A corpus far smaller (e.g. a few
-    // hundred) means paging stopped after one page — the tell for the
-    // `$top`-over-page-cap truncation that made search miss most of the
-    // catalog. Logged so a "search can't find app X" report can be confirmed
-    // against the actual corpus size instead of guessed at.
-    tracing::debug!(
-        templates = templates.len(),
-        "loaded application gallery corpus"
-    );
-
-    let rows = templates
-        .into_iter()
-        .map(|t| {
-            // A gallery template with no `displayName` is rare but real. The
-            // previous code dropped it silently, shrinking results for reasons
-            // invisible to the operator; fall back to the publisher, then the
-            // id, so the row stays findable and pickable (the confirm stage
-            // lets the operator rename it anyway).
-            let display_name = t
-                .display_name
-                .filter(|n| !n.trim().is_empty())
-                .or_else(|| t.publisher.clone())
-                .unwrap_or_else(|| t.id.clone());
-            let publisher_lc = t.publisher.as_deref().unwrap_or_default().to_lowercase();
-            GalleryRow {
-                name_lc: display_name.to_lowercase(),
-                publisher_lc,
-                dto: ApplicationTemplateDto {
-                    id: t.id,
-                    display_name,
-                    publisher: t.publisher,
-                    description: t.description,
-                    categories: t.categories,
-                    logo_url: t.logo_url,
-                    supported_single_sign_on_modes: t.supported_single_sign_on_modes,
-                },
-            }
-        })
-        .collect();
-
-    let corpus = Arc::new(GalleryCorpus { rows, partial });
-    state
-        .cache
-        .put_typed(CacheKind::Lists, key, Arc::clone(&corpus));
-    Ok(corpus)
 }
 
 /// Searches the Entra application gallery for the "Browse the gallery" picker
 /// in the New-application flow, matching **anywhere** in the template's display
 /// name or publisher and ranking the hits.
 ///
-/// Matching runs in memory over the cached corpus because
-/// `GET /applicationTemplates` supports neither `$search` nor `contains()` —
-/// only `startswith`, which could never find "Salesforce" from "force" or
-/// "Office 365" from "365". See [`GraphClient::list_application_templates`].
+/// The match itself runs **server-side** (`$filter=contains(tolower(…))`,
+/// see [`GraphClient::search_application_templates`]) because the gallery is
+/// ~39k templates — far too large to pull whole and match locally, which is
+/// what this command used to do and why it missed most of the catalog. The
+/// fetched candidate pool (up to [`GALLERY_FETCH_POOL`]) is then ranked
+/// locally (exact → prefix → word-boundary → substring) and capped at
+/// [`GALLERY_TOP`] for display. Each ranked reply is typed-cached per
+/// `(tenant, query)`, so retyping a recent query is instant.
+///
 /// A query under [`GALLERY_MIN_QUERY_CHARS`] returns nothing without a fetch.
+/// Errors propagate: a failed gallery search must surface as an error, not as
+/// an empty result set that reads as "no such app".
 #[tauri::command]
 pub async fn search_application_templates(
     state: State<'_, AppState>,
@@ -690,9 +654,48 @@ pub async fn search_application_templates(
     if trimmed.chars().count() < GALLERY_MIN_QUERY_CHARS {
         return Ok(GallerySearchResultsDto::default());
     }
+    let needle = trimmed.to_lowercase();
 
-    let corpus = gallery_corpus(&state, &tenant_id).await?;
-    Ok(rank_gallery(&corpus.rows, trimmed, corpus.partial))
+    let key = gallery_search_key(&tenant_id, &needle);
+    if let Some(hit) = state
+        .cache
+        .get_typed::<GallerySearchResultsDto>(CacheKind::Lists, &key)
+    {
+        return Ok((*hit).clone());
+    }
+
+    let tokens: Vec<String> = needle.split_whitespace().map(String::from).collect();
+    let client = state.graph_for(&tenant_id);
+    let (templates, server_total) = client
+        .search_application_templates(&tokens, GALLERY_FETCH_POOL)
+        .await?;
+    // Logged so a "search can't find app X" report can be checked against what
+    // the server actually matched instead of guessed at.
+    tracing::debug!(
+        fetched = templates.len(),
+        server_total,
+        query = %needle,
+        "gallery search candidates"
+    );
+
+    let rows: Vec<GalleryRow> = templates.into_iter().map(gallery_row).collect();
+    let mut dto = rank_gallery(&rows, trimmed, false);
+    // When more rows matched server-side than the fetch pool holds, the counts
+    // must reflect the server's total — "showing the closest 50 of 51" when
+    // 400 matched is exactly the user-visible lie `rank_gallery`'s docs warn
+    // about.
+    if let Some(total) = server_total {
+        let total = usize::try_from(total).unwrap_or(usize::MAX);
+        if total > dto.total_matches {
+            dto.total_matches = total;
+            dto.truncated = true;
+        }
+    }
+
+    state
+        .cache
+        .put_typed(CacheKind::Lists, key, Arc::new(dto.clone()));
+    Ok(dto)
 }
 
 /// Ranks `rows` against `query` and packages the best [`GALLERY_TOP`] with the
@@ -986,7 +989,7 @@ mod tests {
         assert!(rank("sAlEs", "Salesforce", "").is_some());
     }
 
-    /// A corpus row, built the way `gallery_corpus` builds one.
+    /// A candidate row, built the way `gallery_row` builds one.
     fn grow(id: &str, name: &str, publisher: &str) -> GalleryRow {
         GalleryRow {
             name_lc: name.to_lowercase(),

@@ -7,6 +7,30 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gallery search finally searches the whole gallery — by asking the server.**
+  The 0.20.2 fix assumed `$top=200` pages `GET /applicationTemplates` via
+  `@odata.nextLink`; in reality `$top` is a **total result limit** on that
+  endpoint and a `$top`ed response carries **no nextLink** (verified live), so
+  the "full catalog" was still just the first 200 rows of what turns out to be a
+  **38,922-template** gallery — and apps like CrowdStrike Falcon Platform stayed
+  unfindable. Fetch-and-match-locally is unsalvageable at that size, so the
+  search now runs **server-side**:
+  `$filter=contains(tolower(displayName|publisher),'…')` per query token
+  (case-insensitive — bare `contains` is case-sensitive on this endpoint —
+  and substring-capable, unlike the `startswith` the 0.20.1 fix removed), with
+  `$count=true` so "showing the closest N of M" reports the server's true
+  total. The fetched candidate pool is still ranked locally
+  (exact → prefix → word-boundary → substring) and each ranked reply is cached
+  per query.
+- **The Pages demo's gallery no-match message now admits its catalog is a
+  sample.** Searching the demo for an app outside its curated catalog said
+  "No gallery apps match …", implying the full gallery had been searched —
+  which reads as a broken search to anyone who knows the app exists. The demo
+  now flags its catalog as partial (the picker's existing "only partly loaded"
+  wording), and CrowdStrike Falcon Platform joins the sample catalog.
+
 ## [0.20.2] - 2026-07-17
 
 ### Fixed
