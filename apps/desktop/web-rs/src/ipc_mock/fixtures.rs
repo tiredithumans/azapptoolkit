@@ -835,8 +835,11 @@ pub fn directory_user_search() -> Vec<DirectoryObject> {
 /// Demo distribution lists returned by `search_distribution_lists` (each carries
 /// a mail address), for the SSO notification-email picker.
 /// Sample Entra application-gallery templates for the "Browse the gallery"
-/// picker (demo + GUI tests). The demo mock ignores the query, so any 2+ char
-/// search returns these.
+/// picker (demo + GUI tests). Deliberately varied — names that only match a
+/// query mid-word ("force" → Salesforce), by a later word ("teams" → Microsoft
+/// Teams), or via the publisher only ("google" → Workspace) — so the demo's
+/// args-aware mock ([`gallery_search_for`]) actually exercises the backend's
+/// substring/token ranking instead of looking like a fixed list.
 pub fn application_templates() -> Vec<ApplicationTemplateDto> {
     let tmpl = |seed: &str, name: &str, publisher: &str, modes: &[&str]| ApplicationTemplateDto {
         id: guid(seed),
@@ -856,12 +859,31 @@ pub fn application_templates() -> Vec<ApplicationTemplateDto> {
         ),
         tmpl("tmpl:snow", "ServiceNow", "ServiceNow", &["saml"]),
         tmpl("tmpl:zoom", "Zoom", "Zoom Video Communications", &["saml"]),
+        tmpl("tmpl:teams", "Microsoft Teams", "Microsoft", &["saml"]),
+        tmpl("tmpl:o365", "Office 365", "Microsoft", &["saml"]),
+        tmpl(
+            "tmpl:gws",
+            "Google Workspace",
+            "Google LLC",
+            &["saml", "password"],
+        ),
+        tmpl("tmpl:slack", "Slack", "Slack Technologies", &["saml"]),
+        tmpl("tmpl:box", "Dropbox Business", "Dropbox", &["saml"]),
+        tmpl("tmpl:gh", "GitHub", "GitHub, Inc.", &["saml"]),
+        tmpl(
+            "tmpl:cs",
+            "CrowdStrike Falcon Platform",
+            "CrowdStrike",
+            &["saml"],
+        ),
     ]
 }
 
-/// Demo/GUI-test reply for `search_application_templates`. The mock ignores the
-/// query, so any 2+ char search returns every sample template as an untruncated
-/// full-catalog result.
+/// Static GUI-test reply for `search_application_templates`: every sample
+/// template as an untruncated full-catalog result, ignoring the query. Used by
+/// the gallery GUI test, which only needs a known template (Salesforce) present
+/// to drive the pick → confirm → create flow; query matching is covered by
+/// [`gallery_search_for`] and the backend's own unit tests.
 pub fn gallery_search_results() -> GallerySearchResultsDto {
     let results = application_templates();
     GallerySearchResultsDto {
@@ -869,6 +891,82 @@ pub fn gallery_search_results() -> GallerySearchResultsDto {
         results,
         truncated: false,
         partial_catalog: false,
+    }
+}
+
+/// Args-aware demo reply for `search_application_templates`: actually filters
+/// and ranks the sample catalog by `query`, so the GitHub Pages demo shows the
+/// real substring search ("force" → Salesforce, "365" → Office 365) instead of
+/// echoing the whole list back for every keystroke.
+///
+/// Mirrors the backend's `gallery_relevance`
+/// (`commands::enterprise_application`): a row matches only when **every**
+/// whitespace token appears somewhere in its lowercased name or publisher (AND,
+/// not OR), and the tier is exact < name-prefix < word-boundary < substring <
+/// publisher/token-only. A query under 2 characters returns nothing, matching
+/// the picker's gate.
+pub fn gallery_search_for(query: &str) -> GallerySearchResultsDto {
+    let needle = query.trim().to_lowercase();
+    if needle.chars().count() < 2 {
+        return GallerySearchResultsDto::default();
+    }
+    let tokens: Vec<&str> = needle.split_whitespace().collect();
+
+    // Tier for one row (lower = better), or None when it doesn't match. Kept
+    // byte-for-byte faithful to the backend's ordering so the demo can't drift
+    // from the real ranking.
+    let starts_word = |hay: &str, sub: &str| {
+        hay.match_indices(sub).any(|(i, _)| {
+            hay[..i]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric())
+        })
+    };
+    let rank = |name_lc: &str, publisher_lc: &str| -> Option<u8> {
+        if !tokens
+            .iter()
+            .all(|t| name_lc.contains(t) || publisher_lc.contains(t))
+        {
+            return None;
+        }
+        Some(if name_lc == needle {
+            0
+        } else if name_lc.starts_with(&needle) {
+            1
+        } else if starts_word(name_lc, &needle) {
+            2
+        } else if name_lc.contains(&needle) {
+            3
+        } else {
+            4
+        })
+    };
+
+    let mut hits: Vec<(u8, ApplicationTemplateDto)> = application_templates()
+        .into_iter()
+        .filter_map(|t| {
+            let name_lc = t.display_name.to_lowercase();
+            let publisher_lc = t.publisher.as_deref().unwrap_or_default().to_lowercase();
+            rank(&name_lc, &publisher_lc).map(|r| (r, t))
+        })
+        .collect();
+    hits.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.display_name.cmp(&b.1.display_name))
+            .then_with(|| a.1.id.cmp(&b.1.id))
+    });
+
+    let results: Vec<ApplicationTemplateDto> = hits.into_iter().map(|(_, t)| t).collect();
+    GallerySearchResultsDto {
+        total_matches: results.len(),
+        results,
+        truncated: false,
+        // The demo's catalog IS partial — a dozen curated samples of a ~39k
+        // gallery. Admitting that turns a demo no-match into "the gallery was
+        // only partly loaded" instead of the confident "no gallery apps match
+        // X", which reads as a broken search to anyone who knows X exists.
+        partial_catalog: true,
     }
 }
 

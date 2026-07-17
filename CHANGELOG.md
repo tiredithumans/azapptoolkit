@@ -7,6 +7,54 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gallery search finally searches the whole gallery — by asking the server.**
+  The 0.20.2 fix assumed `$top=200` pages `GET /applicationTemplates` via
+  `@odata.nextLink`; in reality `$top` is a **total result limit** on that
+  endpoint and a `$top`ed response carries **no nextLink** (verified live), so
+  the "full catalog" was still just the first 200 rows of what turns out to be a
+  **38,922-template** gallery — and apps like CrowdStrike Falcon Platform stayed
+  unfindable. Fetch-and-match-locally is unsalvageable at that size, so the
+  search now runs **server-side**:
+  `$filter=contains(tolower(displayName|publisher),'…')` per query token
+  (case-insensitive — bare `contains` is case-sensitive on this endpoint —
+  and substring-capable, unlike the `startswith` the 0.20.1 fix removed), with
+  `$count=true` so "showing the closest N of M" reports the server's true
+  total. The fetched candidate pool is still ranked locally
+  (exact → prefix → word-boundary → substring) and each ranked reply is cached
+  per query.
+- **The Pages demo's gallery no-match message now admits its catalog is a
+  sample.** Searching the demo for an app outside its curated catalog said
+  "No gallery apps match …", implying the full gallery had been searched —
+  which reads as a broken search to anyone who knows the app exists. The demo
+  now flags its catalog as partial (the picker's existing "only partly loaded"
+  wording), and CrowdStrike Falcon Platform joins the sample catalog.
+
+## [0.20.2] - 2026-07-17
+
+### Fixed
+
+- **Gallery search now covers the whole catalog, not a truncated slice.** The
+  0.20.1 fetch requested `GET /applicationTemplates` with `$top=999`, but that
+  endpoint caps the page size at **200 once any query parameter is applied**
+  (and `$select` is), and a `$top` above the endpoint's max is documented to be
+  ignored, clamped, or rejected. Depending on how the tenant's Graph handled the
+  over-limit hint, the gallery could come back as a single truncated page, so the
+  in-memory search silently missed every template past the first slice — apps
+  were unreachable by substring (or any) query even though the matching logic was
+  correct. The request now uses `$top=200` (the honoured maximum) and pages
+  through the full ~3k-template gallery via `@odata.nextLink`, fetched once and
+  cached per tenant.
+- **Gallery search in the GitHub Pages demo now actually searches.** The demo
+  mocks the Tauri backend, and its `search_application_templates` stub returned
+  the entire sample catalog for every query — so the picker looked broken (every
+  keystroke showed the same list). The demo mock is now args-aware: it runs the
+  same token-AND / exact → prefix → word-boundary → substring ranking as the
+  backend over an expanded sample catalog, so `force` → Salesforce and
+  `teams` → Microsoft Teams behave in the demo as they do against a live tenant.
+  This mock bug was demo-only and independent of the fetch-truncation fix above.
+
 ## [0.20.1] - 2026-07-15
 
 ### Fixed

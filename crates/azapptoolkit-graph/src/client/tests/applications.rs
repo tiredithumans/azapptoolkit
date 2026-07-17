@@ -391,26 +391,36 @@ async fn instantiate_template_returns_app_and_sp() {
 }
 
 #[tokio::test]
-async fn list_application_templates_fetches_whole_gallery_unfiltered_and_pages() {
+async fn search_application_templates_filters_server_side_case_insensitively() {
     let server = MockServer::start().await;
-    let base = server.uri();
-    let page2_link = format!("{base}/applicationTemplates?page=2");
 
-    // Page 1. The `$filter` assertion is the regression guard: the gallery is
-    // fetched WHOLE and matched in memory, because a server-side
-    // `startswith(displayName,…)` could never find "Salesforce" from "force".
-    // Re-adding a filter here would silently restore prefix-only search.
+    // The regression guards here (each undoes a way this search shipped broken):
+    // - The match runs SERVER-SIDE via `$filter` — the gallery is ~39k
+    //   templates, so "fetch whole + match locally" silently searched only the
+    //   first slice ("can't find CrowdStrike").
+    // - `contains(tolower(…))`, not bare `contains` (case-SENSITIVE on this
+    //   endpoint: 'crowd' misses "CrowdStrike") and not `startswith` (can't
+    //   find "Salesforce" from "force").
+    // - Every token must land as its own AND'd (name OR publisher) clause —
+    //   "office 365" must not drag in every app containing "365".
+    // - `$count=true`: the server's total lets the caller report "closest N of
+    //   M" honestly when matches exceed the fetch pool.
     Mock::given(method("GET"))
         .and(path("/applicationTemplates"))
-        .and(query_param("$top", "999"))
+        .and(query_param(
+            "$filter",
+            "(contains(tolower(displayName),'sales') or contains(tolower(publisher),'sales')) \
+             and (contains(tolower(displayName),'o''brien') or contains(tolower(publisher),'o''brien'))",
+        ))
+        .and(query_param("$count", "true"))
+        .and(query_param("$top", "200"))
         .and(query_param(
             "$select",
             "id,displayName,publisher,description,categories,logoUrl,supportedSingleSignOnModes",
         ))
-        .and(query_param_is_missing("$filter"))
         .and(query_param_is_missing("$search"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "@odata.nextLink": page2_link,
+            "@odata.count": 251,
             "value": [
                 {
                     "id": "tmpl-1",
@@ -418,20 +428,7 @@ async fn list_application_templates_fetches_whole_gallery_unfiltered_and_pages()
                     "publisher": "Salesforce.com",
                     "categories": ["crm"],
                     "supportedSingleSignOnModes": ["saml", "password"]
-                }
-            ]
-        })))
-        .mount(&server)
-        .await;
-
-    // Page 2, reached via the nextLink — a gallery spans several pages, so
-    // taking only the first would silently drop most of the catalog.
-    Mock::given(method("GET"))
-        .and(path("/applicationTemplates"))
-        .and(query_param("page", "2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "value": [
-                { "id": "tmpl-2", "displayName": "ServiceNow" },
+                },
                 // No `displayName` at all — the caller decides what to do with
                 // it, so the client must still surface the row.
                 { "id": "tmpl-3", "publisher": "Nameless Corp" }
@@ -441,18 +438,69 @@ async fn list_application_templates_fetches_whole_gallery_unfiltered_and_pages()
         .await;
 
     let client = make_client(&server.uri());
-    let (templates, truncated) = client.list_application_templates().await.unwrap();
+    // "o'brien" pins the OData single-quote escape (`'` → `''`); an unescaped
+    // quote is a filter syntax error against real Graph.
+    let tokens = vec!["sales".to_string(), "o'brien".to_string()];
+    let (templates, total) = client
+        .search_application_templates(&tokens, 200)
+        .await
+        .unwrap();
 
-    assert!(!truncated, "a 3-template gallery is far under the cap");
-    assert_eq!(templates.len(), 3, "both pages are concatenated");
+    assert_eq!(
+        total,
+        Some(251),
+        "the server's total match count must ride along"
+    );
+    assert_eq!(templates.len(), 2);
     assert_eq!(templates[0].id, "tmpl-1");
     assert_eq!(templates[0].display_name.as_deref(), Some("Salesforce"));
     assert_eq!(
         templates[0].supported_single_sign_on_modes,
         vec!["saml".to_string(), "password".to_string()]
     );
-    assert_eq!(templates[2].id, "tmpl-3");
-    assert_eq!(templates[2].display_name, None);
+    assert_eq!(templates[1].id, "tmpl-3");
+    assert_eq!(templates[1].display_name, None);
+}
+
+#[tokio::test]
+async fn search_application_templates_follows_a_next_link_up_to_the_pool_cap() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+    let page2_link = format!("{base}/applicationTemplates?page=2");
+
+    // Normally a `$top`ed request arrives whole (no nextLink — `$top` is a
+    // total limit on this endpoint), but if Graph ever pages a filtered
+    // result set the client must keep collecting instead of returning a
+    // short pool.
+    Mock::given(method("GET"))
+        .and(path("/applicationTemplates"))
+        .and(query_param("$count", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "@odata.count": 2,
+            "@odata.nextLink": page2_link,
+            "value": [ { "id": "tmpl-1", "displayName": "Salesforce" } ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/applicationTemplates"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [ { "id": "tmpl-2", "displayName": "Salesforce Sandbox" } ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let tokens = vec!["sales".to_string()];
+    let (templates, total) = client
+        .search_application_templates(&tokens, 200)
+        .await
+        .unwrap();
+
+    assert_eq!(total, Some(2));
+    assert_eq!(templates.len(), 2, "both pages are concatenated");
+    assert_eq!(templates[1].id, "tmpl-2");
 }
 
 #[tokio::test]
