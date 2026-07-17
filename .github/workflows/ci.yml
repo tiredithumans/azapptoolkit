@@ -221,10 +221,12 @@ jobs:
       # License policy + crate-source gating (see deny.toml). Complements the
       # advisory-only `audit` job above. Flags live in the `deny`/`web-deny`
       # justfile recipes; web-deny gates the frontend tree the root check
-      # can't reach.
+      # can't reach. cargo-deny is version-pinned (not @latest) because its
+      # 0.20 CLI refactor broke the recipes unannounced mid-bump; the web-deny
+      # recipe's `--config` placement must match the pinned version's CLI.
       - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
-          tool: just,cargo-deny
+          tool: just,cargo-deny@0.20.2
       - name: deny (workspace)
         run: just deny
       - name: deny (web-rs)
