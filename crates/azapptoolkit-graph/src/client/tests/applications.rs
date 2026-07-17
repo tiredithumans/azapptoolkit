@@ -396,13 +396,19 @@ async fn list_application_templates_fetches_whole_gallery_unfiltered_and_pages()
     let base = server.uri();
     let page2_link = format!("{base}/applicationTemplates?page=2");
 
-    // Page 1. The `$filter` assertion is the regression guard: the gallery is
-    // fetched WHOLE and matched in memory, because a server-side
-    // `startswith(displayName,…)` could never find "Salesforce" from "force".
-    // Re-adding a filter here would silently restore prefix-only search.
+    // Page 1. Two regression guards here:
+    // - `$filter`/`$search` ABSENT: the gallery is fetched WHOLE and matched in
+    //   memory, because a server-side `startswith(displayName,…)` could never
+    //   find "Salesforce" from "force". Re-adding a filter restores prefix-only
+    //   search.
+    // - `$top=200`, not higher: `/applicationTemplates` caps the page at 200 once
+    //   any query parameter (here `$select`) is applied, and a `$top` above the
+    //   endpoint max is documented to be ignored/clamped/rejected — which
+    //   truncated the corpus to one page so search missed most of the catalog.
+    //   200 is the honoured max, and paging via `@odata.nextLink` pulls the rest.
     Mock::given(method("GET"))
         .and(path("/applicationTemplates"))
-        .and(query_param("$top", "999"))
+        .and(query_param("$top", "200"))
         .and(query_param(
             "$select",
             "id,displayName,publisher,description,categories,logoUrl,supportedSingleSignOnModes",

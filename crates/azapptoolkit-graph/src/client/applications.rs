@@ -529,11 +529,21 @@ impl GraphClient {
     pub async fn list_application_templates(&self) -> Result<(Vec<ApplicationTemplate>, bool)> {
         // `$select` trims the payload to the fields the picker renders — the
         // full rows also carry endpoints/provisioning metadata this never
-        // shows. `$top` is a page-size hint, so a ~3k-template gallery is a
-        // handful of round trips rather than dozens at the default page size.
-        // No `$orderby`: ranking is against the query and happens locally.
+        // shows. No `$orderby`: ranking is against the query and happens locally.
+        //
+        // `$top=200`, NOT a larger hint: `GET /applicationTemplates` caps the
+        // page size at **200 once any query parameter is applied** (2,800 only
+        // with a bare request). `$select` applies one, so 200 is the ceiling —
+        // and a `$top` *above* the endpoint's max is documented to be "ignored,
+        // clamped, or rejected with an error", which is how the gallery came
+        // back as a single truncated page and search silently missed apps past
+        // the first slice. 200 is the max the endpoint honours here, so the
+        // whole ~3k gallery is pulled via `@odata.nextLink` (~15 round trips,
+        // fetched once and cached) instead of one clamped page. See
+        // https://learn.microsoft.com/graph/api/applicationtemplate-list and
+        // https://learn.microsoft.com/graph/paging (page-size-exceeds-max).
         let params: [(&str, &str); 2] = [
-            ("$top", "999"),
+            ("$top", "200"),
             (
                 "$select",
                 "id,displayName,publisher,description,categories,logoUrl,supportedSingleSignOnModes",
