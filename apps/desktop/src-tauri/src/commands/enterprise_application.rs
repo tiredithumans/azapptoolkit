@@ -624,6 +624,15 @@ async fn gallery_corpus(state: &AppState, tenant_id: &str) -> Result<Arc<Gallery
             "application gallery exceeded the fetch cap; search covers a partial catalog"
         );
     }
+    // The whole gallery is ~3k templates. A corpus far smaller (e.g. a few
+    // hundred) means paging stopped after one page — the tell for the
+    // `$top`-over-page-cap truncation that made search miss most of the
+    // catalog. Logged so a "search can't find app X" report can be confirmed
+    // against the actual corpus size instead of guessed at.
+    tracing::debug!(
+        templates = templates.len(),
+        "loaded application gallery corpus"
+    );
 
     let rows = templates
         .into_iter()
