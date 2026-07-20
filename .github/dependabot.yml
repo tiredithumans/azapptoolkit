@@ -32,10 +32,14 @@ updates:
       prefix: deps
     open-pull-requests-limit: 10
     ignore:
-      # rand 0.9 / sha2 0.11 advance to the rand_core 0.10 / digest 0.11 chain,
-      # which conflicts with rsa 0.9 (rand_core 0.6 / digest 0.10) — the same
-      # chain that blocks the rsa 0.10 upgrade (AGENTS.md "Don't upgrade rsa to
-      # v0.10"). Drop these ignores when rsa can advance.
+      # rand 0.8 / sha2 0.10 are what `oauth2` 5 (via azapptoolkit-auth) and
+      # `tauri-codegen` already resolve to, and src-tauri deliberately shares
+      # those versions. Bumping our direct pins to rand 0.9+ / sha2 0.11+ would
+      # not remove the old majors — it would duplicate a crypto major in the
+      # graph (AGENTS.md "Crypto deps"). Drop these ignores once oauth2/Tauri
+      # move first. NOTE: `rsa` is not in this graph at all — cert generation
+      # uses rcgen on the aws_lc_rs backend specifically to keep it out
+      # (RUSTSEC-2023-0071); don't reintroduce it.
       - dependency-name: rand
         versions: [">=0.9"]
       - dependency-name: sha2
