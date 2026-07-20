@@ -567,7 +567,16 @@ h3 {
   backdrop-filter: saturate(180%) blur(20px);
   box-shadow: inset 0 -1px 0 var(--border);
   position: relative;
-  z-index: 10;
+  /* Above the open-items workspace overlay (z 500), below the modal scrim
+     (z 1000). The topbar establishes a stacking context, so its account menu
+     (`.shell__account-menu`, z 60 *within* this context) is capped at the
+     topbar's level relative to siblings of `.shell__main`. The menu opens
+     downward into the content row, which the workspace overlays — at z 10 the
+     whole topbar (menu included) rendered *behind* the workspace whenever a
+     detail item was open, so the settings dropdown looked dead. The topbar is
+     row 1 and never geometrically overlaps the row-2 workspace, so lifting it
+     only changes paint order for that downward-hanging menu. */
+  z-index: 600;
 }
 @supports not (backdrop-filter: blur(1px)) {
   .shell__topbar {
@@ -779,7 +788,10 @@ h3 {
 /* ---------- Open-items dock + workspace ---------- */
 /* The dock is the bottom row of `.shell__main`; the workspace is an overlay that
    covers the content area when 1–2 items are shown — above page dropdowns
-   (z 50) but below modal dialogs (z 1000), so a pane's ConfirmDialog still wins. */
+   (z 50) but below modal dialogs (z 1000), so a pane's ConfirmDialog still wins.
+   NOTE: the top-bar account menu is deliberately ABOVE this (`.shell__topbar`
+   z 600) — it's chrome in row 1, not page content, so the overlay must not
+   swallow it. Don't raise the workspace past the topbar. */
 .open-dock {
   display: flex;
   align-items: center;
