@@ -2,7 +2,7 @@
 
 azapptoolkit is a **native Rust desktop app for managing Microsoft Entra ID app registrations** —
 the replacement for ad-hoc PowerShell. Tauri 2 + Leptos 0.8 (WASM) workspace, edition 2024,
-MSRV **1.96** (`rust-toolchain.toml`).
+MSRV **1.97** (`rust-toolchain.toml`).
 
 This file is an **invariant + pointer index**, not a manual: each gotcha is one rule plus a link
 to the deep-dive. Keep it that way — deep detail belongs in `docs/architecture/`, and a size hook

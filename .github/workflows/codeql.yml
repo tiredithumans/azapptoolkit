@@ -52,7 +52,7 @@ jobs:
       # forcing sysroot/proc_macro_server to real paths — byte-identical result.
       # Revisit when a newer CodeQL bundle ships working Rust macro expansion
       # (branch ci/codeql-proc-macro-expansion holds the setup to re-apply).
-      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
         with:
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
