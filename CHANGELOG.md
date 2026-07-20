@@ -7,6 +7,53 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.20.4] - 2026-07-20
+
+### Changed
+
+- **Rust toolchain and MSRV move 1.96 → 1.97.1.** `rust-toolchain.toml` pins
+  the exact patch (1.97.1) so a silent stable bump can't break builds, and the
+  workspace `rust-version` floor (root `Cargo.toml` + `apps/desktop/web-rs`)
+  rises to 1.97 in lockstep. The six `dtolnay/rust-toolchain` SHA pins across
+  `ci.yml`, `codeql.yml`, `pages.yml`, and `release.yml` advance to the matching
+  `1.97.1` commit so CI, CodeQL, the Pages demo, and the release matrix all
+  build on the same compiler as local `just verify`.
+- **Silenced 1.97's new `clippy::byte_char_slices` lint** in the demo/test IPC
+  mock's deterministic UUID helper — the variant-nibble table is now `b"89ab"`
+  instead of `[b'8', b'9', b'a', b'b']`. Behaviour is identical; without it
+  `just web-clippy` (`-D warnings`) fails on the new toolchain.
+- **Semver-compatible dependency refresh across both lockfiles.** `cargo update`
+  on the root workspace and the separate `apps/desktop/web-rs` tree — notably
+  `tokio` 1.52.3 → 1.53.0, `serde`/`serde_json` 1.0.228/1.0.150 → 1.0.229/1.0.151,
+  `thiserror` 2.0.18 → 2.0.19, `uuid` 1.23.5 → 1.24.0, `time` 0.3.53 → 0.3.54,
+  `futures` 0.3.32 → 0.3.33, `tauri-plugin-dialog` 2.7.1 → 2.7.2, and the
+  `zbus`/`zvariant` stack. No manifest constraints changed. `syn` 3.0.2 now
+  appears alongside 2.x via proc-macro dependencies; `deny.toml` treats
+  duplicate versions as a warning, and `bans/licenses/sources` stay clean on
+  both trees.
+- **Corrected the stale `rsa` justification in `.github/dependabot.yml`.** The
+  `rand >= 0.9` / `sha2 >= 0.11` ignores were documented as working around a
+  conflict with `rsa` 0.9 — but `rsa` is not in the dependency graph at all
+  (rcgen on `aws_lc_rs` keeps it out). The real constraint is that `oauth2` 5
+  and `tauri-codegen` already resolve to `rand` 0.8 / `sha2` 0.10, so bumping
+  our direct pins would duplicate a crypto major rather than replace one.
+
+### Fixed
+
+- **The top-bar account/settings dropdown no longer dies when a detail item is
+  open.** `.shell__topbar` establishes a stacking context (`position:relative;
+  z-index:10`), so its account menu — where "Settings" lives — was capped at the
+  topbar's level. The open-items workspace overlay (`.workspace`, `z-index:500`)
+  sits in the root stacking context, so `500 > 10` meant the menu, which opens
+  downward into the content row the workspace covers, rendered *behind* the
+  overlay: the pill still toggled but the menu was invisible and unclickable
+  until the open app registration was closed. Raised `.shell__topbar` to
+  `z-index:600` — above the workspace, below the modal scrim (`z 1000`). The
+  topbar is grid row 1 and never geometrically overlaps the row-2 workspace, so
+  this only changes paint order for the downward-hanging menu. (Teleporting the
+  menu to `<body>` to escape the context is out — a Thaw overlay froze the
+  WebView2 webview on teardown, per the `styles.css` note.)
+
 ## [0.20.3] - 2026-07-17
 
 ### Fixed

@@ -725,7 +725,7 @@ pub fn guid(seed: &str) -> String {
     let lo = mix(h ^ 0xd1b5_4a32_d192_ed03);
     let mut s = format!("{hi:016x}{lo:016x}").into_bytes();
     s[12] = b'4'; // version nibble
-    s[16] = [b'8', b'9', b'a', b'b'][(lo & 3) as usize]; // variant nibble
+    s[16] = b"89ab"[(lo & 3) as usize]; // variant nibble
     let s = String::from_utf8(s).expect("hex is ascii");
     format!(
         "{}-{}-{}-{}-{}",

@@ -5,7 +5,7 @@
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#install)
-[![Rust](https://img.shields.io/badge/rust-1.96-orange.svg)](./rust-toolchain.toml)
+[![Rust](https://img.shields.io/badge/rust-1.97-orange.svg)](./rust-toolchain.toml)
 [![Status: pre-release](https://img.shields.io/badge/status-pre--release-yellow.svg)](./CHANGELOG.md)
 
 Let's face it: managing Azure app registration and service principal permissions is painful. Exchange Graph API application permissions default to org-wide access across *every single mailbox*, and scoping them down is needlessly hard. SharePoint is no better — you grant `Sites.FullControl.All`, scope to `Sites.Selected`, then revoke `Sites.FullControl.All`. We built azapptoolkit to make this work the way it should have from the start.
@@ -454,7 +454,7 @@ Defensive choices worth knowing:
 
 ## Built with
 
-- [Rust](https://www.rust-lang.org/) (workspace, MSRV 1.96)
+- [Rust](https://www.rust-lang.org/) (workspace, MSRV 1.97)
 - [Tauri 2](https://tauri.app) for the desktop shell
 - [Leptos](https://leptos.dev) + [Thaw UI](https://github.com/thaw-ui/thaw)
   for the WASM frontend

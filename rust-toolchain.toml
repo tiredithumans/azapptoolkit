@@ -2,7 +2,7 @@
 # Pinned to the minimum supported Rust version declared in Cargo.toml so a
 # silent stable bump cannot break CI/builds. Bump intentionally in lockstep
 # with the workspace MSRV.
-channel = "1.96.0"
+channel = "1.97.1"
 components = ["rustfmt", "clippy"]
 # The Leptos frontend (apps/desktop/web-rs) compiles to WASM; declaring the
 # target here means rustup provisions it automatically on first build, so

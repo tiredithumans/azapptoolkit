@@ -97,7 +97,7 @@ jobs:
       # Match the pinned MSRV in rust-toolchain.toml (which rustup honors for the
       # actual build regardless of this line) so the installed toolchain is not
       # misleadingly older than what compiles.
-      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
         if: needs.changes.outputs.code == 'true'
         with:
           components: rustfmt, clippy
@@ -133,7 +133,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
         with:
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
