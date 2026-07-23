@@ -188,6 +188,7 @@ impl GraphClient {
                     &[],
                     false,
                     Some(body),
+                    None,
                 )
                 .await?;
             let envelope: BatchEnvelope = serde_json::from_slice(&bytes)

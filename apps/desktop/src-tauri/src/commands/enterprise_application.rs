@@ -573,21 +573,15 @@ const GALLERY_TOP: usize = 50;
 /// a gate the UI labels "2+ characters".
 const GALLERY_MIN_QUERY_CHARS: usize = 2;
 
-/// How many candidate rows to pull from the server per search — the pool the
-/// local ranker orders before the display cap ([`GALLERY_TOP`]) is applied.
-/// Larger than the display cap on purpose: server order is arbitrary, so with
-/// a pool equal to the display cap the best match (e.g. the exact-name hit)
-/// could sit just past the slice and never be shown.
-const GALLERY_FETCH_POOL: usize = 200;
-
-/// Cache key for one gallery search's ranked reply. Tenant-scoped by the
+/// Cache key for the whole-gallery corpus — the ranker's in-memory haystack,
+/// fetched once and reused across every keystroke. Tenant-scoped by the
 /// universal `{tenant_id}|…` convention even though the gallery is Microsoft's
 /// global catalog and not tenant data — so the sign-out prefix sweep collects
 /// it like everything else. Rides `CacheKind::Lists` (60-min TTL); no mutation
-/// in this app can change the gallery, so no invalidation path needs to name
-/// it, and the LRU bounds the per-query key space.
-fn gallery_search_key(tenant_id: &str, needle_lc: &str) -> String {
-    format!("{tenant_id}|gallery_search|{needle_lc}")
+/// in this app can change the gallery, so no invalidation path needs to name it,
+/// and the LRU bounds it to one entry per tenant.
+fn gallery_corpus_key(tenant_id: &str) -> String {
+    format!("{tenant_id}|gallery_corpus")
 }
 
 /// One pre-lowercased gallery row: the DTO the picker renders plus the
@@ -628,22 +622,68 @@ fn gallery_row(t: ApplicationTemplate) -> GalleryRow {
     }
 }
 
-/// Searches the Entra application gallery for the "Browse the gallery" picker
-/// in the New-application flow, matching **anywhere** in the template's display
-/// name or publisher and ranking the hits.
+/// Loads the whole gallery corpus for `tenant_id` — from the typed cache when
+/// warm, otherwise fetching the entire catalog once
+/// ([`GraphClient::list_all_application_templates`]), pre-lowercasing every row,
+/// and caching the `Arc<Vec<GalleryRow>>` for reuse.
 ///
-/// The match itself runs **server-side** (`$filter=contains(tolower(…))`,
-/// see [`GraphClient::search_application_templates`]) because the gallery is
-/// ~39k templates — far too large to pull whole and match locally, which is
-/// what this command used to do and why it missed most of the catalog. The
-/// fetched candidate pool (up to [`GALLERY_FETCH_POOL`]) is then ranked
-/// locally (exact → prefix → word-boundary → substring) and capped at
-/// [`GALLERY_TOP`] for display. Each ranked reply is typed-cached per
-/// `(tenant, query)`, so retyping a recent query is instant.
+/// This is what makes the picker fast: the gallery is a static, tenant-
+/// independent catalog, so one fetch backs every subsequent keystroke's match
+/// **in memory** instead of a non-indexable `contains(tolower(…))` server scan
+/// per query (the old per-keystroke round trip that made this "really slow").
+/// The lowercasing happens here, once per corpus load — not per search.
+async fn load_gallery_corpus(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<Arc<Vec<GalleryRow>>, UiError> {
+    let key = gallery_corpus_key(tenant_id);
+    if let Some(hit) = state
+        .cache
+        .get_typed::<Vec<GalleryRow>>(CacheKind::Lists, &key)
+    {
+        return Ok(hit);
+    }
+    let templates = state
+        .graph_for(tenant_id)
+        .list_all_application_templates()
+        .await?;
+    tracing::debug!(templates = templates.len(), "gallery corpus fetched");
+    let rows: Arc<Vec<GalleryRow>> = Arc::new(templates.into_iter().map(gallery_row).collect());
+    state
+        .cache
+        .put_typed(CacheKind::Lists, key, Arc::clone(&rows));
+    Ok(rows)
+}
+
+/// Warms the gallery corpus cache for `tenant_id` without ranking anything — the
+/// "Browse the gallery" dialog fires this on open (fire-and-forget) so the
+/// one-time full-catalog fetch overlaps the operator typing their first query,
+/// leaving the first real search warm. Idempotent: a no-op once the corpus is
+/// cached. Best-effort — a failure here just means the first search pays the
+/// fetch itself.
+#[tauri::command]
+pub async fn prefetch_application_gallery(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<(), UiError> {
+    load_gallery_corpus(&state, &tenant_id).await.map(|_| ())
+}
+
+/// Searches the Entra application gallery for the "Browse the gallery" picker in
+/// the New-application flow, matching **anywhere** in the template's display name
+/// or publisher and ranking the hits (exact → prefix → word-boundary →
+/// substring), capped at [`GALLERY_TOP`] for display.
+///
+/// The match runs **locally** over the whole gallery, fetched once and cached by
+/// [`load_gallery_corpus`]: the catalog is tens of thousands of static, tenant-
+/// independent rows, so one fetch beats a non-indexable `contains(tolower(…))`
+/// server scan on every keystroke. `total_matches`/`truncated` are exact — they
+/// count the full corpus, not a capped fetch pool — so "showing the closest 50
+/// of N" is honest.
 ///
 /// A query under [`GALLERY_MIN_QUERY_CHARS`] returns nothing without a fetch.
-/// Errors propagate: a failed gallery search must surface as an error, not as
-/// an empty result set that reads as "no such app".
+/// Errors propagate: a failed corpus fetch must surface as an error, not as an
+/// empty result set that reads as "no such app".
 #[tauri::command]
 pub async fn search_application_templates(
     state: State<'_, AppState>,
@@ -654,48 +694,10 @@ pub async fn search_application_templates(
     if trimmed.chars().count() < GALLERY_MIN_QUERY_CHARS {
         return Ok(GallerySearchResultsDto::default());
     }
-    let needle = trimmed.to_lowercase();
-
-    let key = gallery_search_key(&tenant_id, &needle);
-    if let Some(hit) = state
-        .cache
-        .get_typed::<GallerySearchResultsDto>(CacheKind::Lists, &key)
-    {
-        return Ok((*hit).clone());
-    }
-
-    let tokens: Vec<String> = needle.split_whitespace().map(String::from).collect();
-    let client = state.graph_for(&tenant_id);
-    let (templates, server_total) = client
-        .search_application_templates(&tokens, GALLERY_FETCH_POOL)
-        .await?;
-    // Logged so a "search can't find app X" report can be checked against what
-    // the server actually matched instead of guessed at.
-    tracing::debug!(
-        fetched = templates.len(),
-        server_total,
-        query = %needle,
-        "gallery search candidates"
-    );
-
-    let rows: Vec<GalleryRow> = templates.into_iter().map(gallery_row).collect();
-    let mut dto = rank_gallery(&rows, trimmed, false);
-    // When more rows matched server-side than the fetch pool holds, the counts
-    // must reflect the server's total — "showing the closest 50 of 51" when
-    // 400 matched is exactly the user-visible lie `rank_gallery`'s docs warn
-    // about.
-    if let Some(total) = server_total {
-        let total = usize::try_from(total).unwrap_or(usize::MAX);
-        if total > dto.total_matches {
-            dto.total_matches = total;
-            dto.truncated = true;
-        }
-    }
-
-    state
-        .cache
-        .put_typed(CacheKind::Lists, key, Arc::new(dto.clone()));
-    Ok(dto)
+    let corpus = load_gallery_corpus(&state, &tenant_id).await?;
+    // The corpus holds the whole catalog, so the counts are exact and the
+    // catalog is never partial (a short fetch is an `Err`, not a partial `Ok`).
+    Ok(rank_gallery(&corpus, trimmed, false))
 }
 
 /// Ranks `rows` against `query` and packages the best [`GALLERY_TOP`] with the
