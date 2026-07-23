@@ -161,6 +161,7 @@ pub fn run() {
             commands::enterprise_application::add_enterprise_app_owner,
             commands::enterprise_application::remove_enterprise_app_owner,
             commands::enterprise_application::delete_enterprise_application,
+            commands::enterprise_application::prefetch_application_gallery,
             commands::enterprise_application::search_application_templates,
             commands::enterprise_application::create_gallery_application,
             commands::app_roles::list_enterprise_app_roles,

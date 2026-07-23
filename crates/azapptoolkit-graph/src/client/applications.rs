@@ -572,6 +572,30 @@ impl GraphClient {
         Ok((items, total))
     }
 
+    /// Fetches the **entire** Microsoft Entra application gallery
+    /// (`GET /applicationTemplates`, no `$filter`) in a handful of round trips,
+    /// so the caller can cache it once and match every subsequent query in
+    /// memory instead of paying a non-indexable `contains(tolower(…))` server
+    /// scan per keystroke (see [`Self::search_application_templates`]).
+    ///
+    /// Unfiltered, the endpoint honors `Prefer: odata.maxpagesize=2800` (its
+    /// documented ceiling — a *filtered* read is capped at 200/page, which is
+    /// why the per-query path can't page cheaply), so the whole ~tens-of-
+    /// thousands-row catalog arrives in ≈`ceil(total / 2800)` pages that
+    /// `collect_all_pages` walks to the end. `$select` trims each row to the
+    /// picker's fields to keep the payload small. Reading needs no permission
+    /// beyond a valid Graph token, and the gallery is tenant-independent.
+    pub async fn list_all_application_templates(&self) -> Result<Vec<ApplicationTemplate>> {
+        let params: [(&str, &str); 1] = [(
+            "$select",
+            "id,displayName,publisher,description,categories,logoUrl,supportedSingleSignOnModes",
+        )];
+        let page: Paged<ApplicationTemplate> = self
+            .get_json_prefer("/applicationTemplates", &params, "odata.maxpagesize=2800")
+            .await?;
+        self.collect_all_pages(page).await
+    }
+
     /// PATCH `/applications/{id}` with a caller-built body carrying the SSO
     /// fields (`identifierUris`, `web.redirectUris`, `web.logoutUrl`,
     /// `spa.redirectUris`). Kept separate from the typed `AppPatch` so the

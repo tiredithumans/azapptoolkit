@@ -500,6 +500,9 @@ fn register_fixtures() {
     // Args-aware so the demo runs the real substring match over the sample
     // catalog ("force" → Salesforce) instead of echoing the whole list back for
     // every keystroke — the very thing the picker is supposed to demonstrate.
+    // Corpus prewarm fired on dialog-open; a no-op in the demo (the search mock
+    // below already answers from the sample catalog without a corpus fetch).
+    mock_ok("prefetch_application_gallery", &());
     mock_each("search_application_templates", |args| {
         let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
         f::gallery_search_for(query)

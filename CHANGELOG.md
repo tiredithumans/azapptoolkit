@@ -27,6 +27,15 @@ the project adheres to
   subscriptions one ARM round trip at a time; it now fans out with the shared
   bounded `ARM_CONCURRENCY` (8) `buffer_unordered` pattern, and a subscription
   it can't read is logged and skipped rather than silently swallowed.
+- **"Browse the gallery" search is no longer slow on every keystroke.** The
+  New-application gallery picker matched server-side with a non-indexable
+  `contains(tolower(…))` `$filter` (plus `$count=true`), so every uncached query
+  — and each debounced keystroke was a distinct one — was a full-catalog scan
+  costing seconds. It now fetches the whole gallery **once** (unfiltered, at the
+  endpoint's `Prefer: odata.maxpagesize=2800` ceiling), caches the corpus, and
+  matches every subsequent query in memory. The picker prewarms the corpus on
+  open (`prefetch_application_gallery`) so the first search is warm, and match
+  counts are now exact instead of derived from a capped fetch pool.
 
 ## [0.20.4] - 2026-07-20
 
