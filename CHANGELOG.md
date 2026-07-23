@@ -22,6 +22,11 @@ the project adheres to
   role-assignment sweep share no inputs but were awaited one after another;
   they're now joined, so the page's cold latency is the slowest single plane
   instead of their sum. Each plane still degrades to `Unknown` independently.
+- **The Key Vault picker (`list_available_key_vaults`) no longer serializes its
+  cross-subscription sweep.** Like the readiness fix above, it looped
+  subscriptions one ARM round trip at a time; it now fans out with the shared
+  bounded `ARM_CONCURRENCY` (8) `buffer_unordered` pattern, and a subscription
+  it can't read is logged and skipped rather than silently swallowed.
 
 ## [0.20.4] - 2026-07-20
 

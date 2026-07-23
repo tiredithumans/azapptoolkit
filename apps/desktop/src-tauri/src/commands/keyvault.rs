@@ -3,6 +3,7 @@
 //! Clients are built and cached by [`AppState::kv_for`], which wires the
 //! shared token adapter for the `https://vault.azure.net` audience.
 
+use futures::stream::{self, StreamExt};
 use tauri::State;
 
 use azapptoolkit_core::defaults::AppVaultBinding;
@@ -16,6 +17,11 @@ use crate::dto::keyvault::{
     RotateCredentialInput, RotateCredentialResult,
 };
 use crate::state::AppState;
+
+/// Max concurrent ARM calls for the cross-subscription vault sweep. Matches the
+/// Key Vault RBAC / managed-identity sweeps so a large estate stays inside ARM's
+/// rate limits (429s are retried in the client).
+const ARM_CONCURRENCY: usize = 8;
 
 // ---------------- Commands ----------------
 
@@ -220,18 +226,35 @@ pub async fn list_available_key_vaults(
     state.ensure_arm_token(&tenant_id).await?;
     let arm = state.arm_for(&tenant_id);
     let subs = arm.list_subscriptions().await?;
-    // De-duped + sorted for a stable dropdown.
-    let mut names = std::collections::BTreeSet::new();
-    for sub in subs {
-        // Partial discovery beats none: skip a subscription we can't read.
-        if let Ok(vaults) = arm.list_key_vaults(&sub.subscription_id).await {
-            for v in vaults {
-                if let Some(name) = v.name {
-                    names.insert(name);
+    // Bounded fan-out: a serial loop paid one ARM round trip per subscription
+    // back-to-back, which dominated the picker's load time in a large estate.
+    // Partial discovery beats none — a subscription we can't read is skipped
+    // (and logged), not fatal; a 403 is terminal in the ARM transport, so it
+    // fails fast. De-duped + sorted for a stable dropdown.
+    let names: std::collections::BTreeSet<String> = stream::iter(subs)
+        .map(|sub| {
+            let arm = arm.clone();
+            async move {
+                match arm.list_key_vaults(&sub.subscription_id).await {
+                    Ok(vaults) => vaults,
+                    Err(err) => {
+                        tracing::warn!(
+                            ?err,
+                            subscription = %sub.subscription_id,
+                            "vault picker: enumeration failed; skipping subscription",
+                        );
+                        Vec::new()
+                    }
                 }
             }
-        }
-    }
+        })
+        .buffer_unordered(ARM_CONCURRENCY)
+        .collect::<Vec<Vec<_>>>()
+        .await
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.name)
+        .collect();
     Ok(names.into_iter().collect())
 }
 
