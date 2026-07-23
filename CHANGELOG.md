@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.20.5] - 2026-07-23
+
 ### Fixed
 
 - **Access Readiness no longer takes tens of seconds to load in a large Azure
