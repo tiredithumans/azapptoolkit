@@ -7,6 +7,22 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Access Readiness no longer takes tens of seconds to load in a large Azure
+  estate.** The Azure-RBAC plane's role-assignment enumeration
+  (`commands::readiness::enumerate_azure_role_ids`) issued one ARM round trip
+  per subscription in a serial loop, so page load scaled linearly with the
+  operator's subscription count. It now fans out with the same bounded
+  `ARM_CONCURRENCY` (8) `buffer_unordered` pattern the Key Vault and
+  managed-identity sweeps already use. A subscription the user can't read is
+  still skipped (and now logged) rather than failing the report.
+- **`check_readiness` runs its three authorization planes concurrently.**
+  Directory roles (Graph), the scope probes (token endpoint), and the ARM
+  role-assignment sweep share no inputs but were awaited one after another;
+  they're now joined, so the page's cold latency is the slowest single plane
+  instead of their sum. Each plane still degrades to `Unknown` independently.
+
 ## [0.20.4] - 2026-07-20
 
 ### Changed
