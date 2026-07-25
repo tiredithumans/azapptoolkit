@@ -32,6 +32,7 @@ use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
 use crate::hooks::use_list_export::use_list_export;
 use crate::state::use_session;
+use crate::util::contains_ignore_case;
 
 use row::render_row;
 
@@ -200,7 +201,7 @@ fn LoadedManagedIdentities(
         items: list,
         search,
         search_match: |mi: &ManagedIdentityDto, needle: &str| {
-            mi.display_name.to_lowercase().contains(needle)
+            contains_ignore_case(&mi.display_name, needle)
         },
         // No date range or other extra filter on this list — search only.
         extra_active: Signal::derive(|| false),
@@ -232,32 +233,13 @@ fn LoadedManagedIdentities(
     let disabled = list.count_of("disabled");
 
     view! {
-        {move || {
-            view! {
-                <div class="filter-chips">
-                    <FilterChip label="All" value="all" count=base_total.get() facet=mi_filter />
-                    <FilterChip
-                        label="System"
-                        value="system"
-                        count=system.get()
-                        facet=mi_filter
-                    />
-                    <FilterChip label="User" value="user" count=user.get() facet=mi_filter />
-                    <FilterChip
-                        label="Enabled"
-                        value="enabled"
-                        count=enabled.get()
-                        facet=mi_filter
-                    />
-                    <FilterChip
-                        label="Disabled"
-                        value="disabled"
-                        count=disabled.get()
-                        facet=mi_filter
-                    />
-                </div>
-            }
-        }}
+        <div class="filter-chips">
+            <FilterChip label="All" value="all" count=base_total facet=mi_filter />
+            <FilterChip label="System" value="system" count=system facet=mi_filter />
+            <FilterChip label="User" value="user" count=user facet=mi_filter />
+            <FilterChip label="Enabled" value="enabled" count=enabled facet=mi_filter />
+            <FilterChip label="Disabled" value="disabled" count=disabled facet=mi_filter />
+        </div>
         <Show
             when=move || filtered.with(|v| !v.is_empty())
             fallback=|| {

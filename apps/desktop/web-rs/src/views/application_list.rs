@@ -32,7 +32,7 @@ use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
 use crate::hooks::use_list_export::use_list_export;
 use crate::state::{ActiveView, OpenItemKind, use_session};
-use crate::util::created_in_range;
+use crate::util::{contains_ignore_case, created_in_range};
 use crate::views::pairing::jump_to_paired_enterprise;
 
 #[component]
@@ -248,7 +248,7 @@ fn LoadedApps(
         items,
         search,
         search_match: |row: &ApplicationListRowDto, needle: &str| {
-            row.display_name.to_lowercase().contains(needle)
+            contains_ignore_case(&row.display_name, needle)
         },
         extra_active: Signal::derive(move || {
             created_after.get().is_some() || created_before.get().is_some()
@@ -293,62 +293,36 @@ fn LoadedApps(
     let expired = list.count_of("expired");
     let none = list.count_of("none");
 
+    // Derived ONCE, outside the render closures: each is memoized, so a
+    // keystroke updates the count text and the selection bar in place instead of
+    // rebuilding the chip row and re-materializing every visible id.
+    let visible_ids: Memo<Arc<Vec<String>>> = Memo::new(move |_| {
+        Arc::new(shown.with(|items| items.iter().map(|r| r.id.clone()).collect()))
+    });
+    let count_label = Signal::derive(move || {
+        let shown_n = shown.with(|items| items.len());
+        if shown_n == total {
+            format!("{total} app registrations")
+        } else {
+            format!("{shown_n} of {total} app registrations")
+        }
+    });
+
     view! {
         <Show when=move || filters_open.get()>
-            {move || {
-                view! {
-                    <div class="filter-chips">
-                        <FilterChip
-                            label="All"
-                            value="any"
-                            count=base_total.get()
-                            facet=cred_filter
-                        />
-                        <FilterChip
-                            label="Active"
-                            value="active"
-                            count=active.get()
-                            facet=cred_filter
-                        />
-                        <FilterChip
-                            label="Expiring"
-                            value="expiring"
-                            count=expiring.get()
-                            facet=cred_filter
-                        />
-                        <FilterChip
-                            label="Expired"
-                            value="expired"
-                            count=expired.get()
-                            facet=cred_filter
-                        />
-                        <FilterChip
-                            label="No creds"
-                            value="none"
-                            count=none.get()
-                            facet=cred_filter
-                        />
-                    </div>
-                }
-            }}
+            <div class="filter-chips">
+                <FilterChip label="All" value="any" count=base_total facet=cred_filter />
+                <FilterChip label="Active" value="active" count=active facet=cred_filter />
+                <FilterChip label="Expiring" value="expiring" count=expiring facet=cred_filter />
+                <FilterChip label="Expired" value="expired" count=expired facet=cred_filter />
+                <FilterChip label="No creds" value="none" count=none facet=cred_filter />
+            </div>
         </Show>
-        {move || {
-            let items = shown.get();
-            let shown_n = items.len();
-            let count_label = if shown_n == total {
-                format!("{total} app registrations")
-            } else {
-                format!("{shown_n} of {total} app registrations")
-            };
-            let visible_ids: Vec<String> = items.iter().map(|r| r.id.clone()).collect();
-            view! {
-                <SelectAllBar
-                    count_label=count_label
-                    visible_ids=visible_ids
-                    selected=session.tenant_ui.selected_app_ids
-                />
-            }
-        }}
+        <SelectAllBar
+            count_label=count_label
+            visible_ids=visible_ids
+            selected=session.tenant_ui.selected_app_ids
+        />
         // Inline bulk-action bar — self-gating: appears once ≥1 app is checked
         // (and stays to show the run summary), so the user can grant consent /
         // remove expired creds / delete without leaving the list (the separate

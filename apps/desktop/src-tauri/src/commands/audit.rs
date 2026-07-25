@@ -32,7 +32,6 @@ use azapptoolkit_graph::GraphClient;
 use azapptoolkit_graph::client::AppListQuery;
 use chrono::{DateTime, Utc};
 
-use crate::commands::applications::sp_index_key;
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::exchange::{exchange_client, resolve_mail_scopes_audit_cached};
 use crate::commands::export::{csv_field, write_via_dialog};
@@ -49,7 +48,7 @@ const PAGE_SIZE: u32 = azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE;
 /// Safety cap on the total app count per run. Prevents a misconfigured tenant
 /// or runaway pagination loop from OOMing the app; raise or pass `None` if a
 /// user hits this legitimately.
-const MAX_APPS_PER_RUN: usize = 10_000;
+const MAX_APPS_PER_RUN: usize = crate::commands::applications::APPS_MAX;
 /// Tenant-prefixed audit-run cache key — the same `{tenant_id}|` convention as
 /// every other kind, so sign-out's prefix invalidation reaches it. (The
 /// original `run:{tenant}` suffix shape was invisible to the prefix idiom.)
@@ -130,7 +129,7 @@ pub async fn run_audit(
     // application object (foreign enterprise apps, managed identities, orphaned
     // SPs) and that hold at least one Graph application-permission grant.
     let local_app_ids: HashSet<String> = apps.iter().map(|a| a.app_id.clone()).collect();
-    let sp_candidates = sp_audit_candidates(sp_index, &local_app_ids, &graph_roles_by_sp);
+    let sp_candidates = sp_audit_candidates(&sp_index, &local_app_ids, &graph_roles_by_sp);
     let total = apps.len() + sp_candidates.len();
 
     // Exchange circuit breaker: a genuine auth failure (401 / 403) from the
@@ -583,22 +582,18 @@ async fn prefetch_sp_index(
     cache: &Cache,
     client: &GraphClient,
     tenant_id: &str,
-) -> Vec<ServicePrincipal> {
-    let index_key = sp_index_key(tenant_id);
-    if let Some(cached) = cache.get::<Vec<ServicePrincipal>>(CacheKind::Lists, &index_key) {
+) -> Arc<Vec<ServicePrincipal>> {
+    if let Some(cached) = crate::commands::applications::sp_index_hit(cache, tenant_id) {
         return cached;
     }
     match client.list_service_principals_index().await {
-        Ok(sps) => {
-            cache.put(CacheKind::Lists, index_key, &sps);
-            sps
-        }
+        Ok(sps) => crate::commands::applications::sp_index_store(cache, tenant_id, sps),
         Err(err) => {
             tracing::info!(
                 ?err,
                 "audit: SP index unavailable; scanning app registrations only"
             );
-            Vec::new()
+            Arc::new(Vec::new())
         }
     }
 }
@@ -707,14 +702,15 @@ fn score_sp_only(
 /// 4 flags them). Known limitation: roles held only on non-Graph resources
 /// aren't in the matrix, so such an SP is not scored.
 fn sp_audit_candidates(
-    sp_index: Vec<ServicePrincipal>,
+    sp_index: &[ServicePrincipal],
     local_app_ids: &HashSet<String>,
     graph_roles_by_sp: &HashMap<String, Vec<String>>,
 ) -> Vec<ServicePrincipal> {
     sp_index
-        .into_iter()
+        .iter()
         .filter(|sp| !local_app_ids.contains(&sp.app_id))
         .filter(|sp| graph_roles_by_sp.get(&sp.id).is_some_and(|v| !v.is_empty()))
+        .cloned()
         .collect()
 }
 
@@ -992,7 +988,7 @@ mod tests {
             sp("sp-grantless", "gallery-app", Some("Application")),
             sp("sp-empty", "empty-app", Some("Application")),
         ];
-        let got: Vec<String> = sp_audit_candidates(index, &local_app_ids, &roles)
+        let got: Vec<String> = sp_audit_candidates(&index, &local_app_ids, &roles)
             .into_iter()
             .map(|s| s.id)
             .collect();

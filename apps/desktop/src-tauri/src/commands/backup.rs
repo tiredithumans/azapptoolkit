@@ -155,8 +155,9 @@ pub async fn backup_tenant(
     let app_obj_by_app_id = Arc::new(app_obj_by_app_id);
     let tenant_arc: Arc<str> = Arc::from(tenant_id.as_str());
     let enterprise_sps: Vec<ServicePrincipal> = sp_index
-        .into_iter()
+        .iter()
         .filter(|sp| !is_managed_identity(sp))
+        .cloned()
         .collect();
     let ent_chunks: Vec<Vec<ServicePrincipal>> = enterprise_sps
         .chunks(BATCH_CHUNK)

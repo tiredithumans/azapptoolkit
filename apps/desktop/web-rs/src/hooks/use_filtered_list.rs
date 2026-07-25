@@ -150,14 +150,24 @@ where
         )
     });
 
+    // All facet counts in ONE pass over `base`, not one pass per facet. The
+    // per-facet form walked the whole base set 4-5 times on every keystroke and
+    // facet click; at the 10 000-row list ceiling that is 40-50k predicate
+    // evaluations where 10k of each suffice. Row-major also touches each row
+    // once, which is friendlier to cache than re-streaming the set per facet.
     let counts = {
         let facets = Arc::clone(&facets);
         Memo::new(move |_| {
             base.with(|b| {
-                facets
-                    .iter()
-                    .map(|f| b.iter().filter(|r| (f.predicate)(r)).count())
-                    .collect::<Vec<usize>>()
+                let mut counts = vec![0usize; facets.len()];
+                for row in b.iter() {
+                    for (i, f) in facets.iter().enumerate() {
+                        if (f.predicate)(row) {
+                            counts[i] += 1;
+                        }
+                    }
+                }
+                counts
             })
         })
     };

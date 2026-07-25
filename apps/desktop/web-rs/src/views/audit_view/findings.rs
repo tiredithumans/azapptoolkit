@@ -10,6 +10,7 @@
 //! "Healthy configuration" disclosure below the ranked list.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use azapptoolkit_core::audit::AuditPrincipalKind;
 use leptos::prelude::*;
@@ -162,14 +163,16 @@ fn finding_group_view(
     };
 
     // Bulk-eligible rows: app registrations only — SP/MI rows must never enter
-    // the selection (the bulk commands loop app-registration cores). A derived
-    // `Signal` (Copy) so the Fix-all button, its label, and the select-all bar
-    // all share it without threading clones.
+    // the selection (the bulk commands loop app-registration cores).
+    //
+    // A `Memo` over an `Arc`, not a plain `Signal::derive` over a `Vec`: this is
+    // read by the Fix-all handler, its count label, AND the select-all bar, so
+    // an unmemoized derive rebuilt the whole id list once per reader per render.
     let indices = g.item_indices.clone();
-    let eligible_ids: Signal<Vec<String>> = Signal::derive({
+    let eligible_ids: Memo<Arc<Vec<String>>> = Memo::new({
         let indices = indices.clone();
-        move || {
-            ctrl.result.with(|r| {
+        move |_| {
+            Arc::new(ctrl.result.with(|r| {
                 r.as_ref()
                     .map(|r| {
                         indices
@@ -180,13 +183,13 @@ fn finding_group_view(
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
-            })
+            }))
         }
     });
     let bulk_actions = group_bulk_actions(key);
     let has_bulk = actionable && !bulk_actions.is_empty();
     let fix_all = move |_| {
-        let ids: HashSet<String> = eligible_ids.get().into_iter().collect();
+        let ids: HashSet<String> = eligible_ids.with(|v| v.iter().cloned().collect());
         if ids.is_empty() {
             return;
         }
@@ -253,7 +256,7 @@ fn finding_group_view(
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                     on_click=Box::new(fix_all)
                                 >
-                                    {move || format!("Fix all {}", eligible_ids.get().len())}
+                                    {move || format!("Fix all {}", eligible_ids.with(|v| v.len()))}
                                 </Button>
                             </Show>
                         }
@@ -283,21 +286,18 @@ fn finding_group_view(
                         })}
                     {actionable
                         .then(|| {
+                            let label = Signal::derive(move || {
+                                format!(
+                                    "{count} affected — {} selectable for bulk fixes",
+                                    eligible_ids.with(|v| v.len()),
+                                )
+                            });
                             view! {
-                                {move || {
-                                    let ids = eligible_ids.get();
-                                    let label = format!(
-                                        "{count} affected — {} selectable for bulk fixes",
-                                        ids.len(),
-                                    );
-                                    view! {
-                                        <SelectAllBar
-                                            count_label=label
-                                            visible_ids=ids
-                                            selected=selection
-                                        />
-                                    }
-                                }}
+                                <SelectAllBar
+                                    count_label=label
+                                    visible_ids=eligible_ids
+                                    selected=selection
+                                />
                             }
                         })}
                     <table class="data-table">

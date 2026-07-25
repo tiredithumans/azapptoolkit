@@ -7,6 +7,8 @@
 
 use azapptoolkit_core::audit::{AuditItem, AuditPrincipalKind, RiskLevel, issue};
 
+use crate::util::contains_ignore_case;
+
 /// The audit table's filter, as a pure function over the item set: returns the
 /// indices (in original order) of items matching the severity dimension AND the
 /// finding dimension AND the already-lowercased name/appId query. Extracted so
@@ -28,8 +30,8 @@ pub(super) fn filter_indices(
         .filter(|(_, i)| matches_finding(i, finding))
         .filter(|(_, i)| {
             query_lower.is_empty()
-                || i.application_name.to_lowercase().contains(query_lower)
-                || i.app_id.to_lowercase().contains(query_lower)
+                || contains_ignore_case(&i.application_name, query_lower)
+                || contains_ignore_case(&i.app_id, query_lower)
         })
         .map(|(idx, _)| idx)
         .collect()

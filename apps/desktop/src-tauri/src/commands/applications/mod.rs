@@ -4,7 +4,7 @@ use std::time::Duration;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cache::CacheKind;
-use azapptoolkit_core::models::{Organization, ServicePrincipal};
+use azapptoolkit_core::models::Organization;
 use azapptoolkit_graph::client::{AppListQuery, AppPatch, CreateApplicationRequest};
 
 use crate::dto::UiError;
@@ -68,7 +68,12 @@ fn list_row_select() -> Vec<&'static str> {
 const APPS_PAGE_SIZE: u32 = azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE;
 /// Safety cap on total apps materialized for the browse list, mirroring the
 /// audit/credential scans. Well above real-world app-registration counts.
-const APPS_MAX: usize = 10_000;
+/// Shared by every tenant-wide enumeration so the caps can't drift: the browse
+/// list, the Enterprise Apps pairing join, the audit, and the credential sweep
+/// must all reach the same depth, or one view silently knows about apps another
+/// does not. (The Enterprise Apps join previously capped at 5000 and dropped
+/// pairings the App Registrations list had.)
+pub(crate) const APPS_MAX: usize = 10_000;
 
 /// Lean list-row variant of [`list_applications`]: each row is flattened to
 /// the scalars the list renders, with credential status/counts/soonest-expiry
@@ -117,11 +122,7 @@ pub async fn list_applications_with_pairing(
     // just enumerate the apps; on a cold miss fetch both concurrently so the
     // join's long pole is one directory scan, not two serial ones. Both sides
     // follow `@odata.nextLink` to completion.
-    let index_key = sp_index_key(&tenant_id);
-    let (apps, sps) = match state
-        .cache
-        .get::<Vec<ServicePrincipal>>(CacheKind::Lists, &index_key)
-    {
+    let (apps, sps) = match cache::sp_index_hit(&state.cache, &tenant_id) {
         Some(cached_index) => (
             client.list_applications_all(query, Some(APPS_MAX)).await?,
             cached_index,
@@ -132,23 +133,30 @@ pub async fn list_applications_with_pairing(
                 client.list_service_principals_index(),
             )
             .await?;
-            state.cache.put(CacheKind::Lists, index_key, &sps);
-            (apps, sps)
+            (apps, cache::sp_index_store(&state.cache, &tenant_id, sps))
         }
     };
 
-    let by_app_id: HashMap<String, String> = sps.into_iter().map(|sp| (sp.app_id, sp.id)).collect();
+    let by_app_id: HashMap<&str, &str> = sps
+        .iter()
+        .map(|sp| (sp.app_id.as_str(), sp.id.as_str()))
+        .collect();
 
     let now = chrono::Utc::now();
     let rows: Vec<ApplicationListRowDto> = apps
         .into_iter()
         .map(|application| {
-            let paired = by_app_id.get(&application.app_id).cloned();
+            let paired = by_app_id
+                .get(application.app_id.as_str())
+                .map(|id| (*id).to_string());
             ApplicationListRowDto::from_application(application, paired, now)
         })
         .collect();
 
-    state.cache.put(CacheKind::Lists, cache_key, &rows);
+    // Pinned: this is a tenant-wide index (one paginated scan over every app
+    // registration), not a per-object entry — it must not be evictable by the
+    // thousands of `app_detail|…` writes that share this bucket.
+    state.cache.put_index(CacheKind::Lists, cache_key, &rows);
 
     Ok(rows)
 }

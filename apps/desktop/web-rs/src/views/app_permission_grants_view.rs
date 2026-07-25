@@ -19,6 +19,7 @@ use crate::bindings::consent::{self, AppPermissionGrantDto};
 use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::ui::Callout;
 use crate::state::use_session;
+use crate::util::contains_ignore_case;
 
 #[component]
 pub fn AppPermissionGrantsView() -> impl IntoView {
@@ -125,7 +126,7 @@ fn matches_facet(r: &AppPermissionGrantDto, facet: &str) -> bool {
 /// knows it by the app, the permission value, or the resource API, and which
 /// one they remember varies by task.
 fn matches_query(r: &AppPermissionGrantDto, q: &str) -> bool {
-    r.client_display_name.to_lowercase().contains(q)
-        || r.permission.to_lowercase().contains(q)
-        || r.resource_display_name.to_lowercase().contains(q)
+    contains_ignore_case(&r.client_display_name, q)
+        || contains_ignore_case(&r.permission, q)
+        || contains_ignore_case(&r.resource_display_name, q)
 }

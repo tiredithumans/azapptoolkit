@@ -13,6 +13,7 @@ use crate::bindings::consent::{self, OAuth2GrantDto};
 use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::ui::Callout;
 use crate::state::use_session;
+use crate::util::contains_ignore_case;
 
 #[component]
 pub fn ConsentGrantsView() -> impl IntoView {
@@ -58,7 +59,7 @@ pub fn ConsentGrantsView() -> impl IntoView {
             }
             matches=move |r: &OAuth2GrantDto, facet: &str, q: &str| {
                 matches_facet(r, facet)
-                    && (q.is_empty() || r.client_display_name.to_lowercase().contains(q))
+                    && (q.is_empty() || contains_ignore_case(&r.client_display_name, q))
             }
             row=move |r: OAuth2GrantDto| grant_row(session, r).into_any()
         />

@@ -237,3 +237,84 @@ mod tests {
         assert!(!created_in_range(None, None, on(2024, 12, 31)));
     }
 }
+
+/// Case-insensitive substring test that allocates **nothing** for the common
+/// (ASCII) case.
+///
+/// `needle_lower` must already be lowercased — every caller lowercases the query
+/// once per keystroke. The haystack, though, is a different row on every call:
+/// `haystack.to_lowercase().contains(needle)` allocated one `String` per row per
+/// filter pass, so a settled keystroke over a 10 000-row tenant list allocated
+/// tens of thousands of times.
+///
+/// For an all-ASCII haystack, ASCII-insensitive matching is *identical* to full
+/// Unicode lowercasing, so the fast path is exact rather than an approximation.
+/// A haystack containing non-ASCII falls back to the allocating form, which
+/// keeps locale-correct behaviour (Turkish dotted I, Greek final sigma, …) for
+/// the names that actually need it.
+pub fn contains_ignore_case(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    if haystack.is_ascii() {
+        if !needle_lower.is_ascii() {
+            // A non-ASCII needle cannot occur in an ASCII haystack.
+            return false;
+        }
+        let (hay, needle) = (haystack.as_bytes(), needle_lower.as_bytes());
+        if needle.len() > hay.len() {
+            return false;
+        }
+        return hay
+            .windows(needle.len())
+            .any(|w| w.eq_ignore_ascii_case(needle));
+    }
+    haystack.to_lowercase().contains(needle_lower)
+}
+
+#[cfg(test)]
+mod contains_ignore_case_tests {
+    use super::contains_ignore_case;
+
+    #[test]
+    fn matches_case_insensitively_and_anywhere() {
+        assert!(contains_ignore_case("Contoso CRM", "crm"));
+        assert!(contains_ignore_case("Contoso CRM", "contoso"));
+        assert!(contains_ignore_case("Contoso CRM", "oso c"));
+        assert!(!contains_ignore_case("Contoso CRM", "fabrikam"));
+    }
+
+    #[test]
+    fn an_empty_needle_matches_everything() {
+        assert!(contains_ignore_case("", ""));
+        assert!(contains_ignore_case("anything", ""));
+    }
+
+    #[test]
+    fn a_needle_longer_than_the_haystack_cannot_match() {
+        assert!(!contains_ignore_case("ab", "abc"));
+    }
+
+    /// The ASCII fast path must not change results for non-ASCII names — the
+    /// fallback has to agree with the allocating form it replaces.
+    #[test]
+    fn non_ascii_haystacks_still_match_case_insensitively() {
+        assert!(contains_ignore_case("Ünternehmen Größe", "größe"));
+        assert!(contains_ignore_case("ΑΘΗΝΑ", "αθηνα"));
+        assert_eq!(
+            contains_ignore_case("Ünternehmen", "ünter"),
+            "Ünternehmen".to_lowercase().contains("ünter"),
+        );
+    }
+
+    /// A non-ASCII needle against an ASCII haystack takes the early-out; it must
+    /// agree with the allocating form (which also cannot match).
+    #[test]
+    fn a_non_ascii_needle_never_matches_an_ascii_haystack() {
+        assert!(!contains_ignore_case("Contoso", "ü"));
+        assert_eq!(
+            contains_ignore_case("Contoso", "ü"),
+            "Contoso".to_lowercase().contains("ü"),
+        );
+    }
+}

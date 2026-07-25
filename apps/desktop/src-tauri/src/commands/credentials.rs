@@ -29,7 +29,7 @@ use crate::state::AppState;
 /// Page size — the shared `/applications` maximum.
 const PAGE_SIZE: u32 = azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE;
 /// Safety cap on total apps scanned, mirroring the audit run.
-const MAX_APPS: usize = 10_000;
+const MAX_APPS: usize = crate::commands::applications::APPS_MAX;
 
 /// Lists every app-registration credential (client secret + certificate) in the
 /// tenant, sorted soonest-to-expire first (credentials with no expiry sort
