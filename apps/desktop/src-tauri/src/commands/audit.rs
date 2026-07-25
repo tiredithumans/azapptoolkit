@@ -395,10 +395,14 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-/// Serializes a set of [`AuditItem`]s as CSV. Kept as a separate command so
-/// callers that want the text (e.g. clipboard, log) don't need a save dialog.
-#[tauri::command]
-pub fn export_audit_csv(items: Vec<AuditItem>) -> String {
+/// Serializes a set of [`AuditItem`]s as CSV.
+///
+/// An internal helper, not an IPC command: `save_audit_to_file` is the only
+/// caller and the only way the frontend exports an audit. It was registered as
+/// a command "so callers that want the text don't need a save dialog", but no
+/// such caller was ever written — leaving an unreachable entry point on the IPC
+/// boundary.
+pub(crate) fn export_audit_csv(items: Vec<AuditItem>) -> String {
     let mut out = String::new();
     out.push_str("ApplicationName,AppId,ObjectId,CreatedDate,Publisher,SignInAudience,RiskScore,RiskLevel,CredentialStatus,PermissionCount,DaysSinceCreated,ServicePrincipalEnabled,Issues,Recommendations,PrincipalKind\n");
     for item in items {

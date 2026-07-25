@@ -13,8 +13,7 @@ use azapptoolkit_keyvault::SecretSetRequest;
 use crate::commands::applications::invalidate_app_credentials;
 use crate::dto::UiError;
 use crate::dto::keyvault::{
-    KvSecretItemDto, KvSecretMetadataDto, KvSecretValueDto, KvSetSecretInput,
-    RotateCredentialInput, RotateCredentialResult,
+    KvSecretItemDto, KvSecretValueDto, RotateCredentialInput, RotateCredentialResult,
 };
 use crate::state::AppState;
 
@@ -61,36 +60,6 @@ pub async fn kv_get_secret(
     Ok(KvSecretValueDto {
         name: secret_name,
         value: sv.value,
-        content_type: sv.content_type,
-        expires: sv
-            .attributes
-            .and_then(|a| a.expires)
-            .map(|d| d.to_rfc3339()),
-    })
-}
-
-#[tauri::command]
-pub async fn kv_set_secret(
-    state: State<'_, AppState>,
-    tenant_id: String,
-    input: KvSetSecretInput,
-) -> Result<KvSecretMetadataDto, UiError> {
-    let client = state.kv_for(&tenant_id, &input.vault_name)?;
-    let expires = parse_rfc3339(input.expires.as_deref())?;
-    let attrs = expires.map(|e| azapptoolkit_keyvault::models::SecretAttributesRequest {
-        enabled: Some(true),
-        expires: Some(e),
-        not_before: None,
-    });
-    let req = SecretSetRequest {
-        value: input.value,
-        content_type: input.content_type,
-        tags: None,
-        attributes: attrs,
-    };
-    let sv = client.set_secret(&input.secret_name, &req).await?;
-    Ok(KvSecretMetadataDto {
-        name: input.secret_name,
         content_type: sv.content_type,
         expires: sv
             .attributes
@@ -256,15 +225,4 @@ pub async fn list_available_key_vaults(
         .filter_map(|v| v.name)
         .collect();
     Ok(names.into_iter().collect())
-}
-
-fn parse_rfc3339(s: Option<&str>) -> Result<Option<chrono::DateTime<chrono::Utc>>, UiError> {
-    match s {
-        None => Ok(None),
-        Some(v) => chrono::DateTime::parse_from_rfc3339(v)
-            .map(|d| Some(d.with_timezone(&chrono::Utc)))
-            .map_err(|e| {
-                UiError::validation("invalid_timestamp", format!("expires must be RFC3339: {e}"))
-            }),
-    }
 }

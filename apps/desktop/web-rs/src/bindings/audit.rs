@@ -29,10 +29,6 @@ struct ExportArgs<'a> {
     items: &'a [AuditItem],
 }
 
-pub async fn export_audit_csv(items: &[AuditItem]) -> String {
-    invoke("export_audit_csv", ExportArgs { items }).await
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SaveArgs<'a> {

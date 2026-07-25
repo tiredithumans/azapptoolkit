@@ -9,6 +9,28 @@ the project adheres to
 
 ### Added
 
+- **The security audit scores reach beyond the tenant (Rules 19 & 20).**
+  `signInAudience` and `verifiedPublisher` were both fetched, carried on
+  `AuditItem`, and exported to CSV — but nothing scored them, even though
+  Rule 15's own guidance leans on multitenant risk. A new
+  `rule_external_exposure` flags an app whose audience lets other directories
+  (or personal Microsoft accounts) consent to it **while it holds application
+  permissions or credentials**, and adds a second finding when such an app also
+  has no verified publisher. The gating is deliberate: the audience is a
+  blast-radius multiplier on other findings rather than a finding on its own,
+  so a multi-tenant app holding nothing is not flagged, and publisher
+  verification is only assessed where a foreign admin actually has to attribute
+  the app. Unrecognised audience values never inflate a score. Surfaced as a
+  "Reachable outside this tenant" group in the Findings pane.
+  **Operators will see some scores rise**: an app can gain up to 5 points.
+- **Exchange mailbox scoping can be removed from the app.**
+  `remove_exchange_mailbox_access` shipped as a registered command with no UI,
+  so an operator could *create* Exchange RBAC scoping here but had to drop to
+  PowerShell to undo it. The scoping section now has a "Remove all…" action
+  behind a confirmation that states plainly what it does — reverting to the
+  org-wide access the Entra grant allows, which **widens** access rather than
+  revoking it.
+
 - **The Security workbench now has an Application permissions lens.** The
   tenant-wide inventory of every *application* permission
   (`appRoleAssignment`) apps hold on Microsoft Graph / Exchange / SharePoint
@@ -77,6 +99,18 @@ the project adheres to
 - **The Security audit's "Risk" column header shows its sort direction.** It
   drove `SortCol::Score` but rendered no sort glyph, so clicking it silently
   re-sorted the table with no visible feedback.
+
+### Removed
+
+- **Five unreachable Tauri commands (171 → 164).** `kv_set_secret`,
+  `resolve_permission`, `update_required_resource_access`, and
+  `current_tenants` were registered on the IPC boundary and bound in the
+  frontend, but **no view ever called them** — untested, unreachable surface on
+  a security-critical boundary. `kv_set_secret` in particular duplicated a
+  write path `rotate_app_credential` already performs itself (and which also
+  mints the credential and records the vault binding), so the sanctioned
+  rotation flow is unaffected. `export_audit_csv` stays as an internal helper —
+  `save_audit_to_file` is its only caller — but loses its command registration.
 
 ### Changed
 

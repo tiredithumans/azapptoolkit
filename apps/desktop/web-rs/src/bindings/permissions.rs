@@ -58,22 +58,6 @@ struct UpdateRequiredResourceArgs<'a> {
     required_resource_access: &'a [RequiredResourceAccess],
 }
 
-pub async fn update_required_resource_access(
-    tenant_id: &str,
-    object_id: &str,
-    required_resource_access: &[RequiredResourceAccess],
-) -> Result<(), UiError> {
-    invoke_result(
-        "update_required_resource_access",
-        UpdateRequiredResourceArgs {
-            tenant_id,
-            object_id,
-            required_resource_access,
-        },
-    )
-    .await
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GrantConsentArgs<'a> {
