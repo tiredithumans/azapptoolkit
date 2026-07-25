@@ -722,7 +722,7 @@ fn emit_progress(app_handle: &AppHandle, progress: AuditProgress) {
 
 struct ResourceResolver {
     client: Arc<GraphClient>,
-    cache: Mutex<HashMap<String, ResourceIndex>>,
+    cache: Mutex<HashMap<String, Arc<ResourceIndex>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -739,11 +739,16 @@ impl ResourceResolver {
         }
     }
 
-    async fn index(&self, resource_app_id: &str) -> ResourceIndex {
+    /// Returns a SHARED handle, not a copy. The Microsoft Graph resource index
+    /// is ~1500 `(String, String)` pairs, and this is called once per distinct
+    /// resource per app: handing out clones meant a 10 000-app run allocated
+    /// tens of millions of strings for a read-only lookup table, inside the
+    /// spawned scoring tasks (so it saturated every worker, not one).
+    async fn index(&self, resource_app_id: &str) -> Arc<ResourceIndex> {
         {
             let cache = self.cache.lock().await;
             if let Some(hit) = cache.get(resource_app_id) {
-                return hit.clone();
+                return Arc::clone(hit);
             }
         }
 
@@ -761,8 +766,9 @@ impl ResourceResolver {
             }
         }
 
+        let index = Arc::new(index);
         let mut cache = self.cache.lock().await;
-        cache.insert(resource_app_id.to_string(), index.clone());
+        cache.insert(resource_app_id.to_string(), Arc::clone(&index));
         index
     }
 }
@@ -777,7 +783,7 @@ async fn resolve_permissions(
     // applications.rs). Each lookup is independent and Permissions-cached, so on a
     // cold cache this collapses N serial round-trips into one concurrent batch;
     // warm hits cost nothing.
-    let indexes: HashMap<String, ResourceIndex> =
+    let indexes: HashMap<String, Arc<ResourceIndex>> =
         futures::future::join_all(resources.into_iter().map(|id| async move {
             let index = resolver.index(&id).await;
             (id, index)

@@ -261,7 +261,7 @@ async fn list_service_principals_index_selects_superset_and_returns_all_sps() {
         .and(path("/servicePrincipals"))
         .and(query_param(
             "$select",
-            "id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime",
+            "id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames",
         ))
         .and(query_param("$count", "true"))
         .and(header("consistencylevel", "eventual"))
@@ -278,7 +278,11 @@ async fn list_service_principals_index_selects_superset_and_returns_all_sps() {
                     "id": "msi-1",
                     "appId": "msi-app-1",
                     "displayName": "my-vm-identity",
-                    "servicePrincipalType": "ManagedIdentity"
+                    "servicePrincipalType": "ManagedIdentity",
+                    "alternativeNames": [
+                        "isExplicit=False",
+                        "/subscriptions/s1/resourcegroups/rg/providers/Microsoft.Compute/virtualMachines/vm1"
+                    ]
                 }
             ]
         })))
@@ -289,6 +293,17 @@ async fn list_service_principals_index_selects_superset_and_returns_all_sps() {
     // the Enterprise Applications list filters out client-side.
     let sps = client.list_service_principals_index().await.unwrap();
     assert_eq!(sps.len(), 2);
+    // `alternativeNames` rides this projection so the managed-identity list can
+    // derive its system-vs-user subtype from THIS index instead of running a
+    // second `/servicePrincipals` scan of its own.
+    assert_eq!(
+        sps[1].alternative_names,
+        vec![
+            "isExplicit=False".to_string(),
+            "/subscriptions/s1/resourcegroups/rg/providers/Microsoft.Compute/virtualMachines/vm1"
+                .to_string()
+        ]
+    );
     assert_eq!(sps[0].app_id, "app-1");
     assert_eq!(
         sps[0].app_owner_organization_id.as_deref(),

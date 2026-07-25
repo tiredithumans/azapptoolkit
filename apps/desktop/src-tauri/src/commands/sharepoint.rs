@@ -10,15 +10,14 @@
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::Mutex;
 
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Site, SitePermission};
 use azapptoolkit_core::scoping::is_sharepoint_orgwide;
 
 use crate::commands::applications::invalidate_app_lists;
-use crate::commands::dispatch::dispatch_capped;
 use crate::commands::graph_roles::graph_role_index;
+use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
 use crate::dto::sharepoint::{
     GrantSiteAccessResult, SiteAppGrantRow, SiteGrantDto, SitePermissionDto, SiteScopeResult,
@@ -296,6 +295,12 @@ pub async fn convert_site_access_to_selected(
 /// (`scoped_get_retried`), so a transient 429 is absorbed with `Retry-After`
 /// honored; only a *persistently* failing site lands in `sites_failed`.
 const SWEEP_CONCURRENCY: usize = 6;
+/// Sites resolved per progress step. The Graph `$batch` cap is 20 sub-requests,
+/// and `batch_list_site_permissions` chunks internally, so this is the
+/// **cancellation and progress** granularity: small enough that Cancel feels
+/// immediate and a whole-batch failure costs one step, large enough that the
+/// batching win isn't given back in round trips.
+const SWEEP_BATCH: usize = 100;
 /// Safety cap on sites per sweep — prevents a pathological tenant from
 /// queueing an unbounded scan. Raise if a user legitimately hits it.
 const MAX_SITES_PER_SWEEP: usize = 5_000;
@@ -400,53 +405,78 @@ pub async fn sweep_site_permissions(
         },
     );
 
-    let done = Arc::new(Mutex::new(0usize));
     let cancel = state.sweep_cancel.clone();
+
+    // Adaptive throttling, like the audit and DR fan-outs. `/sites/*` is the
+    // throttle-happiest endpoint family in the transport, and this sweep
+    // previously ran at a FIXED width with no backoff — the per-request retry
+    // absorbed 429s but the in-flight cap never yielded, so a throttling tenant
+    // just ground through retries.
+    let tracker = Arc::new(ConcurrencyThrottle::new(SWEEP_CONCURRENCY));
+    let _observer_guard = ThrottleGuard::attach(client.clone(), tracker.clone());
 
     let mut rows: Vec<SiteAppGrantRow> = Vec::new();
     let mut sites_scanned = 0usize;
     let mut sites_failed = 0usize;
-    let mut cancelled = dispatch_capped(
-        sites,
-        || SWEEP_CONCURRENCY,
-        |site| {
-            if cancel.is_cancelled() {
-                return None;
+    let mut done = 0usize;
+    let mut cancelled = false;
+
+    // `/sites/{id}/permissions` is a plain GET, so the sweep reads them in
+    // `$batch` POSTs of 20 instead of one request per site — at the 5000-site
+    // cap that is 250 round trips rather than 5000. Chunked so cancellation and
+    // progress stay responsive between batches, and so a whole-batch failure
+    // costs one chunk rather than the run.
+    for chunk in sites.chunks(SWEEP_BATCH) {
+        if cancel.is_cancelled() {
+            cancelled = true;
+            break;
+        }
+        let ids: Vec<String> = chunk.iter().map(|s| s.id.clone()).collect();
+        match client.batch_list_site_permissions(&ids).await {
+            Ok(results) => {
+                for (site, result) in chunk.iter().zip(results) {
+                    fold_site_result(
+                        &mut rows,
+                        &mut sites_scanned,
+                        &mut sites_failed,
+                        site,
+                        result,
+                    );
+                }
             }
-            let client = client.clone();
-            let app_handle = app_handle.clone();
-            let done = done.clone();
-            let cancel_for_task = cancel.clone();
-            Some(tokio::spawn(async move {
-                let result = client.list_site_permissions(&site.id).await;
-                let mut guard = done.lock().await;
-                *guard += 1;
-                let progress = SiteSweepProgress {
-                    done: *guard,
-                    total,
-                    current_site: site.display_name.clone().or_else(|| site.web_url.clone()),
-                    cancelled: cancel_for_task.is_cancelled(),
-                };
-                drop(guard);
-                emit_sweep_progress(&app_handle, progress);
-                (site, result)
-            }))
-        },
-        |joined| match joined {
-            Ok((site, result)) => fold_site_result(
-                &mut rows,
-                &mut sites_scanned,
-                &mut sites_failed,
-                &site,
-                result,
-            ),
             Err(err) => {
-                sites_failed += 1;
-                tracing::warn!(?err, "site sweep: join error");
+                // Whole-batch failure degrades to per-site reads rather than
+                // losing the chunk (the batched fan-out contract).
+                tracing::warn!(?err, "site sweep: batch failed; falling back to per-site");
+                for site in chunk {
+                    if cancel.is_cancelled() {
+                        cancelled = true;
+                        break;
+                    }
+                    let result = client.list_site_permissions(&site.id).await;
+                    fold_site_result(
+                        &mut rows,
+                        &mut sites_scanned,
+                        &mut sites_failed,
+                        site,
+                        result,
+                    );
+                }
             }
-        },
-    )
-    .await;
+        }
+        done += chunk.len();
+        emit_sweep_progress(
+            &app_handle,
+            SiteSweepProgress {
+                done,
+                total,
+                current_site: chunk
+                    .last()
+                    .and_then(|s| s.display_name.clone().or_else(|| s.web_url.clone())),
+                cancelled: cancel.is_cancelled(),
+            },
+        );
+    }
 
     cancelled = cancelled || cancel.is_cancelled();
     tracing::info!(

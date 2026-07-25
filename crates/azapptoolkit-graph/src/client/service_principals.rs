@@ -167,8 +167,14 @@ impl GraphClient {
     pub async fn list_service_principals_index(&self) -> Result<Vec<ServicePrincipal>> {
         let params: [(&str, &str); 3] = [
             (
+                // `alternativeNames` is here so the managed-identity list can be
+                // a filter over THIS index rather than a second, near-identical
+                // `/servicePrincipals` scan of its own — it is what
+                // `MiSubtype::from_alternative_names` reads to tell a
+                // system-assigned identity from a user-assigned one. It is empty
+                // for the non-MI service principals that dominate the index.
                 "$select",
-                "id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime",
+                "id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames",
             ),
             ("$count", "true"),
             ("$top", "999"),

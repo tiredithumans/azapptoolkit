@@ -643,15 +643,30 @@ async fn load_gallery_corpus(
     {
         return Ok(hit);
     }
+    // Single-flight. The dialog fires `prefetch_application_gallery` on open
+    // while the first debounced keystroke calls in here too; without the gate
+    // both miss and both fetch the whole ~39 000-row catalog, so the prewarm
+    // *doubled* the very cost it exists to hide.
+    let gate = state.single_flight(&key);
+    let _held = gate.lock().await;
+    // Re-check: the fetch we were queued behind has already populated the cache.
+    if let Some(hit) = state
+        .cache
+        .get_typed::<Vec<GalleryRow>>(CacheKind::Lists, &key)
+    {
+        return Ok(hit);
+    }
     let templates = state
         .graph_for(tenant_id)
         .list_all_application_templates()
         .await?;
     tracing::debug!(templates = templates.len(), "gallery corpus fetched");
     let rows: Arc<Vec<GalleryRow>> = Arc::new(templates.into_iter().map(gallery_row).collect());
+    // Pinned: the catalog is tens of thousands of rows and one fetch backs every
+    // subsequent keystroke.
     state
         .cache
-        .put_typed(CacheKind::Lists, key, Arc::clone(&rows));
+        .put_typed_index(CacheKind::Lists, key, Arc::clone(&rows));
     Ok(rows)
 }
 

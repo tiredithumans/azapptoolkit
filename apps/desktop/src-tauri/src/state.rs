@@ -102,6 +102,8 @@ pub struct AppState {
     pub client_id: String,
     pub tenant_id: String,
     pub cache: Arc<Cache>,
+    /// Single-flight gates, keyed by cache key. See [`AppState::single_flight`].
+    inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub graph_clients: Mutex<HashMap<String, Arc<GraphClient>>>,
     /// Exchange Online Admin API clients cached per tenant. Built lazily on the
     /// first Exchange RBAC operation; the audience and token are distinct from
@@ -164,6 +166,7 @@ impl AppState {
             client_id,
             tenant_id,
             cache: Cache::new(),
+            inflight: Mutex::new(HashMap::new()),
             graph_clients: Mutex::new(HashMap::new()),
             exchange_clients: Mutex::new(HashMap::new()),
             kv_clients: Mutex::new(HashMap::new()),
@@ -198,6 +201,29 @@ impl AppState {
         } else {
             &self.tenant_id
         }
+    }
+
+    /// Returns the single-flight gate for `key` (creating it on first use).
+    ///
+    /// Read-through caches are `get` → miss → fetch → `put`, which lets two
+    /// callers that miss at the same time both do the expensive fetch. Holding
+    /// this gate across the fetch — and **re-checking the cache after acquiring
+    /// it** — collapses that to one fetch, with the loser reading the winner's
+    /// result.
+    ///
+    /// The concrete case: the gallery picker fires `prefetch_application_gallery`
+    /// on dialog open while the operator's first debounced keystroke calls
+    /// `search_application_templates`. Both missed, so the prewarm added a
+    /// second full-catalog fetch (~39 000 templates) instead of preventing one.
+    ///
+    /// Gates are keyed by cache key and kept after use; the set is bounded by
+    /// the number of distinct cache keys that opt in, which is a handful.
+    pub fn single_flight(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self.inflight.lock();
+        Arc::clone(
+            map.entry(key.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
     }
 
     pub fn graph_for(&self, tenant_id: &str) -> Arc<GraphClient> {

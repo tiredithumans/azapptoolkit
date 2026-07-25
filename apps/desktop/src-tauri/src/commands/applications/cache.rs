@@ -109,6 +109,13 @@ pub(crate) fn invalidate_app_lists(cache: &Cache, tenant_id: &str) {
     cache.invalidate(CacheKind::Lists, &app_name_index_key(tenant_id));
     // The search corpus is derived from those two indexes, so it must fall too.
     cache.invalidate(CacheKind::Lists, &search_corpus_key(tenant_id));
+    // The managed-identity list is now a filtered projection OF the SP index
+    // (rather than its own scan), so it is stale whenever the index is. Without
+    // this it could outlive its own source by up to the 60-minute TTL.
+    cache.invalidate(
+        CacheKind::Lists,
+        &crate::commands::managed_identity::mi_key(tenant_id),
+    );
     // A create/delete changes the app set the credential-expiry list scans.
     cache.invalidate(CacheKind::Lists, &credential_expirations_key(tenant_id));
     // Any list-changing mutation (create/delete, credential add/remove, …) also
