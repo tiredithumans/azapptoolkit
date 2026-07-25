@@ -16,7 +16,9 @@
   --scrim: rgba(0, 0, 0, 0.32);
   --text: #1f1f1f;
   --text-muted: #5b5b5b;
-  --text-faint: #8a8a8a;
+  /* 4.6:1 on --surface (#fff). #8a8a8a was ~3.0:1 — below WCAG AA 4.5:1 for
+     the body text this backs (muted labels, saved-view remove). */
+  --text-faint: #6e6e6e;
 
   --accent: #0f6cbd;
   --accent-hover: #115ea3;
@@ -29,7 +31,9 @@
   --accent-mi-user-soft: rgba(0, 122, 153, 0.12);
   --danger: #b10e1c;
   --danger-soft: rgba(177, 14, 28, 0.12);
-  --warning: #c97200;
+  /* 4.5:1 on --surface. This is used as a TEXT colour (badge labels, callout
+     copy), not just a fill, so it has to clear AA like any other body text. */
+  --warning: #a35c00;
   --warning-soft: rgba(201, 114, 0, 0.12);
   --ok: #0f803c;
   --ok-soft: rgba(15, 128, 60, 0.12);
@@ -1477,7 +1481,10 @@ h3 {
   font-weight: var(--weight-semibold);
 }
 .filter-chip:disabled {
-  opacity: 0.4;
+  /* Mute via colour, not opacity: 0.4 opacity over already-muted text landed
+     well under 3:1, making a zero-count facet effectively unreadable rather
+     than merely de-emphasised. */
+  color: var(--text-faint);
   cursor: default;
 }
 .filter-chip__count {
@@ -3842,4 +3849,43 @@ h3 {
   font-weight: 600;
   text-decoration: underline;
   white-space: nowrap;
+}
+
+
+/* ---- Keyboard shortcut sheet (?) ---- */
+.shortcuts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+}
+.shortcuts__row {
+  display: grid;
+  grid-template-columns: minmax(9rem, max-content) 1fr;
+  gap: var(--space-3);
+  align-items: baseline;
+}
+.shortcuts__keys {
+  margin: 0;
+}
+.shortcuts__keys kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-alt);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.shortcuts__what {
+  margin: 0;
+  color: var(--text-muted);
+}
+@media (max-width: 480px) {
+  .shortcuts__row {
+    grid-template-columns: 1fr;
+    gap: var(--space-1);
+  }
 }

@@ -50,11 +50,35 @@ pub fn OpenItemsWorkspace() -> impl IntoView {
         c
     };
 
+    // The overlay is fully opaque over the list (`.workspace` is
+    // `position:absolute; inset:0`), so the content it covers must also be
+    // removed from the accessibility tree and the tab order — otherwise the
+    // hidden list's rows, checkboxes and buttons stay reachable *behind* it,
+    // and a keyboard or screen-reader user tabs into content they cannot see.
+    // `inert` does both in one attribute.
+    Effect::new(move |_| {
+        let covered = session.shown_items.with(|s| !s.is_empty());
+        if let Some(content) = document().query_selector(".shell__content").ok().flatten() {
+            if covered {
+                let _ = content.set_attribute("inert", "");
+            } else {
+                let _ = content.remove_attribute("inert");
+            }
+        }
+    });
+
     view! {
         // Mounted whenever the working set is non-empty, so every open window
         // survives chip switches and collapse/expand (no remount, no refetch).
         <Show when=move || session.open_items.with(|l| !l.is_empty())>
-            <div class="workspace" style=overlay_style aria-label="Open item workspace">
+            // `role="region"` + a label: a bare `aria-label` on a generic `div`
+            // has no role to attach to, so it was never announced.
+            <div
+                class="workspace"
+                style=overlay_style
+                role="region"
+                aria-label="Open item workspace"
+            >
                 <div class=panes_class>
                     <For each=move || session.open_items.get() key=|it| it.id let:item>
                         {open_item_window(session, item)}

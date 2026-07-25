@@ -14,9 +14,11 @@ use crate::components::global_search::GlobalSearch;
 use crate::components::icon::{Icon, IconName};
 use crate::components::open_items_dock::OpenItemsDock;
 use crate::components::open_items_workspace::OpenItemsWorkspace;
+use crate::components::shortcuts_help::ShortcutsHelp;
 use crate::components::toast::{ToastHost, ToastKind};
 use crate::components::update_splash::UpdateSplash;
 use crate::hooks::use_escape::use_escape;
+use crate::hooks::use_shortcuts::use_shortcuts;
 use crate::state::{ActiveView, use_session};
 use crate::views::dialogs::{
     cache_diagnostics_dialog::CacheDiagnosticsDialog, create_app_dialog::CreateAppDialog,
@@ -27,6 +29,11 @@ use crate::views::dialogs::{
 #[component]
 pub fn AppShell(children: Children) -> impl IntoView {
     let session = use_session();
+    // The app's global keyboard layer (quick nav, list-filter focus, close item,
+    // this sheet). Installed once, here, alongside the shell that owns the
+    // surfaces the bindings act on.
+    let shortcuts_open = RwSignal::new(false);
+    use_shortcuts(session, shortcuts_open);
     let tenant = session.active_tenant;
     let view = session.view;
 
@@ -467,6 +474,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                 <div class="shell__content-wrap">
                     <div class="shell__content">{children()}</div>
                     <OpenItemsWorkspace />
+                    <ShortcutsHelp open=shortcuts_open />
                 </div>
                 <OpenItemsDock />
             </div>
