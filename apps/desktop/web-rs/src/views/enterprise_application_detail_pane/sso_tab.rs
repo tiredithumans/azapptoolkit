@@ -27,15 +27,19 @@ pub(super) fn SsoContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> im
     view! {
         <Suspense fallback=move || {
             view! {
-                <div class="centered-pad">
-                    <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading SSO…" />
-                </div>
+                <DetailSkeleton />
             }
         }>
             {move || Suspend::new(async move {
                 match config.await {
                     Err(e) => {
-                        view! { <div class="alert alert--warn">{e.message}</div> }.into_any()
+                        view! {
+                            <DetailLoadError
+                                error=e
+                                on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                            />
+                        }
+                            .into_any()
                     }
                     Ok(cfg) => view! { <SsoEditor cfg=cfg reload=reload /> }.into_any(),
                 }
@@ -387,11 +391,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                     view! {
                         <h4>"Details for the application owner"</h4>
                         <Suspense fallback=move || {
-                            view! {
-                                <div class="centered-pad">
-                                    <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
-                                </div>
-                            }
+                            view! { <SkeletonList rows=3 /> }
                         }>
                             {move || Suspend::new(async move {
                                 match summary.await {

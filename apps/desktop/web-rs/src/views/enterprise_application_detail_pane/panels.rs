@@ -12,9 +12,11 @@ pub(super) fn ProvisioningContent(
     let tenant = session.active_tenant;
     let sp_id = Signal::derive(move || signal.with(|d| d.service_principal.id.clone()));
 
+    let reload = RwSignal::new(0u32);
     let jobs = LocalResource::new(move || {
         let tenant = tenant.get();
         let id = sp_id.get();
+        let _ = reload.get();
         async move {
             match tenant {
                 Some(t) => {
@@ -26,23 +28,27 @@ pub(super) fn ProvisioningContent(
     });
 
     view! {
-        <Suspense fallback=move || {
-            view! {
-                <div class="centered-pad">
-                    <Spinner
-                        size=Signal::derive(|| SpinnerSize::Tiny)
-                        label="Loading provisioning…"
-                    />
-                </div>
-            }
-        }>
+        <Suspense fallback=move || view! { <DetailSkeleton /> }>
             {move || Suspend::new(async move {
                 match jobs.await {
-                    Err(_) => {
+                    // Only an authorization failure means "you need consent /
+                    // a license". Swallowing EVERY error into that message told
+                    // an operator hitting a transient 429 to go grant a scope
+                    // they already have, with no way to retry.
+                    Err(e) if e.code == "forbidden" || e.code == "consent_required" => {
                         view! {
                             <div class="alert alert--warn">
                                 "Provisioning status is unavailable. It needs admin consent to Synchronization.Read.All and an Entra ID P1/P2 license."
                             </div>
+                        }
+                            .into_any()
+                    }
+                    Err(e) => {
+                        view! {
+                            <DetailLoadError
+                                error=e
+                                on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                            />
                         }
                             .into_any()
                     }

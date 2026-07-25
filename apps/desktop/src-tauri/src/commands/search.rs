@@ -16,7 +16,7 @@ use azapptoolkit_core::models::{Application, ServicePrincipal};
 use azapptoolkit_graph::GraphClient;
 use tauri::State;
 
-use crate::commands::applications::{app_name_index_key, search_corpus_key, sp_index_key};
+use crate::commands::applications::{app_name_index_key, search_corpus_key};
 use crate::commands::guid::is_guid;
 use crate::dto::UiError;
 use crate::dto::search::{GlobalSearchResults, SearchHit};
@@ -66,18 +66,11 @@ async fn search_corpus(
     }
 
     // Service principals — shared with the App Reg / Enterprise lists.
-    let sp_key = sp_index_key(tenant_id);
-    let sps: Vec<ServicePrincipal> = match state
-        .cache
-        .get::<Vec<ServicePrincipal>>(CacheKind::Lists, &sp_key)
-    {
+    let sps = match crate::commands::applications::sp_index_hit(&state.cache, tenant_id) {
         Some(hit) => hit,
         None => match client.list_service_principals_index().await {
-            Ok(sps) => {
-                state.cache.put(CacheKind::Lists, sp_key, &sps);
-                sps
-            }
-            Err(_) => Vec::new(),
+            Ok(sps) => crate::commands::applications::sp_index_store(&state.cache, tenant_id, sps),
+            Err(_) => Arc::new(Vec::new()),
         },
     };
 
@@ -109,7 +102,7 @@ async fn search_corpus(
             kind: SearchKind::AppReg,
         });
     }
-    for sp in sps {
+    for sp in sps.iter() {
         let kind = if sp.service_principal_type.as_deref() == Some("ManagedIdentity") {
             SearchKind::ManagedIdentity
         } else {
@@ -119,16 +112,17 @@ async fn search_corpus(
             name_lc: sp.display_name.to_lowercase(),
             app_id_lc: sp.app_id.to_lowercase(),
             id_lc: sp.id.to_lowercase(),
-            id: sp.id,
-            app_id: sp.app_id,
-            display_name: sp.display_name,
+            id: sp.id.clone(),
+            app_id: sp.app_id.clone(),
+            display_name: sp.display_name.clone(),
             kind,
         });
     }
     let corpus = Arc::new(rows);
+    // Pinned: rebuilding this corpus costs two full directory scans.
     state
         .cache
-        .put_typed(CacheKind::Lists, corpus_key, Arc::clone(&corpus));
+        .put_typed_index(CacheKind::Lists, corpus_key, Arc::clone(&corpus));
     corpus
 }
 

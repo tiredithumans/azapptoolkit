@@ -20,6 +20,9 @@ pub(crate) use controller::AuditController;
 pub(crate) use findings::FindingsPane;
 pub(crate) use groups::ranked_actionable_findings;
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use azapptoolkit_core::audit::{AuditItem, AuditPrincipalKind, RiskLevel};
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
@@ -69,15 +72,27 @@ pub fn AuditAppsPane() -> impl IntoView {
                 .map(|r| {
                     let mut idx = filter_indices(&r.items, &sev, "all", &q);
                     if let Some((col, desc)) = srt {
+                        // Name sorting is case-insensitive, so lowercase ONCE per
+                        // row up front rather than twice per comparison — the
+                        // comparator runs O(n log n) times, and allocating two
+                        // Strings inside it made a sort-toggle on a large tenant
+                        // allocate tens of thousands of times.
+                        let name_keys: Option<Vec<String>> =
+                            matches!(col, SortCol::Name).then(|| {
+                                r.items
+                                    .iter()
+                                    .map(|it| it.application_name.to_lowercase())
+                                    .collect()
+                            });
                         // Stable sort over indices — reads the column value from
                         // the items by index, never cloning a row.
                         idx.sort_by(|&a, &b| {
                             let (ia, ib) = (&r.items[a], &r.items[b]);
                             let ord = match col {
-                                SortCol::Name => ia
-                                    .application_name
-                                    .to_lowercase()
-                                    .cmp(&ib.application_name.to_lowercase()),
+                                SortCol::Name => match &name_keys {
+                                    Some(keys) => keys[a].cmp(&keys[b]),
+                                    None => ia.application_name.cmp(&ib.application_name),
+                                },
                                 SortCol::Score => ia.risk_score.cmp(&ib.risk_score),
                                 SortCol::LastSignIn => ia.last_sign_in.cmp(&ib.last_sign_in),
                             };
@@ -88,6 +103,48 @@ pub fn AuditAppsPane() -> impl IntoView {
                 })
                 .unwrap_or_default()
         })
+    });
+
+    // Select-all inputs, derived once. `selectable_ids` is the object_ids of
+    // every row matching the active filters (not just the rendered window), so
+    // "select all visible" covers the whole filtered set. SP-only rows are
+    // excluded — the bulk commands loop app-registration cores, which have
+    // nothing to resolve for a principal without a local app.
+    let selectable_ids: Memo<Arc<Vec<String>>> = Memo::new(move |_| {
+        Arc::new(filtered.with(|idx| {
+            result.with(|r| {
+                r.as_ref()
+                    .map(|r| {
+                        idx.iter()
+                            .filter_map(|&i| r.items.get(i))
+                            .filter(|it| it.principal_kind == AuditPrincipalKind::Application)
+                            .map(|it| it.object_id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+        }))
+    });
+    // `object_id -> application name` so a bulk failure names the app rather
+    // than printing its GUID.
+    let names: Memo<Arc<HashMap<String, String>>> = Memo::new(move |_| {
+        Arc::new(result.with(|r| {
+            r.as_ref()
+                .map(|r| {
+                    r.items
+                        .iter()
+                        .map(|i| (i.object_id.clone(), i.application_name.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }))
+    });
+    let selectbar_label = Signal::derive(move || {
+        format!(
+            "{} of {} apps match",
+            filtered.with(Vec::len),
+            total_items.get().unwrap_or(0),
+        )
     });
 
     // Click a sortable header: cycle default-direction → reverse → unsorted.
@@ -178,6 +235,7 @@ pub fn AuditAppsPane() -> impl IntoView {
                         // Finding-paired fixes (scope/redundant/owner/disable)
                         // live on the Findings pane's per-group bars.
                         <BulkActionBar
+                            names=names
                             selection=selection
                             actions=Signal::derive(|| vec![
                                 BulkAction::RemoveExpired,
@@ -191,39 +249,11 @@ pub fn AuditAppsPane() -> impl IntoView {
                         // the whole filtered set. SP-only rows are excluded — the
                         // bulk commands loop app-registration cores, which have
                         // nothing to resolve for a principal without a local app.
-                        {move || {
-                            let (count_label, visible_ids) = filtered
-                                .with(|idx| {
-                                    let label = format!(
-                                        "{} of {} apps match",
-                                        idx.len(),
-                                        total_items.get().unwrap_or(0),
-                                    );
-                                    let ids = result
-                                        .with(|r| {
-                                            r.as_ref()
-                                                .map(|r| {
-                                                    idx.iter()
-                                                        .filter_map(|&i| r.items.get(i))
-                                                        .filter(|it| {
-                                                            it.principal_kind
-                                                                == AuditPrincipalKind::Application
-                                                        })
-                                                        .map(|it| it.object_id.clone())
-                                                        .collect::<Vec<_>>()
-                                                })
-                                                .unwrap_or_default()
-                                        });
-                                    (label, ids)
-                                });
-                            view! {
-                                <SelectAllBar
-                                    count_label=count_label
-                                    visible_ids=visible_ids
-                                    selected=selection
-                                />
-                            }
-                        }}
+                        <SelectAllBar
+                            count_label=selectbar_label
+                            visible_ids=selectable_ids
+                            selected=selection
+                        />
                         {move || {
                             filtered
                                 .with(|f| f.is_empty())
@@ -251,6 +281,12 @@ pub fn AuditAppsPane() -> impl IntoView {
                                     </th>
                                     <th>"AppId"</th>
                                     <th>
+                                        // Risk tier and Score are the same
+                                        // ordering, so this header drives
+                                        // `SortCol::Score` — and must therefore
+                                        // render that column's glyph too, or
+                                        // clicking it silently re-sorts with no
+                                        // visible feedback.
                                         <button
                                             class="th-sort"
                                             type="button"
@@ -258,6 +294,7 @@ pub fn AuditAppsPane() -> impl IntoView {
                                             on:click=move |_| toggle_sort(SortCol::Score)
                                         >
                                             "Risk"
+                                            {move || sort_glyph(SortCol::Score)}
                                         </button>
                                     </th>
                                     <th>

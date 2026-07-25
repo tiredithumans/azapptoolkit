@@ -24,11 +24,6 @@ pub async fn sign_out(state: State<'_, AppState>, tenant: TenantContext) -> Resu
     Ok(())
 }
 
-#[tauri::command]
-pub async fn current_tenants(state: State<'_, AppState>) -> Result<Vec<TenantContext>, UiError> {
-    Ok(state.auth.tenants().await)
-}
-
 /// Re-mints the signed-in account's tokens *without* ending the session: drops
 /// the tenant's cached access tokens and re-acquires them via the stored
 /// refresh token, so a role activated after sign-in — e.g. a PIM "Exchange

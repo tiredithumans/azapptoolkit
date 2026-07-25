@@ -66,9 +66,14 @@ pub async fn list_oauth2_grants_audit(
     // Reuse the shared per-tenant SP index for name resolution (same cache the
     // App Registrations / Enterprise Apps lists use).
     let sps = sp_index_cached(&state, &client, &tenant_id).await?;
-    let by_id: HashMap<String, (String, String)> = sps
-        .into_iter()
-        .map(|sp| (sp.id, (sp.display_name, sp.app_id)))
+    let by_id: HashMap<&str, (&str, &str)> = sps
+        .iter()
+        .map(|sp| {
+            (
+                sp.id.as_str(),
+                (sp.display_name.as_str(), sp.app_id.as_str()),
+            )
+        })
         .collect();
 
     let grants = client.list_all_oauth2_grants().await?;
@@ -76,13 +81,13 @@ pub async fn list_oauth2_grants_audit(
     let mut rows: Vec<OAuth2GrantDto> = grants
         .into_iter()
         .map(|g| {
-            let (client_display_name, client_app_id) = match by_id.get(&g.client_id) {
-                Some((name, app_id)) => (name.clone(), Some(app_id.clone())),
+            let (client_display_name, client_app_id) = match by_id.get(g.client_id.as_str()) {
+                Some((name, app_id)) => ((*name).to_string(), Some((*app_id).to_string())),
                 None => (format!("(unknown SP {})", g.client_id), None),
             };
             let resource_display_name = by_id
-                .get(&g.resource_id)
-                .map(|(name, _)| name.clone())
+                .get(g.resource_id.as_str())
+                .map(|(name, _)| (*name).to_string())
                 .unwrap_or_else(|| format!("(unknown SP {})", g.resource_id));
             let scopes: Vec<String> = g.scope.split_whitespace().map(str::to_string).collect();
             let risky_scopes: Vec<String> = scopes

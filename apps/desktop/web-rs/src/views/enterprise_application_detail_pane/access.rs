@@ -126,11 +126,7 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
         <div class="ent-access">
             <h4>"Assigned users & groups"</h4>
             <Suspense fallback=move || {
-                view! {
-                    <div class="centered-pad">
-                        <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading access…" />
-                    </div>
-                }
+                view! { <SkeletonList rows=6 /> }
             }>
                 {move || {
                     let roles = signal.with_untracked(|d| d.service_principal.app_roles.clone());
@@ -508,11 +504,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
             "Groups this service principal is a direct member of. Group-gated APIs — e.g. Power BI's \"Service principals can use Fabric APIs\" tenant setting — grant API access via security-group membership."
         </p>
         <Suspense fallback=move || {
-            view! {
-                <div class="centered-pad">
-                    <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading groups…" />
-                </div>
-            }
+            view! { <SkeletonList rows=4 /> }
         }>
             {move || Suspend::new(async move {
                 match memberships.await {

@@ -32,6 +32,7 @@ use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
 use crate::hooks::use_list_export::use_list_export;
 use crate::state::use_session;
+use crate::util::contains_ignore_case;
 
 use row::render_row;
 
@@ -68,6 +69,9 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
 
     // Bumped by the Refresh button to force the identities list to re-evaluate.
     let list_reload = RwSignal::new(0_u32);
+    // Drives the refresh button's busy spinner. Without it, refreshing this list
+    // gave no feedback at all — the other two lists both show one.
+    let refreshing = RwSignal::new(false);
 
     // Rows currently shown (after every filter) — captured for the inventory
     // export so "what you see is what you export" (the backend serializes these
@@ -85,9 +89,12 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
         let _ = list_reload.get();
         async move {
             let Some(t) = tenant else {
+                refreshing.set(false);
                 return Err(no_tenant());
             };
-            managed_identity::list_managed_identities(&t.tenant_id).await
+            let result = managed_identity::list_managed_identities(&t.tenant_id).await;
+            refreshing.set(false);
+            result
         }
     });
 
@@ -95,6 +102,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
         let Some(t) = tenant.get() else {
             return;
         };
+        refreshing.set(true);
         leptos::task::spawn_local(async move {
             diagnostics::invalidate_list_cache(
                 t.tenant_id.clone(),
@@ -120,6 +128,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                             aria_label="Refresh managed identities".to_string()
                             title="Refresh".to_string()
                             on_click=Callback::new(on_refresh_list)
+                            busy=Signal::derive(move || refreshing.get())
                         />
                     </div>
                 </SectionHeader>
@@ -142,8 +151,9 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                         view! {
                                             <EmptyState
                                                 icon=IconName::Server
-                                                title="No managed identities".to_string()
-                                                body="No managed identities found in this tenant.".to_string()
+                                                title="No managed identities yet".to_string()
+                                                body="This tenant has no managed identities. Azure creates them when you enable a system- or user-assigned identity on a resource."
+                                                    .to_string()
                                             />
                                         }
                                             .into_any()
@@ -200,7 +210,7 @@ fn LoadedManagedIdentities(
         items: list,
         search,
         search_match: |mi: &ManagedIdentityDto, needle: &str| {
-            mi.display_name.to_lowercase().contains(needle)
+            contains_ignore_case(&mi.display_name, needle)
         },
         // No date range or other extra filter on this list — search only.
         extra_active: Signal::derive(|| false),
@@ -232,32 +242,13 @@ fn LoadedManagedIdentities(
     let disabled = list.count_of("disabled");
 
     view! {
-        {move || {
-            view! {
-                <div class="filter-chips">
-                    <FilterChip label="All" value="all" count=base_total.get() facet=mi_filter />
-                    <FilterChip
-                        label="System"
-                        value="system"
-                        count=system.get()
-                        facet=mi_filter
-                    />
-                    <FilterChip label="User" value="user" count=user.get() facet=mi_filter />
-                    <FilterChip
-                        label="Enabled"
-                        value="enabled"
-                        count=enabled.get()
-                        facet=mi_filter
-                    />
-                    <FilterChip
-                        label="Disabled"
-                        value="disabled"
-                        count=disabled.get()
-                        facet=mi_filter
-                    />
-                </div>
-            }
-        }}
+        <div class="filter-chips">
+            <FilterChip label="All" value="all" count=base_total facet=mi_filter />
+            <FilterChip label="System" value="system" count=system facet=mi_filter />
+            <FilterChip label="User" value="user" count=user facet=mi_filter />
+            <FilterChip label="Enabled" value="enabled" count=enabled facet=mi_filter />
+            <FilterChip label="Disabled" value="disabled" count=disabled facet=mi_filter />
+        </div>
         <Show
             when=move || filtered.with(|v| !v.is_empty())
             fallback=|| {

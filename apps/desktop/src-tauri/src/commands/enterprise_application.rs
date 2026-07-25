@@ -15,7 +15,7 @@ use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_core::models::{ApplicationTemplate, ServicePrincipal, SynchronizationJob};
 use azapptoolkit_graph::GraphError;
 
-use crate::commands::applications::{enterprise_key, invalidate_app_lists, sp_index_key};
+use crate::commands::applications::{APPS_MAX, enterprise_key, invalidate_app_lists};
 use crate::dto::UiError;
 use crate::dto::enterprise_application::{
     AppAssignmentDto, ApplicationTemplateDto, EnterpriseApplicationDetail,
@@ -82,35 +82,35 @@ pub async fn list_enterprise_applications(
     // overlap. The SP index is unfiltered (it is shared with the App
     // Registrations join), so filter managed identities out below — matching
     // the prior server-side `servicePrincipalType ne 'ManagedIdentity'`.
-    let index_key = sp_index_key(&tenant_id);
-    let (sps, app_reg_index_pairs) = match state
-        .cache
-        .get::<Vec<ServicePrincipal>>(CacheKind::Lists, &index_key)
-    {
-        Some(cached) => (cached, client.list_application_index(Some(5000)).await?),
-        None => {
-            let (sps, pairs) = futures::future::try_join(
-                client.list_service_principals_index(),
-                client.list_application_index(Some(5000)),
-            )
-            .await?;
-            state.cache.put(CacheKind::Lists, index_key, &sps);
-            (sps, pairs)
-        }
-    };
+    let (sps, app_reg_index_pairs) =
+        match crate::commands::applications::sp_index_hit(&state.cache, &tenant_id) {
+            Some(cached) => (cached, client.list_application_index(Some(APPS_MAX)).await?),
+            None => {
+                let (sps, pairs) = futures::future::try_join(
+                    client.list_service_principals_index(),
+                    client.list_application_index(Some(APPS_MAX)),
+                )
+                .await?;
+                (
+                    crate::commands::applications::sp_index_store(&state.cache, &tenant_id, sps),
+                    pairs,
+                )
+            }
+        };
 
     let by_app_id: HashMap<String, String> = app_reg_index_pairs.into_iter().collect();
 
     let rows: Vec<EnterpriseApplicationDto> = sps
-        .into_iter()
+        .iter()
         .filter(|sp| sp.service_principal_type.as_deref() != Some("ManagedIdentity"))
         .map(|sp| {
             let paired = by_app_id.get(&sp.app_id).cloned();
-            sp_to_enterprise_dto(sp, &tenant_id, paired)
+            sp_to_enterprise_dto(sp.clone(), &tenant_id, paired)
         })
         .collect();
 
-    state.cache.put(CacheKind::Lists, key, &rows);
+    // Pinned: a tenant-wide index, not a per-object entry (see `put_index`).
+    state.cache.put_index(CacheKind::Lists, key, &rows);
     Ok(rows)
 }
 
@@ -643,15 +643,30 @@ async fn load_gallery_corpus(
     {
         return Ok(hit);
     }
+    // Single-flight. The dialog fires `prefetch_application_gallery` on open
+    // while the first debounced keystroke calls in here too; without the gate
+    // both miss and both fetch the whole ~39 000-row catalog, so the prewarm
+    // *doubled* the very cost it exists to hide.
+    let gate = state.single_flight(&key);
+    let _held = gate.lock().await;
+    // Re-check: the fetch we were queued behind has already populated the cache.
+    if let Some(hit) = state
+        .cache
+        .get_typed::<Vec<GalleryRow>>(CacheKind::Lists, &key)
+    {
+        return Ok(hit);
+    }
     let templates = state
         .graph_for(tenant_id)
         .list_all_application_templates()
         .await?;
     tracing::debug!(templates = templates.len(), "gallery corpus fetched");
     let rows: Arc<Vec<GalleryRow>> = Arc::new(templates.into_iter().map(gallery_row).collect());
+    // Pinned: the catalog is tens of thousands of rows and one fetch backs every
+    // subsequent keystroke.
     state
         .cache
-        .put_typed(CacheKind::Lists, key, Arc::clone(&rows));
+        .put_typed_index(CacheKind::Lists, key, Arc::clone(&rows));
     Ok(rows)
 }
 

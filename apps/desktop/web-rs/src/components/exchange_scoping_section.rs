@@ -24,6 +24,7 @@ use crate::components::ui::DataTable;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::parse_lines;
+use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 /// How the "scope all mail permissions" grant addresses the principal.
 #[derive(Clone, PartialEq)]
@@ -110,6 +111,11 @@ pub fn ExchangeScopingSection(
 
     // Drives the legacy Application Access Policy migration (`do_migrate`).
     let mig_cmd = use_command();
+    // Tearing a scope back down. Without this the app could CREATE Exchange RBAC
+    // scoping but not remove it — the operator had to drop to PowerShell to undo
+    // something this tool did, which is the exact workflow it exists to replace.
+    let remove_cmd = use_command();
+    let confirm_remove = RwSignal::new(false);
     let mig_result: RwSignal<Option<AapMigrationReport>> = RwSignal::new(None);
     // Optional override for the management-scope name. Blank => backend default
     // (`app_scope_<appId>`). The concrete default is surfaced as helper text.
@@ -353,13 +359,56 @@ pub fn ExchangeScopingSection(
                             <hr />
                             <header class="row-between">
                                 <strong>"Current Exchange role assignments"</strong>
-                                <Button
-                                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                    on_click=Box::new(move |_| reload.update(|n| *n += 1))
-                                >
-                                    "Refresh"
-                                </Button>
+                                <span class="row-actions">
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                        on_click=Box::new(move |_| confirm_remove.set(true))
+                                        disabled=Signal::derive(move || remove_cmd.busy.get())
+                                    >
+                                        "Remove all…"
+                                    </Button>
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                        on_click=Box::new(move |_| reload.update(|n| *n += 1))
+                                    >
+                                        "Refresh"
+                                    </Button>
+                                </span>
                             </header>
+                            {move || {
+                                remove_cmd
+                                    .error
+                                    .get()
+                                    .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                            }}
+                            <ConfirmDialog
+                                open=Signal::derive(move || confirm_remove.get())
+                                title="Remove Exchange mailbox scoping?"
+                                body="This removes every Exchange role assignment for this principal, so its mail permissions revert to the org-wide access the Entra grant allows — this widens access, it does not revoke it. The management scope and the mail-enabled group are left in place so the scoping can be re-applied."
+                                confirm_label="Remove assignments"
+                                busy=Signal::derive(move || remove_cmd.busy.get())
+                                on_confirm=Callback::new(move |_| {
+                                    let aid = app_id.get_untracked();
+                                    remove_cmd
+                                        .run(
+                                            move |res: exchange::ExchangeAccessRemovalResult| {
+                                                confirm_remove.set(false);
+                                                let n = res.removed_assignments.len();
+                                                session
+                                                    .toast_success(
+                                                        format!("Removed {n} Exchange role assignment(s)"),
+                                                    );
+                                                reload.update(|v| *v += 1);
+                                                on_changed.run(());
+                                            },
+                                            move |tenant_id: String| async move {
+                                                exchange::remove_exchange_mailbox_access(&tenant_id, &aid)
+                                                    .await
+                                            },
+                                        );
+                                })
+                                on_close=Callback::new(move |_| confirm_remove.set(false))
+                            />
                             <Suspense fallback=move || {
                                 view! {
                                     <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" />

@@ -39,6 +39,20 @@ pub(super) const PTS_ALL_EXPIRING_SOON: u32 = 3;
 pub(super) const PTS_MIXED_EXPIRING: u32 = 2;
 pub(super) const PTS_LONG_LIVED: u32 = 3;
 pub(super) const PTS_STALE_APP: u32 = 2;
+/// Multi-tenant / personal-account sign-in audience on an app that actually
+/// holds something worth taking (application permissions or credentials).
+///
+/// Scored rather than advisory because the audience is a genuine *blast-radius
+/// multiplier*, not a preference: it decides whether the app's permissions are
+/// reachable by principals outside this directory at all. It is weighted below a
+/// single medium-risk permission — the audience alone is not a finding, it
+/// sharpens the ones already present, which is why it only fires alongside them.
+pub(super) const PTS_MULTITENANT_EXPOSURE: u32 = 3;
+/// Additional weight when a multi-tenant app also has **no verified publisher**.
+/// Publisher verification is what lets a consenting tenant's admin tell who the
+/// app's author actually is; without it, a multi-tenant app asking for consent
+/// is unattributable.
+pub(super) const PTS_UNVERIFIED_PUBLISHER: u32 = 2;
 /// Reduced weight for a high/medium-risk *mail* permission that is confirmed
 /// scoped to specific mailboxes via Exchange RBAC for Applications (see
 /// [`AppPermissions::mail_scopes`]). A `Mail.Send` confined to one shared

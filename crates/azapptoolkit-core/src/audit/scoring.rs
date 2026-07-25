@@ -12,8 +12,8 @@ use super::credentials::{is_long_lived, overall_credential_status};
 use super::permissions::{
     PTS_ADMIN_CONSENT_DELEGATED, PTS_ALL_CREDS_EXPIRED, PTS_ALL_EXPIRING_SOON,
     PTS_HIGH_RISK_APP_PERM, PTS_LONG_LIVED, PTS_MEDIUM_RISK_APP_PERM, PTS_MIXED_EXPIRED,
-    PTS_MIXED_EXPIRING, PTS_SCOPED_HIGH_RISK_MAIL, PTS_SCOPED_MEDIUM_RISK_MAIL, PTS_SP_DISABLED,
-    PTS_STALE_APP,
+    PTS_MIXED_EXPIRING, PTS_MULTITENANT_EXPOSURE, PTS_SCOPED_HIGH_RISK_MAIL,
+    PTS_SCOPED_MEDIUM_RISK_MAIL, PTS_SP_DISABLED, PTS_STALE_APP, PTS_UNVERIFIED_PUBLISHER,
 };
 
 /// Builds an [`AuditItem`] for `app`. All inputs must be pre-resolved: the
@@ -359,6 +359,75 @@ fn rule_app_hygiene(
     c
 }
 
+/// Rules 19 & 20: exposure beyond this directory.
+///
+/// `signInAudience` decides whether an app's permissions and credentials are
+/// reachable by principals in *other* directories at all, so it is a blast-radius
+/// multiplier on every other finding rather than a finding on its own. It is
+/// therefore scored **only when the app has something worth reaching** — an
+/// application permission or a credential. A multi-tenant app holding neither is
+/// not interesting, and flagging it would bury the ones that matter.
+///
+/// Publisher verification rides the same rule because it is only meaningful in
+/// the same situation: it is how a *consenting* tenant's admin attributes the
+/// app to a real, MPN-verified author. On a single-tenant internal app there is
+/// nobody to attribute it to, so the absence is not a finding.
+///
+/// This is the reasoning Rule 15's own guidance already leans on ("especially
+/// for multitenant apps, where a foreign tenant's admin could otherwise add
+/// credentials"), previously with nothing scoring the audience it named.
+fn rule_external_exposure(
+    app: &Application,
+    has_app_permissions: bool,
+    has_credentials: bool,
+) -> RuleContribution {
+    let mut c = RuleContribution::default();
+    let audience = app.sign_in_audience.as_deref().unwrap_or_default();
+    let (multitenant, personal) = match audience {
+        "AzureADMultipleOrgs" => (true, false),
+        "AzureADandPersonalMicrosoftAccount" | "PersonalMicrosoftAccount" => (true, true),
+        // "AzureADMyOrg" and anything unrecognised: treat as single-tenant. An
+        // unknown value must never *inflate* a score.
+        _ => (false, false),
+    };
+    if !multitenant || !(has_app_permissions || has_credentials) {
+        return c;
+    }
+
+    c.score += PTS_MULTITENANT_EXPOSURE;
+    let reach = if personal {
+        "any Entra tenant and personal Microsoft accounts"
+    } else {
+        "any Entra tenant"
+    };
+    c.issues.push(format!(
+        "{} — this app can be consented to from {reach}, so its permissions and credentials are not confined to this directory",
+        issue::MULTITENANT_AUDIENCE
+    ));
+    c.recommendations.push(
+        "Confirm this app is intended to be multi-tenant. If it is only used by this organization, set its sign-in audience to 'Accounts in this organizational directory only' (AzureADMyOrg)"
+            .to_string(),
+    );
+
+    if app.verified_publisher.as_ref().is_none_or(|p| {
+        p.verified_publisher_id
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty()
+    }) {
+        c.score += PTS_UNVERIFIED_PUBLISHER;
+        c.issues.push(format!(
+            "{} — admins in other tenants cannot attribute this app to a verified author when consenting",
+            issue::UNVERIFIED_PUBLISHER
+        ));
+        c.recommendations.push(
+            "Complete publisher verification so consenting admins see a verified publisher name (and so the app is eligible for the default user-consent policies that require one)"
+                .to_string(),
+        );
+    }
+    c
+}
+
 /// Rule 18 (advisory, no score): redundant application permissions — a narrower
 /// permission a broader held permission already fully covers. Returns the
 /// redundancy list for the RemoveRedundantPermissions remediation.
@@ -596,6 +665,11 @@ pub fn score_application(
 
     let (redundant_contrib, redundant) = rule_redundant_permissions(perms); // Rule 18
     acc.merge(redundant_contrib);
+    acc.merge(rule_external_exposure(
+        app,
+        has_app_permissions,
+        has_credentials,
+    )); // Rules 19 & 20
     acc.merge(rule_downgrade_pointers(perms)); // least-privilege downgrade pointers
 
     let permission_count = (perms.app_role_values.len() + perms.scope_values.len()) as u32;
@@ -741,6 +815,7 @@ mod tests {
     use super::*;
     use crate::models::{
         Application, KeyCredential, PasswordCredential, ServicePrincipalLockConfiguration,
+        VerifiedPublisher,
     };
     use chrono::{Duration, TimeZone};
 
@@ -1020,6 +1095,179 @@ mod tests {
                 .any(|i| i.starts_with("High-risk delegated permissions:") && i.contains(scope));
             assert_eq!(surfaced, expect_issue, "issue mismatch for {scope}");
         }
+    }
+
+    /// Rules 19 & 20 — external exposure. Table-driven over the axes that decide
+    /// whether the rule fires at all: the audience, and whether the app holds
+    /// anything worth reaching from outside.
+    #[test]
+    fn external_exposure_scores_only_reachable_multitenant_apps() {
+        struct Case {
+            name: &'static str,
+            audience: Option<&'static str>,
+            app_perms: bool,
+            credentials: bool,
+            expect_audience_issue: bool,
+        }
+        // A multi-tenant app with NOTHING to reach is not a finding: the audience
+        // is a blast-radius multiplier, and flagging bare app shells would bury
+        // the apps that actually hold permissions.
+        let cases = [
+            Case {
+                name: "single-tenant with app permissions",
+                audience: Some("AzureADMyOrg"),
+                app_perms: true,
+                credentials: false,
+                expect_audience_issue: false,
+            },
+            Case {
+                name: "multi-tenant holding nothing",
+                audience: Some("AzureADMultipleOrgs"),
+                app_perms: false,
+                credentials: false,
+                expect_audience_issue: false,
+            },
+            Case {
+                name: "multi-tenant with app permissions",
+                audience: Some("AzureADMultipleOrgs"),
+                app_perms: true,
+                credentials: false,
+                expect_audience_issue: true,
+            },
+            Case {
+                name: "multi-tenant with only a credential",
+                audience: Some("AzureADMultipleOrgs"),
+                app_perms: false,
+                credentials: true,
+                expect_audience_issue: true,
+            },
+            Case {
+                name: "multi-tenant + personal accounts",
+                audience: Some("AzureADandPersonalMicrosoftAccount"),
+                app_perms: true,
+                credentials: false,
+                expect_audience_issue: true,
+            },
+            // An unrecognised audience must never INFLATE a score.
+            Case {
+                name: "unknown audience",
+                audience: Some("SomethingNew"),
+                app_perms: true,
+                credentials: false,
+                expect_audience_issue: false,
+            },
+            Case {
+                name: "absent audience",
+                audience: None,
+                app_perms: true,
+                credentials: false,
+                expect_audience_issue: false,
+            },
+        ];
+
+        for case in cases {
+            let mut app = base_app();
+            app.sign_in_audience = case.audience.map(str::to_string);
+            if case.credentials {
+                app.password_credentials = vec![PasswordCredential {
+                    key_id: "k1".into(),
+                    display_name: Some("secret".into()),
+                    start_date_time: Some(now() - Duration::days(1)),
+                    end_date_time: Some(now() + Duration::days(90)),
+                    ..Default::default()
+                }];
+            }
+            let perms = AppPermissions {
+                app_role_values: if case.app_perms {
+                    vec!["User.Read.All".into()]
+                } else {
+                    Vec::new()
+                },
+                ..Default::default()
+            };
+            let issues = score_application(&app, Some(true), &perms, now()).issues;
+            let fired = issues
+                .iter()
+                .any(|i| i.starts_with(issue::MULTITENANT_AUDIENCE));
+            assert_eq!(
+                fired, case.expect_audience_issue,
+                "{}: expected audience issue = {}, got {issues:?}",
+                case.name, case.expect_audience_issue
+            );
+        }
+    }
+
+    /// Publisher verification only matters where a foreign admin has to attribute
+    /// the app — so it rides the multi-tenant rule rather than firing on every
+    /// internal app.
+    #[test]
+    fn unverified_publisher_is_scored_only_alongside_multitenant_reach() {
+        let perms = AppPermissions {
+            app_role_values: vec!["User.Read.All".into()],
+            ..Default::default()
+        };
+        let unverified = |audience: &str, publisher: Option<VerifiedPublisher>| {
+            let mut app = base_app();
+            app.sign_in_audience = Some(audience.to_string());
+            app.verified_publisher = publisher;
+            score_application(&app, Some(true), &perms, now())
+        };
+
+        // Single-tenant: never flagged, however unverified.
+        let internal = unverified("AzureADMyOrg", None);
+        assert!(
+            !internal
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::UNVERIFIED_PUBLISHER))
+        );
+
+        // Multi-tenant + unverified: flagged, and scored above the audience alone.
+        let exposed = unverified("AzureADMultipleOrgs", None);
+        assert!(
+            exposed
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::UNVERIFIED_PUBLISHER))
+        );
+
+        // Multi-tenant + verified: audience still flagged, publisher is not, and
+        // the score is lower by exactly the publisher weight.
+        let verified = unverified(
+            "AzureADMultipleOrgs",
+            Some(VerifiedPublisher {
+                display_name: Some("Contoso Ltd".into()),
+                verified_publisher_id: Some("1234567".into()),
+                added_date_time: None,
+            }),
+        );
+        assert!(
+            !verified
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::UNVERIFIED_PUBLISHER))
+        );
+        assert_eq!(
+            exposed.risk_score - verified.risk_score,
+            PTS_UNVERIFIED_PUBLISHER,
+        );
+
+        // A publisher object with an EMPTY id is not verification.
+        let empty_id = unverified(
+            "AzureADMultipleOrgs",
+            Some(VerifiedPublisher {
+                display_name: Some("".into()),
+                verified_publisher_id: Some(String::new()),
+                added_date_time: None,
+            }),
+        );
+        assert!(
+            empty_id
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::UNVERIFIED_PUBLISHER)),
+            "an empty verifiedPublisherId must not read as verified"
+        );
     }
 
     #[test]

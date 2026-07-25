@@ -27,6 +27,32 @@ impl GraphClient {
         .await
     }
 
+    /// Batched [`Self::list_site_permissions`]: resolves many sites' application
+    /// permissions in `$batch` POSTs of 20 instead of one GET per site, and
+    /// returns one `Result` per input site **in order**.
+    ///
+    /// This is what makes the tenant-wide sweep affordable: at the sweep's
+    /// 5000-site cap it turns 5000 requests into 250, on the endpoint family the
+    /// transport documents as the throttle-happiest.
+    ///
+    /// A sub-response that still carries an `@odata.nextLink` is followed
+    /// outside the batch by [`Self::finish_paged_batch`], so a site whose grant
+    /// list spans pages is never silently truncated — the same contract the
+    /// single-site path guarantees.
+    pub async fn batch_list_site_permissions(
+        &self,
+        site_ids: &[String],
+    ) -> Result<Vec<Result<Vec<SitePermission>>>> {
+        let token = self.sharepoint_token()?;
+        let urls: Vec<String> = site_ids
+            .iter()
+            .map(|id| format!("/sites/{id}/permissions"))
+            .collect();
+        let pages: Vec<Result<Paged<SitePermission>>> =
+            self.batch_get_json_scoped(token, &urls).await?;
+        self.finish_paged_batch(pages).await
+    }
+
     /// Enumerates the tenant's SharePoint sites via `GET /sites?search=*`,
     /// following `nextLink` until exhausted or `max` is reached. Rides the
     /// SharePoint scope like the permission endpoints (`Sites.FullControl.All`

@@ -80,12 +80,9 @@ pub async fn bulk_remove_expired_credentials(
     // `list_credential_expirations`.
     let mut apps = client
         .list_applications_all(
-            AppListQuery::default().with_top(100).with_select(vec![
-                "id",
-                "appId",
-                "displayName",
-                "passwordCredentials",
-            ]),
+            AppListQuery::default()
+                .with_top(azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE)
+                .with_select(vec!["id", "appId", "displayName", "passwordCredentials"]),
             Some(10_000),
         )
         .await?;

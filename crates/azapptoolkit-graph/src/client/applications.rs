@@ -202,38 +202,57 @@ const APP_BACKUP_SELECT: &str = "id,appId,displayName,description,signInAudience
      createdDateTime,passwordCredentials,keyCredentials,requiredResourceAccess,\
      isFallbackPublicClient,web,spa,publicClient,identifierUris,api";
 
+/// Page size for `/applications` enumerations.
+///
+/// Graph documents the default and **maximum** page sizes for `/applications`
+/// as 100 and **999**. Paging is strictly serial (each request needs the prior
+/// response's `@odata.nextLink`), so the page size is a direct divisor of
+/// wall-clock time on a full-tenant scan: at the 10 000-app enumeration ceiling
+/// this is 11 round trips instead of 100.
+///
+/// Larger pages also *reduce* throttling on the credential-bearing projections —
+/// Graph applies a 150-request-per-minute-per-tenant limit specifically to
+/// requests that `$select` `keyCredentials`, which the app list, the audit, and
+/// the credential dashboard all do.
+pub const DEFAULT_APP_PAGE_SIZE: u32 = 999;
+
 impl GraphClient {
     pub async fn list_applications(&self, q: AppListQuery) -> Result<Paged<Application>> {
         let select = q
             .select
             .unwrap_or_else(|| default_application_select().to_vec())
             .join(",");
-        let top = q.top.unwrap_or(50).to_string();
+        let top = q.top.unwrap_or(DEFAULT_APP_PAGE_SIZE).to_string();
 
-        let mut params: Vec<(&str, String)> = vec![
-            ("$select", select),
-            ("$top", top),
-            ("$count", "true".into()),
-        ];
+        let mut params: Vec<(&str, String)> = vec![("$select", select), ("$top", top)];
+        // `$search` on `/applications` is an ADVANCED query: it requires both
+        // `$count=true` and `ConsistencyLevel: eventual`. Nothing else here does
+        // — so advanced-query mode is scoped to the search path alone.
+        //
+        // The plain enumerations deliberately send neither:
+        //   * `$count` — the `@odata.count` it returns has no reader on this
+        //     path (the lists report their own materialized row counts), and it
+        //     forces every page into advanced-query handling for a value that is
+        //     then discarded.
+        //   * `$orderby` — sorting is done in the frontend over the cached rows
+        //     (see `web-rs/src/views/`), so a server-side sort is wasted work
+        //     that additionally conflicts with `$expand`. `list_application_index`
+        //     already omits both for the same reason.
+        //
+        // This also removes an officially UNSUPPORTED combination on the audit's
+        // expanding call: per Graph's documented query-parameter limitations,
+        // `$expand` is not supported together with advanced queries, and such
+        // combinations "might fail silently" rather than erroring.
+        let eventual = q.search.is_some();
         if let Some(s) = &q.search {
             // Neutralize double quotes so a term like `Test"App` can't break the
             // `$search` phrase (matches search_applications_by_name).
             params.push(("$search", search_phrase("displayName", s)));
-        } else if q.expand.is_none() {
-            // Graph rejects `$orderby` together with `$expand` on `/applications`
-            // ("Request_UnsupportedQuery: Sorting not supported for 'Application'"),
-            // so skip ordering when expanding. Callers that expand (e.g. the
-            // security audit, which expands `owners`) sort client-side anyway.
-            params.push(("$orderby", "displayName".into()));
+            params.push(("$count", "true".into()));
         }
         if let Some(expand) = q.expand {
             params.push(("$expand", expand.to_string()));
         }
-        // `$orderby` and `$count` on `/applications` are advanced query
-        // parameters and require `ConsistencyLevel: eventual`. Without it,
-        // Graph returns `Request_UnsupportedQuery: Sorting not supported
-        // for 'Application'`.
-        let eventual = true;
         let params_ref: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
         self.get_json("/applications", &params_ref, eventual).await
     }

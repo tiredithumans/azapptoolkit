@@ -10,6 +10,13 @@ pub(crate) use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::super::GraphClient;
 
+/// Asserts a request header is **absent**. wiremock 0.6 ships `header_exists`
+/// but no negation, and "this request must not opt into advanced-query
+/// handling" is a property several transport tests need to pin.
+pub(crate) fn header_is_missing(name: &'static str) -> impl wiremock::Match {
+    move |req: &wiremock::Request| !req.headers.contains_key(name)
+}
+
 pub(crate) fn sample_org_json() -> serde_json::Value {
     serde_json::json!({
         "value": [{

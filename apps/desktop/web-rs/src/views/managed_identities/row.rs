@@ -49,6 +49,10 @@ pub(super) fn render_row(idx: usize, mi: ManagedIdentityDto) -> impl IntoView {
     };
     let title_name = display_name.clone();
     let name_for_open = display_name.clone();
+    // Screen readers announce the row by name — without this the button's
+    // accessible name is whatever the chip + truncated spans happen to
+    // concatenate to (the sibling lists both label their rows).
+    let row_label = format!("Open managed identity {display_name}");
     let app_id = mi.app_id;
     view! {
         <div
@@ -59,6 +63,7 @@ pub(super) fn render_row(idx: usize, mi: ManagedIdentityDto) -> impl IntoView {
             <button
                 class="app-list__row-btn"
                 type="button"
+                aria-label=row_label
                 on:click=move |_| {
                     session.open_item(
                         OpenItemKind::ManagedIdentity,

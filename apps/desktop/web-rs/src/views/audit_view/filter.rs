@@ -7,6 +7,8 @@
 
 use azapptoolkit_core::audit::{AuditItem, AuditPrincipalKind, RiskLevel, issue};
 
+use crate::util::contains_ignore_case;
+
 /// The audit table's filter, as a pure function over the item set: returns the
 /// indices (in original order) of items matching the severity dimension AND the
 /// finding dimension AND the already-lowercased name/appId query. Extracted so
@@ -28,8 +30,8 @@ pub(super) fn filter_indices(
         .filter(|(_, i)| matches_finding(i, finding))
         .filter(|(_, i)| {
             query_lower.is_empty()
-                || i.application_name.to_lowercase().contains(query_lower)
-                || i.app_id.to_lowercase().contains(query_lower)
+                || contains_ignore_case(&i.application_name, query_lower)
+                || contains_ignore_case(&i.app_id, query_lower)
         })
         .map(|(idx, _)| idx)
         .collect()
@@ -65,6 +67,13 @@ pub(super) fn matches_finding(i: &AuditItem, finding: &str) -> bool {
             .issues
             .iter()
             .any(|x| x.starts_with(issue::HIGH_RISK_DELEGATED_PERMS)),
+        // Reach beyond this directory. Both markers live in one group: the
+        // publisher finding only ever fires alongside the audience one, so
+        // splitting them would produce a group that is always a subset of
+        // another.
+        "external_exposure" => i.issues.iter().any(|x| {
+            x.starts_with(issue::MULTITENANT_AUDIENCE) || x.starts_with(issue::UNVERIFIED_PUBLISHER)
+        }),
         // Effective mailbox scoping findings. Scoping is resolved on every run, but
         // degrades to org-wide when the signed-in user lacks Exchange-admin rights.
         "orgwide_mailbox" => i
@@ -155,6 +164,26 @@ mod tests {
             risk_level: level,
             ..blank()
         }
+    }
+
+    /// The external-exposure group must match on EITHER of its two markers —
+    /// the publisher finding rides the same group as the audience one, so a
+    /// group that only matched the audience marker would drop nothing today but
+    /// would silently diverge the moment the rules stop firing together.
+    #[test]
+    fn external_exposure_matches_either_marker() {
+        let audience = with_issue(format!(
+            "{} — reaches any Entra tenant",
+            issue::MULTITENANT_AUDIENCE
+        ));
+        let publisher = with_issue(format!(
+            "{} — cannot be attributed",
+            issue::UNVERIFIED_PUBLISHER
+        ));
+        let unrelated = with_issue(format!("{} Mail.Read", issue::HIGH_RISK_APP_PERMS));
+        assert!(matches_finding(&audience, "external_exposure"));
+        assert!(matches_finding(&publisher, "external_exposure"));
+        assert!(!matches_finding(&unrelated, "external_exposure"));
     }
 
     // ---- filter_indices characterization (T-M7) ----------------------------

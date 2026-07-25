@@ -208,23 +208,6 @@ pub async fn list_resource_permission_counts(
 
 // ---------------- Declared permissions persist ----------------
 
-#[tauri::command]
-pub async fn update_required_resource_access(
-    state: State<'_, AppState>,
-    tenant_id: String,
-    object_id: String,
-    required_resource_access: Vec<RequiredResourceAccess>,
-) -> Result<(), UiError> {
-    let client = state.graph_for(&tenant_id);
-    let patch = azapptoolkit_graph::client::AppPatch {
-        required_resource_access: Some(required_resource_access),
-        ..Default::default()
-    };
-    client.update_application(&object_id, &patch).await?;
-    super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
-    Ok(())
-}
-
 /// Removes one declared permission from an application's `requiredResourceAccess`.
 /// Re-resolves the live manifest before acting (the UI snapshot is advisory):
 /// drops the `ResourceAccess` whose `id` matches `permission_id` (and `type`

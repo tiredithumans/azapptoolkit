@@ -13,6 +13,7 @@ use crate::bindings::consent::{self, OAuth2GrantDto};
 use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::ui::Callout;
 use crate::state::use_session;
+use crate::util::contains_ignore_case;
 
 #[component]
 pub fn ConsentGrantsView() -> impl IntoView {
@@ -21,8 +22,8 @@ pub fn ConsentGrantsView() -> impl IntoView {
     // Bound to `let` rather than inline: the `view!` macro can't parse an
     // `async move {}` block as an attribute value.
     let fetch = move |tid: String| async move { consent::list_oauth2_grants_audit(&tid).await };
-    let export = move |data: Vec<OAuth2GrantDto>| async move {
-        consent::save_oauth2_grants_to_file(&data, "csv").await
+    let export = move |data: Vec<OAuth2GrantDto>, format: &'static str| async move {
+        consent::save_oauth2_grants_to_file(&data, format).await
     };
 
     view! {
@@ -30,6 +31,7 @@ pub fn ConsentGrantsView() -> impl IntoView {
             title="Consent grants"
             crumb="Delegated (OAuth2) permission grants"
             search_placeholder="Filter by client name…"
+            refresh_label="Refresh consent grants"
             view_key="consent"
             noun="grant(s)"
             empty_message="No grants match this filter."
@@ -57,7 +59,7 @@ pub fn ConsentGrantsView() -> impl IntoView {
             }
             matches=move |r: &OAuth2GrantDto, facet: &str, q: &str| {
                 matches_facet(r, facet)
-                    && (q.is_empty() || r.client_display_name.to_lowercase().contains(q))
+                    && (q.is_empty() || contains_ignore_case(&r.client_display_name, q))
             }
             row=move |r: OAuth2GrantDto| grant_row(session, r).into_any()
         />

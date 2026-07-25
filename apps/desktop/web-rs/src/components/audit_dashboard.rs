@@ -12,10 +12,14 @@ use std::future::Future;
 
 use azapptoolkit_dto::UiError;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Input, Tab, TabList};
+use thaw::{Body1, Button, ButtonAppearance, Tab, TabList};
 
+use crate::components::export_menu::ExportMenu;
+use crate::components::icon::IconName;
 use crate::components::saved_views::SavedViews;
-use crate::components::ui::{SectionHeader, SkeletonList};
+use crate::components::ui::{
+    DetailLoadError, EmptyState, IconButton, SearchInput, SectionHeader, SkeletonList,
+};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
@@ -28,6 +32,10 @@ pub fn AuditDashboard<T, Fetch, FetchFut, Export, ExportFut, Banner, Matches, Ro
     #[prop(into)] title: String,
     #[prop(into)] crumb: String,
     #[prop(into)] search_placeholder: String,
+    /// Accessible name for the refresh control, e.g. `"Refresh credential
+    /// expiry"` — an icon button needs a view-specific label, not "Refresh".
+    #[prop(into)]
+    refresh_label: String,
     /// Namespaces saved views in `localStorage` (e.g. `"credentials"`).
     view_key: &'static str,
     /// Plural-aware noun for the count line, e.g. `"credential(s)"`.
@@ -47,7 +55,8 @@ pub fn AuditDashboard<T, Fetch, FetchFut, Export, ExportFut, Banner, Matches, Ro
     headers: Vec<&'static str>,
     /// Fetches the rows for a tenant id.
     fetch: Fetch,
-    /// Writes the rows to a user-chosen file (CSV); `Ok(None)` = cancelled.
+    /// Writes the rows to a user-chosen file in the given format (`"csv"` /
+    /// `"json"`); `Ok(None)` = cancelled.
     export: Export,
     /// Optional alert banner derived from all rows (e.g. "N high-risk …").
     banner: Banner,
@@ -60,7 +69,7 @@ where
     T: Clone + 'static,
     Fetch: Fn(String) -> FetchFut + 'static,
     FetchFut: Future<Output = Result<Vec<T>, UiError>> + 'static,
-    Export: Fn(Vec<T>) -> ExportFut + 'static,
+    Export: Fn(Vec<T>, &'static str) -> ExportFut + 'static,
     ExportFut: Future<Output = Result<Option<String>, UiError>> + 'static,
     Banner: Fn(&[T]) -> Option<AnyView> + 'static,
     Matches: Fn(&T, &str, &str) -> bool + 'static,
@@ -71,7 +80,9 @@ where
 
     let rows = RwSignal::new_local(Vec::<T>::new());
     let loading = RwSignal::new(false);
-    let error: RwSignal<Option<String>> = RwSignal::new(None);
+    // Keep the whole `UiError` (not a pre-formatted string) so the failure can
+    // render through the shared `DetailLoadError`, which shows the code too.
+    let error: RwSignal<Option<UiError>> = RwSignal::new(None);
     let reload = RwSignal::new(0_u32);
     // Use the caller-supplied (session-lifted) facet if given, else a local one.
     let facet = facet.unwrap_or_else(|| RwSignal::new(String::from("all")));
@@ -113,14 +124,14 @@ where
             if still_active {
                 match result {
                     Ok(r) => rows.set(r),
-                    Err(e) => error.set(Some(format!("Failed to load: {}", e.message))),
+                    Err(e) => error.set(Some(e)),
                 }
                 loading.set(false);
             }
         });
     });
 
-    let on_export = move |_| {
+    let on_export = move |format: &'static str| {
         if exporting.get() {
             return;
         }
@@ -130,7 +141,7 @@ where
         }
         exporting.set(true);
         leptos::task::spawn_local(async move {
-            match export.with_value(|f| f(data)).await {
+            match export.with_value(|f| f(data, format)).await {
                 // Surface through the shared bottom-right toasts (like the
                 // list-view exports), not a persistent inline banner.
                 Ok(Some(path)) => {
@@ -159,6 +170,26 @@ where
         }
     });
 
+    // Filter to INDICES in a MEMO, not inline in the render closure. Growing the
+    // render window (or any unrelated reactive tick) must not re-run the
+    // predicate over every row: at tenant scale these lenses hold thousands, and
+    // "Show more" previously re-filtered the whole set before rebuilding the
+    // table. Indices (not rows) keep this O(matched) `usize`s rather than a deep
+    // clone of every match.
+    let matched: Memo<Vec<usize>> = Memo::new(move |_| {
+        let q = search_debounced.get().to_lowercase();
+        let f = facet.get();
+        rows.with(|all| {
+            matches.with_value(|m| {
+                all.iter()
+                    .enumerate()
+                    .filter(|(_, r)| m(r, &f, &q))
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+        })
+    });
+
     let tbody_ref: NodeRef<leptos::html::Tbody> = NodeRef::new();
     let on_grid_key = use_grid_keynav(tbody_ref, move || {
         // Reapply the roving tabindex whenever the rendered row set changes
@@ -172,39 +203,32 @@ where
     view! {
         <main class="audit-view">
             <SectionHeader title=title crumb=crumb>
-                <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                    on_click=Box::new(move |_| reload.update(|n| *n += 1))
-                    disabled=Signal::derive(move || loading.get())
-                >
-                    "Refresh"
-                </Button>
-                <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                    on_click=Box::new(on_export)
-                    disabled=Signal::derive(move || exporting.get() || rows.with(Vec::is_empty))
-                >
-                    "Export CSV…"
-                </Button>
+                <ExportMenu
+                    disabled=Signal::derive(move || {
+                        exporting.get() || rows.with(Vec::is_empty)
+                    })
+                    on_select=Callback::new(on_export)
+                    options=vec![("csv", "Export as CSV…"), ("json", "Export as JSON…")]
+                />
+                <IconButton
+                    icon=IconName::Refresh
+                    aria_label=refresh_label.clone()
+                    title="Refresh".to_string()
+                    on_click=Callback::new(move |_| reload.update(|n| *n += 1))
+                    busy=Signal::derive(move || loading.get())
+                />
             </SectionHeader>
 
             {move || {
                 error
                     .get()
                     .map(|e| {
-                        // A tenant-wide load can fail transiently (429 / network);
-                        // offer an in-context Retry instead of a dead-end message
-                        // (the entity lists do the same).
                         view! {
-                            <div class="app-list__error">
-                                <Body1 class="form-error">{e}</Body1>
-                                <Button
-                                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                    on_click=Box::new(move |_| reload.update(|n| *n += 1))
-                                >
-                                    "Retry"
-                                </Button>
-                            </div>
+                            <DetailLoadError
+                                error=e
+                                on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                class="app-list__error"
+                            />
                         }
                     })
             }}
@@ -216,59 +240,28 @@ where
                     .map(|(value, label)| view! { <Tab value=value>{label}</Tab> })
                     .collect_view()}
             </TabList>
-            <Input value=search placeholder=search_placeholder />
+            <SearchInput value=search placeholder=search_placeholder />
             <SavedViews view_key=view_key facet=facet search=search />
 
             {move || {
                 if loading.get() && rows.with(Vec::is_empty) {
                     return view! { <SkeletonList rows=6 /> }.into_any();
                 }
-                let q = search_debounced.get().to_lowercase();
-                let f = facet.get();
-                // Filter to INDICES (no row clone): only the windowed rows below
-                // are cloned, so a keystroke is O(matched) usizes, not a deep
-                // clone of every matching row.
-                let matched: Vec<usize> = rows.with(|all| {
-                    matches.with_value(|m| {
-                        all.iter()
-                            .enumerate()
-                            .filter(|(_, r)| m(r, &f, &q))
-                            .map(|(i, _)| i)
-                            .collect()
-                    })
-                });
-                if matched.is_empty() {
-                    return view! { <Body1>{empty_message.get_value()}</Body1> }.into_any();
+                if matched.with(Vec::is_empty) {
+                    return view! {
+                        <EmptyState
+                            icon=IconName::Search
+                            title="No matches".to_string()
+                            body=empty_message.get_value()
+                        />
+                    }
+                        .into_any();
                 }
                 let total = rows.with(Vec::len);
-                let shown = matched.len();
-                let limit = render_limit.get();
+                let shown = matched.with(Vec::len);
                 let header_cells = headers
                     .with_value(|h| h.iter().map(|c| view! { <th>{*c}</th> }).collect_view());
-                // Draw only the first `limit` matched rows.
-                let body_rows = rows.with(|all| {
-                    matched
-                        .iter()
-                        .take(limit)
-                        .filter_map(|&i| all.get(i).cloned())
-                        .map(|r| row.with_value(|f| f(r)))
-                        .collect_view()
-                });
                 let count_line = format!("{shown} of {total} {} match", noun.get_value());
-                let more = (shown > limit).then(|| {
-                    let next = RENDER_PAGE.min(shown - limit);
-                    view! {
-                        <div class="audit-show-more">
-                            <Body1>{format!("Showing {limit} of {shown} matching rows")}</Body1>
-                            <Button
-                                appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                on_click=Box::new(move |_| render_limit.update(|n| *n += RENDER_PAGE))
-                            >
-                                {format!("Show {next} more")}
-                            </Button>
-                        </div>
-                    }
-                });
                 view! {
                     <div>
                         <Body1>{count_line}</Body1>
@@ -277,10 +270,55 @@ where
                                 <tr>{header_cells}</tr>
                             </thead>
                             <tbody node_ref=tbody_ref on:keydown=on_grid_key.clone()>
-                                {body_rows}
+                                // Keyed by row index so growing the window (or a
+                                // filter change that keeps rows) patches the
+                                // affected `<tr>`s instead of tearing down and
+                                // rebuilding the entire table.
+                                <For
+                                    each=move || {
+                                        matched
+                                            .get()
+                                            .into_iter()
+                                            .take(render_limit.get())
+                                            .collect::<Vec<_>>()
+                                    }
+                                    key=|i| *i
+                                    let:i
+                                >
+                                    {rows
+                                        .with(|all| {
+                                            all.get(i)
+                                                .cloned()
+                                                .map(|r| row.with_value(|f| f(r)))
+                                        })}
+                                </For>
                             </tbody>
                         </table>
-                        {more}
+                        {move || {
+                            let shown = matched.with(Vec::len);
+                            let limit = render_limit.get();
+                            (shown > limit)
+                                .then(|| {
+                                    let next = RENDER_PAGE.min(shown - limit);
+                                    view! {
+                                        <div class="audit-show-more">
+                                            <Body1>
+                                                {format!("Showing {limit} of {shown} matching rows")}
+                                            </Body1>
+                                            <Button
+                                                appearance=Signal::derive(|| {
+                                                    ButtonAppearance::Secondary
+                                                })
+                                                on_click=Box::new(move |_| {
+                                                    render_limit.update(|n| *n += RENDER_PAGE)
+                                                })
+                                            >
+                                                {format!("Show {next} more")}
+                                            </Button>
+                                        </div>
+                                    }
+                                })
+                        }}
                     </div>
                 }
                     .into_any()

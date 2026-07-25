@@ -1,14 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use tauri::State;
-
 use azapptoolkit_core::models::ServicePrincipal;
 use azapptoolkit_permissions::PermissionsCatalog;
 
-use crate::dto::UiError;
-use crate::dto::applications::PermissionDescriptor;
 use crate::dto::permissions::{PermissionKind, ResolvedPermission};
-use crate::state::AppState;
 
 /// Resolves one declared permission to a [`ResolvedPermission`] through the
 /// fixed fallback ladder — bundled catalog → live resource SP (`appRoles` then
@@ -200,68 +195,4 @@ pub(super) async fn resolve_required_resource_access(
     }
 
     out
-}
-
-#[tauri::command]
-pub async fn resolve_permission(
-    state: State<'_, AppState>,
-    tenant_id: String,
-    resource_app_id: String,
-    permission_id: String,
-) -> Result<PermissionDescriptor, UiError> {
-    let catalog = PermissionsCatalog::bundled();
-    if let Some((display_name, kind)) = catalog.lookup_permission(&resource_app_id, &permission_id)
-    {
-        let resource_display_name = catalog
-            .resource(&resource_app_id)
-            .map(|r| r.display_name.clone())
-            .unwrap_or_else(|| resource_app_id.clone());
-        return Ok(PermissionDescriptor {
-            display_name,
-            kind: kind.to_string(),
-            resource_display_name,
-            source: "bundled".to_string(),
-        });
-    }
-
-    let client = state.graph_for(&tenant_id);
-    let sp = client
-        .resolve_resource_sp(&resource_app_id)
-        .await?
-        .ok_or_else(|| {
-            UiError::not_found(
-                "resource",
-                format!("resource app id {resource_app_id} not found"),
-            )
-        })?;
-
-    if let Some(role) = sp.app_roles.iter().find(|r| r.id == permission_id) {
-        return Ok(PermissionDescriptor {
-            display_name: role.display_name.clone(),
-            kind: "Role".into(),
-            resource_display_name: sp.display_name,
-            source: "graph".into(),
-        });
-    }
-    if let Some(scope) = sp
-        .oauth2_permission_scopes
-        .iter()
-        .find(|s| s.id == permission_id)
-    {
-        let name = scope
-            .admin_consent_display_name
-            .clone()
-            .unwrap_or_else(|| scope.value.clone());
-        return Ok(PermissionDescriptor {
-            display_name: name,
-            kind: "Scope".into(),
-            resource_display_name: sp.display_name,
-            source: "graph".into(),
-        });
-    }
-
-    Err(UiError::not_found(
-        "permission",
-        format!("permission id {permission_id} not found on {resource_app_id}"),
-    ))
 }

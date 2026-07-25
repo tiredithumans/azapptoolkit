@@ -402,6 +402,10 @@ pub mod issue {
         "Public client flows are enabled and credentials are present";
     pub const PREFER_CERT_OVER_SECRET: &str = "Uses client secret(s)";
     pub const REDUNDANT_APP_PERMS: &str = "Redundant application permissions:";
+    /// Sign-in audience reaches beyond this directory (multi-tenant, or
+    /// multi-tenant + personal Microsoft accounts).
+    pub const MULTITENANT_AUDIENCE: &str = "Sign-in audience reaches outside this tenant";
+    pub const UNVERIFIED_PUBLISHER: &str = "No verified publisher";
 }
 
 #[cfg(test)]

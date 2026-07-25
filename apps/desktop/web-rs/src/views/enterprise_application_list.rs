@@ -28,7 +28,7 @@ use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
 use crate::hooks::use_list_export::use_list_export;
 use crate::state::{OpenItemKind, use_session};
-use crate::util::created_in_range;
+use crate::util::{contains_ignore_case, created_in_range};
 use crate::views::pairing::jump_to_paired_app;
 
 #[component]
@@ -229,7 +229,7 @@ fn LoadedEnterpriseApps(
         items,
         search,
         search_match: |sp: &EnterpriseApplicationDto, needle: &str| {
-            sp.display_name.to_lowercase().contains(needle)
+            contains_ignore_case(&sp.display_name, needle)
         },
         extra_active: Signal::derive(move || {
             created_after.get().is_some() || created_before.get().is_some()
@@ -273,50 +273,25 @@ fn LoadedEnterpriseApps(
     // count, not a select-all / Bulk-actions control that would act on nothing.
     view! {
         <Show when=move || filters_open.get()>
-            {move || {
-                view! {
-                    <div class="filter-chips">
-                        <FilterChip
-                            label="All"
-                            value="all"
-                            count=base_total.get()
-                            facet=ent_filter
-                        />
-                        <FilterChip
-                            label="Enabled"
-                            value="enabled"
-                            count=enabled.get()
-                            facet=ent_filter
-                        />
-                        <FilterChip
-                            label="Disabled"
-                            value="disabled"
-                            count=disabled.get()
-                            facet=ent_filter
-                        />
-                        <FilterChip
-                            label="Foreign"
-                            value="foreign"
-                            count=foreign.get()
-                            facet=ent_filter
-                        />
-                    </div>
-                }
-            }}
+            <div class="filter-chips">
+                <FilterChip label="All" value="all" count=base_total facet=ent_filter />
+                <FilterChip label="Enabled" value="enabled" count=enabled facet=ent_filter />
+                <FilterChip label="Disabled" value="disabled" count=disabled facet=ent_filter />
+                <FilterChip label="Foreign" value="foreign" count=foreign facet=ent_filter />
+            </div>
         </Show>
-        {move || {
-            let shown_n = shown_total.get();
-            let count_label = if shown_n == total {
-                format!("{total} enterprise applications")
-            } else {
-                format!("{shown_n} of {total} enterprise applications")
-            };
-            view! {
-                <div class="app-list__selectbar">
-                    <span class="app-list__count">{count_label}</span>
-                </div>
-            }
-        }}
+        <div class="app-list__selectbar">
+            <span class="app-list__count">
+                {move || {
+                    let shown_n = shown_total.get();
+                    if shown_n == total {
+                        format!("{total} enterprise applications")
+                    } else {
+                        format!("{shown_n} of {total} enterprise applications")
+                    }
+                }}
+            </span>
+        </div>
         <VirtualRows items=shown total=total />
     }
 }
@@ -388,7 +363,6 @@ fn view_row(
     // refcount bumps instead of String clones.
     let id: Arc<str> = sp.id.into();
     let id_click = Arc::clone(&id);
-    let id_key = Arc::clone(&id);
     // Highlight every row open in the workspace (the working set). Class name
     // stays `--selected` so `pairing.rs`'s scroll-settle selector keeps matching.
     let row_class = move || {
@@ -407,7 +381,6 @@ fn view_row(
     let title_name = display_name.clone();
     // Owned name copies for the open handlers (the open chip's label).
     let name_click = display_name.clone();
-    let name_key = display_name.clone();
     let app_id_string = sp.app_id;
     let is_foreign = sp.is_foreign_tenant;
     let paired_app_id = sp.paired_app_registration_id.clone();
@@ -428,11 +401,6 @@ fn view_row(
                 aria-label=row_label
                 on:click=move |_| {
                     session.open_item(OpenItemKind::Enterprise, id_click.to_string(), name_click.clone());
-                }
-                on:keydown=move |ev: ev::KeyboardEvent| {
-                    if ev.key() == "Enter" {
-                        session.open_item(OpenItemKind::Enterprise, id_key.to_string(), name_key.clone());
-                    }
                 }
             >
                 <span class="row-meta">

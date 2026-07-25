@@ -459,6 +459,12 @@ fn register_fixtures() {
     // ---- Security / health ----
     mock_ok("list_credential_expirations", &f::credential_expirations());
     mock_ok("get_cached_audit", &Some(f::audit_run_result()));
+    // The two grant lenses of the Security workbench. Both are fallible reads,
+    // so an unmocked route degrades to the lens's error state rather than
+    // panicking — but that would show the demo's visitors a failure where the
+    // feature should be.
+    mock_ok("list_oauth2_grants_audit", &f::oauth2_grants());
+    mock_ok("list_app_permission_grants", &f::app_permission_grants());
 
     // ---- Key Vault ----
     mock_ok(
