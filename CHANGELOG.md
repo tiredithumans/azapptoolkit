@@ -9,6 +9,13 @@ the project adheres to
 
 ### Added
 
+- **Keyboard shortcuts for the surfaces you move between constantly.**
+  `Cmd/Ctrl-1…5` jump to Home / App Registrations / Enterprise Apps / Managed
+  Identities / Security; `/` focuses the **current list's** filter (deliberately
+  distinct from `Cmd/Ctrl-K`, which searches the whole tenant); `Cmd/Ctrl-W`
+  closes the open item; `?` shows the full list. Bare-key bindings never fire
+  while you're typing in a field.
+
 - **The security audit scores reach beyond the tenant (Rules 19 & 20).**
   `signInAudience` and `verifiedPublisher` were both fetched, carried on
   `AuditItem`, and exported to CSV — but nothing scored them, even though
@@ -113,6 +120,38 @@ the project adheres to
   `save_audit_to_file` is its only caller — but loses its command registration.
 
 ### Changed
+
+- **Large tenants are markedly faster to browse and audit.** Several hot paths
+  were doing far more work than they needed: the app/enterprise/managed-identity
+  lists re-materialized their filter state on every keystroke (at the 10 000-app
+  ceiling, ~10 000 string allocations per keypress); the audit's name sort
+  allocated inside its comparator; filter predicates allocated per row per pass;
+  and facet counts made one full pass over the row set *per facet*. The
+  SharePoint site sweep now reads permissions in `$batch` POSTs of 20 rather
+  than one request per site (5 000 requests → 250 at the sweep cap) and backs
+  off adaptively on 429s like the audit does. The observed-Graph-activity panel
+  no longer re-runs a whole subscription × workspace sweep on every open when
+  the tenant has no activity export — the "not configured" answer is cached too.
+  Three redundant tenant-wide directory scans were removed.
+
+- **The app follows your OS light/dark setting while it's running.** The theme
+  was sampled once at launch while the stylesheet reacted live, so flipping the
+  OS theme left form controls, buttons, and tabs light on dark chrome until
+  restart.
+
+- **Muted text and warning colours now meet WCAG AA.** `--text-faint` was ~3.0:1
+  on white and `--warning` ~3.7:1 despite being used as a text colour; both now
+  clear 4.5:1. Zero-count filter chips were dimmed with 40% opacity over
+  already-muted text — well under 3:1 — and are now muted by colour instead.
+
+- **Bulk-action failures name the app that failed.** Every bulk result except
+  remove-expired-credentials labelled failures with the raw object id, so a
+  failure list after a large run was a column of GUIDs.
+
+- **The open-items workspace behaves like the modal it visually is.** It covers
+  the list opaquely but left the content underneath reachable by Tab and by
+  screen readers, and carried no landmark role. It now marks the covered region
+  inert while shown.
 
 - **The Security workbench's sub-tabs are keyboard-navigable.** The lens
   selector was a hand-rolled third tab implementation with no `role="tablist"`
