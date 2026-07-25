@@ -187,9 +187,10 @@ stick with it** — installing one type and later updating with the other
 leaves two conflicting entries in Windows (see [Updates](#updates)):
 
 - **`azapptoolkit_<version>_x64-setup.exe`** — lightweight NSIS
-  installer. Per-user install, no admin rights, and **auto-updates
-  silently in place**. The right choice for individual users and
-  testers — pick this one unless you specifically need the MSI.
+  installer. Per-user install, no admin rights, and **updates in place**
+  (on your confirmation — see [Updates](#updates)). The right choice for
+  individual users and testers — pick this one unless you specifically
+  need the MSI.
 - **`azapptoolkit_<version>_x64_en-US.msi`** — classic Windows Installer
   for **enterprise rollout** via SCCM, Intune, or Group Policy. The
   in-app auto-updater does **not** manage MSI installs (it ships only the
@@ -213,9 +214,9 @@ cannot check it for malicious software"). Clear it once, either way:
 - **Right-click → Open** in Finder, then confirm **Open** in the dialog; or
 - run `xattr -dr com.apple.quarantine "/Applications/azapptoolkit.app"`.
 
-After that it launches normally and **auto-updates in place** like the
-Windows NSIS build. Apple Silicon (M-series) only for now; Intel builds
-aren't published yet.
+After that it launches normally and **updates in place** like the Windows
+NSIS build. Apple Silicon (M-series) only for now; Intel builds aren't
+published yet.
 
 ### Linux (x86_64)
 
@@ -232,17 +233,24 @@ desktops and pulled in automatically by the `.deb`.
 
 ## Updates
 
-The in-app auto-updater manages the **NSIS (`-setup.exe`) install** on
+The in-app updater manages the **NSIS (`-setup.exe`) install** on
 Windows, the **`.app`** on macOS, and the **`.AppImage`** on Linux (the
 MSI and `.deb` are not auto-updated — manage those through your packaging
 tooling). On launch, azapptoolkit checks the configured release endpoint
-for a newer signed build for your platform. If one is available, it is
-downloaded and applied **automatically** — there is no prompt; the new
-version runs the next time the app starts. Update payloads are verified against a public key baked
-into the build at release time — a payload that fails signature
-verification is rejected before any bytes touch disk. A failed update
-check or install never blocks the app; it is logged (see
-[Logs](#logs)) and retried on a later launch.
+for a newer signed build for your platform.
+
+**Updating is always your choice — nothing installs in the background.**
+If an update is available you get a notification; opening it shows the new
+version's changelog, and the update downloads and installs only when you
+select **Update & restart**. The app then relaunches into the new version.
+You can also check on demand from the account menu ("Check for updates"),
+which shows the same changelog screen — or tells you you're already
+current.
+
+Update payloads are verified against a public key baked into the build at
+release time — a payload that fails signature verification is rejected
+before any bytes touch disk. A failed update check or install never blocks
+the app; it is logged (see [Logs](#logs)) and retried on a later launch.
 
 > **MSI installs:** the updater only ever ships the NSIS payload, so
 > letting it run against an MSI install creates a second, conflicting
@@ -252,7 +260,8 @@ check or install never blocks the app; it is logged (see
 
 ### Opting out
 
-Auto-update is on by default. There are two ways to turn it off:
+Update *checking* is on by default (installing always needs your
+confirmation). To stop the checks entirely, there are two ways:
 
 - **Environment variable** — set `AZAPPTOOLKIT_AUTO_UPDATE=0` (also
   accepts `false` / `off` / `no`) in the user or machine environment

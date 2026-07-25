@@ -7,6 +7,107 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **The Security workbench now has an Application permissions lens.** The
+  tenant-wide inventory of every *application* permission
+  (`appRoleAssignment`) apps hold on Microsoft Graph / Exchange / SharePoint
+  was fully implemented backend-side — `list_app_permission_grants`,
+  `save_app_permission_grants_to_file`, the DTO, and the frontend binding all
+  shipped — but **nothing ever called the binding**, so the feature the README
+  advertised was unreachable. It is now a fifth sub-tab
+  (`views::app_permission_grants_view`) alongside Delegated grants, with
+  risk facets, a high-risk banner, search across app/permission/resource,
+  CSV **and** JSON export, and a deep-link into each holder's Enterprise
+  Application permissions tab. Both grant lenses are now registered in
+  `demo::register_fixtures` too, so the hosted demo shows them populated
+  rather than in an error state.
+
+### Fixed
+
+- **The security audit no longer evicts its own service-principal cache
+  seeding.** `seed_lean_sps_from_index` wrote one entry per app registration
+  (up to 10 000) into a bucket capped at 5000, so past entry 5000 every insert
+  LRU-evicted one of this same pass's earlier entries — and each evicted app
+  then fell back to an individual Graph GET, the exact N+1 the function exists
+  to remove. The predecessor it superseded (`prewarm_sps`) had the guard; it
+  was not carried over. The pass is now bounded by the bucket size, and
+  `CacheKind::ServicePrincipal` — which holds one small entry *per directory
+  object* rather than a handful of tenant-wide aggregates — is capped at the
+  10 000-app enumeration ceiling instead of the aggregate-sized
+  `MAX_CACHE_SIZE`, so a large tenant actually fits.
+- **Cache eviction is no longer quadratic.** `evict_lru` picked its victim with
+  a `min_by_key` scan over the whole bucket (up to 5000 entries) plus a key
+  clone, repeated per eviction and held under the bucket lock — so a seeding
+  pass cost millions of comparisons while blocking every other reader of that
+  bucket. Eviction now pops from a `tick -> key` ordering index in O(log n).
+- **Tenant-wide index entries can no longer be evicted by per-app churn.** The
+  `Lists` bucket holds the expensive directory indexes (`sp_index`,
+  `apps_pairing`, the search/gallery corpora) alongside thousands of cheap
+  `app_detail|…` / `mail_scopes|…` entries, so one mail-heavy audit run could
+  evict indexes that cost a full tenant scan to rebuild. `put_index` /
+  `put_typed_index` mark those entries exempt from LRU (TTL and tenant
+  invalidation still apply, so sign-out cannot leak them across tenants).
+- **`/applications` scans page at Graph's documented maximum.** The browse
+  list, the security audit, the credential-expiry dashboard, and the bulk
+  credential sweep all paged at `$top=100` under a comment claiming "Graph caps
+  `$top` at 100 on `/applications`" — Graph documents the maximum as **999**,
+  and this codebase already used 999 on the same endpoint elsewhere. Paging is
+  strictly serial, so at the 10 000-app ceiling this was 100 sequential round
+  trips where 11 suffice. Larger pages also *reduce* throttling on these
+  queries, which `$select` `keyCredentials` and so fall under Graph's
+  150-requests-per-minute-per-tenant limit for that projection.
+- **Plain `/applications` enumerations no longer run as advanced queries.**
+  Every page carried `$count=true` (whose `@odata.count` has no reader on this
+  path) and `$orderby=displayName` (sorting happens in the frontend), forcing
+  `ConsistencyLevel: eventual` handling for values that were discarded. Both
+  are now scoped to the `$search` path, which genuinely requires them. This
+  also removes an officially **unsupported** combination from the audit's scan:
+  Graph does not support `$expand` together with an advanced query, and
+  documents that such combinations may fail *silently* — which would have left
+  the audit's inline owner ids quietly missing. The audit's `$expand=owners`
+  truncation limit (20 items, no `nextLink`) is now documented at the call site.
+- **A failed managed-identity load no longer claims the identity was deleted.**
+  `ManagedIdentityDetailWindow` collapsed the fetch error with `.ok()`, so a
+  transient 429 rendered "Identity not found — it may have been deleted" with
+  no way to retry. Fetch failure and genuine absence are now distinct: the
+  former routes through `DetailLoadError` (message + Retry), the latter keeps
+  the empty state. Its full-window `Spinner` is also now a `DetailSkeleton`,
+  matching the other detail panes.
+- **The Security audit's "Risk" column header shows its sort direction.** It
+  drove `SortCol::Score` but rendered no sort glyph, so clicking it silently
+  re-sorted the table with no visible feedback.
+
+### Changed
+
+- **The Security workbench's sub-tabs are keyboard-navigable.** The lens
+  selector was a hand-rolled third tab implementation with no `role="tablist"`
+  / `role="tab"`, no `aria-selected`, and no arrow-key navigation — on the
+  workbench's own top-level navigation. It now uses the shared
+  `components::ui::TabBar`, which implements the WAI-ARIA tabs pattern
+  (roving tabindex, Left/Right/Home/End). The dead `.security-lens*` CSS is
+  removed.
+- **The Credential-expiry and Delegated-grants lenses use the shared
+  primitives.** `AuditDashboard` bypassed four of them at once: a raw Thaw
+  `Input` (so no clear button, while its own empty state told users to change
+  the filter), a hand-rolled error block instead of `DetailLoadError`, a bare
+  `Body1` instead of `EmptyState`, and a text "Export CSV…" button instead of
+  `ExportMenu` + a `busy` `IconButton` — so these lenses alone offered no JSON
+  export and no refresh feedback. All four now route through the primitives.
+- **`AuditDashboard` no longer re-filters and rebuilds its whole table on every
+  reactive tick.** The filter ran inline in the render closure rather than in a
+  `Memo`, and the `<table>` was rebuilt wholesale with no keyed `<For>`, so
+  "Show more" re-filtered every row and rebuilt all of them — on the surface
+  its own comment describes as holding thousands of rows. The filter is now a
+  `Memo` over row indices and the body is a keyed `<For>`.
+- **README: the Updates section described a flow the app does not implement.**
+  It stated updates are "downloaded and applied automatically — there is no
+  prompt". The actual flow is interactive: a launch-time check raises a
+  notification, and the update installs only on an explicit **Update &
+  restart** from the changelog splash. The section now documents that (and the
+  on-demand "Check for updates"), and the "auto-updates silently in place"
+  claims on the Windows/macOS install notes are corrected.
+
 ## [0.20.5] - 2026-07-23
 
 ### Fixed
