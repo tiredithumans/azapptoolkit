@@ -12,7 +12,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 use crate::bindings::activity::{self, ActivityLogItem};
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::auth;
-use crate::components::ui::{DataTable, Skeleton, SkeletonList};
+use crate::components::ui::{DataTable, DetailLoadError, Skeleton, SkeletonList};
 use crate::state::use_session;
 
 use crate::util::no_tenant;
@@ -78,7 +78,17 @@ pub fn ActivityPanel(
                         Err(e) if e.code == "activity_unavailable" => {
                             view! { <div class="alert alert--warn">{e.message}</div> }.into_any()
                         }
-                        Err(e) => view! { <Body1 class="form-error">{e.message}</Body1> }.into_any(),
+                        // Anything else is a real failure (429, network, …) and
+                        // must offer a way out, not just a message.
+                        Err(e) => {
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                />
+                            }
+                                .into_any()
+                        }
                     }
                 })}
             </Suspense>
@@ -161,7 +171,15 @@ fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
                             }
                                 .into_any()
                         }
-                        Err(e) => view! { <Body1 class="form-error">{e.message}</Body1> }.into_any(),
+                        Err(e) => {
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                />
+                            }
+                                .into_any()
+                        }
                     }
                 })}
             </Suspense>

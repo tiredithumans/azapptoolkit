@@ -8,6 +8,7 @@
 //! rebuilding the subtree. The chrome (header, search, filter drawer) is the
 //! shared [`ListScaffold`].
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::NaiveDate;
@@ -244,6 +245,19 @@ fn LoadedApps(
 ) -> impl IntoView {
     let session = use_session();
 
+    // `object_id -> display name` so a bulk failure names the app instead of
+    // printing its GUID. Built once per fetch from the rows the selection is
+    // made from; the bar falls back to the id for anything missing.
+    let names: Signal<Arc<HashMap<String, String>>> = {
+        let map: Arc<HashMap<String, String>> = Arc::new(
+            items
+                .iter()
+                .map(|r| (r.id.clone(), r.display_name.clone()))
+                .collect(),
+        );
+        Signal::stored(map)
+    };
+
     let list = use_filtered_list(FilteredListSpec {
         items,
         search,
@@ -299,6 +313,8 @@ fn LoadedApps(
     let visible_ids: Memo<Arc<Vec<String>>> = Memo::new(move |_| {
         Arc::new(shown.with(|items| items.iter().map(|r| r.id.clone()).collect()))
     });
+    // `object_id -> display name` so a bulk failure names the app instead of
+    // printing its GUID. Derived from the loaded rows the selection came from.
     let count_label = Signal::derive(move || {
         let shown_n = shown.with(|items| items.len());
         if shown_n == total {
@@ -328,6 +344,7 @@ fn LoadedApps(
         // remove expired creds / delete without leaving the list (the separate
         // Bulk Actions page remains for Create-apps).
         <BulkActionBar
+            names=names
             selection=session.tenant_ui.selected_app_ids
             actions=Signal::derive(|| {
                 vec![BulkAction::Grant, BulkAction::RemoveExpired, BulkAction::Delete]
@@ -416,7 +433,6 @@ fn view_row(
     let id: Arc<str> = row.id.into();
     let id_class = Arc::clone(&id);
     let id_click = Arc::clone(&id);
-    let id_key = Arc::clone(&id);
     let id_check = Arc::clone(&id);
     // Highlight every row that's open in the workspace (the working set), not a
     // single selection. Class name stays `--selected` so `pairing.rs`'s
@@ -437,7 +453,6 @@ fn view_row(
     let title_name = display_name.clone();
     // Owned name copies for the open handlers (the open chip's label).
     let name_click = display_name.clone();
-    let name_key = display_name.clone();
     let app_id_string = row.app_id;
     // Descriptive per-row label for the bulk-select checkbox: the row's
     // display name plus its appId, so screen-reader users can tell rows apart
@@ -461,11 +476,6 @@ fn view_row(
                 type="button"
                 on:click=move |_| {
                     session.open_item(OpenItemKind::AppReg, id_click.to_string(), name_click.clone());
-                }
-                on:keydown=move |ev: ev::KeyboardEvent| {
-                    if ev.key() == "Enter" {
-                        session.open_item(OpenItemKind::AppReg, id_key.to_string(), name_key.clone());
-                    }
                 }
             >
                 <span class="row-meta">

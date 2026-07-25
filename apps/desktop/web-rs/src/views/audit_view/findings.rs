@@ -9,7 +9,7 @@
 //! Positive signals (already-scoped access) sit demoted in a collapsed
 //! "Healthy configuration" disclosure below the ranked list.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use azapptoolkit_core::audit::AuditPrincipalKind;
@@ -19,6 +19,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 use crate::components::bulk_action_bar::BulkActionBar;
 use crate::components::select_all_bar::SelectAllBar;
 use crate::constants::*;
+use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::use_session;
 
 use super::controller::AuditController;
@@ -186,6 +187,19 @@ fn finding_group_view(
             }))
         }
     });
+    // `object_id -> application name` for failure labels (see BulkActionBar).
+    let names: Memo<Arc<HashMap<String, String>>> = Memo::new(move |_| {
+        Arc::new(ctrl.result.with(|r| {
+            r.as_ref()
+                .map(|r| {
+                    r.items
+                        .iter()
+                        .map(|i| (i.object_id.clone(), i.application_name.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }))
+    });
     let bulk_actions = group_bulk_actions(key);
     let has_bulk = actionable && !bulk_actions.is_empty();
     let fix_all = move |_| {
@@ -196,6 +210,15 @@ fn finding_group_view(
         expanded.set(Some(key.to_string()));
         selection.set(ids);
     };
+
+    // Roving-tabindex grid nav for this group's rows, reseeded whenever the
+    // rendered set changes (expansion, window growth, a remediation landing).
+    let tbody_ref: NodeRef<leptos::html::Tbody> = NodeRef::new();
+    let on_grid_key = use_grid_keynav(tbody_ref, move || {
+        let _ = expanded.get();
+        let _ = render_limit.get();
+        let _ = ctrl.result.with(|r| r.as_ref().map(|r| r.items.len()));
+    });
 
     let tone = match g.worst {
         azapptoolkit_core::audit::RiskLevel::Critical => "critical",
@@ -278,6 +301,7 @@ fn finding_group_view(
                             let actions = bulk_actions.clone();
                             view! {
                                 <BulkActionBar
+                                    names=names
                                     selection=selection
                                     actions=Signal::derive(move || actions.clone())
                                     on_done=ctrl.on_bulk_done
@@ -316,7 +340,10 @@ fn finding_group_view(
                                 <th>"Actions"</th>
                             </tr>
                         </thead>
-                        <tbody>
+                        // Keyboard grid nav, like every sibling table. This is
+                        // the Security workbench's DEFAULT pane and was the one
+                        // table without it.
+                        <tbody node_ref=tbody_ref on:keydown=on_grid_key.clone()>
                             <For
                                 each=rows.clone()
                                 key=|(_, i)| (i.object_id.clone(), i.remediations.len())

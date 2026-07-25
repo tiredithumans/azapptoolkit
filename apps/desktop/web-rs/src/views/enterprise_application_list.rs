@@ -363,7 +363,6 @@ fn view_row(
     // refcount bumps instead of String clones.
     let id: Arc<str> = sp.id.into();
     let id_click = Arc::clone(&id);
-    let id_key = Arc::clone(&id);
     // Highlight every row open in the workspace (the working set). Class name
     // stays `--selected` so `pairing.rs`'s scroll-settle selector keeps matching.
     let row_class = move || {
@@ -382,7 +381,6 @@ fn view_row(
     let title_name = display_name.clone();
     // Owned name copies for the open handlers (the open chip's label).
     let name_click = display_name.clone();
-    let name_key = display_name.clone();
     let app_id_string = sp.app_id;
     let is_foreign = sp.is_foreign_tenant;
     let paired_app_id = sp.paired_app_registration_id.clone();
@@ -403,11 +401,6 @@ fn view_row(
                 aria-label=row_label
                 on:click=move |_| {
                     session.open_item(OpenItemKind::Enterprise, id_click.to_string(), name_click.clone());
-                }
-                on:keydown=move |ev: ev::KeyboardEvent| {
-                    if ev.key() == "Enter" {
-                        session.open_item(OpenItemKind::Enterprise, id_key.to_string(), name_key.clone());
-                    }
                 }
             >
                 <span class="row-meta">

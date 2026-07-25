@@ -25,7 +25,7 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 base64 = "0.22"
-web-sys = { version = "0.3", features = ["MediaQueryList", "Window", "Document", "HtmlElement", "Element", "Node", "NodeList", "Clipboard", "Navigator", "ResizeObserver", "ResizeObserverEntry", "Storage", "File", "FileList", "Blob", "HtmlInputElement", "Event"] }
+web-sys = { version = "0.3", features = ["MediaQueryList", "MediaQueryListEvent", "Window", "Document", "HtmlElement", "Element", "Node", "NodeList", "Clipboard", "Navigator", "ResizeObserver", "ResizeObserverEntry", "Storage", "File", "FileList", "Blob", "HtmlInputElement", "Event"] }
 console_error_panic_hook = "0.1"
 futures = "0.3"
 

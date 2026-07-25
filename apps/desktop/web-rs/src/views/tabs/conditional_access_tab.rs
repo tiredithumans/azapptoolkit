@@ -10,7 +10,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::conditional_access::{self, ConditionalAccessPolicyDto};
 use crate::components::requires_role::RequiresRole;
-use crate::components::ui::{DataTable, SkeletonList};
+use crate::components::ui::{DataTable, DetailLoadError, SkeletonList};
 use crate::state::use_session;
 
 use crate::util::no_tenant;
@@ -66,7 +66,16 @@ pub fn ConditionalAccessPanel(#[prop(into)] app_id: Signal<String>) -> impl Into
                         Err(e) if e.code == "ca_unavailable" => {
                             view! { <div class="alert alert--warn">{e.message}</div> }.into_any()
                         }
-                        Err(e) => view! { <Body1 class="form-error">{e.message}</Body1> }.into_any(),
+                        // A real failure (429, network, …) — offer a way out.
+                        Err(e) => {
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                />
+                            }
+                                .into_any()
+                        }
                     }
                 })}
             </Suspense>

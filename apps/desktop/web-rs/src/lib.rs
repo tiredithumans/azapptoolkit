@@ -14,6 +14,7 @@
 
 use leptos::prelude::*;
 use thaw::{ConfigProvider, Theme};
+use wasm_bindgen::JsCast;
 
 pub mod bindings;
 pub mod components;
@@ -72,12 +73,44 @@ fn App() -> impl IntoView {
     #[cfg(feature = "demo")]
     use_session().set_active_tenant(Some(demo::demo_tenant()));
     let theme = RwSignal::new(initial_theme());
+    follow_system_theme(theme);
 
     view! {
         <ConfigProvider theme>
             <Root />
         </ConfigProvider>
     }
+}
+
+/// Keeps the Thaw component theme in step with the OS light/dark setting for the
+/// life of the session.
+///
+/// `initial_theme` samples `prefers-color-scheme` **once**, but `styles.css`
+/// reacts to it live — so flipping the OS theme with the app open left Thaw's
+/// components (Input, Button, TabList, Spinner) rendering light on dark app
+/// chrome until the next restart. Subscribing to the media query fixes the half
+/// that was static.
+///
+/// The listener is leaked deliberately: it must outlive this call and live as
+/// long as the app root, which is the whole process.
+fn follow_system_theme(theme: RwSignal<Theme>) {
+    let Some(mql) = web_sys::window()
+        .and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok().flatten())
+    else {
+        return;
+    };
+    let on_change = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MediaQueryListEvent)>::new(
+        move |ev: web_sys::MediaQueryListEvent| {
+            theme.set(if ev.matches() {
+                Theme::dark()
+            } else {
+                Theme::light()
+            });
+        },
+    );
+    // `addEventListener("change")` — `onchange` would clobber any other listener.
+    let _ = mql.add_event_listener_with_callback("change", on_change.as_ref().unchecked_ref());
+    on_change.forget();
 }
 
 #[component]

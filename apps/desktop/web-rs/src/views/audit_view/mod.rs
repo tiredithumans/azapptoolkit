@@ -20,6 +20,7 @@ pub(crate) use controller::AuditController;
 pub(crate) use findings::FindingsPane;
 pub(crate) use groups::ranked_actionable_findings;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use azapptoolkit_core::audit::{AuditItem, AuditPrincipalKind, RiskLevel};
@@ -124,6 +125,20 @@ pub fn AuditAppsPane() -> impl IntoView {
             })
         }))
     });
+    // `object_id -> application name` so a bulk failure names the app rather
+    // than printing its GUID.
+    let names: Memo<Arc<HashMap<String, String>>> = Memo::new(move |_| {
+        Arc::new(result.with(|r| {
+            r.as_ref()
+                .map(|r| {
+                    r.items
+                        .iter()
+                        .map(|i| (i.object_id.clone(), i.application_name.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }))
+    });
     let selectbar_label = Signal::derive(move || {
         format!(
             "{} of {} apps match",
@@ -220,6 +235,7 @@ pub fn AuditAppsPane() -> impl IntoView {
                         // Finding-paired fixes (scope/redundant/owner/disable)
                         // live on the Findings pane's per-group bars.
                         <BulkActionBar
+                            names=names
                             selection=selection
                             actions=Signal::derive(|| vec![
                                 BulkAction::RemoveExpired,
