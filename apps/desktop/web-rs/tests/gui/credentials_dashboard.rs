@@ -37,8 +37,15 @@ async fn retry_after_error_refetches() {
     );
 
     let _m = ts::mount_view(|| view! { <CredentialsDashboard /> });
-    // The error carries a load context, not just the raw backend message.
-    ts::wait_for(|| ts::body_contains("Failed to load: Too many requests")).await;
+    // This lens now renders its load failure via the shared `DetailLoadError`
+    // (raw `UiError` message + the muted error code, no "Failed to load:"
+    // prefix) — the same grammar the Managed Identities list already asserts.
+    // The code is what carries the context the bespoke prefix used to.
+    ts::wait_for(|| ts::body_contains("Too many requests")).await;
+    assert!(
+        ts::body_contains("[throttled]"),
+        "the error code should be surfaced alongside the message"
+    );
 
     // The transient failure clears: Retry refetches in place (no remount).
     ts::mock_ok(
