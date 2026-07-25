@@ -251,6 +251,12 @@ pub fn AuditAppsPane() -> impl IntoView {
                                     </th>
                                     <th>"AppId"</th>
                                     <th>
+                                        // Risk tier and Score are the same
+                                        // ordering, so this header drives
+                                        // `SortCol::Score` — and must therefore
+                                        // render that column's glyph too, or
+                                        // clicking it silently re-sorts with no
+                                        // visible feedback.
                                         <button
                                             class="th-sort"
                                             type="button"
@@ -258,6 +264,7 @@ pub fn AuditAppsPane() -> impl IntoView {
                                             on:click=move |_| toggle_sort(SortCol::Score)
                                         >
                                             "Risk"
+                                            {move || sort_glyph(SortCol::Score)}
                                         </button>
                                     </th>
                                     <th>

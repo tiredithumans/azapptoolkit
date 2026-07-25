@@ -21,8 +21,8 @@ pub fn ConsentGrantsView() -> impl IntoView {
     // Bound to `let` rather than inline: the `view!` macro can't parse an
     // `async move {}` block as an attribute value.
     let fetch = move |tid: String| async move { consent::list_oauth2_grants_audit(&tid).await };
-    let export = move |data: Vec<OAuth2GrantDto>| async move {
-        consent::save_oauth2_grants_to_file(&data, "csv").await
+    let export = move |data: Vec<OAuth2GrantDto>, format: &'static str| async move {
+        consent::save_oauth2_grants_to_file(&data, format).await
     };
 
     view! {
@@ -30,6 +30,7 @@ pub fn ConsentGrantsView() -> impl IntoView {
             title="Consent grants"
             crumb="Delegated (OAuth2) permission grants"
             search_placeholder="Filter by client name…"
+            refresh_label="Refresh consent grants"
             view_key="consent"
             noun="grant(s)"
             empty_message="No grants match this filter."

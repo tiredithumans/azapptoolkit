@@ -3002,40 +3002,6 @@ h3 {
   letter-spacing: 0.03em;
 }
 
-/* Security workbench sub-tab selector — four co-equal panes (Findings /
-   All apps / Credential expiry / Delegated grants). */
-.security-lenses {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  border-bottom: 1px solid var(--border);
-  padding-bottom: var(--space-2);
-  margin-bottom: var(--space-3);
-}
-.security-lens {
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  font: inherit;
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-  padding: 6px 10px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.security-lens:hover {
-  color: var(--text);
-}
-.security-lens--active {
-  color: var(--accent);
-  border-color: var(--accent);
-}
-.security-lens:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
 /* ---- SectionHeader ---- */
 .ui-section-header {
   display: flex;
