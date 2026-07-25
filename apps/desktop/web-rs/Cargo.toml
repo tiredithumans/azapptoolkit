@@ -81,3 +81,17 @@ strip = true
 # trace fully anonymous.
 [profile.test]
 strip = "debuginfo"
+# The other half of the size story, and the one that actually makes the shard
+# ceiling reachable. At opt-level 0 a debug wasm of a Leptos view tree is
+# enormous: the single heaviest GUI test module (`open_items_dock`, which mounts
+# the workspace and therefore links all three detail panes) measured **63 MB on
+# its own** — already past what headless Chrome will instantiate, so NO grouping
+# of modules into shards could have fixed it. At opt-level 1 the same module is
+# 19 MB and all 24 modules merged are 29 MB.
+#
+# Level 1 specifically: it is enough to collapse the generic/closure bloat that
+# dominates a debug Leptos build, without the compile-time cost of 2/3/"s".
+# Behaviour is unchanged (tests assert on panic *messages*, kept by
+# `console_error_panic_hook`) and `strip = "debuginfo"` still preserves the
+# `name` section, so traces stay symbolicated.
+opt-level = 1
