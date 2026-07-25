@@ -64,8 +64,8 @@ fn list_row_select() -> Vec<&'static str> {
     ]
 }
 
-/// Graph caps `$top` at 100 on `/applications`; we page through with that window.
-const APPS_PAGE_SIZE: u32 = 100;
+/// Page size for the browse-list scan — the shared `/applications` maximum.
+const APPS_PAGE_SIZE: u32 = azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE;
 /// Safety cap on total apps materialized for the browse list, mirroring the
 /// audit/credential scans. Well above real-world app-registration counts.
 const APPS_MAX: usize = 10_000;

@@ -44,8 +44,8 @@ use crate::state::AppState;
 
 /// Upper bound on in-flight per-app lookups when the tenant is healthy.
 const INITIAL_CONCURRENCY: usize = 8;
-/// Page size — Graph caps `$top` at 100 on `/applications`.
-const PAGE_SIZE: u32 = 100;
+/// Page size — the shared `/applications` maximum.
+const PAGE_SIZE: u32 = azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE;
 /// Safety cap on the total app count per run. Prevents a misconfigured tenant
 /// or runaway pagination loop from OOMing the app; raise or pass `None` if a
 /// user hits this legitimately.
@@ -85,6 +85,14 @@ pub async fn run_audit(
         .list_applications_all(
             // `$expand=owners` brings owner ids inline so the ownership audit
             // rules need no per-app round trip.
+            //
+            // LIMIT: `$expand` on a directory-object relationship returns at
+            // most 20 items and carries no `@odata.nextLink`, so this owner list
+            // is TRUNCATED for any app with more than 20 owners. That is safe
+            // for the only rule reading it (the ownership gap fires on 0 or 1
+            // owner, and a truncated list still has 20). A future rule that
+            // needs a COMPLETE owner set must not read this field — it has to
+            // page `/applications/{id}/owners` per app instead.
             AppListQuery::default()
                 .with_top(PAGE_SIZE)
                 .with_expand("owners($select=id)"),

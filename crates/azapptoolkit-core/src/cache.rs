@@ -7,14 +7,14 @@
 
 use parking_lot::Mutex;
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::constants::{
-    AUDIT_CACHE_TTL, LISTS_CACHE_TTL, MAX_CACHE_SIZE, PERMISSIONS_CACHE_TTL,
-    SERVICE_PRINCIPAL_CACHE_TTL,
+    AUDIT_CACHE_TTL, LISTS_CACHE_TTL, MAX_CACHE_SIZE, MAX_PER_OBJECT_CACHE_SIZE,
+    PERMISSIONS_CACHE_TTL, SERVICE_PRINCIPAL_CACHE_TTL,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -96,6 +96,9 @@ pub struct CacheStats {
     pub lists_misses: u64,
 }
 
+/// Type-erased handle kept alongside the JSON value by [`Cache::put_typed`].
+type TypedValue = Arc<dyn Any + Send + Sync>;
+
 struct Entry {
     // `Arc` so a `get` clones a refcount, not the whole JSON tree, while holding
     // the buckets mutex. The index entries (`sp_index`, the cached audit run) are
@@ -108,14 +111,30 @@ struct Entry {
     // original `Arc<T>` (a refcount clone) without re-deserializing — the hot
     // path for the multi-MB tenant search corpus, which a debounced keystroke
     // would otherwise rebuild from JSON every query.
-    typed: Option<Arc<dyn Any + Send + Sync>>,
+    typed: Option<TypedValue>,
     inserted: Instant,
     // Monotonically-increasing counter used for LRU ordering.
     last_access: u64,
+    // Exempt from LRU eviction. Set for the handful of tenant-wide *index*
+    // entries (the service-principal index, the app-registration pairing rows,
+    // the search/gallery corpora) that cost a full directory scan to rebuild and
+    // that many surfaces read. Without this they share a bucket with thousands
+    // of cheap per-app entries (`app_detail|…`, `mail_scopes|…`), so one
+    // mail-heavy audit run evicts the indexes and the next list visit pays for a
+    // fresh tenant scan. Pinned entries still expire on TTL and are still
+    // dropped by explicit/tenant invalidation — they are only invisible to LRU.
+    pinned: bool,
 }
 
 struct Bucket {
     entries: HashMap<String, Entry>,
+    // LRU ordering index: `last_access` tick -> key, so eviction pops the oldest
+    // in O(log n) instead of scanning every entry. Kept in step with `entries`
+    // on insert/touch/remove; `retain`/`clear` rebuild it wholesale. May briefly
+    // hold ticks whose entry is gone or has since been touched — `evict_lru`
+    // treats those as stale and skips them, which is what keeps the bookkeeping
+    // on the hot paths to a single `remove` + `insert`.
+    lru: BTreeMap<u64, String>,
     tick: u64,
 }
 
@@ -123,15 +142,76 @@ impl Bucket {
     fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            lru: BTreeMap::new(),
             tick: 0,
         }
     }
 
     fn touch(&mut self, key: &str) {
         self.tick += 1;
+        let tick = self.tick;
         if let Some(e) = self.entries.get_mut(key) {
-            e.last_access = self.tick;
+            let previous = e.last_access;
+            e.last_access = tick;
+            self.lru.remove(&previous);
+            self.lru.insert(tick, key.to_string());
         }
+    }
+
+    /// Inserts (or replaces) an entry, keeping the LRU index in step.
+    fn insert(
+        &mut self,
+        key: String,
+        value: Arc<serde_json::Value>,
+        typed: Option<TypedValue>,
+        pinned: bool,
+    ) {
+        self.tick += 1;
+        let tick = self.tick;
+        let entry = Entry {
+            value,
+            typed,
+            inserted: Instant::now(),
+            last_access: tick,
+            pinned,
+        };
+        if let Some(previous) = self.entries.insert(key.clone(), entry) {
+            self.lru.remove(&previous.last_access);
+        }
+        self.lru.insert(tick, key);
+    }
+
+    /// Removes one entry, keeping the LRU index in step.
+    fn remove(&mut self, key: &str) -> bool {
+        match self.entries.remove(key) {
+            Some(previous) => {
+                self.lru.remove(&previous.last_access);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drops every entry whose key fails `keep`, then rebuilds the LRU index.
+    /// Invalidation sweeps are infrequent, so a wholesale rebuild is cheaper to
+    /// reason about than threading removals through the index.
+    fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+        self.entries.retain(|k, _| keep(k));
+        self.rebuild_lru();
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+        self.tick = 0;
+    }
+
+    fn rebuild_lru(&mut self) {
+        self.lru = self
+            .entries
+            .iter()
+            .map(|(k, e)| (e.last_access, k.clone()))
+            .collect();
     }
 
     fn evict_lru(&mut self, max_size: usize) {
@@ -140,19 +220,33 @@ impl Bucket {
         // `max_size` on an already-oversized bucket it would take that many more
         // `put`s to converge — and never converge at all if writes stop. Evict
         // the least-recently-used entry repeatedly until within the bound.
+        //
+        // Pinned entries are skipped, so a bucket that is entirely (or almost
+        // entirely) pinned stops evicting rather than dropping an index: the
+        // pinned set is a fixed handful of tenant-wide keys, not something a
+        // caller can grow without bound.
+        let mut skipped: Vec<(u64, String)> = Vec::new();
         while self.entries.len() > max_size {
-            let oldest_key = self
-                .entries
-                .iter()
-                .min_by_key(|(_, e)| e.last_access)
-                .map(|(k, _)| k.clone());
-            match oldest_key {
-                Some(k) => {
-                    self.entries.remove(&k);
+            let Some((tick, key)) = self.lru.pop_first() else {
+                break;
+            };
+            match self.entries.get(&key) {
+                // Stale index row: the entry was removed, or touched since (its
+                // current tick has its own, later, index row). Drop and move on.
+                Some(e) if e.last_access != tick => continue,
+                None => continue,
+                Some(e) if e.pinned => {
+                    skipped.push((tick, key));
+                    continue;
                 }
-                None => break,
+                Some(_) => {
+                    self.entries.remove(&key);
+                }
             }
         }
+        // Put the pinned rows we stepped over back, so they stay ordered for the
+        // next pass (and so a later unpin/replace can still evict them).
+        self.lru.extend(skipped);
     }
 }
 
@@ -223,18 +317,36 @@ impl Cache {
         *self.stats.lock()
     }
 
+    /// Entry cap for `kind`, derived from the configured `max_size`.
+    ///
+    /// `max_size` is sized for kinds holding a handful of tenant-wide aggregates.
+    /// [`CacheKind::ServicePrincipal`] instead holds **one small entry per app
+    /// registration** (the audit's `|lean` seeding), so it is capped at the same
+    /// ceiling the tenant enumerations use — see [`MAX_PER_OBJECT_CACHE_SIZE`].
+    /// A caller that raises `max_size` past that ceiling gets the larger value
+    /// for every kind.
+    /// Effective entry cap for `kind` under the current configuration. Callers
+    /// that pre-seed a bucket in bulk use this to bound the pass, so seeding
+    /// can't evict its own earlier entries.
+    pub fn capacity_for(&self, kind: CacheKind) -> usize {
+        Self::cap_for(kind, self.config.lock().max_size)
+    }
+
+    fn cap_for(kind: CacheKind, max_size: usize) -> usize {
+        match kind {
+            CacheKind::ServicePrincipal => max_size.max(MAX_PER_OBJECT_CACHE_SIZE),
+            _ => max_size,
+        }
+    }
+
     pub fn clear(&self) {
         for kind in CacheKind::ALL {
-            let mut bucket = self.buckets[kind.idx()].lock();
-            bucket.entries.clear();
-            bucket.tick = 0;
+            self.buckets[kind.idx()].lock().clear();
         }
     }
 
     pub fn clear_kind(&self, kind: CacheKind) {
-        let mut bucket = self.buckets[kind.idx()].lock();
-        bucket.entries.clear();
-        bucket.tick = 0;
+        self.buckets[kind.idx()].lock().clear();
     }
 
     /// Shared read prologue for [`Self::get`] / [`Self::get_typed`]: enforces the
@@ -262,7 +374,7 @@ impl Cache {
             .get(key)
             .is_some_and(|e| e.inserted.elapsed() <= ttl);
         if !live {
-            bucket.entries.remove(key);
+            bucket.remove(key);
             drop(bucket);
             self.record(kind, false);
             return None;
@@ -298,12 +410,32 @@ impl Cache {
     where
         T: serde::Serialize,
     {
-        let max_size = {
-            let c = self.config.lock();
-            if !c.enabled {
-                return;
-            }
-            c.max_size
+        self.put_inner(kind, key, value, false);
+    }
+
+    /// Like [`Self::put`], but marks the entry **pinned**: exempt from LRU
+    /// eviction (TTL and invalidation still apply).
+    ///
+    /// Use only for tenant-wide *index* entries that cost a full directory scan
+    /// to rebuild and that several surfaces read — the service-principal index,
+    /// the app-registration pairing rows, the credential-expiry roll-up. These
+    /// share a bucket with thousands of cheap per-app entries, so without the
+    /// pin a single mail-heavy audit run evicts them and the next list visit
+    /// pays for a fresh scan. The pinned set must stay a bounded handful of
+    /// keys; never pin anything keyed per directory object.
+    pub fn put_index<T>(&self, kind: CacheKind, key: String, value: &T)
+    where
+        T: serde::Serialize,
+    {
+        self.put_inner(kind, key, value, true);
+    }
+
+    fn put_inner<T>(&self, kind: CacheKind, key: String, value: &T, pinned: bool)
+    where
+        T: serde::Serialize,
+    {
+        let Some(max_size) = self.cap_if_enabled(kind) else {
+            return;
         };
         let json = match serde_json::to_value(value) {
             Ok(v) => v,
@@ -313,18 +445,17 @@ impl Cache {
             }
         };
         let mut bucket = self.buckets[kind.idx()].lock();
-        bucket.tick += 1;
-        let tick = bucket.tick;
-        bucket.entries.insert(
-            key,
-            Entry {
-                value: Arc::new(json),
-                typed: None,
-                inserted: Instant::now(),
-                last_access: tick,
-            },
-        );
+        bucket.insert(key, Arc::new(json), None, pinned);
         bucket.evict_lru(max_size);
+    }
+
+    /// Effective per-kind entry cap, or `None` when caching is disabled.
+    fn cap_if_enabled(&self, kind: CacheKind) -> Option<usize> {
+        let c = self.config.lock();
+        if !c.enabled {
+            return None;
+        }
+        Some(Self::cap_for(kind, c.max_size))
     }
 
     /// Caches `value` keeping the original `Arc<T>` so [`Self::get_typed`]
@@ -334,25 +465,33 @@ impl Cache {
     /// tenant search corpus). TTL / LRU / tenant invalidation behave identically
     /// to [`Self::put`]; `get::<T>` on such a key reads `Null` and misses.
     pub fn put_typed<T: Send + Sync + 'static>(&self, kind: CacheKind, key: String, value: Arc<T>) {
-        let max_size = {
-            let c = self.config.lock();
-            if !c.enabled {
-                return;
-            }
-            c.max_size
+        self.put_typed_inner(kind, key, value, false);
+    }
+
+    /// [`Self::put_typed`] with the [`Self::put_index`] pin — the combination the
+    /// large, read-hot tenant indexes want: no re-deserialize on read *and* not
+    /// evictable by the per-app entries sharing their bucket.
+    pub fn put_typed_index<T: Send + Sync + 'static>(
+        &self,
+        kind: CacheKind,
+        key: String,
+        value: Arc<T>,
+    ) {
+        self.put_typed_inner(kind, key, value, true);
+    }
+
+    fn put_typed_inner<T: Send + Sync + 'static>(
+        &self,
+        kind: CacheKind,
+        key: String,
+        value: Arc<T>,
+        pinned: bool,
+    ) {
+        let Some(max_size) = self.cap_if_enabled(kind) else {
+            return;
         };
         let mut bucket = self.buckets[kind.idx()].lock();
-        bucket.tick += 1;
-        let tick = bucket.tick;
-        bucket.entries.insert(
-            key,
-            Entry {
-                value: Arc::new(serde_json::Value::Null),
-                typed: Some(value),
-                inserted: Instant::now(),
-                last_access: tick,
-            },
-        );
+        bucket.insert(key, Arc::new(serde_json::Value::Null), Some(value), pinned);
         bucket.evict_lru(max_size);
     }
 
@@ -378,7 +517,7 @@ impl Cache {
     }
 
     pub fn invalidate(&self, kind: CacheKind, key: &str) {
-        self.buckets[kind.idx()].lock().entries.remove(key);
+        self.buckets[kind.idx()].lock().remove(key);
     }
 
     /// Drops every entry of `kind` whose key begins with `prefix`. Used for
@@ -387,8 +526,7 @@ impl Cache {
     pub fn invalidate_prefix(&self, kind: CacheKind, prefix: &str) {
         self.buckets[kind.idx()]
             .lock()
-            .entries
-            .retain(|k, _| !k.starts_with(prefix));
+            .retain(|k| !k.starts_with(prefix));
     }
 
     /// Drops every entry across **all** kinds whose key begins with
@@ -402,8 +540,7 @@ impl Cache {
         for kind in CacheKind::ALL {
             self.buckets[kind.idx()]
                 .lock()
-                .entries
-                .retain(|k, _| !k.starts_with(&prefix));
+                .retain(|k| !k.starts_with(&prefix));
         }
     }
 
@@ -572,6 +709,155 @@ mod tests {
         let last: Option<Sample> =
             cache.get(CacheKind::Permissions, &format!("k{}", MAX_CACHE_SIZE + 24));
         assert!(last.is_some());
+    }
+
+    /// The LRU index must track *recency*, not insertion order — a read of an
+    /// old key has to rescue it from the next eviction. This is what the
+    /// `tick -> key` index has to keep in step on `touch`.
+    #[test]
+    fn eviction_is_by_recency_not_insertion_order() {
+        let cache = Cache::new();
+        cache.configure(None, None, None, None, None, Some(3));
+        for i in 0..3 {
+            cache.put(
+                CacheKind::Permissions,
+                format!("k{i}"),
+                &Sample(format!("v{i}")),
+            );
+        }
+        // Re-read the oldest entry, making it the most recently used.
+        assert!(cache.get::<Sample>(CacheKind::Permissions, "k0").is_some());
+        // Inserting past the cap must now evict k1 (the true LRU), not k0.
+        cache.put(CacheKind::Permissions, "k3".into(), &Sample("v3".into()));
+        assert!(
+            cache.get::<Sample>(CacheKind::Permissions, "k0").is_some(),
+            "the touched entry must survive"
+        );
+        assert!(
+            cache.get::<Sample>(CacheKind::Permissions, "k1").is_none(),
+            "the least-recently-used entry must be the one evicted"
+        );
+    }
+
+    /// A pinned index entry must outlive a flood of ordinary entries in the same
+    /// bucket — the per-app `app_detail|…` / `mail_scopes|…` writes an audit run
+    /// makes, which previously evicted the tenant-wide indexes.
+    #[test]
+    fn pinned_entries_survive_lru_pressure() {
+        let cache = Cache::new();
+        cache.configure(None, None, None, None, None, Some(4));
+        cache.put_index(
+            CacheKind::Permissions,
+            "t1|sp_index".into(),
+            &Sample("index".into()),
+        );
+        for i in 0..50 {
+            cache.put(
+                CacheKind::Permissions,
+                format!("t1|app_detail|{i}"),
+                &Sample(format!("v{i}")),
+            );
+        }
+        let index: Option<Sample> = cache.get(CacheKind::Permissions, "t1|sp_index");
+        assert_eq!(index, Some(Sample("index".into())));
+    }
+
+    /// Pinning is an LRU exemption only — an explicit tenant sweep still drops
+    /// the entry, or sign-out would leak one tenant's index into the next.
+    #[test]
+    fn pinned_entries_are_still_swept_by_tenant_invalidation() {
+        let cache = Cache::new();
+        cache.put_index(CacheKind::Lists, "t1|sp_index".into(), &Sample("a".into()));
+        cache.put_typed_index(CacheKind::Lists, "t1|corpus".into(), Arc::new(vec![1u32]));
+        cache.invalidate_tenant("t1");
+        assert!(
+            cache
+                .get::<Sample>(CacheKind::Lists, "t1|sp_index")
+                .is_none()
+        );
+        assert!(
+            cache
+                .get_typed::<Vec<u32>>(CacheKind::Lists, "t1|corpus")
+                .is_none()
+        );
+    }
+
+    /// `ServicePrincipal` holds one small entry per app registration (the
+    /// audit's `|lean` seeding), so it is capped at the tenant-enumeration
+    /// ceiling rather than the aggregate-sized `MAX_CACHE_SIZE`. Without this a
+    /// seeding pass over a large tenant evicts its own earlier entries and every
+    /// one of them falls back to an individual Graph GET.
+    #[test]
+    fn service_principal_bucket_holds_a_whole_large_tenant() {
+        let cache = Cache::new();
+        let overflow = MAX_CACHE_SIZE + 500;
+        for i in 0..overflow {
+            cache.put(
+                CacheKind::ServicePrincipal,
+                format!("t1|{i}|lean"),
+                &Sample(format!("v{i}")),
+            );
+        }
+        // Nothing evicted: the cap is MAX_PER_OBJECT_CACHE_SIZE, well above this.
+        assert!(
+            cache
+                .get::<Sample>(CacheKind::ServicePrincipal, "t1|0|lean")
+                .is_some(),
+            "the first-seeded entry must survive a full-tenant seeding pass"
+        );
+        let count = {
+            let bucket = cache.buckets[CacheKind::ServicePrincipal.idx()].lock();
+            bucket.entries.len()
+        };
+        assert_eq!(count, overflow);
+    }
+
+    /// The `tick -> key` index is only correct if it stays in step with
+    /// `entries` across every mutation path. A leak would silently degrade
+    /// eviction into skipping stale rows forever.
+    #[test]
+    fn lru_index_stays_in_step_with_entries() {
+        let cache = Cache::new();
+        for i in 0..20 {
+            cache.put(
+                CacheKind::Lists,
+                format!("t1|k{i}"),
+                &Sample(format!("v{i}")),
+            );
+        }
+        // Touch some, replace some, remove some, sweep some.
+        for i in 0..5 {
+            let _: Option<Sample> = cache.get(CacheKind::Lists, &format!("t1|k{i}"));
+        }
+        for i in 5..10 {
+            cache.put(
+                CacheKind::Lists,
+                format!("t1|k{i}"),
+                &Sample(format!("replaced{i}")),
+            );
+        }
+        for i in 10..15 {
+            cache.invalidate(CacheKind::Lists, &format!("t1|k{i}"));
+        }
+        cache.put(CacheKind::Lists, "t2|other".into(), &Sample("x".into()));
+        cache.invalidate_tenant("t2");
+
+        let bucket = cache.buckets[CacheKind::Lists.idx()].lock();
+        assert_eq!(
+            bucket.lru.len(),
+            bucket.entries.len(),
+            "LRU index must hold exactly one live row per entry"
+        );
+        for (tick, key) in &bucket.lru {
+            let entry = bucket
+                .entries
+                .get(key)
+                .unwrap_or_else(|| panic!("LRU index references missing key {key}"));
+            assert_eq!(
+                entry.last_access, *tick,
+                "LRU index tick must match the entry's last_access"
+            );
+        }
     }
 
     #[test]

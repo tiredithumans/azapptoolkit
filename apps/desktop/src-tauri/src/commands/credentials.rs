@@ -26,8 +26,8 @@ use crate::dto::UiError;
 use crate::dto::credentials::CredentialRowDto;
 use crate::state::AppState;
 
-/// Page size — Graph caps `$top` at 100 on `/applications`.
-const PAGE_SIZE: u32 = 100;
+/// Page size — the shared `/applications` maximum.
+const PAGE_SIZE: u32 = azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE;
 /// Safety cap on total apps scanned, mirroring the audit run.
 const MAX_APPS: usize = 10_000;
 

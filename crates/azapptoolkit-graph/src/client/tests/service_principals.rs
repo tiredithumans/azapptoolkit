@@ -206,6 +206,55 @@ async fn seed_lean_sps_from_index_makes_the_lean_lookup_a_cache_hit() {
 }
 
 #[tokio::test]
+async fn seed_lean_sps_from_index_never_evicts_its_own_entries() {
+    // Regression guard. Seeding one entry per app registration into a bucket
+    // smaller than the pass would push every insert past the cap, evicting an
+    // entry this same pass had just written — so the earliest-seeded apps would
+    // fall back to an individual Graph GET, which is exactly the N+1 this
+    // function exists to remove. The pass must be bounded by the bucket size.
+    let server = MockServer::start().await;
+    // Any request at all means a seeded entry was evicted and fell through.
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": []
+        })))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+
+    let cap = client
+        .cache
+        .capacity_for(azapptoolkit_core::cache::CacheKind::ServicePrincipal);
+    let overflow = cap + 50;
+    let sp_index: Vec<azapptoolkit_core::models::ServicePrincipal> = (0..overflow)
+        .map(|i| {
+            serde_json::from_value(serde_json::json!({
+                "id": format!("sp-{i}"),
+                "appId": format!("app-{i}"),
+                "accountEnabled": true
+            }))
+            .expect("sample SP deserializes")
+        })
+        .collect();
+    let app_ids: Vec<String> = (0..overflow).map(|i| format!("app-{i}")).collect();
+    client.seed_lean_sps_from_index(&app_ids, &sp_index);
+
+    // The FIRST app seeded must still be a cache hit: an uncapped pass would
+    // have evicted it while writing the tail.
+    let first = client
+        .get_service_principal_by_app_id_lean("app-0")
+        .await
+        .unwrap();
+    assert_eq!(
+        first.as_ref().map(|sp| sp.id.as_str()),
+        Some("sp-0"),
+        "the earliest-seeded entry must survive the rest of the pass"
+    );
+}
+
+#[tokio::test]
 async fn list_service_principals_index_selects_superset_and_returns_all_sps() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

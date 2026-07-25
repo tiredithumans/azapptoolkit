@@ -56,7 +56,8 @@ mod transport;
 pub use applications::{
     ApiApplicationPatch, AppListQuery, AppPatch, ApplicationAuthenticationPatch,
     ApplicationExposeApiPatch, ApplicationPublicClientPatch, ApplicationSpaPatch,
-    ApplicationSsoPatch, ApplicationWebPatch, CreateApplicationRequest, ImplicitGrantSettingsPatch,
+    ApplicationSsoPatch, ApplicationWebPatch, CreateApplicationRequest, DEFAULT_APP_PAGE_SIZE,
+    ImplicitGrantSettingsPatch,
 };
 pub use credentials::{FederatedCredentialPatch, FederatedCredentialRequest};
 pub use service_principals::{ServicePrincipalSigningKeyPatch, ServicePrincipalSsoModePatch};
