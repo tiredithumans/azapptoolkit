@@ -135,6 +135,83 @@ async fn upsert_admin_oauth2_grant_merges_scopes_when_existing_is_partial() {
     assert!(grant.scope.split_whitespace().any(|s| s == "User.Read"));
 }
 
+/// The pre-read variant must make NO grant-collection read of its own — that is
+/// the entire reason it exists. The admin-consent path upserts once per declared
+/// resource, so a read inside the call is an N+1 in the resource count. Only the
+/// PATCH is mocked here: any GET would fall through to wiremock's 404 and fail
+/// the upsert, so a reintroduced read cannot pass silently.
+#[tokio::test]
+async fn upsert_admin_oauth2_grant_in_reads_no_grants_of_its_own() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/oauth2PermissionGrants/g-1"))
+        .and(wiremock::matchers::body_json(serde_json::json!({
+            "scope": "User.Read email"
+        })))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let existing = vec![
+        // A grant on a DIFFERENT resource must not be matched…
+        azapptoolkit_core::models::OAuth2PermissionGrant {
+            id: Some("g-other".into()),
+            client_id: "sp-client".into(),
+            resource_id: "sp-exchange".into(),
+            consent_type: "AllPrincipals".into(),
+            principal_id: None,
+            scope: "Mail.Read".into(),
+        },
+        // …nor a user-consent grant on the right one.
+        azapptoolkit_core::models::OAuth2PermissionGrant {
+            id: Some("g-user".into()),
+            client_id: "sp-client".into(),
+            resource_id: "sp-graph".into(),
+            consent_type: "Principal".into(),
+            principal_id: Some("u-1".into()),
+            scope: "openid".into(),
+        },
+        azapptoolkit_core::models::OAuth2PermissionGrant {
+            id: Some("g-1".into()),
+            client_id: "sp-client".into(),
+            resource_id: "sp-graph".into(),
+            consent_type: "AllPrincipals".into(),
+            principal_id: None,
+            scope: "User.Read".into(),
+        },
+    ];
+    let client = make_client(&server.uri());
+    let grant = client
+        .upsert_admin_oauth2_grant_in("sp-client", "sp-graph", &["email"], &existing)
+        .await
+        .unwrap();
+    assert_eq!(grant.id.as_deref(), Some("g-1"));
+    assert!(grant.scope.split_whitespace().any(|s| s == "email"));
+}
+
+/// With no matching grant in the pre-read list, the variant creates one — and
+/// still makes no read.
+#[tokio::test]
+async fn upsert_admin_oauth2_grant_in_creates_when_the_pre_read_list_has_no_match() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth2PermissionGrants"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": "grant-new",
+            "clientId": "sp-client",
+            "resourceId": "sp-graph",
+            "consentType": "AllPrincipals",
+            "scope": "User.Read"
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let grant = client
+        .upsert_admin_oauth2_grant_in("sp-client", "sp-graph", &["User.Read"], &[])
+        .await
+        .unwrap();
+    assert_eq!(grant.id.as_deref(), Some("grant-new"));
+}
+
 #[tokio::test]
 async fn upsert_admin_oauth2_grant_noops_when_scopes_are_subset() {
     let server = MockServer::start().await;

@@ -113,11 +113,16 @@ async fn get_application_returns_single() {
 }
 
 #[tokio::test]
-async fn list_application_index_returns_appid_object_id_pairs_without_orderby() {
+async fn list_application_index_named_projects_name_without_orderby_or_count() {
+    // The single shared index projection: `id,appId,displayName` — the pairing
+    // joins need the first two, global search substring-matches the third, and
+    // one shape is what lets the command layer cache ONE entry for both. No
+    // `$orderby`/`$count`: the result feeds a HashMap / an in-memory ranker, so
+    // a server-side sort (and the advanced-query mode it forces) is wasted work.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/applications"))
-        .and(query_param("$select", "id,appId"))
+        .and(query_param("$select", "id,appId,displayName"))
         .and(query_param_is_missing("$orderby"))
         .and(query_param_is_missing("$count"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -129,9 +134,14 @@ async fn list_application_index_returns_appid_object_id_pairs_without_orderby() 
         .mount(&server)
         .await;
     let client = make_client(&server.uri());
-    let pairs = client.list_application_index(Some(5000)).await.unwrap();
-    assert_eq!(pairs.len(), 2);
-    assert_eq!(pairs[0], ("app-a".to_string(), "obj-a".to_string()));
+    let apps = client
+        .list_application_index_named(Some(5000))
+        .await
+        .unwrap();
+    assert_eq!(apps.len(), 2);
+    assert_eq!(apps[0].app_id, "app-a");
+    assert_eq!(apps[0].id, "obj-a");
+    assert_eq!(apps[0].display_name, "A");
 }
 
 #[tokio::test]

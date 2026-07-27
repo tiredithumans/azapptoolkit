@@ -533,10 +533,18 @@ pub async fn find_mailbox_reachers(
     // the App Registration pane by the application object id; a miss (managed
     // identity, foreign enterprise app, or orphaned SP) routes to the enterprise /
     // MI pane by the SP object id. Best-effort — an unreadable list just routes
-    // every row by SP object id, never changing a verdict.
+    // every row by SP object id, never changing a verdict. Reads the SHARED
+    // per-tenant app-registration index (the same entry global search and the
+    // Enterprise Apps join use) rather than running a `/applications` scan of
+    // its own on every probe.
     let app_reg_index: Arc<HashMap<String, String>> = Arc::new(
-        match client.list_application_index(None).await {
-            Ok(pairs) => pairs.into_iter().collect(),
+        match crate::commands::applications::app_name_index_cached(&state, &client, &tenant_id)
+            .await
+        {
+            Ok(apps) => apps
+                .iter()
+                .map(|a| (a.app_id.clone(), a.id.clone()))
+                .collect(),
             Err(err) => {
                 tracing::info!(
                     ?err,

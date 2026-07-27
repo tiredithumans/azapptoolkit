@@ -330,13 +330,17 @@ pub(crate) fn declare_resource_access(
 /// Order of operations:
 ///   1. Read the target application.
 ///   2. Ensure the client service principal exists (create if missing).
-///   3. For each resource group:
+///   3. Snapshot the client SP's existing `appRoleAssignments` **and**
+///      `oauth2PermissionGrants` — once, concurrently. Both drive idempotency
+///      inside the per-resource loop, so neither may be read from within it.
+///   4. For each resource group:
 ///      a. Resolve the resource SP (live Graph; cached under `Permissions` kind).
 ///      b. For each `Role` permission: skip if already assigned, else POST
 ///         `appRoleAssignments`.
 ///      c. For each `Scope` permission: resolve the scope value from the
-///         resource SP's `oauth2PermissionScopes`, then `upsert_admin_oauth2_grant`
-///         with the aggregate scope list for that resource.
+///         resource SP's `oauth2PermissionScopes`, then
+///         `upsert_admin_oauth2_grant_in` (the pre-read-grants variant) with the
+///         aggregate scope list for that resource.
 ///
 /// Partial failures are collected in `failures` rather than aborting the run.
 #[tauri::command]
@@ -385,10 +389,21 @@ pub(crate) async fn grant_admin_consent_core(
 ) -> Result<(GrantResult, bool), UiError> {
     let app = client.get_application(object_id).await?;
     let (client_sp, sp_created) = client.ensure_service_principal(&app.app_id).await?;
-    // Must not swallow this: if the existing-assignments lookup fails we can't
-    // tell which roles are already granted, and proceeding would re-grant
+    // Both idempotency snapshots are read ONCE, before the per-resource loop:
+    // the assignments for the Role branch and the delegated grants for the Scope
+    // branch. Each is a paged tenant read filtered to this client SP, and the
+    // loop below runs per declared resource — so leaving either inside it
+    // (`upsert_admin_oauth2_grant` reads the grants itself) is an N+1 in the
+    // number of resources the app declares.
+    //
+    // Must not swallow these: with the granted set unknown we can't tell which
+    // roles/scopes are already in place, and proceeding would re-grant
     // everything (duplicate/conflicting assignments).
-    let existing_assignments = client.list_app_role_assignments(&client_sp.id).await?;
+    let (existing_assignments, existing_grants) = futures::future::try_join(
+        client.list_app_role_assignments(&client_sp.id),
+        client.list_oauth2_grants(&client_sp.id),
+    )
+    .await?;
 
     // Batch-prewarm the resource SPs (one $batch POST per 20) so the loop
     // below hits the Permissions cache instead of one sequential GET per
@@ -503,7 +518,12 @@ pub(crate) async fn grant_admin_consent_core(
         }
 
         match client
-            .upsert_admin_oauth2_grant(&client_sp.id, &resource_sp.id, &scope_values)
+            .upsert_admin_oauth2_grant_in(
+                &client_sp.id,
+                &resource_sp.id,
+                &scope_values,
+                &existing_grants,
+            )
             .await
         {
             Ok(grant) => {

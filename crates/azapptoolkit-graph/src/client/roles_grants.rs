@@ -13,7 +13,10 @@ impl GraphClient {
         service_principal_id: &str,
     ) -> Result<Vec<AppRoleAssignment>> {
         let path = format!("/servicePrincipals/{service_principal_id}/appRoleAssignments");
-        let params: [(&str, &str); 1] = [("$select", APP_ROLE_ASSIGNMENT_SELECT)];
+        let params: [(&str, &str); 2] = [
+            ("$select", APP_ROLE_ASSIGNMENT_SELECT),
+            ("$top", MAX_PAGE_SIZE),
+        ];
         let page: Paged<AppRoleAssignment> = self.get_json(&path, &params, false).await?;
         self.collect_all_pages(page).await
     }
@@ -26,7 +29,15 @@ impl GraphClient {
         service_principal_id: &str,
     ) -> Result<Vec<AppRoleAssignment>> {
         let path = format!("/servicePrincipals/{service_principal_id}/appRoleAssignedTo");
-        let params: [(&str, &str); 1] = [("$select", APP_ROLE_ASSIGNMENT_SELECT)];
+        // The heaviest paged read in the app: pointed at the Microsoft Graph SP
+        // (the audit's `prefetch_graph_app_roles`, the consent view's tenant-wide
+        // scan) this collection holds every app-permission grant in the tenant,
+        // so the page size decides how many serial round trips run before either
+        // surface can score anything. See [`MAX_PAGE_SIZE`].
+        let params: [(&str, &str); 2] = [
+            ("$select", APP_ROLE_ASSIGNMENT_SELECT),
+            ("$top", MAX_PAGE_SIZE),
+        ];
         let page: Paged<AppRoleAssignment> = self.get_json(&path, &params, false).await?;
         self.collect_all_pages(page).await
     }
@@ -44,7 +55,10 @@ impl GraphClient {
             .map(|id| {
                 batch_sub_url(
                     &format!("/servicePrincipals/{id}/appRoleAssignedTo"),
-                    &[("$select", APP_ROLE_ASSIGNMENT_SELECT)],
+                    &[
+                        ("$select", APP_ROLE_ASSIGNMENT_SELECT),
+                        ("$top", MAX_PAGE_SIZE),
+                    ],
                 )
             })
             .collect();
@@ -64,7 +78,10 @@ impl GraphClient {
             .map(|id| {
                 batch_sub_url(
                     &format!("/servicePrincipals/{id}/appRoleAssignments"),
-                    &[("$select", APP_ROLE_ASSIGNMENT_SELECT)],
+                    &[
+                        ("$select", APP_ROLE_ASSIGNMENT_SELECT),
+                        ("$top", MAX_PAGE_SIZE),
+                    ],
                 )
             })
             .collect();
@@ -108,9 +125,10 @@ impl GraphClient {
         service_principal_id: &str,
     ) -> Result<Vec<OAuth2PermissionGrant>> {
         let filter = format!("clientId eq '{}'", escape_odata(service_principal_id));
-        let params: [(&str, &str); 2] = [
+        let params: [(&str, &str); 3] = [
             ("$filter", filter.as_str()),
             ("$select", OAUTH2_GRANT_SELECT),
+            ("$top", MAX_PAGE_SIZE),
         ];
         let page: Paged<OAuth2PermissionGrant> = self
             .get_json("/oauth2PermissionGrants", &params, false)
@@ -121,7 +139,7 @@ impl GraphClient {
     /// Every delegated permission grant in the tenant (`/oauth2PermissionGrants`,
     /// unfiltered). Used by the consent-grant audit. Follows `@odata.nextLink`.
     pub async fn list_all_oauth2_grants(&self) -> Result<Vec<OAuth2PermissionGrant>> {
-        let params: [(&str, &str); 2] = [("$top", "999"), ("$select", OAUTH2_GRANT_SELECT)];
+        let params: [(&str, &str); 2] = [("$top", MAX_PAGE_SIZE), ("$select", OAUTH2_GRANT_SELECT)];
         let page: Paged<OAuth2PermissionGrant> = self
             .get_json("/oauth2PermissionGrants", &params, false)
             .await?;
@@ -214,15 +232,42 @@ impl GraphClient {
     /// Ensures an admin-consent OAuth2 grant exists for `(client_sp_id,
     /// resource_sp_id)` and covers every scope in `desired_scopes`. Returns
     /// the final grant (either newly created or updated). Idempotent.
+    ///
+    /// Reads the client's grant collection itself, so a caller upserting for
+    /// **several** resources in a row should read it once and use
+    /// [`Self::upsert_admin_oauth2_grant_in`] instead.
     pub async fn upsert_admin_oauth2_grant(
         &self,
         client_sp_id: &str,
         resource_sp_id: &str,
         desired_scopes: &[&str],
     ) -> Result<OAuth2PermissionGrant> {
-        if let Some(existing) = self
-            .find_admin_oauth2_grant(client_sp_id, resource_sp_id)
-            .await?
+        let existing = self.list_oauth2_grants(client_sp_id).await?;
+        self.upsert_admin_oauth2_grant_in(client_sp_id, resource_sp_id, desired_scopes, &existing)
+            .await
+    }
+
+    /// [`Self::upsert_admin_oauth2_grant`] against an **already-read** grant
+    /// list, so a per-resource upsert loop doesn't re-read the client's whole
+    /// `/oauth2PermissionGrants` collection on every iteration — the same hoist
+    /// the admin-consent path already applies to `appRoleAssignments` on its
+    /// Role branch.
+    ///
+    /// `existing_grants` may go stale as the loop writes, but only for the
+    /// resource just upserted: the match is `resourceId` + `AllPrincipals`, and
+    /// an application declares each resource at most once, so no later iteration
+    /// reads an entry this one wrote.
+    pub async fn upsert_admin_oauth2_grant_in(
+        &self,
+        client_sp_id: &str,
+        resource_sp_id: &str,
+        desired_scopes: &[&str],
+        existing_grants: &[OAuth2PermissionGrant],
+    ) -> Result<OAuth2PermissionGrant> {
+        if let Some(existing) = existing_grants
+            .iter()
+            .find(|g| g.resource_id == resource_sp_id && g.consent_type == "AllPrincipals")
+            .cloned()
         {
             let current: std::collections::BTreeSet<&str> =
                 existing.scope.split_whitespace().collect();

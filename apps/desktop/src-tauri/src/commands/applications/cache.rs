@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use azapptoolkit_core::cache::{Cache, CacheKind};
-use azapptoolkit_core::models::ServicePrincipal;
+use azapptoolkit_core::models::{Application, ServicePrincipal};
 use azapptoolkit_graph::{GraphClient, GraphError};
 
 use crate::state::AppState;
@@ -33,10 +33,16 @@ pub(crate) fn sp_index_key(tenant_id: &str) -> String {
     format!("{tenant_id}|sp_index")
 }
 
-/// Cache key for the per-tenant app-registration name index (`id`, `appId`,
-/// `displayName`) the global search substring-matches against. Distinct from
+/// Cache key for the per-tenant app-registration index (`id`, `appId`,
+/// `displayName`) — the `/applications` twin of [`sp_index_key`]. Distinct from
 /// `sp_index` (service principals): app registrations without a paired SP only
 /// live here.
+///
+/// Named for its original reader (the global search substring match), but every
+/// surface that needs "which app registrations exist in this tenant" now joins
+/// against this one entry — global search, the Enterprise Apps pairing join, the
+/// DR backup's estate enumeration, and the mailbox probe's routing map. Those
+/// last three each used to run their own uncached `/applications` scan.
 pub(crate) fn app_name_index_key(tenant_id: &str) -> String {
     format!("{tenant_id}|app_name_index")
 }
@@ -201,6 +207,183 @@ pub(crate) async fn sp_index_cached(
     }
     let sps = client.list_service_principals_index().await?;
     Ok(sp_index_store(&state.cache, tenant_id, sps))
+}
+
+/// Reads the cached per-tenant app-registration index, if present.
+///
+/// The `/applications` counterpart of [`sp_index_hit`], and typed + pinned for
+/// the same two reasons: four surfaces read it (global search, the Enterprise
+/// Apps pairing join, the DR backup, the mailbox probe), so re-materializing a
+/// 10 000-entry JSON tree per read was pure CPU on a runtime worker; and it
+/// shares its bucket with the thousands of per-app `app_detail|…` /
+/// `mail_scopes|…` writes, which must not be able to evict an entry that costs
+/// a full `/applications` scan to rebuild.
+///
+/// Every reader must go through this (and [`app_name_index_store`]) rather than
+/// `cache.get`: a typed entry read untyped reads as a miss, silently costing a
+/// tenant-wide rescan.
+pub(crate) fn app_name_index_hit(cache: &Cache, tenant_id: &str) -> Option<Arc<Vec<Application>>> {
+    cache.get_typed::<Vec<Application>>(CacheKind::Lists, &app_name_index_key(tenant_id))
+}
+
+/// Caches a freshly-fetched app-registration index and hands back the shared
+/// handle. Pair with [`app_name_index_hit`].
+pub(crate) fn app_name_index_store(
+    cache: &Cache,
+    tenant_id: &str,
+    apps: Vec<Application>,
+) -> Arc<Vec<Application>> {
+    let shared = Arc::new(apps);
+    cache.put_typed_index(
+        CacheKind::Lists,
+        app_name_index_key(tenant_id),
+        Arc::clone(&shared),
+    );
+    shared
+}
+
+/// The per-tenant app-registration index, read through the shared cache entry
+/// ([`app_name_index_key`]) and fetched on a miss. The `/applications` sibling
+/// of [`sp_index_cached`].
+///
+/// Bounded by [`APPS_MAX`](super::APPS_MAX), like every other tenant-wide
+/// enumeration in the backend — the caps must not drift, or one surface silently
+/// knows about apps another does not.
+pub(crate) async fn app_name_index_cached(
+    state: &AppState,
+    client: &GraphClient,
+    tenant_id: &str,
+) -> Result<Arc<Vec<Application>>, GraphError> {
+    if let Some(cached) = app_name_index_hit(&state.cache, tenant_id) {
+        return Ok(cached);
+    }
+    let apps = client
+        .list_application_index_named(Some(super::APPS_MAX))
+        .await?;
+    Ok(app_name_index_store(&state.cache, tenant_id, apps))
+}
+
+/// Both tenant-wide indexes, fetching only the cold ones — and, when both are
+/// cold, fetching them **concurrently**, so a first visit to a list that joins
+/// them waits on one directory scan rather than two serial ones.
+pub(crate) async fn indexes_cached(
+    state: &AppState,
+    client: &GraphClient,
+    tenant_id: &str,
+) -> Result<(Arc<Vec<ServicePrincipal>>, Arc<Vec<Application>>), GraphError> {
+    match (
+        sp_index_hit(&state.cache, tenant_id),
+        app_name_index_hit(&state.cache, tenant_id),
+    ) {
+        (Some(sps), Some(apps)) => Ok((sps, apps)),
+        (Some(sps), None) => Ok((sps, app_name_index_cached(state, client, tenant_id).await?)),
+        (None, Some(apps)) => Ok((sp_index_cached(state, client, tenant_id).await?, apps)),
+        (None, None) => {
+            let (sps, apps) = futures::future::try_join(
+                client.list_service_principals_index(),
+                client.list_application_index_named(Some(super::APPS_MAX)),
+            )
+            .await?;
+            Ok((
+                sp_index_store(&state.cache, tenant_id, sps),
+                app_name_index_store(&state.cache, tenant_id, apps),
+            ))
+        }
+    }
+}
+
+/// The `/applications` index carries the same three contracts the SP index
+/// does — shared allocation, typed-only reachability, pinned against per-app
+/// churn, dropped on the tenant sweep. Mirrored here rather than folded into
+/// `sp_index_tests` so a regression names the index that broke.
+#[cfg(test)]
+mod app_name_index_tests {
+    use super::{app_name_index_hit, app_name_index_key, app_name_index_store};
+    use azapptoolkit_core::cache::{Cache, CacheKind};
+    use azapptoolkit_core::models::Application;
+
+    fn app(id: &str) -> Application {
+        Application {
+            id: id.to_string(),
+            app_id: format!("app-{id}"),
+            display_name: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// A hit must hand back the SAME allocation, not a rebuild: four surfaces
+    /// read this entry, and an untyped read walked a 10 000-entry JSON tree on
+    /// a runtime worker every time.
+    #[test]
+    fn a_hit_is_a_refcount_clone_not_a_deserialize() {
+        let cache = Cache::new();
+        let stored = app_name_index_store(&cache, "t1", vec![app("a"), app("b")]);
+        let hit = app_name_index_hit(&cache, "t1").expect("index hit");
+        assert!(std::sync::Arc::ptr_eq(&stored, &hit));
+    }
+
+    /// The trap this design carries: stored typed, so a reader reaching for it
+    /// with the plain `get` reads a MISS and silently pays for a full
+    /// `/applications` rescan. Every reader must go through
+    /// `app_name_index_hit` / `app_name_index_cached`.
+    #[test]
+    fn the_index_is_not_reachable_through_the_untyped_get() {
+        let cache = Cache::new();
+        app_name_index_store(&cache, "t1", vec![app("a")]);
+        assert!(
+            cache
+                .get::<Vec<Application>>(CacheKind::Lists, &app_name_index_key("t1"))
+                .is_none(),
+            "read the typed index untyped — use app_name_index_hit instead"
+        );
+    }
+
+    /// Pinning must never defeat the cross-tenant sweep — the repo's #1 footgun.
+    #[test]
+    fn the_pinned_index_is_still_dropped_on_tenant_sweep() {
+        let cache = Cache::new();
+        app_name_index_store(&cache, "t1", vec![app("a")]);
+        app_name_index_store(&cache, "t2", vec![app("b")]);
+        cache.invalidate_tenant("t1");
+        assert!(app_name_index_hit(&cache, "t1").is_none(), "swept tenant");
+        assert!(
+            app_name_index_hit(&cache, "t2").is_some(),
+            "other tenant kept"
+        );
+    }
+
+    /// Per-app entries share this index's bucket; a mail-heavy audit writes
+    /// thousands of them. Before pinning, that churn could evict an entry that
+    /// costs a full `/applications` scan to rebuild.
+    #[test]
+    fn per_app_churn_cannot_evict_the_index() {
+        let cache = Cache::new();
+        cache.configure(None, None, None, None, None, Some(8));
+        app_name_index_store(&cache, "t1", vec![app("a")]);
+        for i in 0..200 {
+            cache.put(
+                CacheKind::Lists,
+                format!("t1|app_detail|{i}"),
+                &i.to_string(),
+            );
+        }
+        assert!(app_name_index_hit(&cache, "t1").is_some());
+    }
+
+    /// The list-changing bust must reach the index — a create/delete/rename
+    /// changes the app set every reader joins against.
+    #[test]
+    fn invalidate_app_lists_drops_the_index() {
+        let cache = Cache::new();
+        app_name_index_store(&cache, "t1", vec![app("a")]);
+        app_name_index_store(&cache, "t2", vec![app("b")]);
+        super::invalidate_app_lists(&cache, "t1");
+        assert!(app_name_index_hit(&cache, "t1").is_none());
+        assert!(
+            app_name_index_hit(&cache, "t2").is_some(),
+            "other tenant must survive"
+        );
+    }
 }
 
 #[cfg(test)]
