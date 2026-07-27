@@ -23,10 +23,6 @@ pub async fn sign_out(tenant: &TenantContext) -> Result<(), UiError> {
     invoke_result("sign_out", SignOutArgs { tenant }).await
 }
 
-pub async fn current_tenants() -> Result<Vec<TenantContext>, UiError> {
-    invoke_result("current_tenants", ()).await
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RefreshSessionArgs<'a> {

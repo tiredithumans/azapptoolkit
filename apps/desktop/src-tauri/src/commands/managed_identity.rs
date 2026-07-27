@@ -35,7 +35,7 @@ const HIGH_PRIVILEGE_ROLES: &[&str] = &[
 /// proportionally longer rather than truncating the result.
 const ARM_CONCURRENCY: usize = 8;
 
-fn mi_key(tenant_id: &str) -> String {
+pub(crate) fn mi_key(tenant_id: &str) -> String {
     format!("{tenant_id}|mi")
 }
 
@@ -55,23 +55,27 @@ pub async fn list_managed_identities(
     }
     tracing::debug!(target = "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
 
+    // Filter the SHARED service-principal index rather than running a second,
+    // near-identical `/servicePrincipals` scan of our own. That index is
+    // unfiltered by design (the App Registrations join needs every SP), already
+    // carries `servicePrincipalType` and `alternativeNames`, and is read by five
+    // other surfaces — so on a warm tenant this list now costs nothing, and on a
+    // cold one it seeds the index everything else then reuses.
     let client = state.graph_for(&tenant_id);
-    let identities = client.list_managed_identities().await?;
-    let rows: Vec<ManagedIdentityDto> = identities
-        .into_iter()
-        .map(|sp| {
-            let mi_subtype = MiSubtype::from_alternative_names(&sp.alternative_names);
-            ManagedIdentityDto {
-                id: sp.id,
-                app_id: sp.app_id,
-                display_name: sp.display_name,
-                account_enabled: sp.account_enabled,
-                mi_subtype,
-            }
+    let sps = crate::commands::applications::sp_index_cached(&state, &client, &tenant_id).await?;
+    let rows: Vec<ManagedIdentityDto> = sps
+        .iter()
+        .filter(|sp| sp.service_principal_type.as_deref() == Some("ManagedIdentity"))
+        .map(|sp| ManagedIdentityDto {
+            id: sp.id.clone(),
+            app_id: sp.app_id.clone(),
+            display_name: sp.display_name.clone(),
+            account_enabled: sp.account_enabled,
+            mi_subtype: MiSubtype::from_alternative_names(&sp.alternative_names),
         })
         .collect();
 
-    state.cache.put(CacheKind::Lists, key, &rows);
+    state.cache.put_index(CacheKind::Lists, key, &rows);
     Ok(rows)
 }
 

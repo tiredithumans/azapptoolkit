@@ -13,6 +13,9 @@ use azapptoolkit_web_rs::views::dialogs::gallery_dialog::GalleryDialog;
 #[wasm_bindgen_test]
 async fn browse_pick_and_create_from_gallery() {
     ts::reset();
+    // The dialog prewarms the corpus on open (fire-and-forget); mock it so the
+    // call resolves cleanly rather than relying on a rejected-promise fallback.
+    ts::mock_ok("prefetch_application_gallery", &());
     ts::mock_ok(
         "search_application_templates",
         &fixtures::gallery_search_results(),
@@ -59,6 +62,7 @@ async fn browse_pick_and_create_from_gallery() {
 #[wasm_bindgen_test]
 async fn zero_results_says_no_match_not_type_a_name() {
     ts::reset();
+    ts::mock_ok("prefetch_application_gallery", &());
     ts::mock_ok(
         "search_application_templates",
         &fixtures::gallery_search_no_matches(),

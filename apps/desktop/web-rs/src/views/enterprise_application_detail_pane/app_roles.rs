@@ -19,6 +19,7 @@ use crate::bindings::enterprise_application::{
     self, AppRoleInput, AppRolesView, EnterpriseApplicationDetail,
 };
 use crate::components::modal_shell::ModalShell;
+use crate::components::ui::SkeletonList;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -252,14 +253,7 @@ pub(super) fn AppRolesContent(
             </header>
 
             <Suspense fallback=move || {
-                view! {
-                    <div class="centered-pad">
-                        <Spinner
-                            size=Signal::derive(|| SpinnerSize::Tiny)
-                            label="Loading app roles…"
-                        />
-                    </div>
-                }
+                view! { <SkeletonList rows=4 /> }
             }>
                 {move || Suspend::new(async move {
                     match roles_res.await {

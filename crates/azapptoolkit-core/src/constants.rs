@@ -54,3 +54,17 @@ pub const AUDIT_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 /// governs out-of-band changes made by another admin (a manual Refresh re-fetches).
 pub const LISTS_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 pub const MAX_CACHE_SIZE: usize = 5000;
+
+/// Entry cap for kinds that hold **one small entry per directory object** rather
+/// than a handful of tenant-wide aggregates — currently only
+/// [`crate::cache::CacheKind::ServicePrincipal`], whose `|lean` keys are seeded
+/// one-per-app-registration by the audit.
+///
+/// [`MAX_CACHE_SIZE`] (5000) is sized for aggregate entries and is *below* the
+/// 10 000-app ceiling the list/audit/credential scans enumerate to, so a
+/// per-object kind capped there cannot hold a large tenant: the back half of a
+/// seeding pass evicts the front half, and every evicted app falls back to an
+/// individual Graph GET. This cap matches that enumeration ceiling so a whole
+/// tenant fits. Entries of this kind are small (a lean service principal carries
+/// no `appRoles`/`oauth2PermissionScopes` arrays).
+pub const MAX_PER_OBJECT_CACHE_SIZE: usize = 10_000;

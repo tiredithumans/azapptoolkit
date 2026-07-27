@@ -12,6 +12,7 @@
 
 use azapptoolkit_arm::LogsQueryTable;
 use azapptoolkit_core::cache::CacheKind;
+use futures::stream::{self, StreamExt};
 use tauri::State;
 
 use crate::dto::UiError;
@@ -24,6 +25,10 @@ const USAGE_ROW_CAP: usize = 200;
 /// Safety cap on workspace table-presence probes per discovery run.
 const MAX_WORKSPACES_PROBED: usize = 50;
 
+/// Bounded fan-out width for the ARM control-plane sweep, matching the shared
+/// value the Key Vault picker / readiness / managed-identity sweeps use.
+const ARM_CONCURRENCY: usize = 8;
+
 /// Tenant-prefixed cache key for the discovered workspace (cross-tenant
 /// leakage guard, same convention as the list caches).
 ///
@@ -32,9 +37,20 @@ const MAX_WORKSPACES_PROBED: usize = 50;
 /// mutation busts this key — it's cleared only by the 60-min `Permissions` TTL
 /// and the sign-out tenant sweep (`invalidate_tenant`). If a workspace is
 /// re-pointed mid-session, "Clear all" in Cache diagnostics forces re-discovery.
+///
+/// Caches the **negative** outcome as well as the positive one (see
+/// [`WorkspaceLookup`]): most tenants have no Graph-activity export at all, and
+/// that is precisely the case where discovery is most expensive.
 fn workspace_cache_key(tenant_id: &str) -> String {
     format!("{tenant_id}|graph_activity_ws")
 }
+
+/// Cached discovery outcome. `None` — "this tenant exports no
+/// `MicrosoftGraphActivityLogs`" — is a real, cacheable answer: without it every
+/// visit to the usage panel re-ran the whole subscription × workspace sweep
+/// (up to [`MAX_WORKSPACES_PROBED`] multi-second Log Analytics probes) only to
+/// report "unavailable" again. Same TTL/sweep semantics as the positive hit.
+type WorkspaceLookup = Option<(String, String)>;
 
 /// Finds a Log Analytics workspace containing `MicrosoftGraphActivityLogs`:
 /// enumerate the subscriptions the signed-in user can reach, list each one's
@@ -47,11 +63,12 @@ async fn discover_workspace(
     state: &AppState,
     tenant_id: &str,
 ) -> Result<Option<(String, String)>, UiError> {
+    let cache_key = workspace_cache_key(tenant_id);
     if let Some(hit) = state
         .cache
-        .get::<(String, String)>(CacheKind::Permissions, &workspace_cache_key(tenant_id))
+        .get::<WorkspaceLookup>(CacheKind::Permissions, &cache_key)
     {
-        return Ok(Some(hit));
+        return Ok(hit);
     }
 
     // Typed ARM consent probe first, so a missing-consent rejection surfaces
@@ -64,58 +81,85 @@ async fn discover_workspace(
     let la = state.log_analytics_for(tenant_id);
 
     let subscriptions = arm.list_subscriptions().await.map_err(UiError::from)?;
+
+    // Bounded fan-out over subscriptions, matching the Key Vault picker and
+    // readiness sweeps. The serial form paid one ARM round trip per
+    // subscription back-to-back before any probe could start, so discovery
+    // scaled with the operator's subscription count. A subscription we can't
+    // read is skipped, not fatal.
+    let workspaces: Vec<_> = stream::iter(subscriptions)
+        .map(|sub| {
+            let arm = arm.clone();
+            async move {
+                match arm
+                    .list_log_analytics_workspaces(&sub.subscription_id)
+                    .await
+                {
+                    Ok(ws) => ws,
+                    Err(err) => {
+                        tracing::info!(
+                            sub = %sub.subscription_id,
+                            code = err.ui_code(),
+                            "usage: workspace listing failed; skipping subscription"
+                        );
+                        Vec::new()
+                    }
+                }
+            }
+        })
+        .buffer_unordered(ARM_CONCURRENCY)
+        .collect::<Vec<Vec<_>>>()
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+
     let mut probed = 0usize;
-    for sub in subscriptions {
-        let workspaces = match arm
-            .list_log_analytics_workspaces(&sub.subscription_id)
+    let mut found: WorkspaceLookup = None;
+    let mut hit_cap = false;
+    for ws in workspaces {
+        if probed >= MAX_WORKSPACES_PROBED {
+            tracing::warn!(
+                cap = MAX_WORKSPACES_PROBED,
+                "usage: workspace probe cap reached without a hit"
+            );
+            hit_cap = true;
+            break;
+        }
+        let Some(customer_id) = ws.properties.customer_id.clone() else {
+            continue;
+        };
+        probed += 1;
+        // Probes stay SERIAL: the first hit wins and the common tenant has one
+        // or two workspaces, so fanning these out would mostly buy extra Log
+        // Analytics load on a query surface that is already the slow one.
+        match la
+            .query(&customer_id, "MicrosoftGraphActivityLogs | take 1", "P1D")
             .await
         {
-            Ok(ws) => ws,
+            Ok(_) => {
+                let name = ws.name.clone().unwrap_or_else(|| customer_id.clone());
+                found = Some((customer_id, name));
+                break;
+            }
             Err(err) => {
-                tracing::info!(
-                    sub = %sub.subscription_id,
+                // Table absent (400) or no read access (403) — not this one.
+                tracing::debug!(
+                    ws = ws.name.as_deref().unwrap_or("?"),
                     code = err.ui_code(),
-                    "usage: workspace listing failed; skipping subscription"
+                    "usage: workspace probe negative"
                 );
-                continue;
-            }
-        };
-        for ws in workspaces {
-            if probed >= MAX_WORKSPACES_PROBED {
-                tracing::warn!(
-                    cap = MAX_WORKSPACES_PROBED,
-                    "usage: workspace probe cap reached without a hit"
-                );
-                return Ok(None);
-            }
-            let Some(customer_id) = ws.properties.customer_id.clone() else {
-                continue;
-            };
-            probed += 1;
-            match la
-                .query(&customer_id, "MicrosoftGraphActivityLogs | take 1", "P1D")
-                .await
-            {
-                Ok(_) => {
-                    let name = ws.name.clone().unwrap_or_else(|| customer_id.clone());
-                    let hit = (customer_id, name);
-                    state
-                        .cache
-                        .put(CacheKind::Permissions, workspace_cache_key(tenant_id), &hit);
-                    return Ok(Some(hit));
-                }
-                Err(err) => {
-                    // Table absent (400) or no read access (403) — not this one.
-                    tracing::debug!(
-                        ws = ws.name.as_deref().unwrap_or("?"),
-                        code = err.ui_code(),
-                        "usage: workspace probe negative"
-                    );
-                }
             }
         }
     }
-    Ok(None)
+
+    // Cache the outcome — including "no workspace". Skip only the truncated
+    // case, where the answer is "we ran out of probe budget", not "there is
+    // none", and caching it would hide a workspace past the cap until the TTL.
+    if !hit_cap {
+        state.cache.put(CacheKind::Permissions, cache_key, &found);
+    }
+    Ok(found)
 }
 
 /// KQL summarizing one app's Graph calls by (method, GUID-normalized path),

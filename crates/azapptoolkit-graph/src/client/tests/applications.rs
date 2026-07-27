@@ -2,14 +2,14 @@ use super::super::*;
 use super::common::*;
 
 #[tokio::test]
-async fn list_applications_uses_default_select_and_top() {
+async fn list_applications_pages_at_the_graph_maximum() {
+    // Paging `/applications` is strictly serial, so the page size directly
+    // divides a full-tenant scan's wall clock. Graph documents 999 as the
+    // maximum; anything smaller multiplies the round trips.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/applications"))
-        .and(query_param("$top", "50"))
-        .and(query_param("$count", "true"))
-        .and(query_param("$orderby", "displayName"))
-        .and(header("consistencylevel", "eventual"))
+        .and(query_param("$top", "999"))
         .respond_with(ResponseTemplate::new(200).set_body_json(sample_apps_json()))
         .mount(&server)
         .await;
@@ -21,19 +21,46 @@ async fn list_applications_uses_default_select_and_top() {
         .unwrap();
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].app_id, "app-1");
-    assert_eq!(page.total_count, Some(1));
 }
 
 #[tokio::test]
-async fn list_applications_with_expand_omits_orderby() {
-    // Graph rejects `$orderby` + `$expand` on `/applications`, so an
-    // expanding call (e.g. the security audit) must drop `$orderby`.
+async fn plain_enumeration_is_not_an_advanced_query() {
+    // `$count`/`$orderby` force every page into advanced-query handling. The
+    // count has no reader on this path and sorting is done in the frontend, so
+    // a plain enumeration must send neither — nor the `ConsistencyLevel` header
+    // they would require.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/applications"))
+        .and(query_param_is_missing("$count"))
+        .and(query_param_is_missing("$orderby"))
+        .and(header_is_missing("consistencylevel"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(sample_apps_json()))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let page = client
+        .list_applications(AppListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+}
+
+#[tokio::test]
+async fn expanding_call_is_not_an_advanced_query() {
+    // Graph does not support `$expand` together with an advanced query, and
+    // documents that such combinations may fail SILENTLY rather than erroring —
+    // which would leave the audit's inline owner ids quietly missing. The
+    // audit's expanding scan must therefore carry no `$count`/`$orderby` and no
+    // `ConsistencyLevel` header.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/applications"))
         .and(query_param("$expand", "owners($select=id)"))
         .and(query_param_is_missing("$orderby"))
-        .and(header("consistencylevel", "eventual"))
+        .and(query_param_is_missing("$count"))
+        .and(header_is_missing("consistencylevel"))
         .respond_with(ResponseTemplate::new(200).set_body_json(sample_apps_json()))
         .mount(&server)
         .await;
@@ -47,20 +74,24 @@ async fn list_applications_with_expand_omits_orderby() {
 }
 
 #[tokio::test]
-async fn search_adds_consistency_level_header() {
+async fn search_is_an_advanced_query_with_count_and_consistency_level() {
+    // `$search` on `/applications` REQUIRES both `$count=true` and
+    // `ConsistencyLevel: eventual` — the one path that still opts in.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/applications"))
+        .and(query_param("$count", "true"))
         .and(header("consistencylevel", "eventual"))
         .respond_with(ResponseTemplate::new(200).set_body_json(sample_apps_json()))
         .mount(&server)
         .await;
 
     let client = make_client(&server.uri());
-    let _ = client
+    let page = client
         .list_applications(AppListQuery::default().with_search("demo"))
         .await
         .unwrap();
+    assert_eq!(page.total_count, Some(1));
 }
 
 #[tokio::test]
@@ -330,8 +361,7 @@ async fn list_applications_all_follows_next_link() {
     // Page 1: matches the broad "list_applications" call (has $select etc).
     Mock::given(method("GET"))
         .and(path("/applications"))
-        .and(query_param("$top", "50"))
-        .and(query_param("$count", "true"))
+        .and(query_param("$top", "999"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "@odata.nextLink": page2_link,
             "value": [{

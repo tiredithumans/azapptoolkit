@@ -80,6 +80,12 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         section: GroupSection::Actionable,
     },
     GroupSpec {
+        key: "external_exposure",
+        title: "Reachable outside this tenant",
+        blurb: "Apps whose sign-in audience lets other directories (or personal Microsoft accounts) consent to them, while they hold application permissions or credentials — so their access isn't confined here. Confirm each is meant to be multi-tenant; verify the publisher if it is.",
+        section: GroupSection::Actionable,
+    },
+    GroupSpec {
         key: "high_risk_delegated",
         title: "High-risk delegated permissions",
         blurb: "Admin-consented delegated scopes with broad reach. Review on the principal's Permissions tab; delegated scopes are requested by name, so removal is admin-judged.",

@@ -179,10 +179,24 @@ pub fn focus(selector: &str) {
 /// Dispatch a bubbling `keydown` for `key` (e.g. "ArrowDown", "Enter", "Escape")
 /// on the element matching `selector`, as a keyboard user would.
 pub fn press_key(selector: &str, key: &str) {
+    press_key_with(selector, key, false);
+}
+
+/// [`press_key`] with the platform accelerator (Ctrl) held, for the global
+/// `Cmd/Ctrl-…` bindings. Ctrl rather than Meta because the handler accepts
+/// either and Ctrl is what a headless Linux CI browser reports.
+pub fn press_key_with_accel(selector: &str, key: &str) {
+    press_key_with(selector, key, true);
+}
+
+fn press_key_with(selector: &str, key: &str, accel: bool) {
     if let Some(el) = query(selector) {
         let init = web_sys::KeyboardEventInit::new();
         init.set_key(key);
         init.set_bubbles(true);
+        if accel {
+            init.set_ctrl_key(true);
+        }
         let event =
             web_sys::KeyboardEvent::new_with_keyboard_event_init_dict("keydown", &init).unwrap();
         let _ = el.dispatch_event(&event);

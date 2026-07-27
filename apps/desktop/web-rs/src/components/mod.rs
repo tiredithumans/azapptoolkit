@@ -30,6 +30,7 @@ pub mod scope_unavailable_banner;
 pub mod scope_wizard;
 pub mod select_all_bar;
 pub mod sharepoint_sites_section;
+pub mod shortcuts_help;
 pub mod site_selection_panel;
 pub mod sso_summary;
 pub mod toast;

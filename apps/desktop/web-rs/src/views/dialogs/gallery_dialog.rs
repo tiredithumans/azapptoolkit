@@ -52,6 +52,20 @@ pub fn GalleryDialog(
     let modal_ref: NodeRef<html::Div> = NodeRef::new();
     use_focus_trap(modal_ref, open);
 
+    // On open, warm the gallery corpus so the operator's first query is instant.
+    // The whole-catalog fetch is a one-time cost that overlaps them typing;
+    // fire-and-forget and best-effort — a failure just makes the first search
+    // pay the fetch itself (and it's idempotent once cached).
+    Effect::new(move |_| {
+        if open.get()
+            && let Some(t) = session.active_tenant.get()
+        {
+            leptos::task::spawn_local(async move {
+                let _ = enterprise_application::prefetch_application_gallery(&t.tenant_id).await;
+            });
+        }
+    });
+
     // `Ok(None)` = no query yet (or no tenant); `Ok(Some(results))` = a real
     // search ran. The distinction is load-bearing: an empty `Vec` alone can't
     // tell "type something" from "nothing matched", and conflating them told

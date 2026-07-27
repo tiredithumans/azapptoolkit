@@ -32,7 +32,6 @@ use azapptoolkit_graph::GraphClient;
 use azapptoolkit_graph::client::AppListQuery;
 use chrono::{DateTime, Utc};
 
-use crate::commands::applications::sp_index_key;
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::exchange::{exchange_client, resolve_mail_scopes_audit_cached};
 use crate::commands::export::{csv_field, write_via_dialog};
@@ -44,12 +43,12 @@ use crate::state::AppState;
 
 /// Upper bound on in-flight per-app lookups when the tenant is healthy.
 const INITIAL_CONCURRENCY: usize = 8;
-/// Page size — Graph caps `$top` at 100 on `/applications`.
-const PAGE_SIZE: u32 = 100;
+/// Page size — the shared `/applications` maximum.
+const PAGE_SIZE: u32 = azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE;
 /// Safety cap on the total app count per run. Prevents a misconfigured tenant
 /// or runaway pagination loop from OOMing the app; raise or pass `None` if a
 /// user hits this legitimately.
-const MAX_APPS_PER_RUN: usize = 10_000;
+const MAX_APPS_PER_RUN: usize = crate::commands::applications::APPS_MAX;
 /// Tenant-prefixed audit-run cache key — the same `{tenant_id}|` convention as
 /// every other kind, so sign-out's prefix invalidation reaches it. (The
 /// original `run:{tenant}` suffix shape was invisible to the prefix idiom.)
@@ -85,6 +84,14 @@ pub async fn run_audit(
         .list_applications_all(
             // `$expand=owners` brings owner ids inline so the ownership audit
             // rules need no per-app round trip.
+            //
+            // LIMIT: `$expand` on a directory-object relationship returns at
+            // most 20 items and carries no `@odata.nextLink`, so this owner list
+            // is TRUNCATED for any app with more than 20 owners. That is safe
+            // for the only rule reading it (the ownership gap fires on 0 or 1
+            // owner, and a truncated list still has 20). A future rule that
+            // needs a COMPLETE owner set must not read this field — it has to
+            // page `/applications/{id}/owners` per app instead.
             AppListQuery::default()
                 .with_top(PAGE_SIZE)
                 .with_expand("owners($select=id)"),
@@ -122,7 +129,7 @@ pub async fn run_audit(
     // application object (foreign enterprise apps, managed identities, orphaned
     // SPs) and that hold at least one Graph application-permission grant.
     let local_app_ids: HashSet<String> = apps.iter().map(|a| a.app_id.clone()).collect();
-    let sp_candidates = sp_audit_candidates(sp_index, &local_app_ids, &graph_roles_by_sp);
+    let sp_candidates = sp_audit_candidates(&sp_index, &local_app_ids, &graph_roles_by_sp);
     let total = apps.len() + sp_candidates.len();
 
     // Exchange circuit breaker: a genuine auth failure (401 / 403) from the
@@ -388,10 +395,14 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-/// Serializes a set of [`AuditItem`]s as CSV. Kept as a separate command so
-/// callers that want the text (e.g. clipboard, log) don't need a save dialog.
-#[tauri::command]
-pub fn export_audit_csv(items: Vec<AuditItem>) -> String {
+/// Serializes a set of [`AuditItem`]s as CSV.
+///
+/// An internal helper, not an IPC command: `save_audit_to_file` is the only
+/// caller and the only way the frontend exports an audit. It was registered as
+/// a command "so callers that want the text don't need a save dialog", but no
+/// such caller was ever written — leaving an unreachable entry point on the IPC
+/// boundary.
+pub(crate) fn export_audit_csv(items: Vec<AuditItem>) -> String {
     let mut out = String::new();
     out.push_str("ApplicationName,AppId,ObjectId,CreatedDate,Publisher,SignInAudience,RiskScore,RiskLevel,CredentialStatus,PermissionCount,DaysSinceCreated,ServicePrincipalEnabled,Issues,Recommendations,PrincipalKind\n");
     for item in items {
@@ -575,22 +586,18 @@ async fn prefetch_sp_index(
     cache: &Cache,
     client: &GraphClient,
     tenant_id: &str,
-) -> Vec<ServicePrincipal> {
-    let index_key = sp_index_key(tenant_id);
-    if let Some(cached) = cache.get::<Vec<ServicePrincipal>>(CacheKind::Lists, &index_key) {
+) -> Arc<Vec<ServicePrincipal>> {
+    if let Some(cached) = crate::commands::applications::sp_index_hit(cache, tenant_id) {
         return cached;
     }
     match client.list_service_principals_index().await {
-        Ok(sps) => {
-            cache.put(CacheKind::Lists, index_key, &sps);
-            sps
-        }
+        Ok(sps) => crate::commands::applications::sp_index_store(cache, tenant_id, sps),
         Err(err) => {
             tracing::info!(
                 ?err,
                 "audit: SP index unavailable; scanning app registrations only"
             );
-            Vec::new()
+            Arc::new(Vec::new())
         }
     }
 }
@@ -699,14 +706,15 @@ fn score_sp_only(
 /// 4 flags them). Known limitation: roles held only on non-Graph resources
 /// aren't in the matrix, so such an SP is not scored.
 fn sp_audit_candidates(
-    sp_index: Vec<ServicePrincipal>,
+    sp_index: &[ServicePrincipal],
     local_app_ids: &HashSet<String>,
     graph_roles_by_sp: &HashMap<String, Vec<String>>,
 ) -> Vec<ServicePrincipal> {
     sp_index
-        .into_iter()
+        .iter()
         .filter(|sp| !local_app_ids.contains(&sp.app_id))
         .filter(|sp| graph_roles_by_sp.get(&sp.id).is_some_and(|v| !v.is_empty()))
+        .cloned()
         .collect()
 }
 
@@ -718,7 +726,7 @@ fn emit_progress(app_handle: &AppHandle, progress: AuditProgress) {
 
 struct ResourceResolver {
     client: Arc<GraphClient>,
-    cache: Mutex<HashMap<String, ResourceIndex>>,
+    cache: Mutex<HashMap<String, Arc<ResourceIndex>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -735,11 +743,16 @@ impl ResourceResolver {
         }
     }
 
-    async fn index(&self, resource_app_id: &str) -> ResourceIndex {
+    /// Returns a SHARED handle, not a copy. The Microsoft Graph resource index
+    /// is ~1500 `(String, String)` pairs, and this is called once per distinct
+    /// resource per app: handing out clones meant a 10 000-app run allocated
+    /// tens of millions of strings for a read-only lookup table, inside the
+    /// spawned scoring tasks (so it saturated every worker, not one).
+    async fn index(&self, resource_app_id: &str) -> Arc<ResourceIndex> {
         {
             let cache = self.cache.lock().await;
             if let Some(hit) = cache.get(resource_app_id) {
-                return hit.clone();
+                return Arc::clone(hit);
             }
         }
 
@@ -757,8 +770,9 @@ impl ResourceResolver {
             }
         }
 
+        let index = Arc::new(index);
         let mut cache = self.cache.lock().await;
-        cache.insert(resource_app_id.to_string(), index.clone());
+        cache.insert(resource_app_id.to_string(), Arc::clone(&index));
         index
     }
 }
@@ -773,7 +787,7 @@ async fn resolve_permissions(
     // applications.rs). Each lookup is independent and Permissions-cached, so on a
     // cold cache this collapses N serial round-trips into one concurrent batch;
     // warm hits cost nothing.
-    let indexes: HashMap<String, ResourceIndex> =
+    let indexes: HashMap<String, Arc<ResourceIndex>> =
         futures::future::join_all(resources.into_iter().map(|id| async move {
             let index = resolver.index(&id).await;
             (id, index)
@@ -984,7 +998,7 @@ mod tests {
             sp("sp-grantless", "gallery-app", Some("Application")),
             sp("sp-empty", "empty-app", Some("Application")),
         ];
-        let got: Vec<String> = sp_audit_candidates(index, &local_app_ids, &roles)
+        let got: Vec<String> = sp_audit_candidates(&index, &local_app_ids, &roles)
             .into_iter()
             .map(|s| s.id)
             .collect();

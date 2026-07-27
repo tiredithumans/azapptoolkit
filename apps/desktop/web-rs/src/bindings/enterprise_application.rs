@@ -432,6 +432,18 @@ pub async fn save_enterprise_applications_to_file(
     .await
 }
 
+/// Warms the gallery corpus cache so the first real search is instant. Fired
+/// fire-and-forget when the "Browse the gallery" dialog opens; the one-time
+/// full-catalog fetch overlaps the operator typing. Best-effort — errors are
+/// ignored, the first search just pays the fetch itself.
+pub async fn prefetch_application_gallery(tenant_id: &str) -> Result<(), UiError> {
+    invoke_result(
+        "prefetch_application_gallery",
+        PrefetchGalleryArgs { tenant_id },
+    )
+    .await
+}
+
 /// Searches the Entra application gallery for the New-application "Browse the
 /// gallery" picker — matches anywhere in a template's name or publisher, ranked
 /// (2+ characters; an empty result set below that). The reply carries
@@ -464,6 +476,12 @@ pub async fn create_gallery_application(
         },
     )
     .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrefetchGalleryArgs<'a> {
+    tenant_id: &'a str,
 }
 
 #[derive(Serialize)]

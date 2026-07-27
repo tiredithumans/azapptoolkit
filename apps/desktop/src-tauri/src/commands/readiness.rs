@@ -12,6 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use futures::stream::{self, StreamExt};
 use tauri::State;
 
 use azapptoolkit_auth::AuthError;
@@ -23,6 +24,11 @@ use azapptoolkit_core::models::ActiveDirectoryRole;
 use crate::dto::UiError;
 use crate::dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use crate::state::AppState;
+
+/// Max concurrent ARM calls for the per-subscription role-assignment sweep.
+/// Matches the Key Vault / managed-identity sweeps so a large estate stays
+/// inside ARM's rate limits (429s are retried in the client).
+const ARM_CONCURRENCY: usize = 8;
 
 /// Builds the readiness report for `tenant_id`. Never cached — the whole point is
 /// freshness after a PIM activation; the underlying token probes reuse the
@@ -38,15 +44,8 @@ pub async fn check_readiness(
     // inactive roles are absent (only activated assignments are memberships) —
     // exactly the signal we want. A read failure isn't fatal: every
     // DirectoryRole row degrades to "?" and the UI shows one banner.
-    let active_roles = state
-        .graph_for(&tenant_id)
-        .me_active_directory_roles()
-        .await
-        .inspect_err(|err| {
-            tracing::warn!(?err, "readiness: couldn't read active directory roles");
-        });
-    let directory_roles_indeterminate = active_roles.is_err();
-    let active_roles = active_roles.unwrap_or_default();
+    let graph = state.graph_for(&tenant_id);
+    let roles_fut = graph.me_active_directory_roles();
 
     // Probe each DISTINCT scope audience once, concurrently — `write` and `arm`
     // are each shared by two capabilities. Serial probing paid a token-endpoint
@@ -60,19 +59,28 @@ pub async fn check_readiness(
             .filter(|f| seen.insert(*f))
             .collect()
     };
-    let scope_verdicts: HashMap<&'static str, Verdict> =
-        futures::future::join_all(distinct_features.into_iter().map(|f| {
-            let st = &state;
-            let tid = tenant_id.as_str();
-            async move { (f, probe_scope(st, tid, f).await) }
-        }))
-        .await
-        .into_iter()
-        .collect();
+    let scopes_fut = futures::future::join_all(distinct_features.into_iter().map(|f| {
+        let st = &state;
+        let tid = tenant_id.as_str();
+        async move { (f, probe_scope(st, tid, f).await) }
+    }));
 
     // Azure-RBAC plane: enumerate the user's direct role assignments once
     // (best-effort). `None` => the Azure capabilities fall back to "?".
-    let azure_held = enumerate_azure_role_ids(&state, &tenant_id).await;
+    let azure_fut = enumerate_azure_role_ids(&state, &tenant_id);
+
+    // The three planes share no inputs — Graph directory roles, token-endpoint
+    // scope probes and the ARM sweep are independent — so they run concurrently
+    // and the page's cold latency is the slowest single plane rather than their
+    // sum. Each still degrades on its own: a failure here is never fatal.
+    let (active_roles, scope_verdicts, azure_held) = tokio::join!(roles_fut, scopes_fut, azure_fut);
+
+    let active_roles = active_roles.inspect_err(|err| {
+        tracing::warn!(?err, "readiness: couldn't read active directory roles");
+    });
+    let directory_roles_indeterminate = active_roles.is_err();
+    let active_roles = active_roles.unwrap_or_default();
+    let scope_verdicts: HashMap<&'static str, Verdict> = scope_verdicts.into_iter().collect();
 
     let mut items = Vec::with_capacity(CAPABILITIES.len());
     for cap in CAPABILITIES {
@@ -204,22 +212,44 @@ async fn enumerate_azure_role_ids(state: &AppState, tenant_id: &str) -> Option<H
     state.ensure_arm_token(tenant_id).await.ok()?;
     let arm = state.arm_for(tenant_id);
     let subs = arm.list_subscriptions().await.ok()?;
-    let mut ids = HashSet::new();
-    for sub in subs {
-        // Partial enumeration beats none — skip a subscription we can't read.
-        if let Ok(assignments) = arm
-            .list_role_assignments_for_principal(&sub.subscription_id, &oid)
-            .await
-        {
-            for a in assignments {
-                if let Some(rid) = a.properties.role_definition_id.as_deref()
-                    && let Some(tail) = azapptoolkit_core::azure_roles::role_id_tail(rid)
+    // Bounded fan-out. A serial loop paid one ARM round trip per subscription
+    // back-to-back, which dominated this page's load time in tenants with a
+    // large estate (the cost scaled with the operator's subscription count).
+    // Partial enumeration beats none — a subscription we can't read is skipped,
+    // not fatal; a 403 is terminal in the ARM transport, so it fails fast.
+    let ids: HashSet<String> = stream::iter(subs)
+        .map(|sub| {
+            let arm = arm.clone();
+            let oid = oid.clone();
+            async move {
+                match arm
+                    .list_role_assignments_for_principal(&sub.subscription_id, &oid)
+                    .await
                 {
-                    ids.insert(tail);
+                    Ok(assignments) => assignments,
+                    Err(err) => {
+                        tracing::warn!(
+                            ?err,
+                            subscription = %sub.subscription_id,
+                            "readiness: role-assignment enumeration failed; skipping subscription",
+                        );
+                        Vec::new()
+                    }
                 }
             }
-        }
-    }
+        })
+        .buffer_unordered(ARM_CONCURRENCY)
+        .collect::<Vec<Vec<_>>>()
+        .await
+        .into_iter()
+        .flatten()
+        .filter_map(|a| {
+            a.properties
+                .role_definition_id
+                .as_deref()
+                .and_then(azapptoolkit_core::azure_roles::role_id_tail)
+        })
+        .collect();
     Some(ids)
 }
 

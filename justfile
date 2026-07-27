@@ -13,11 +13,17 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 
 # wasm-bindgen-test's headless runner gives a browser this many seconds to load
 # the test module AND report results before it declares "Failed to detect test as
-# having been run" (upstream default 20). The GUI tests are grouped into a few
-# larger shard binaries (tests/gui_N.rs, ~45-52 MB each) that each run ~25 tests
-# serially in one page, so the default is too tight a margin — 60 gives headroom
-# without slowing green runs (they finish and exit early). `just`'s `export` puts
-# it in every recipe's environment cross-platform; only wasm-pack's runner reads it.
+# having been run" (upstream default 20). This budget is PER BINARY, not per
+# test: the runner polls the page until it prints `test result:`, so every test
+# in a shard shares one 60s deadline.
+#
+# That is the reason the GUI tests stay sharded (tests/gui_N.rs, 8-21 MB each,
+# 16-21 tests apiece) rather than merging into one binary — four independent 60s
+# budgets, not one shared by all 72 tests. Merging was measured and is not a win
+# anyway: a single binary is 29 MB vs 53 MB across four, but builds *slower*
+# (49-50s vs 46-47s) because cargo links the four in parallel and the merged one
+# is a single serial link. `just`'s `export` puts it in every recipe's
+# environment cross-platform; only wasm-pack's runner reads it.
 export WASM_BINDGEN_TEST_TIMEOUT := "60"
 
 # Show the recipe list when run with no arguments.

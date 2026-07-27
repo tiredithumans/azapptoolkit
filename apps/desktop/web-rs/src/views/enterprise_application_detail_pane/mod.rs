@@ -22,7 +22,7 @@ use crate::components::detail_header::DetailHeader;
 use crate::components::requires_role::RequiresRole;
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{DataTable, DetailLoadError, DetailSkeleton};
+use crate::components::ui::{DataTable, DetailLoadError, DetailSkeleton, SkeletonList};
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::{OpenItemKind, use_session};

@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 
 use leptos::prelude::*;
-use thaw::{Spinner, SpinnerSize};
 
 use azapptoolkit_core::audit::MailPermissionScope;
 
@@ -20,7 +19,7 @@ use crate::bindings::managed_identity;
 use crate::bindings::permissions as permissions_bindings;
 use crate::components::icon::IconName;
 use crate::components::scope_badge::is_exchange_scopable;
-use crate::components::ui::EmptyState;
+use crate::components::ui::{DetailLoadError, DetailSkeleton, EmptyState};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -52,16 +51,21 @@ pub fn ManagedIdentityDetailWindow(
     // Resolve this window's identity from the (server-cached) list — the same
     // lookup the old parent did, so it's a cache hit. Depends on `reload` so the
     // header status/subtype refresh after a Refresh busts the list cache.
+    // `Result<Option<_>>`, NOT `Option<_>`: a failed fetch and a genuinely
+    // absent identity are different outcomes and must not render the same.
+    // Collapsing the error with `.ok()` made a transient 429 claim the identity
+    // "may have been deleted", with no way to retry.
     let mi_resource = LocalResource::new(move || {
         let tenant = tenant.get();
         let id = mi_id.get();
         let _ = reload.get();
         async move {
-            let t = tenant?;
+            let Some(t) = tenant else {
+                return Ok(None);
+            };
             managed_identity::list_managed_identities(&t.tenant_id)
                 .await
-                .ok()
-                .and_then(|list| list.into_iter().find(|m| m.id == id))
+                .map(|list| list.into_iter().find(|m| m.id == id))
         }
     });
 
@@ -186,16 +190,20 @@ pub fn ManagedIdentityDetailWindow(
             })
         />
         <div class="mi-window">
-            <Suspense fallback=move || {
-                view! {
-                    <div class="centered-pad">
-                        <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" />
-                    </div>
-                }
-            }>
+            <Suspense fallback=move || view! { <DetailSkeleton /> }>
                 {move || Suspend::new(async move {
                     match mi_resource.await {
-                        None => {
+                        Err(e) => {
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                    class="app-detail__body"
+                                />
+                            }
+                                .into_any()
+                        }
+                        Ok(None) => {
                             view! {
                                 <EmptyState
                                     icon=IconName::Server
@@ -206,7 +214,7 @@ pub fn ManagedIdentityDetailWindow(
                             }
                                 .into_any()
                         }
-                        Some(mi) => {
+                        Ok(Some(mi)) => {
                             if let Some(cb) = on_title {
                                 cb.run(mi.display_name.clone());
                             }

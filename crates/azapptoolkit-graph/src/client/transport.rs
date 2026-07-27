@@ -8,6 +8,7 @@
 use super::*;
 
 const CONSISTENCY_LEVEL: HeaderName = HeaderName::from_static("consistencylevel");
+const PREFER: HeaderName = HeaderName::from_static("prefer");
 
 impl GraphClient {
     /// GET an absolute URL with an explicit (non-default) bearer token, decoding
@@ -60,7 +61,7 @@ impl GraphClient {
         url: &str,
     ) -> Result<T> {
         let bytes = self
-            .send_core_url_with(token, Method::GET, url, &[], false, None)
+            .send_core_url_with(token, Method::GET, url, &[], false, None, None)
             .await?;
         serde_json::from_slice(&bytes).map_err(|e| GraphError::Deserialize(e.to_string()))
     }
@@ -289,6 +290,32 @@ impl GraphClient {
         serde_json::from_slice::<T>(&bytes).map_err(|e| GraphError::Deserialize(e.to_string()))
     }
 
+    /// GET the read-token collection with a `Prefer` request header — used by the
+    /// whole-gallery fetch to ask for large pages (`odata.maxpagesize=…`) so a
+    /// full-collection read is a handful of round trips instead of hundreds. The
+    /// effective page size carries into `@odata.nextLink`, so only this first
+    /// request needs the header; subsequent pages ride `get_json_absolute`.
+    pub(crate) async fn get_json_prefer<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+        prefer: &str,
+    ) -> Result<T> {
+        let url = format!("{}{path}", self.base_url);
+        let bytes = self
+            .send_core_url_with(
+                &self.read_token,
+                Method::GET,
+                &url,
+                query,
+                false,
+                None,
+                Some(prefer),
+            )
+            .await?;
+        serde_json::from_slice::<T>(&bytes).map_err(|e| GraphError::Deserialize(e.to_string()))
+    }
+
     /// POST/PATCH with a JSON body, returning a decoded response.
     pub(crate) async fn send_json<B, T>(&self, method: Method, path: &str, body: &B) -> Result<T>
     where
@@ -354,13 +381,27 @@ impl GraphClient {
         } else {
             &self.write_token
         };
-        self.send_core_url_with(provider, method, url, query, consistency_eventual, body)
-            .await
+        self.send_core_url_with(
+            provider,
+            method,
+            url,
+            query,
+            consistency_eventual,
+            body,
+            None,
+        )
+        .await
     }
 
     /// [`send_core_url`] with an explicit token `provider` — lets a POST that is
     /// semantically a *read* (the `/$batch` endpoint wrapping GET sub-requests)
-    /// ride the read token instead of the verb-selected write token.
+    /// ride the read token instead of the verb-selected write token. `prefer`,
+    /// when set, is sent as the `Prefer` request header (e.g.
+    /// `odata.maxpagesize=…` to pull large pages on a whole-collection read).
+    // The innermost transport primitive: each argument is an orthogonal HTTP
+    // knob (token, verb, url, query, consistency, body, prefer) with no natural
+    // grouping, so a params struct would only add indirection.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_core_url_with(
         &self,
         provider: &Arc<dyn BearerProvider>,
@@ -369,6 +410,7 @@ impl GraphClient {
         query: &[(&str, &str)],
         consistency_eventual: bool,
         body: Option<serde_json::Value>,
+        prefer: Option<&str>,
     ) -> Result<bytes::Bytes> {
         // Fetch the token once: it's valid well past the bounded retry window,
         // so re-fetching on every transient retry would just hammer the auth
@@ -382,6 +424,12 @@ impl GraphClient {
         );
         if consistency_eventual {
             headers.insert(CONSISTENCY_LEVEL, HeaderValue::from_static("eventual"));
+        }
+        if let Some(prefer) = prefer {
+            headers.insert(
+                PREFER,
+                HeaderValue::from_str(prefer).map_err(|e| GraphError::Protocol(e.to_string()))?,
+            );
         }
         if body.is_some() {
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));

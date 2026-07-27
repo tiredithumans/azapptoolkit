@@ -1,39 +1,25 @@
-//! GUI test shard 2 of 3.
+//! GUI test shard 2 of 4.
 //!
-//! The Leptos view tests run in a headless browser (mock Tauri IPC, no tenant).
-//! They are split across a small number of aggregator binaries (`tests/gui_N.rs`)
-//! rather than one binary per file: `wasm-bindgen-test-runner` decodes the wasm
-//! and boots Chrome once per binary, and with `[profile.test] strip = "debuginfo"`
-//! that per-binary cost is cheap — so 3 shards is far faster than 21 while
-//! avoiding the single-binary load cliff (a merged ~78 MB module times out in
-//! Chrome; each shard stays under the ~52 MB that provably loads).
+//! Shards exist because a single merged test binary's served wasm exceeds what
+//! headless Chrome will instantiate. Modules are grouped by the **view subtree
+//! they mount**, not by count: the linker keeps only referenced views, so two
+//! modules that mount the same pane cost barely more than one, while splitting
+//! them duplicates that pane across both shards. Re-measure after moving a
+//! module (see the sharding note in AGENTS.md).
 //!
-//! Tests within a shard run serially in one page and share its DOM; isolation
-//! relies on Leptos disposing each `mount_view` (and its teleported overlays) on
-//! unmount. `reset()` must NOT clear `document.body` — the runner scrapes results
-//! from the DOM, so wiping it makes the whole shard report nothing. Balancing is
-//! by measured wasm size — see `tests/gui_1.rs`.
+//! This shard holds the security-audit cluster (both audit panes plus the surfaces that read a
+//! run: credential expiry, readiness) and the whole-shell smoke test.
 #![cfg(target_arch = "wasm32")]
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
-#[path = "gui/application_detail.rs"]
-mod application_detail;
-#[path = "gui/application_list.rs"]
-mod application_list;
-#[path = "gui/copyable_id.rs"]
-mod copyable_id;
 #[path = "gui/credentials_dashboard.rs"]
 mod credentials_dashboard;
-#[path = "gui/dr.rs"]
-mod dr;
-#[path = "gui/enterprise_application_list.rs"]
-mod enterprise_application_list;
-#[path = "gui/event_streams.rs"]
-mod event_streams;
-#[path = "gui/key_vault.rs"]
-mod key_vault;
-#[path = "gui/managed_identities.rs"]
-mod managed_identities;
 #[path = "gui/readiness.rs"]
 mod readiness;
+#[path = "gui/security_audit.rs"]
+mod security_audit;
+#[path = "gui/security_findings.rs"]
+mod security_findings;
+#[path = "gui/view_smoke.rs"]
+mod view_smoke;

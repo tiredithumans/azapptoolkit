@@ -2,9 +2,10 @@
 //!
 //! One posture strip (read-only severity counts + Run / Cancel / Export /
 //! progress / consent — the single owner of the audit-run lifecycle via
-//! [`AuditController`]) above four co-equal sub-tabs: **Findings** (grouped,
+//! [`AuditController`]) above five co-equal sub-tabs: **Findings** (grouped,
 //! remediation-centric — the default), **All apps** (the ranked score table),
-//! and the two inventory lenses (Credential expiry, Delegated grants). The
+//! and the three inventory lenses (Credential expiry, Delegated grants,
+//! Application permissions). The
 //! controller is constructed once here and provided via context so both audit
 //! panes read the same scan; the strip's counts are display-only — filtering
 //! happens inside the panes (this view retired the old triple-control setup:
@@ -21,9 +22,10 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 
 use crate::components::export_menu::ExportMenu;
-use crate::components::ui::{Callout, SectionHeader};
+use crate::components::ui::{Callout, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
 use crate::util::keep_alive;
+use crate::views::app_permission_grants_view::AppPermissionGrantsView;
 use crate::views::audit_view::posture::PostureCounts;
 use crate::views::audit_view::{AuditAppsPane, AuditController, FindingsPane};
 use crate::views::consent_grants_view::ConsentGrantsView;
@@ -65,16 +67,26 @@ pub fn SecurityView() -> impl IntoView {
     view! {
         <div class="security-view">
             <PostureStrip />
-            <div class="security-lenses">
-                {lens_btn(sub, "findings", "Findings")}
-                {lens_btn(sub, "apps", "All apps")}
-                {lens_btn(sub, "credentials", "Credential expiry")}
-                {lens_btn(sub, "grants", "Delegated grants")}
-            </div>
+            <TabBar
+                selected=sub
+                items=vec![
+                    TabBarItem { value: "findings", label: "Findings" },
+                    TabBarItem { value: "apps", label: "All apps" },
+                    TabBarItem { value: "credentials", label: "Credential expiry" },
+                    TabBarItem { value: "grants", label: "Delegated grants" },
+                    TabBarItem { value: "app-permissions", label: "Application permissions" },
+                ]
+            />
             {keep_alive(sub, visited, "findings", || view! { <FindingsPane /> })}
             {keep_alive(sub, visited, "apps", || view! { <AuditAppsPane /> })}
             {keep_alive(sub, visited, "credentials", || view! { <CredentialsDashboard /> })}
             {keep_alive(sub, visited, "grants", || view! { <ConsentGrantsView /> })}
+            {keep_alive(
+                sub,
+                visited,
+                "app-permissions",
+                || view! { <AppPermissionGrantsView /> },
+            )}
         </div>
     }
 }
@@ -217,21 +229,5 @@ fn metric_box(n: usize, label: &'static str, tone: &'static str) -> impl IntoVie
             <span class=num_class>{n}</span>
             <span class="dash-metric__label">{label}</span>
         </div>
-    }
-}
-
-/// One entry in the workbench's sub-tab selector.
-fn lens_btn(sub: RwSignal<String>, value: &'static str, label: &'static str) -> impl IntoView {
-    let class = move || {
-        let mut c = String::from("security-lens");
-        if sub.with(|s| s == value) {
-            c.push_str(" security-lens--active");
-        }
-        c
-    };
-    view! {
-        <button type="button" class=class on:click=move |_| sub.set(value.to_string())>
-            {label}
-        </button>
     }
 }

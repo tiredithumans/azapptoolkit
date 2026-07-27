@@ -17,6 +17,7 @@ use azapptoolkit_dto::applications::{ApplicationDetail, ApplicationListRowDto};
 use azapptoolkit_dto::audit::AuditRunResult;
 use azapptoolkit_dto::bulk::BulkProgress;
 use azapptoolkit_dto::config::AuthConfigStatus;
+use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};
 use azapptoolkit_dto::credentials::CredentialRowDto;
 use azapptoolkit_dto::diagnostics::CacheStatsDto;
 use azapptoolkit_dto::enterprise_application::{
@@ -1118,4 +1119,120 @@ pub fn azure_roles(roles: Vec<AzureRoleDto>) -> AzureRolesResult {
         total: 2,
         skipped: 0,
     }
+}
+
+// ---- Consent / application-permission grant lenses ----
+
+fn oauth2_grant(
+    client: &str,
+    resource: &str,
+    consent_type: &str,
+    scopes: &[&str],
+    risky: &[&str],
+) -> OAuth2GrantDto {
+    OAuth2GrantDto {
+        grant_id: Some(guid(client)),
+        client_sp_id: guid(client),
+        client_display_name: client.to_string(),
+        client_app_id: Some(guid(&format!("{client}-app"))),
+        resource_display_name: resource.to_string(),
+        consent_type: consent_type.to_string(),
+        scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        risky_scopes: risky.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+pub fn oauth2_grants() -> Vec<OAuth2GrantDto> {
+    vec![
+        oauth2_grant(
+            "Contoso CRM",
+            "Microsoft Graph",
+            "AllPrincipals",
+            &["User.Read", "Directory.AccessAsUser.All"],
+            &["Directory.AccessAsUser.All"],
+        ),
+        oauth2_grant(
+            "Fabrikam Mail Sync",
+            "Microsoft Graph",
+            "AllPrincipals",
+            &["Mail.ReadWrite", "offline_access"],
+            &[],
+        ),
+        oauth2_grant(
+            "Tailspin Reporting",
+            "Azure Service Management",
+            "Principal",
+            &["user_impersonation"],
+            &["user_impersonation"],
+        ),
+        oauth2_grant(
+            "Wingtip Toys Connector",
+            "Microsoft Graph",
+            "Principal",
+            &["User.Read"],
+            &[],
+        ),
+    ]
+}
+
+fn app_permission_grant(
+    client: &str,
+    permission: &str,
+    resource: &str,
+    risk: &str,
+) -> AppPermissionGrantDto {
+    AppPermissionGrantDto {
+        client_sp_id: guid(client),
+        client_display_name: client.to_string(),
+        permission: permission.to_string(),
+        resource_display_name: resource.to_string(),
+        risk: risk.to_string(),
+    }
+}
+
+pub fn app_permission_grants() -> Vec<AppPermissionGrantDto> {
+    vec![
+        app_permission_grant(
+            "Fabrikam Mail Sync",
+            "Mail.ReadWrite",
+            "Microsoft Graph",
+            "high",
+        ),
+        app_permission_grant(
+            "Contoso CRM",
+            "Directory.ReadWrite.All",
+            "Microsoft Graph",
+            "high",
+        ),
+        app_permission_grant(
+            "Tailspin Reporting",
+            "Sites.FullControl.All",
+            "SharePoint",
+            "high",
+        ),
+        app_permission_grant(
+            "Northwind Provisioning",
+            "Application.ReadWrite.OwnedBy",
+            "Microsoft Graph",
+            "medium",
+        ),
+        app_permission_grant(
+            "Wingtip Toys Connector",
+            "User.Read.All",
+            "Microsoft Graph",
+            "medium",
+        ),
+        app_permission_grant(
+            "Adventure Works Sync",
+            "full_access_as_app",
+            "Office 365 Exchange Online",
+            "high",
+        ),
+        app_permission_grant(
+            "Litware Analytics",
+            "Reports.Read.All",
+            "Microsoft Graph",
+            "low",
+        ),
+    ]
 }

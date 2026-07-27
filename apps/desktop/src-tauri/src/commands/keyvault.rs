@@ -3,6 +3,7 @@
 //! Clients are built and cached by [`AppState::kv_for`], which wires the
 //! shared token adapter for the `https://vault.azure.net` audience.
 
+use futures::stream::{self, StreamExt};
 use tauri::State;
 
 use azapptoolkit_core::defaults::AppVaultBinding;
@@ -12,10 +13,14 @@ use azapptoolkit_keyvault::SecretSetRequest;
 use crate::commands::applications::invalidate_app_credentials;
 use crate::dto::UiError;
 use crate::dto::keyvault::{
-    KvSecretItemDto, KvSecretMetadataDto, KvSecretValueDto, KvSetSecretInput,
-    RotateCredentialInput, RotateCredentialResult,
+    KvSecretItemDto, KvSecretValueDto, RotateCredentialInput, RotateCredentialResult,
 };
 use crate::state::AppState;
+
+/// Max concurrent ARM calls for the cross-subscription vault sweep. Matches the
+/// Key Vault RBAC / managed-identity sweeps so a large estate stays inside ARM's
+/// rate limits (429s are retried in the client).
+const ARM_CONCURRENCY: usize = 8;
 
 // ---------------- Commands ----------------
 
@@ -55,36 +60,6 @@ pub async fn kv_get_secret(
     Ok(KvSecretValueDto {
         name: secret_name,
         value: sv.value,
-        content_type: sv.content_type,
-        expires: sv
-            .attributes
-            .and_then(|a| a.expires)
-            .map(|d| d.to_rfc3339()),
-    })
-}
-
-#[tauri::command]
-pub async fn kv_set_secret(
-    state: State<'_, AppState>,
-    tenant_id: String,
-    input: KvSetSecretInput,
-) -> Result<KvSecretMetadataDto, UiError> {
-    let client = state.kv_for(&tenant_id, &input.vault_name)?;
-    let expires = parse_rfc3339(input.expires.as_deref())?;
-    let attrs = expires.map(|e| azapptoolkit_keyvault::models::SecretAttributesRequest {
-        enabled: Some(true),
-        expires: Some(e),
-        not_before: None,
-    });
-    let req = SecretSetRequest {
-        value: input.value,
-        content_type: input.content_type,
-        tags: None,
-        attributes: attrs,
-    };
-    let sv = client.set_secret(&input.secret_name, &req).await?;
-    Ok(KvSecretMetadataDto {
-        name: input.secret_name,
         content_type: sv.content_type,
         expires: sv
             .attributes
@@ -220,28 +195,34 @@ pub async fn list_available_key_vaults(
     state.ensure_arm_token(&tenant_id).await?;
     let arm = state.arm_for(&tenant_id);
     let subs = arm.list_subscriptions().await?;
-    // De-duped + sorted for a stable dropdown.
-    let mut names = std::collections::BTreeSet::new();
-    for sub in subs {
-        // Partial discovery beats none: skip a subscription we can't read.
-        if let Ok(vaults) = arm.list_key_vaults(&sub.subscription_id).await {
-            for v in vaults {
-                if let Some(name) = v.name {
-                    names.insert(name);
+    // Bounded fan-out: a serial loop paid one ARM round trip per subscription
+    // back-to-back, which dominated the picker's load time in a large estate.
+    // Partial discovery beats none — a subscription we can't read is skipped
+    // (and logged), not fatal; a 403 is terminal in the ARM transport, so it
+    // fails fast. De-duped + sorted for a stable dropdown.
+    let names: std::collections::BTreeSet<String> = stream::iter(subs)
+        .map(|sub| {
+            let arm = arm.clone();
+            async move {
+                match arm.list_key_vaults(&sub.subscription_id).await {
+                    Ok(vaults) => vaults,
+                    Err(err) => {
+                        tracing::warn!(
+                            ?err,
+                            subscription = %sub.subscription_id,
+                            "vault picker: enumeration failed; skipping subscription",
+                        );
+                        Vec::new()
+                    }
                 }
             }
-        }
-    }
+        })
+        .buffer_unordered(ARM_CONCURRENCY)
+        .collect::<Vec<Vec<_>>>()
+        .await
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.name)
+        .collect();
     Ok(names.into_iter().collect())
-}
-
-fn parse_rfc3339(s: Option<&str>) -> Result<Option<chrono::DateTime<chrono::Utc>>, UiError> {
-    match s {
-        None => Ok(None),
-        Some(v) => chrono::DateTime::parse_from_rfc3339(v)
-            .map(|d| Some(d.with_timezone(&chrono::Utc)))
-            .map_err(|e| {
-                UiError::validation("invalid_timestamp", format!("expires must be RFC3339: {e}"))
-            }),
-    }
 }

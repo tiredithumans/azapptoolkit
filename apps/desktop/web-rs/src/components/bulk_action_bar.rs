@@ -17,7 +17,8 @@
 //! progress row + Cancel and a tone-coded result summary mirror the former
 //! tab-per-action page.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
@@ -79,8 +80,24 @@ pub fn BulkActionBar(
     /// Fired after any successful run so the host can refetch its list(s).
     #[prop(optional, into)]
     on_done: Option<Callback<()>>,
+    /// `object_id -> display name` for the selectable rows, used to label
+    /// failures.
+    ///
+    /// The bulk commands take object ids, so their outcomes carry only ids —
+    /// which meant a failure list after (say) a 200-app delete was a column of
+    /// raw GUIDs with no way to tell WHICH app failed. The host already has the
+    /// names (the selection was made from its list), so it supplies them here.
+    /// Empty map ⇒ fall back to the id, the previous behaviour.
+    #[prop(optional, into)]
+    names: Option<Signal<Arc<HashMap<String, String>>>>,
 ) -> impl IntoView {
     let session = use_session();
+    // Resolve an object id to its display name for failure labels.
+    let label_for = move |object_id: &str| -> String {
+        names
+            .and_then(|n| n.with(|m| m.get(object_id).cloned()))
+            .unwrap_or_else(|| object_id.to_string())
+    };
 
     let busy = RwSignal::new(false);
     let summary: RwSignal<Option<String>> = RwSignal::new(None);
@@ -214,7 +231,7 @@ pub fn BulkActionBar(
             let parsed: Result<(String, Vec<BulkFailure>, bool), String> = match action {
                 BulkAction::Grant => bulk::bulk_grant_permissions(tid, &ids)
                     .await
-                    .map(|r| (parse_grant(r), false))
+                    .map(|r| (parse_grant(r, label_for), false))
                     .map(|((s, f), c)| (s, f, c))
                     .map_err(|e| e.message),
                 BulkAction::RemoveExpired => bulk::bulk_remove_expired_credentials(tid, Some(&ids))
@@ -224,18 +241,18 @@ pub fn BulkActionBar(
                     .map_err(|e| e.message),
                 BulkAction::RemoveRedundant => bulk::bulk_remove_redundant_permissions(tid, &ids)
                     .await
-                    .map(|r| (parse_redundant(r), false))
+                    .map(|r| (parse_redundant(r, label_for), false))
                     .map(|((s, f), c)| (s, f, c))
                     .map_err(|e| e.message),
                 BulkAction::ScopeMailbox => bulk::bulk_scope_mailbox_access(tid, &ids, &groups)
                     .await
-                    .map(|r| (parse_scope("mailbox", r), false))
+                    .map(|r| (parse_scope("mailbox", r, label_for), false))
                     .map(|((s, f), c)| (s, f, c))
                     .map_err(|e| e.message),
                 BulkAction::ScopeSharePoint => {
                     bulk::bulk_scope_sharepoint_access(tid, &ids, &sites, &role)
                         .await
-                        .map(|r| (parse_scope("SharePoint", r), false))
+                        .map(|r| (parse_scope("SharePoint", r, label_for), false))
                         .map(|((s, f), c)| (s, f, c))
                         .map_err(|e| e.message)
                 }
@@ -244,18 +261,18 @@ pub fn BulkActionBar(
                     let principal_id = principal_id.unwrap_or_default();
                     bulk::bulk_add_owner(tid, &ids, &principal_id)
                         .await
-                        .map(|r| (parse_add_owner(r), false))
+                        .map(|r| (parse_add_owner(r, label_for), false))
                         .map(|((s, f), c)| (s, f, c))
                         .map_err(|e| e.message)
                 }
                 BulkAction::DisableSignIn => bulk::bulk_disable_sign_in(tid, &ids)
                     .await
-                    .map(|r| (parse_disable(r), false))
+                    .map(|r| (parse_disable(r, label_for), false))
                     .map(|((s, f), c)| (s, f, c))
                     .map_err(|e| e.message),
                 BulkAction::Delete => bulk::bulk_delete_applications(tid, &ids)
                     .await
-                    .map(|r| (parse_delete(r), true))
+                    .map(|r| (parse_delete(r, label_for), true))
                     .map(|((s, f), c)| (s, f, c))
                     .map_err(|e| e.message),
             };
@@ -631,13 +648,16 @@ fn cancelled_suffix(cancelled: bool) -> &'static str {
     if cancelled { " (cancelled)" } else { "" }
 }
 
-fn parse_grant(r: bulk::BulkGrantResult) -> (String, Vec<BulkFailure>) {
+fn parse_grant(
+    r: bulk::BulkGrantResult,
+    label_for: impl Fn(&str) -> String,
+) -> (String, Vec<BulkFailure>) {
     let fails: Vec<BulkFailure> = r
         .outcomes
         .iter()
         .filter_map(|o| {
             o.error.as_ref().map(|e| BulkFailure {
-                label: o.object_id.clone(),
+                label: label_for(&o.object_id),
                 reason: e.clone(),
             })
         })
@@ -690,13 +710,16 @@ fn parse_remove_expired(r: bulk::BulkRemoveExpiredResult) -> (String, Vec<BulkFa
     )
 }
 
-fn parse_redundant(r: bulk::BulkRemoveRedundantResult) -> (String, Vec<BulkFailure>) {
+fn parse_redundant(
+    r: bulk::BulkRemoveRedundantResult,
+    label_for: impl Fn(&str) -> String,
+) -> (String, Vec<BulkFailure>) {
     let fails: Vec<BulkFailure> = r
         .outcomes
         .iter()
         .filter_map(|o| {
             o.error.as_ref().map(|e| BulkFailure {
-                label: o.object_id.clone(),
+                label: label_for(&o.object_id),
                 reason: e.clone(),
             })
         })
@@ -713,13 +736,17 @@ fn parse_redundant(r: bulk::BulkRemoveRedundantResult) -> (String, Vec<BulkFailu
     )
 }
 
-fn parse_scope(noun: &str, r: bulk::BulkScopeResult) -> (String, Vec<BulkFailure>) {
+fn parse_scope(
+    noun: &str,
+    r: bulk::BulkScopeResult,
+    label_for: impl Fn(&str) -> String,
+) -> (String, Vec<BulkFailure>) {
     let fails: Vec<BulkFailure> = r
         .outcomes
         .iter()
         .filter_map(|o| {
             o.error.as_ref().map(|e| BulkFailure {
-                label: o.object_id.clone(),
+                label: label_for(&o.object_id),
                 reason: e.clone(),
             })
         })
@@ -735,13 +762,16 @@ fn parse_scope(noun: &str, r: bulk::BulkScopeResult) -> (String, Vec<BulkFailure
     )
 }
 
-fn parse_add_owner(r: bulk::BulkAddOwnerResult) -> (String, Vec<BulkFailure>) {
+fn parse_add_owner(
+    r: bulk::BulkAddOwnerResult,
+    label_for: impl Fn(&str) -> String,
+) -> (String, Vec<BulkFailure>) {
     let fails: Vec<BulkFailure> = r
         .outcomes
         .iter()
         .filter_map(|o| {
             o.error.as_ref().map(|e| BulkFailure {
-                label: o.object_id.clone(),
+                label: label_for(&o.object_id),
                 reason: e.clone(),
             })
         })
@@ -758,13 +788,16 @@ fn parse_add_owner(r: bulk::BulkAddOwnerResult) -> (String, Vec<BulkFailure>) {
     )
 }
 
-fn parse_disable(r: bulk::BulkDisableSignInResult) -> (String, Vec<BulkFailure>) {
+fn parse_disable(
+    r: bulk::BulkDisableSignInResult,
+    label_for: impl Fn(&str) -> String,
+) -> (String, Vec<BulkFailure>) {
     let fails: Vec<BulkFailure> = r
         .outcomes
         .iter()
         .filter_map(|o| {
             o.error.as_ref().map(|e| BulkFailure {
-                label: o.object_id.clone(),
+                label: label_for(&o.object_id),
                 reason: e.clone(),
             })
         })
@@ -780,12 +813,15 @@ fn parse_disable(r: bulk::BulkDisableSignInResult) -> (String, Vec<BulkFailure>)
     )
 }
 
-fn parse_delete(r: bulk::BulkDeleteResult) -> (String, Vec<BulkFailure>) {
+fn parse_delete(
+    r: bulk::BulkDeleteResult,
+    label_for: impl Fn(&str) -> String,
+) -> (String, Vec<BulkFailure>) {
     let fails: Vec<BulkFailure> = r
         .failed
         .iter()
         .map(|f| BulkFailure {
-            label: f.object_id.clone(),
+            label: label_for(&f.object_id),
             reason: f.message.clone(),
         })
         .collect();

@@ -176,14 +176,7 @@ pub(super) fn PermissionsContent(
                 on_changed=Callback::new(move |()| reload.update(|n| *n += 1))
             />
             <Suspense fallback=move || {
-                view! {
-                    <div class="centered-pad">
-                        <Spinner
-                            size=Signal::derive(|| SpinnerSize::Tiny)
-                            label="Loading granted permissions…"
-                        />
-                    </div>
-                }
+                view! { <SkeletonList rows=6 /> }
             }>
                 {move || Suspend::new(async move {
                     match granted.await {

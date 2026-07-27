@@ -6,6 +6,8 @@
 //! never merge the tiers (the credential tier exists to keep tenant-wide index
 //! re-scans off the credential path).
 
+use std::sync::Arc;
+
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::ServicePrincipal;
 use azapptoolkit_graph::{GraphClient, GraphError};
@@ -107,6 +109,13 @@ pub(crate) fn invalidate_app_lists(cache: &Cache, tenant_id: &str) {
     cache.invalidate(CacheKind::Lists, &app_name_index_key(tenant_id));
     // The search corpus is derived from those two indexes, so it must fall too.
     cache.invalidate(CacheKind::Lists, &search_corpus_key(tenant_id));
+    // The managed-identity list is now a filtered projection OF the SP index
+    // (rather than its own scan), so it is stale whenever the index is. Without
+    // this it could outlive its own source by up to the 60-minute TTL.
+    cache.invalidate(
+        CacheKind::Lists,
+        &crate::commands::managed_identity::mi_key(tenant_id),
+    );
     // A create/delete changes the app set the credential-expiry list scans.
     cache.invalidate(CacheKind::Lists, &credential_expirations_key(tenant_id));
     // Any list-changing mutation (create/delete, credential add/remove, …) also
@@ -144,6 +153,39 @@ pub(crate) fn invalidate_app_credentials(cache: &Cache, tenant_id: &str, object_
     crate::commands::audit::invalidate_audit_cache(cache, tenant_id);
 }
 
+/// Reads the cached per-tenant service-principal index, if present.
+///
+/// Stored on the **typed** path ([`Cache::put_typed_index`]), so a hit is a
+/// refcount clone rather than a walk of a 10 000-entry JSON tree — this entry is
+/// read by six surfaces (both entity lists, global search, the audit, the
+/// consent audit, DR backup), and re-materializing it on each was pure CPU on a
+/// runtime worker. It is also **pinned**, so the per-app `app_detail|…` /
+/// `mail_scopes|…` entries sharing its bucket can't evict an index that costs a
+/// full `/servicePrincipals` scan to rebuild.
+///
+/// Every reader must go through this (and [`sp_index_store`]) rather than
+/// `cache.get`: a typed entry read untyped reads as a miss, silently costing a
+/// tenant-wide rescan.
+pub(crate) fn sp_index_hit(cache: &Cache, tenant_id: &str) -> Option<Arc<Vec<ServicePrincipal>>> {
+    cache.get_typed::<Vec<ServicePrincipal>>(CacheKind::Lists, &sp_index_key(tenant_id))
+}
+
+/// Caches a freshly-fetched service-principal index and hands back the shared
+/// handle. Pair with [`sp_index_hit`].
+pub(crate) fn sp_index_store(
+    cache: &Cache,
+    tenant_id: &str,
+    sps: Vec<ServicePrincipal>,
+) -> Arc<Vec<ServicePrincipal>> {
+    let shared = Arc::new(sps);
+    cache.put_typed_index(
+        CacheKind::Lists,
+        sp_index_key(tenant_id),
+        Arc::clone(&shared),
+    );
+    shared
+}
+
 /// The per-tenant service-principal index, read through the same cache entry
 /// the Enterprise Apps / App Registrations lists populate ([`sp_index_key`]),
 /// so a tenant-wide scan (DR backup, consent audit) right after browsing those
@@ -153,17 +195,84 @@ pub(crate) async fn sp_index_cached(
     state: &AppState,
     client: &GraphClient,
     tenant_id: &str,
-) -> Result<Vec<ServicePrincipal>, GraphError> {
-    let key = sp_index_key(tenant_id);
-    if let Some(cached) = state
-        .cache
-        .get::<Vec<ServicePrincipal>>(CacheKind::Lists, &key)
-    {
+) -> Result<Arc<Vec<ServicePrincipal>>, GraphError> {
+    if let Some(cached) = sp_index_hit(&state.cache, tenant_id) {
         return Ok(cached);
     }
     let sps = client.list_service_principals_index().await?;
-    state.cache.put(CacheKind::Lists, key, &sps);
-    Ok(sps)
+    Ok(sp_index_store(&state.cache, tenant_id, sps))
+}
+
+#[cfg(test)]
+mod sp_index_tests {
+    use super::{sp_index_hit, sp_index_key, sp_index_store};
+    use azapptoolkit_core::cache::{Cache, CacheKind};
+    use azapptoolkit_core::models::ServicePrincipal;
+
+    fn sp(id: &str) -> ServicePrincipal {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "appId": format!("app-{id}"),
+            "displayName": id,
+        }))
+        .expect("sample SP deserializes")
+    }
+
+    /// A hit must hand back the SAME allocation, not a rebuild — the whole
+    /// reason the index is on the typed path (six surfaces read it, and each
+    /// untyped read walked a 10 000-entry JSON tree on a runtime worker).
+    #[test]
+    fn a_hit_is_a_refcount_clone_not_a_deserialize() {
+        let cache = Cache::new();
+        let stored = sp_index_store(&cache, "t1", vec![sp("a"), sp("b")]);
+        let hit = sp_index_hit(&cache, "t1").expect("index hit");
+        assert!(std::sync::Arc::ptr_eq(&stored, &hit));
+    }
+
+    /// Guards the trap in this design: the index is stored typed, so a reader
+    /// reaching for it with the plain `get` reads a MISS and silently pays for a
+    /// full tenant rescan. Every reader must go through `sp_index_hit`.
+    #[test]
+    fn the_index_is_not_reachable_through_the_untyped_get() {
+        let cache = Cache::new();
+        sp_index_store(&cache, "t1", vec![sp("a")]);
+        assert!(
+            cache
+                .get::<Vec<ServicePrincipal>>(CacheKind::Lists, &sp_index_key("t1"))
+                .is_none(),
+            "read the typed index untyped — use sp_index_hit instead"
+        );
+    }
+
+    /// The index is pinned against LRU, but pinning must never defeat the
+    /// cross-tenant sweep — that is the repo's #1 footgun.
+    #[test]
+    fn the_pinned_index_is_still_dropped_on_tenant_sweep() {
+        let cache = Cache::new();
+        sp_index_store(&cache, "t1", vec![sp("a")]);
+        sp_index_store(&cache, "t2", vec![sp("b")]);
+        cache.invalidate_tenant("t1");
+        assert!(sp_index_hit(&cache, "t1").is_none(), "swept tenant");
+        assert!(sp_index_hit(&cache, "t2").is_some(), "other tenant kept");
+    }
+
+    /// Per-app entries share the index's bucket; a mail-heavy audit writes
+    /// thousands of them. The index must survive that pressure or the next list
+    /// visit pays for a fresh `/servicePrincipals` scan.
+    #[test]
+    fn per_app_churn_cannot_evict_the_index() {
+        let cache = Cache::new();
+        cache.configure(None, None, None, None, None, Some(8));
+        sp_index_store(&cache, "t1", vec![sp("a")]);
+        for i in 0..200 {
+            cache.put(
+                CacheKind::Lists,
+                format!("t1|mail_scopes|{i}"),
+                &i.to_string(),
+            );
+        }
+        assert!(sp_index_hit(&cache, "t1").is_some());
+    }
 }
 
 #[cfg(test)]

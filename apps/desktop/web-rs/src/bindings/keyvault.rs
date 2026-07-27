@@ -62,13 +62,6 @@ struct SetArgs<'a> {
     input: &'a KvSetSecretInput,
 }
 
-pub async fn kv_set_secret(
-    tenant_id: &str,
-    input: &KvSetSecretInput,
-) -> Result<KvSecretMetadataDto, UiError> {
-    invoke_result("kv_set_secret", SetArgs { tenant_id, input }).await
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RotateArgs<'a> {

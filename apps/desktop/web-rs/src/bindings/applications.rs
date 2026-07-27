@@ -64,22 +64,6 @@ struct ResolvePermissionArgs<'a> {
     permission_id: &'a str,
 }
 
-pub async fn resolve_permission(
-    tenant_id: &str,
-    resource_app_id: &str,
-    permission_id: &str,
-) -> Result<PermissionDescriptor, UiError> {
-    invoke_result(
-        "resolve_permission",
-        ResolvePermissionArgs {
-            tenant_id,
-            resource_app_id,
-            permission_id,
-        },
-    )
-    .await
-}
-
 // ---------------- Mutations ----------------
 
 #[derive(Serialize)]

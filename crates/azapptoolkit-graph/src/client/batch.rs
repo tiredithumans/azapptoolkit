@@ -9,10 +9,12 @@
 //! See <https://learn.microsoft.com/en-us/graph/json-batching>.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use reqwest::Method;
 use serde::de::DeserializeOwned;
 
+use azapptoolkit_core::BearerProvider;
 use azapptoolkit_core::http_retry::{
     BASE_DELAY_MS, MAX_RETRIES, next_backoff_ms, parse_retry_after_seconds, sleep_before_retry,
 };
@@ -91,6 +93,21 @@ impl GraphClient {
         self.batch_get_json_with_headers(urls, &[]).await
     }
 
+    /// [`Self::batch_get_json`] on a **caller-supplied** bearer instead of the
+    /// default read token.
+    ///
+    /// `/sites/{id}/permissions` is a `Sites.*`-scoped read, so the SharePoint
+    /// sweep can't ride the read token the way the directory batches do — yet it
+    /// is by far the largest un-batched fan-out in the app (one GET per site, up
+    /// to the sweep's 5000-site cap, where 20 GETs fit in one POST).
+    pub(crate) async fn batch_get_json_scoped<T: DeserializeOwned>(
+        &self,
+        token: &Arc<dyn BearerProvider>,
+        urls: &[String],
+    ) -> Result<Vec<Result<T>>> {
+        self.batch_get_json_inner(token, urls, &[]).await
+    }
+
     /// Like [`Self::batch_get_json`] but applies `headers` to **every**
     /// sub-request. The lone caller that needs this is an advanced query
     /// (`memberOf/microsoft.graph.group` with `$count`), which Graph rejects
@@ -98,6 +115,16 @@ impl GraphClient {
     /// headers don't propagate to the batched sub-requests.
     pub async fn batch_get_json_with_headers<T: DeserializeOwned>(
         &self,
+        urls: &[String],
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<Result<T>>> {
+        self.batch_get_json_inner(&self.read_token, urls, headers)
+            .await
+    }
+
+    async fn batch_get_json_inner<T: DeserializeOwned>(
+        &self,
+        token: &Arc<dyn BearerProvider>,
         urls: &[String],
         headers: &[(&str, &str)],
     ) -> Result<Vec<Result<T>>> {
@@ -109,9 +136,12 @@ impl GraphClient {
         let chunks: Vec<&[String]> = urls.chunks(BATCH_MAX).collect();
         let mut out: Vec<Result<T>> = Vec::with_capacity(urls.len());
         for group in chunks.chunks(CHUNK_CONCURRENCY) {
-            let results =
-                futures::future::join_all(group.iter().map(|c| self.batch_chunk::<T>(c, headers)))
-                    .await;
+            let results = futures::future::join_all(
+                group
+                    .iter()
+                    .map(|c| self.batch_chunk::<T>(token, c, headers)),
+            )
+            .await;
             for chunk in results {
                 out.extend(chunk?);
             }
@@ -151,6 +181,7 @@ impl GraphClient {
     /// `headers`, when non-empty, are attached to every sub-request.
     async fn batch_chunk<T: DeserializeOwned>(
         &self,
+        token: &Arc<dyn BearerProvider>,
         urls: &[String],
         headers: &[(&str, &str)],
     ) -> Result<Vec<Result<T>>> {
@@ -182,12 +213,13 @@ impl GraphClient {
             let body = serde_json::json!({ "requests": requests });
             let bytes = self
                 .send_core_url_with(
-                    &self.read_token,
+                    token,
                     Method::POST,
                     &batch_url,
                     &[],
                     false,
                     Some(body),
+                    None,
                 )
                 .await?;
             let envelope: BatchEnvelope = serde_json::from_slice(&bytes)

@@ -4,21 +4,29 @@
 //! selection set so the same component drives both lists.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use leptos::prelude::*;
 
 #[component]
 pub fn SelectAllBar(
     /// Result count line, e.g. `"42 of 100 app registrations"`.
-    count_label: String,
+    #[prop(into)]
+    count_label: Signal<String>,
     /// Object ids of the currently-filtered (visible) rows — the "current view".
-    visible_ids: Vec<String>,
+    ///
+    /// A **shared** handle, not an owned `Vec`: the caller derives this from its
+    /// filtered row set, which changes on every keystroke and facet click, and
+    /// at the 10 000-app list ceiling materializing one `String` per visible row
+    /// each time was the list's dominant per-keystroke cost. Taking a `Signal`
+    /// over an `Arc` makes a re-render a refcount clone.
+    #[prop(into)]
+    visible_ids: Signal<Arc<Vec<String>>>,
     /// The bulk-selection set this bar toggles (a superset of the visible ids,
     /// since rows hidden by the active filter can still be selected).
     selected: RwSignal<HashSet<String>>,
 ) -> impl IntoView {
-    let visible = StoredValue::new(visible_ids);
-    let visible_count = visible.with_value(Vec::len);
+    let visible_count = move || visible_ids.with(|ids| ids.len());
 
     // `(all visible selected, any visible selected)` in one memoized pass per
     // selection change, shared by the checkbox's `checked` and `indeterminate`.
@@ -26,9 +34,9 @@ pub fn SelectAllBar(
     // O(visible), not O(visible × selected). `all` is false when nothing is visible.
     let sel_state = Memo::new(move |_| {
         selected.with(|sel| {
-            visible.with_value(|ids| {
+            visible_ids.with(|ids| {
                 let on = ids.iter().filter(|id| sel.contains(id.as_str())).count();
-                (visible_count > 0 && on == ids.len(), on > 0)
+                (!ids.is_empty() && on == ids.len(), on > 0)
             })
         })
     });
@@ -42,14 +50,14 @@ pub fn SelectAllBar(
         if all_selected() {
             // Deselect every visible id, leaving any off-screen selections intact.
             selected.update(|sel| {
-                visible.with_value(|ids| {
-                    for id in ids {
+                visible_ids.with(|ids| {
+                    for id in ids.iter() {
                         sel.remove(id);
                     }
                 })
             });
         } else {
-            selected.update(|sel| visible.with_value(|ids| sel.extend(ids.iter().cloned())));
+            selected.update(|sel| visible_ids.with(|ids| sel.extend(ids.iter().cloned())));
         }
     };
 
@@ -61,12 +69,12 @@ pub fn SelectAllBar(
                 <input
                     type="checkbox"
                     class="app-list__check"
-                    aria-label=format!("Select all {visible_count} visible")
+                    aria-label=move || format!("Select all {} visible", visible_count())
                     prop:checked=all_selected
                     prop:indeterminate=indeterminate
                     on:change=toggle
                 />
-                <span class="app-list__count">{count_label}</span>
+                <span class="app-list__count">{move || count_label.get()}</span>
             </label>
             {move || {
                 let n = selected.with(HashSet::len);

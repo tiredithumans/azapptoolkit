@@ -27,8 +27,8 @@ pub fn CredentialsDashboard() -> impl IntoView {
     // `async move {}` block as an attribute value.
     let fetch =
         move |tid: String| async move { credentials::list_credential_expirations(&tid).await };
-    let export = move |data: Vec<CredentialRowDto>| async move {
-        credentials::save_credentials_to_file(&data, "csv").await
+    let export = move |data: Vec<CredentialRowDto>, format: &'static str| async move {
+        credentials::save_credentials_to_file(&data, format).await
     };
 
     view! {
@@ -36,6 +36,7 @@ pub fn CredentialsDashboard() -> impl IntoView {
             title="Credential expiry"
             crumb="Secrets & certificates across the tenant"
             search_placeholder="Filter by app name or appId…"
+            refresh_label="Refresh credential expiry"
             view_key="credentials"
             noun="credential(s)"
             empty_message="No credentials match this filter."
