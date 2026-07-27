@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-07-27
+
 ### Changed
 
 - **Lists, search, and the DR backup now share one app-registration
