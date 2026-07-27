@@ -7,6 +7,71 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **Lists, search, and the DR backup now share one app-registration
+  enumeration.** There was a shared, cached service-principal index but no
+  `/applications` equivalent, so `/applications` was enumerated tenant-wide from
+  five places with five projections — three of them (the Enterprise Apps pairing
+  join, the DR backup's estate read, the mailbox probe's routing map) **uncached**
+  and re-run every time. They now read one typed, pinned per-tenant index, the
+  same way every service-principal reader already shares `sp_index`. A cold
+  Enterprise Apps load right after browsing App Registrations, or a backup right
+  after either, no longer pays for its own full-tenant scan; when two indexes are
+  cold together they are fetched concurrently rather than serially. Global search
+  keeps degrading each half of its corpus independently, so one unreadable index
+  can't blank the other's results.
+
+  Two consequences worth knowing: the search corpus is now bounded at the same
+  10 000-app cap as every other tenant-wide enumeration (it was unbounded, which
+  meant it could disagree with the lists on a very large tenant), and the shared
+  index is pinned against LRU eviction, so a mail-heavy audit run can no longer
+  push it out and force the next list visit to rescan.
+
+- **Every paged Graph read asks for full-size pages.** Paging is strictly serial,
+  so an omitted `$top` left Graph on its default of 100 rows — a 10× round-trip
+  multiplier. The app-role assignment, delegated-grant, owner, and group-membership
+  reads (and their `$batch` sub-requests) now request the documented maximum, as do
+  the managed-identity and tenant-resource service-principal scans, which had been
+  paging at 200 while the neighbouring index scan used 999.
+
+  The one operators will feel is the security audit: it reads every
+  application-permission grant in the tenant from a single collection before it
+  can score anything, and that read was the run's longest serial prologue.
+
+- **The DR backup no longer rescans every service principal to find the managed
+  identities.** It fetched the SP index and then issued a second, near-identical
+  full `/servicePrincipals` scan filtered to managed identities — whose entire
+  payload the index already carried. The managed-identity list had already been
+  fixed this way; the backup had not.
+
+- **Admin consent reads the app's delegated grants once, not once per resource.**
+  `grant_admin_consent` hoisted its app-role snapshot out of the per-resource loop
+  but left the matching delegated-grant read inside it, so an app declaring N APIs
+  re-read the same grant collection N times. Both snapshots are now taken once, up
+  front, and concurrently.
+
+### Fixed
+
+- **A hung connection could stall a Graph call for the full request timeout, on
+  every retry.** The HTTP client had a 60-second total-request budget — sized for
+  the slowest legitimate response — but no separate connect budget, so a host that
+  never completed a handshake burned the whole 60 seconds before the retry loop
+  saw a failure, and then did it again. Connections now time out in 10 seconds;
+  idle sockets are also held long enough to survive the quiet gaps between fan-out
+  waves.
+
+- **Retried writes no longer re-serialize their request body.** The body was
+  built inside the retry loop, so every 429/5xx retry re-encoded the payload —
+  most visibly on the 20-sub-request `$batch` POSTs, which retry precisely when
+  the tenant is already under pressure.
+
+- **`prewarm_sps` measured its seeding budget against the wrong cache bound**
+  (the global entry cap rather than the per-kind one from `Cache::capacity_for`),
+  so it would under-seed the service-principal bucket, which is allowed to be
+  larger. No live caller hit this — the only remaining one seeds a kind where the
+  two bounds coincide — but the helper exists to be kind-generic.
+
 ## [0.21.0] - 2026-07-25
 
 ### Added

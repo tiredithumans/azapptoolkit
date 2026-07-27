@@ -16,7 +16,7 @@ use azapptoolkit_core::models::{Application, ServicePrincipal};
 use azapptoolkit_graph::GraphClient;
 use tauri::State;
 
-use crate::commands::applications::{app_name_index_key, search_corpus_key};
+use crate::commands::applications::search_corpus_key;
 use crate::commands::guid::is_guid;
 use crate::dto::UiError;
 use crate::dto::search::{GlobalSearchResults, SearchHit};
@@ -49,6 +49,23 @@ struct SearchRow {
     kind: SearchKind,
 }
 
+/// One half of the corpus, degrading a failed index read to no rows for that
+/// half instead of failing the search. Named rather than a closure because the
+/// two halves hold different element types.
+fn corpus_half<T>(
+    index: Result<Arc<Vec<T>>, azapptoolkit_graph::GraphError>,
+    which: &str,
+) -> Arc<Vec<T>> {
+    index.unwrap_or_else(|err| {
+        tracing::info!(
+            ?err,
+            index = which,
+            "global search: corpus half unavailable"
+        );
+        Arc::new(Vec::new())
+    })
+}
+
 /// Returns the tenant's typed-cached search corpus, building it from the SP +
 /// app-name indexes on a miss (and seeding those indexes if cold). Invalidated
 /// alongside its source indexes by `invalidate_app_lists`.
@@ -65,40 +82,33 @@ async fn search_corpus(
         return corpus;
     }
 
-    // Service principals — shared with the App Reg / Enterprise lists.
-    let sps = match crate::commands::applications::sp_index_hit(&state.cache, tenant_id) {
-        Some(hit) => hit,
-        None => match client.list_service_principals_index().await {
-            Ok(sps) => crate::commands::applications::sp_index_store(&state.cache, tenant_id, sps),
-            Err(_) => Arc::new(Vec::new()),
-        },
-    };
-
-    // App registrations without a paired SP only appear in this index.
-    let app_key = app_name_index_key(tenant_id);
-    let apps: Vec<Application> = match state
-        .cache
-        .get::<Vec<Application>>(CacheKind::Lists, &app_key)
-    {
-        Some(hit) => hit,
-        None => match client.list_application_index_named(None).await {
-            Ok(a) => {
-                state.cache.put(CacheKind::Lists, app_key, &a);
-                a
-            }
-            Err(_) => Vec::new(),
-        },
-    };
+    // Both halves of the corpus are the shared tenant-wide indexes the App Reg /
+    // Enterprise lists populate — app registrations without a paired SP appear
+    // only in the application index, which is why both are needed.
+    //
+    // `join`, not `try_join` (and not the paired `indexes_cached` the lists
+    // use): on a double-cold tenant these still fetch concurrently, but a
+    // failure on ONE index must degrade only its own half of the corpus. A
+    // short-circuiting join would let an unreadable `/applications` blank the
+    // service-principal results too — search's contract is partial results, not
+    // an error.
+    let (sps, apps) = futures::future::join(
+        crate::commands::applications::sp_index_cached(state, client, tenant_id),
+        crate::commands::applications::app_name_index_cached(state, client, tenant_id),
+    )
+    .await;
+    let sps = corpus_half(sps, "service_principals");
+    let apps = corpus_half(apps, "applications");
 
     let mut rows: Vec<SearchRow> = Vec::with_capacity(sps.len() + apps.len());
-    for a in apps {
+    for a in apps.iter() {
         rows.push(SearchRow {
             name_lc: a.display_name.to_lowercase(),
             app_id_lc: a.app_id.to_lowercase(),
             id_lc: a.id.to_lowercase(),
-            id: a.id,
-            app_id: a.app_id,
-            display_name: a.display_name,
+            id: a.id.clone(),
+            app_id: a.app_id.clone(),
+            display_name: a.display_name.clone(),
             kind: SearchKind::AppReg,
         });
     }

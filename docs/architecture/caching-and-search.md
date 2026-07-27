@@ -13,12 +13,35 @@ The convention is universal: every kind — Lists, Audit (`{tenant}|audit_run`,
 prefix-sweeps **all four kinds**, so a different operator signing into the *same* tenant never
 reads the previous session's audit/sweep/SP data.
 
-## One SP enumeration feeds two lists
+## Two tenant-wide indexes, and every surface joins against them
 
-The App Registrations and Enterprise Apps lists share **one** cached service-principal enumeration
-under `sp_index_key(tenant_id)` → `"{tenant_id}|sp_index"` (fetched by
-`list_service_principals_index`), so a tab switch (or a global-search keystroke) reuses one
-directory scan instead of re-enumerating every SP.
+There are exactly **two** cached tenant-wide directory enumerations, and no surface may run its own:
+
+| Index | Key | Fetched by | Projection |
+|---|---|---|---|
+| Service principals | `sp_index_key` → `"{tenant}\|sp_index"` | `list_service_principals_index` | `id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames` |
+| App registrations | `app_name_index_key` → `"{tenant}\|app_name_index"` | `list_application_index_named` | `id,appId,displayName` |
+
+Readers: both entity lists, global search, the security audit, the consent audit, the DR backup, the
+managed-identity list, and the mailbox probe. A tab switch, a search keystroke, or a backup run right
+after browsing reuses one directory scan rather than re-enumerating.
+
+Both go through their accessor pairs in `commands/applications/cache.rs` — `sp_index_hit` /
+`sp_index_store` / `sp_index_cached` and `app_name_index_hit` / `app_name_index_store` /
+`app_name_index_cached` — never `cache.get`. Both are stored via `put_typed_index`, so they are
+**typed** (a hit is a refcount clone, not a walk of a 10 000-entry JSON tree) and **pinned** (the
+thousands of per-app `app_detail|…` / `mail_scopes|…` writes sharing their bucket can't evict an
+entry that costs a full directory scan to rebuild). **Footgun:** a typed entry read untyped reads as
+a *miss*, silently costing a tenant-wide rescan — pinned by a test per index.
+
+`indexes_cached(state, client, tenant)` returns both, fetching only the cold ones and, when both are
+cold, fetching them **concurrently**. Use it wherever a surface joins the two (the Enterprise Apps
+pairing join, the DR backup estate). `global_search` deliberately does *not*: it runs the two
+accessors under a non-short-circuiting `join` so one unreadable index degrades only its own half of
+the corpus instead of blanking the results.
+
+Both are bounded at `APPS_MAX` / `SP_INDEX_MAX` (both 10 000). Those caps must not drift — a surface
+enumerating deeper than another silently knows about principals the other does not.
 
 ## Filtering happens in the frontend, on lean rows
 
@@ -39,9 +62,9 @@ objects, only `startswith` / token-based `$search`. A full-GUID query still take
 fast path.
 
 The corpus is a **pre-lowercased, typed-cached** index under
-`search_corpus_key(tenant_id)` → `"{tenant_id}|search_corpus"`, built once (from `sp_index` plus the
-app-registration name index `app_name_index_key(tenant_id)` → `"{tenant_id}|app_name_index"`, fetched
-by `list_application_index_named`) and stored via `Cache::put_typed`. A debounced keystroke reads it
+`search_corpus_key(tenant_id)` → `"{tenant_id}|search_corpus"`, built once from the two shared
+indexes above (app registrations without a paired SP appear only in `app_name_index`) and stored via
+`Cache::put_typed`. A debounced keystroke reads it
 back with `Cache::get_typed` — a refcount clone of `Arc<Vec<SearchRow>>`, **no per-query deserialize
 of the full SP/Application models and no per-query re-lowercasing** (`SearchRow` carries the
 lowercased forms). `put_typed`/`get_typed` keep the original `Arc<T>` alongside a `Null` JSON value,
@@ -158,6 +181,24 @@ any new heavy fan-out; don't hand-roll a second tracker or a raw per-item loop:
   429 and recovers when quiet. Attach/detach with the `ThrottleGuard::attach(client, tracker)`
   RAII (used by the audit and the bulk fan-outs) so an early `?` can't leave a stale observer
   halving the shared per-tenant client's cap.
+
+## Page size is a wall-clock divisor, not a tuning knob
+
+Paging is strictly **serial** — each request needs the prior response's `@odata.nextLink` — so the
+`$top` on a paged read divides its round-trip count directly. Graph's default is **100**, so an
+omitted `$top` is a 10× round-trip multiplier on any collection that pages.
+
+Every paged read in `azapptoolkit-graph` therefore sends `client::MAX_PAGE_SIZE` (999), the
+documented maximum for these directory collections; `/applications` enumerations use the equivalent
+public `DEFAULT_APP_PAGE_SIZE`. Asking above an endpoint's real cap is harmless (Graph clamps
+silently), and per-endpoint caps are **not reliably documented** — `list_service_principals_index`
+logs its effective first-page size for exactly that reason. Batched sub-requests carry it too, so a
+`$batch` sub-response rarely overflows into `finish_paged_batch`'s serial continuation.
+
+The read that dominates is `appRoleAssignedTo` **on the Microsoft Graph service principal**: it holds
+every application-permission grant in the tenant, and both the security audit
+(`prefetch_graph_app_roles`) and the consent view walk it end-to-end *before* they can score
+anything.
 
 The write fan-outs (bulk delete / grant / remove-expired, DR backup writes) **can't `$batch`** —
 Graph batches GETs — so their win is bounded concurrency + adaptive 429 backoff, not round-trip

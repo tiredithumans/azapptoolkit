@@ -15,7 +15,7 @@ use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_core::models::{ApplicationTemplate, ServicePrincipal, SynchronizationJob};
 use azapptoolkit_graph::GraphError;
 
-use crate::commands::applications::{APPS_MAX, enterprise_key, invalidate_app_lists};
+use crate::commands::applications::{enterprise_key, invalidate_app_lists};
 use crate::dto::UiError;
 use crate::dto::enterprise_application::{
     AppAssignmentDto, ApplicationTemplateDto, EnterpriseApplicationDetail,
@@ -76,35 +76,29 @@ pub async fn list_enterprise_applications(
 
     let client = state.graph_for(&tenant_id);
 
-    // Both the rows and the pairing index come from whole-tenant scans. Reuse
-    // the shared SP index (cached across both list views); on a cold miss fetch
-    // it concurrently with the app-registration pairing index so the two scans
-    // overlap. The SP index is unfiltered (it is shared with the App
-    // Registrations join), so filter managed identities out below — matching
-    // the prior server-side `servicePrincipalType ne 'ManagedIdentity'`.
-    let (sps, app_reg_index_pairs) =
-        match crate::commands::applications::sp_index_hit(&state.cache, &tenant_id) {
-            Some(cached) => (cached, client.list_application_index(Some(APPS_MAX)).await?),
-            None => {
-                let (sps, pairs) = futures::future::try_join(
-                    client.list_service_principals_index(),
-                    client.list_application_index(Some(APPS_MAX)),
-                )
-                .await?;
-                (
-                    crate::commands::applications::sp_index_store(&state.cache, &tenant_id, sps),
-                    pairs,
-                )
-            }
-        };
+    // Both the rows and the pairing index come from whole-tenant scans, and both
+    // are the SHARED cached indexes every other surface joins against — so a
+    // visit here right after the App Registrations tab (or global search) costs
+    // nothing, and a cold visit fetches the two concurrently. The pairing index
+    // was previously an uncached `/applications` scan of its own, re-run on
+    // every cold load of this list. The SP index is unfiltered (it is shared
+    // with the App Registrations join), so filter managed identities out below —
+    // matching the prior server-side `servicePrincipalType ne 'ManagedIdentity'`.
+    let (sps, app_index) =
+        crate::commands::applications::indexes_cached(&state, &client, &tenant_id).await?;
 
-    let by_app_id: HashMap<String, String> = app_reg_index_pairs.into_iter().collect();
+    let by_app_id: HashMap<&str, &str> = app_index
+        .iter()
+        .map(|a| (a.app_id.as_str(), a.id.as_str()))
+        .collect();
 
     let rows: Vec<EnterpriseApplicationDto> = sps
         .iter()
         .filter(|sp| sp.service_principal_type.as_deref() != Some("ManagedIdentity"))
         .map(|sp| {
-            let paired = by_app_id.get(&sp.app_id).cloned();
+            let paired = by_app_id
+                .get(sp.app_id.as_str())
+                .map(|id| (*id).to_string());
             sp_to_enterprise_dto(sp.clone(), &tenant_id, paired)
         })
         .collect();

@@ -112,7 +112,7 @@ impl GraphClient {
                 "$select",
                 "id,appId,displayName,accountEnabled,servicePrincipalType,alternativeNames",
             ),
-            ("$top", "200"),
+            ("$top", MAX_PAGE_SIZE),
         ];
         let page: Paged<ServicePrincipal> =
             self.get_json("/servicePrincipals", &params, false).await?;
@@ -143,7 +143,7 @@ impl GraphClient {
             ("$filter", filter.as_str()),
             ("$select", "id,appId,displayName,appRoles"),
             ("$count", "true"),
-            ("$top", "200"),
+            ("$top", MAX_PAGE_SIZE),
         ];
         let page: Paged<ServicePrincipal> =
             self.get_json("/servicePrincipals", &params, true).await?;
@@ -177,7 +177,7 @@ impl GraphClient {
                 "id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames",
             ),
             ("$count", "true"),
-            ("$top", "999"),
+            ("$top", MAX_PAGE_SIZE),
         ];
         let page: Paged<ServicePrincipal> =
             self.get_json("/servicePrincipals", &params, true).await?;
@@ -295,7 +295,11 @@ impl GraphClient {
         if missing.is_empty() {
             return;
         }
-        let cap = self.cache.config().max_size;
+        // Bound by the cap of the bucket being SEEDED, not the global
+        // `max_size`: `CacheKind::ServicePrincipal` gets a larger, per-object
+        // allowance (`Cache::capacity_for`), so measuring against `max_size`
+        // would under-seed it. Same rule `seed_lean_sps_from_index` follows.
+        let cap = self.cache.capacity_for(kind);
         if missing.len() > cap {
             tracing::info!(
                 missing = missing.len(),
@@ -349,7 +353,8 @@ impl GraphClient {
         sp_object_id: &str,
     ) -> Result<Vec<DirectoryObject>> {
         let path = format!("/servicePrincipals/{sp_object_id}/owners");
-        let page: Paged<DirectoryObject> = self.get_json(&path, &[], false).await?;
+        let params: [(&str, &str); 1] = [("$top", MAX_PAGE_SIZE)];
+        let page: Paged<DirectoryObject> = self.get_json(&path, &params, false).await?;
         self.collect_all_pages(page).await
     }
 

@@ -28,6 +28,24 @@ use crate::error::{GraphError, Result};
 /// Microsoft Graph v1 base URL. Overridable for tests.
 pub const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
+/// `$top` for the directory collections this client pages through — Graph's
+/// documented maximum for them.
+///
+/// Omitting `$top` leaves Graph on its **default page size of 100**, and paging
+/// is strictly serial (each request needs the prior response's
+/// `@odata.nextLink`), so the page size is a direct divisor of wall-clock time
+/// on every tenant-wide or fanned-out read. The one that dominates is
+/// `appRoleAssignedTo` on the Microsoft Graph service principal — a tenant-wide
+/// collection the audit and the consent view both walk end-to-end before they
+/// can score anything.
+///
+/// Graph's real per-endpoint caps are not always what the reference pages claim
+/// (see [`GraphClient::list_service_principals_index`], which logs its effective
+/// first-page size for exactly this reason). Asking for more than an endpoint
+/// allows is harmless — Graph silently clamps to its own maximum — so this is
+/// the safe request everywhere.
+pub(crate) const MAX_PAGE_SIZE: &str = "999";
+
 /// Observer fired on every 429 (or 5xx retry) the client handles. Consumers
 /// use this to back off concurrency when a tenant is under pressure; the
 /// retry middleware inside `send_core` still honors `Retry-After` on a
@@ -135,6 +153,17 @@ impl GraphClient {
         let http = reqwest::Client::builder()
             .user_agent(concat!("azapptoolkit/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(60))
+            // The 60s ceiling is sized for the *slowest legitimate response* —
+            // a 999-app page carrying credential arrays, or a `$batch` POST of
+            // 20 sub-requests. Without a separate connect budget a host that
+            // accepts no connection burns that whole ceiling before the retry
+            // loop even sees a failure, and does it once per attempt. A TCP+TLS
+            // handshake to Graph is sub-second in practice, so 10s is generous.
+            .connect_timeout(Duration::from_secs(10))
+            // Long fan-outs (audit, DR backup) go quiet between waves. Holding
+            // idle sockets across those gaps keeps the next wave off a fresh
+            // handshake; 90s comfortably spans the throttle back-off window.
+            .pool_idle_timeout(Duration::from_secs(90))
             .build()
             .expect("reqwest client builds");
         Self {

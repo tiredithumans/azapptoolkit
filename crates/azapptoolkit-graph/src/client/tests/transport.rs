@@ -2,6 +2,44 @@ use super::super::transport::parse_claims_challenge;
 use super::super::*;
 use super::common::*;
 
+/// The request body is serialized ONCE, outside the retry loop, and replayed on
+/// each attempt as `Bytes`. This pins the two things that refactor could break:
+/// a retried write must send the byte-identical body again (not an empty one),
+/// and it must still carry `Content-Type: application/json` — which now comes
+/// from the header map rather than from `RequestBuilder::json`.
+#[tokio::test]
+async fn a_retried_write_replays_the_same_body_and_content_type() {
+    let server = MockServer::start().await;
+    let body = serde_json::json!({ "displayName": "Renamed App" });
+    // Both mocks match on the body + header, so an attempt that dropped either
+    // falls through to wiremock's 404 and fails the call.
+    Mock::given(method("PATCH"))
+        .and(path("/applications/obj-1"))
+        .and(wiremock::matchers::body_json(body.clone()))
+        .and(header("content-type", "application/json"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "0")
+                .set_body_string("throttled"),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/applications/obj-1"))
+        .and(wiremock::matchers::body_json(body.clone()))
+        .and(header("content-type", "application/json"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    client
+        .patch_application_web("obj-1", &body)
+        .await
+        .expect("the retried PATCH resends the same body");
+}
+
 #[tokio::test]
 async fn retry_after_is_honored_on_429() {
     let server = MockServer::start().await;

@@ -166,9 +166,10 @@ impl GraphClient {
     ) -> Result<Vec<GroupSummary>> {
         let path =
             format!("/servicePrincipals/{service_principal_id}/memberOf/microsoft.graph.group");
-        let params: [(&str, &str); 2] = [
+        let params: [(&str, &str); 3] = [
             ("$select", "id,displayName,securityEnabled,groupTypes"),
             ("$count", "true"),
+            ("$top", MAX_PAGE_SIZE),
         ];
         let page: Paged<GroupSummary> = self.get_json(&path, &params, true).await?;
         self.collect_all_pages(page).await
@@ -195,6 +196,7 @@ impl GraphClient {
                     &[
                         ("$select", "id,displayName,securityEnabled,groupTypes"),
                         ("$count", "true"),
+                        ("$top", MAX_PAGE_SIZE),
                     ],
                 )
             })

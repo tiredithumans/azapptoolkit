@@ -28,7 +28,7 @@ use azapptoolkit_core::models::{
 };
 use azapptoolkit_graph::{GraphClient, GraphError};
 
-use crate::commands::applications::{extract_auth_fields, sp_index_cached};
+use crate::commands::applications::{extract_auth_fields, indexes_cached};
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
@@ -52,8 +52,9 @@ const BATCH_CHUNK: usize = 20;
 /// and halves it toward a floor of 1 on a throttling one.
 const INITIAL_DR_CONCURRENCY: usize = 4;
 
-/// Tenant-wide enumeration cap, matching the lists' `APPS_MAX` / `SP_INDEX_MAX`.
-const ESTATE_CAP: usize = 10_000;
+// The estate's enumeration cap is no longer restated here: both indexes now come
+// from the shared cached accessors (`indexes_cached`), which bound themselves by
+// the lists' `APPS_MAX` / `SP_INDEX_MAX`. A local copy could only drift from them.
 
 /// Captures a full, portable backup of the tenant's app estate. Long-running
 /// (a batched per-app fan-out), so it polls the dedicated [`AppState::dr_cancel`]
@@ -77,18 +78,26 @@ pub async fn backup_tenant(
     let throttle = Arc::new(ConcurrencyThrottle::new(INITIAL_DR_CONCURRENCY));
     let _observer_guard = ThrottleGuard::attach(client.clone(), throttle.clone());
 
-    // Enumerate the estate up front so progress has a real denominator. The SP
-    // index reuses the cache the Enterprise Apps list populates (it's the same
-    // per-tenant scan) so we don't re-pull it; the app index is one cheap read.
-    let app_index = client.list_application_index(Some(ESTATE_CAP)).await?;
-    let sp_index = sp_index_cached(&state, &client, &tenant_id).await?;
-    let managed = client.list_managed_identities().await?;
+    // Enumerate the estate up front so progress has a real denominator. BOTH
+    // indexes are the shared per-tenant entries the lists populate, so a backup
+    // run right after browsing costs no directory scan at all, and a cold run
+    // fetches the two concurrently instead of serially.
+    let (sp_index, app_index) = indexes_cached(&state, &client, &tenant_id).await?;
+
+    // The managed identities are a FILTER over the SP index we already hold —
+    // `/servicePrincipals?$filter=servicePrincipalType eq 'ManagedIdentity'` is
+    // a second full scan of the same collection, and the index projection is a
+    // superset of what the MI pass reads (`id`/`appId`/`displayName`/
+    // `alternativeNames`). Same reasoning as `list_managed_identities`, which is
+    // itself a filter over this index.
+    let managed: Vec<ServicePrincipal> = sp_index
+        .iter()
+        .filter(|sp| is_managed_identity(sp))
+        .cloned()
+        .collect();
 
     let app_total = app_index.len();
-    let ent_total = sp_index
-        .iter()
-        .filter(|sp| !is_managed_identity(sp))
-        .count();
+    let ent_total = sp_index.len() - managed.len();
     let total = app_total + ent_total + managed.len();
     emit(&app_handle, 0, total, None, Some(throttle.current_limit()));
 
@@ -98,8 +107,12 @@ pub async fn backup_tenant(
     let sp_app_ids: Arc<std::collections::HashSet<String>> =
         Arc::new(sp_index.iter().map(|sp| sp.app_id.clone()).collect());
     let done = Arc::new(Mutex::new(0usize));
+    let app_pairs: Vec<(String, String)> = app_index
+        .iter()
+        .map(|a| (a.app_id.clone(), a.id.clone()))
+        .collect();
     let app_chunks: Vec<Vec<(String, String)>> =
-        app_index.chunks(BATCH_CHUNK).map(<[_]>::to_vec).collect();
+        app_pairs.chunks(BATCH_CHUNK).map(<[_]>::to_vec).collect();
     let mut app_backups: Vec<AppRegistrationBackup> = Vec::with_capacity(app_total);
     let cancel = state.dr_cancel.clone();
     let cancelled = dispatch_capped(

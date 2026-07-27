@@ -431,7 +431,21 @@ impl GraphClient {
                 HeaderValue::from_str(prefer).map_err(|e| GraphError::Protocol(e.to_string()))?,
             );
         }
-        if body.is_some() {
+        // Serialize the body ONCE, outside the retry loop. `RequestBuilder::json`
+        // re-encodes its argument on every call, so building it per attempt made
+        // each 429/5xx retry re-serialize the payload — measurable on the `$batch`
+        // POSTs (20 sub-requests) that retry precisely when the tenant is under
+        // pressure. `Bytes` clones are a refcount bump. The `Content-Type` that
+        // `json()` would have set is carried by `headers` instead.
+        let body_bytes: Option<bytes::Bytes> = match body {
+            Some(v) => Some(
+                serde_json::to_vec(&v)
+                    .map_err(|e| GraphError::Deserialize(e.to_string()))?
+                    .into(),
+            ),
+            None => None,
+        };
+        if body_bytes.is_some() {
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         }
 
@@ -446,8 +460,8 @@ impl GraphClient {
                 .request(method.clone(), url)
                 .headers(headers.clone())
                 .query(query);
-            if let Some(v) = body.as_ref() {
-                req = req.json(v);
+            if let Some(b) = body_bytes.as_ref() {
+                req = req.body(b.clone());
             }
             let resp = req.send().await;
             let resp = match resp {
