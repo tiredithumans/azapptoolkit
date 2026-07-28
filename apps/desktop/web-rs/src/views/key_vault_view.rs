@@ -13,7 +13,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Spinner, SpinnerSize};
 
 use crate::bindings::keyvault::{self, KvSecretItemDto, KvSecretValueDto};
 use crate::components::requires_role::RequiresRole;
-use crate::components::ui::{DataTable, SectionHeader};
+use crate::components::ui::{Callout, CopyableId, DataTable, SectionHeader};
 use crate::components::vault_picker::VaultPicker;
 use crate::state::{ActiveView, use_session};
 
@@ -171,11 +171,24 @@ pub fn KeyVaultView() -> impl IntoView {
                 revealed
                     .get()
                     .map(|v| {
+                        // A revealed secret is something the operator came here to
+                        // USE: it needs a copy affordance (selecting a `<pre>` by
+                        // hand is error-prone with a trailing newline) and a way to
+                        // put it away again without leaving the page — the only
+                        // previous way to re-hide it was navigating away.
                         view! {
-                            <div class="alert alert--ok">
-                                <strong>{v.name}</strong>
-                                <pre class="secret-reveal">{v.value}</pre>
-                            </div>
+                            <Callout tone="ok">
+                                <div class="row-between">
+                                    <strong>{v.name}</strong>
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                        on_click=Box::new(move |_| revealed.set(None))
+                                    >
+                                        "Hide"
+                                    </Button>
+                                </div>
+                                <CopyableId value=v.value label="secret value" full=true />
+                            </Callout>
                         }
                     })
             }}

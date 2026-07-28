@@ -17,9 +17,8 @@ use leptos::prelude::*;
 use thaw::Body1;
 
 use crate::components::icon::IconName;
-use crate::components::ui::{
-    DetailLoadError, EmptyState, IconButton, SearchInput, SectionHeader, SkeletonList,
-};
+use crate::components::list_scaffold::ListScaffold;
+use crate::components::ui::{DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList};
 use crate::components::virtual_list::VirtualList;
 
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
@@ -27,7 +26,6 @@ use crate::bindings::managed_identity::{self, ManagedIdentityDto, MiSubtype};
 use crate::components::export_menu::ExportMenu;
 use crate::components::filter_chip::FilterChip;
 use crate::components::index_cap_notice::IndexCapNotice;
-use crate::components::saved_views::SavedViews;
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
@@ -67,6 +65,11 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
     // lifted to the session (like the search above) so the Home dashboard's
     // Managed Identities metrics can seed it.
     let mi_filter = session.tenant_ui.mi_facet;
+
+    // Collapsible filter drawer, matching the two sibling lists (this view had
+    // neither the drawer nor the active-filter badge).
+    let filters_open = RwSignal::new(false);
+    let active_filters = Signal::derive(move || (mi_filter.get() != "all") as usize);
 
     // Bumped by the Refresh button to force the identities list to re-evaluate.
     let list_reload = RwSignal::new(0_u32);
@@ -139,8 +142,17 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
             </div>
             <div class="mi-view__body">
                 <div class="mi-view__list">
-                    <SearchInput value=raw_search placeholder="Filter Managed Identities…" />
-                    <SavedViews view_key="mi" facet=mi_filter search=raw_search />
+                    // Was a hand-rolled search box + SavedViews pair, so this
+                    // list had no filter drawer and no active-filter badge while
+                    // both sibling lists did.
+                    <ListScaffold
+                        search=raw_search
+                        search_placeholder="Filter Managed Identities…"
+                        saved_view_key="mi"
+                        facet=mi_filter
+                        filters_open=filters_open
+                        active_filters=active_filters
+                    >
                     <Suspense fallback=move || view! { <SkeletonList rows=6 /> }>
                         {move || {
                             // Re-runs only on an actual refetch; the search and
@@ -165,6 +177,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                                 list=list
                                                 search=search
                                                 mi_filter=mi_filter
+                                                filters_open=filters_open
                                                 export_rows=export_rows
                                             />
                                         }
@@ -191,6 +204,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                             })
                         }}
                     </Suspense>
+                    </ListScaffold>
                 </div>
             </div>
         </div>
@@ -205,6 +219,9 @@ fn LoadedManagedIdentities(
     list: Vec<ManagedIdentityDto>,
     search: Signal<String>,
     mi_filter: RwSignal<String>,
+    /// Drawer state, so the facet chips collapse with the rest of the drawer —
+    /// matching the two sibling lists.
+    filters_open: RwSignal<bool>,
     export_rows: StoredValue<Arc<Vec<ManagedIdentityDto>>>,
 ) -> impl IntoView {
     let list = use_filtered_list(FilteredListSpec {
@@ -236,6 +253,8 @@ fn LoadedManagedIdentities(
     });
 
     let filtered = list.shown;
+    let total = list.total;
+    let shown_total = list.shown_total();
     let base_total = list.base_total();
     let system = list.count_of("system");
     let user = list.count_of("user");
@@ -243,14 +262,30 @@ fn LoadedManagedIdentities(
     let disabled = list.count_of("disabled");
 
     view! {
-        <div class="filter-chips">
-            <FilterChip label="All" value="all" count=base_total facet=mi_filter />
-            <FilterChip label="System" value="system" count=system facet=mi_filter />
-            <FilterChip label="User" value="user" count=user facet=mi_filter />
-            <FilterChip label="Enabled" value="enabled" count=enabled facet=mi_filter />
-            <FilterChip label="Disabled" value="disabled" count=disabled facet=mi_filter />
-        </div>
+        <Show when=move || filters_open.get()>
+            <div class="filter-chips">
+                <FilterChip label="All" value="all" count=base_total facet=mi_filter />
+                <FilterChip label="System" value="system" count=system facet=mi_filter />
+                <FilterChip label="User" value="user" count=user facet=mi_filter />
+                <FilterChip label="Enabled" value="enabled" count=enabled facet=mi_filter />
+                <FilterChip label="Disabled" value="disabled" count=disabled facet=mi_filter />
+            </div>
+        </Show>
         <IndexCapNotice noun="managed identity" />
+        // Both sibling lists print "N of M"; this one printed nothing, so a
+        // filtered view gave no sense of how much it was hiding.
+        <div class="app-list__selectbar">
+            <span class="app-list__count">
+                {move || {
+                    let shown_n = shown_total.get();
+                    if shown_n == total {
+                        format!("{total} managed identities")
+                    } else {
+                        format!("{shown_n} of {total} managed identities")
+                    }
+                }}
+            </span>
+        </div>
         <Show
             when=move || filtered.with(|v| !v.is_empty())
             fallback=|| {

@@ -9,6 +9,30 @@ the project adheres to
 
 ### Added
 
+- **Confirm dialogs can name the object they are about to destroy.** The dialog
+  body is a `&'static str` describing the *kind* of thing ("this client
+  secret"), so an app with six secrets rendered six identical dialogs and the
+  operator had to trust that the button they clicked belonged to the row they
+  meant. An optional `subject` now names the instance; the credential,
+  certificate, and federated-credential removals pass it (the federated one had
+  the name staged already and was discarding it at the dialog).
+
+- **The Bulk Actions page shows what is selected, and names failures.** It
+  operates on a selection made on another surface, and showed only a count — so
+  an operator typed DELETE against a set they could not review. It now lists the
+  selected apps by name, and a tenant-wide `object_id -> name` map on the
+  session means a failure list is names rather than the raw GUIDs the `names`
+  prop was added to eliminate.
+
+- **Enterprise Application and Managed Identity rows show sign-in state.** Both
+  lists offer an Enabled/Disabled facet but neither row displayed the state it
+  filtered on, so a filtered view and an unfiltered one looked identical
+  row-for-row.
+
+- **The revealed Key Vault secret is copyable and can be hidden.** It rendered
+  as a bare `<pre>` — no copy button (selecting it by hand risks a trailing
+  newline) and no way to put it away short of navigating off the page.
+
 - **Enterprise Applications and Managed Identities warn when the directory
   index truncated.** Both lists are filtered views of one shared
   service-principal index that caps at 10 000 rows; past that they silently
@@ -21,6 +45,31 @@ the project adheres to
   read, so a failure costs the notice and never the list.
 
 ### Fixed
+
+- **The Security lenses no longer claim "No matches" on top of a load error.**
+  Credential expiry, Delegated grants, and Application permissions share one
+  scaffold, so on a failed fetch (429, expired token, missing role) all three
+  rendered a red error *and* "No matches" underneath — false, and contradicting
+  the error directly above it. "Nothing here at all" and "your filter hid
+  everything" also shared one message, implying a filter was hiding data that
+  does not exist; they are now distinct. The table shell is built once instead
+  of inside the reactive closure, so a keystroke patches rows through the keyed
+  `<For>` rather than tearing the table down and rebuilding it.
+
+- **The audit's All-apps pane no longer renders a dead select-all bar over an
+  empty table.** A filter matching nothing left a select-all control governing
+  nothing, a bare table header, and a flat one-line notice; it now shows the
+  standard empty state. The table stays mounted (hidden) so the keyed rows are
+  not torn down on every filter tick.
+
+- **Access Readiness uses the standard page header and shows a loading state.**
+  It hand-rolled its own header and rendered blank space while the slow
+  three-plane check ran. The `Suspense` boundary is deliberately local to the
+  view.
+
+- **Managed Identities matches its sibling lists.** It skipped `ListScaffold`
+  entirely — no filter drawer, no active-filter badge — and printed no result
+  count, so a filtered view gave no sense of how much it was hiding.
 
 - **Bulk "Grant admin consent" now asks before it runs.** It was the one bulk
   action that fired on the first click — every sibling arms an inline confirm
