@@ -517,79 +517,13 @@ impl GraphClient {
         self.send_json(Method::POST, &path, &body).await
     }
 
-    /// Searches the Microsoft Entra application gallery
-    /// (`GET /applicationTemplates`) **server-side**, case-insensitively, with
-    /// every token required to appear somewhere in the display name or
-    /// publisher. Reading the gallery needs no extra permission beyond a valid
-    /// Graph token.
-    ///
-    /// Why filtered, not fetch-the-gallery-and-match-locally: the gallery is
-    /// **~39k templates** (verified via `$count` — not the ~3k the corpus
-    /// design assumed), so pulling it whole is ~14 round trips and tens of MB
-    /// per tenant. And why not `$top`-paged: on this endpoint `$top` is a
-    /// **total result limit**, not a page-size hint — a `$top`ed request
-    /// returns one slice with **no `@odata.nextLink`** (verified live), which
-    /// is exactly how the corpus silently became the first 200 rows of 39k and
-    /// search "couldn't find" CrowdStrike.
-    ///
-    /// `contains(tolower(...))` is not spelled out in the endpoint's docs (they
-    /// only list `$filter` generically) but is verified working on v1.0 and is
-    /// the only server-side spelling that finds "Salesforce" from "force" and
-    /// is case-insensitive ("crowd" → "CrowdStrike…"; bare `contains` is
-    /// case-SENSITIVE here).
-    ///
-    /// `tokens` must be non-empty, pre-lowercased, whitespace-split words;
-    /// single quotes are escaped here. Returns up to `top` matches plus the
-    /// server's total match count (`$count=true`), so the caller can say
-    /// "showing the closest N of M" honestly when the pool was capped.
-    pub async fn search_application_templates(
-        &self,
-        tokens: &[String],
-        top: usize,
-    ) -> Result<(Vec<ApplicationTemplate>, Option<u64>)> {
-        // AND of per-token (name OR publisher) clauses — matches the local
-        // ranker's admission rule, so every fetched row is a real candidate.
-        let filter = tokens
-            .iter()
-            .map(|t| {
-                // OData string literals escape `'` by doubling it.
-                let t = t.replace('\'', "''");
-                format!(
-                    "(contains(tolower(displayName),'{t}') or contains(tolower(publisher),'{t}'))"
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" and ");
-        let top_s = top.to_string();
-        // `$select` trims the payload to the fields the picker renders — the
-        // full rows also carry endpoints/provisioning metadata this never
-        // shows. No `$orderby`: ranking is against the query and happens
-        // locally over the fetched pool.
-        let params: [(&str, &str); 4] = [
-            ("$filter", &filter),
-            ("$count", "true"),
-            ("$top", &top_s),
-            (
-                "$select",
-                "id,displayName,publisher,description,categories,logoUrl,supportedSingleSignOnModes",
-            ),
-        ];
-        let page: Paged<ApplicationTemplate> = self
-            .get_json("/applicationTemplates", &params, false)
-            .await?;
-        let total = page.total_count;
-        // Normally the whole `$top`-bounded slice arrives in one response (no
-        // nextLink — see above). Following any nextLink up to `top` is cheap
-        // insurance against Graph deciding to page a filtered result set.
-        let (items, _) = self.collect_all_pages_capped(page, top).await?;
-        Ok((items, total))
-    }
-
     /// Fetches the **entire** Microsoft Entra application gallery
     /// (`GET /applicationTemplates`, no `$filter`) in a handful of round trips,
     /// so the caller can cache it once and match every subsequent query in
     /// memory instead of paying a non-indexable `contains(tolower(…))` server
-    /// scan per keystroke (see [`Self::search_application_templates`]).
+    /// scan per keystroke. (The per-query server-side search this replaced is
+    /// gone — `commands::enterprise_application::search_application_templates`
+    /// ranks against this cached corpus.)
     ///
     /// Unfiltered, the endpoint honors `Prefer: odata.maxpagesize=2800` (its
     /// documented ceiling — a *filtered* read is capped at 200/page, which is

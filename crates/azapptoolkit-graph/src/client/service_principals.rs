@@ -425,40 +425,6 @@ impl GraphClient {
         Ok((sp, true))
     }
 
-    /// Display-name **term** search over `/servicePrincipals` via Graph
-    /// `$search` (matches anywhere in the name, not just a prefix), combined
-    /// with a `$filter` on the SP kind. When `only_managed_identities` is
-    /// `true`, returns only managed-identity SPs; otherwise only enterprise SPs.
-    /// `$search` + `$filter` together require the `ConsistencyLevel: eventual`
-    /// header, which `get_json(.., true)` sends.
-    pub async fn search_service_principals_by_name(
-        &self,
-        term: &str,
-        top: u32,
-        only_managed_identities: bool,
-    ) -> Result<Vec<ServicePrincipal>> {
-        let kind_clause = if only_managed_identities {
-            "servicePrincipalType eq 'ManagedIdentity'"
-        } else {
-            "servicePrincipalType ne 'ManagedIdentity'"
-        };
-        let search = search_phrase("displayName", term);
-        let top_s = top.to_string();
-        let params: [(&str, &str); 5] = [
-            ("$search", search.as_str()),
-            ("$filter", kind_clause),
-            (
-                "$select",
-                "id,appId,displayName,servicePrincipalType,appOwnerOrganizationId,alternativeNames",
-            ),
-            ("$count", "true"),
-            ("$top", top_s.as_str()),
-        ];
-        let page: Paged<ServicePrincipal> =
-            self.get_json("/servicePrincipals", &params, true).await?;
-        Ok(page.items)
-    }
-
     /// GET `/servicePrincipals/{id}`. Returns `Ok(None)` for 404.
     pub async fn get_service_principal_by_object_id(
         &self,

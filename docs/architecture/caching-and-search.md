@@ -84,8 +84,9 @@ The earlier design sent the match server-side (`$filter=(contains(tolower(displa
 contains(tolower(publisher),'t'))` AND-joined per token, plus `$count=true`). It was correct but
 **slow**: `contains(tolower(…))` is non-indexable, so every uncached query was a full-catalog scan,
 and each debounced keystroke (`"sa"`→`"sal"`→`"sale"`…) was a distinct cache key → its own
-multi-second round trip. `GraphClient::search_application_templates` (still present and unit-tested)
-is no longer on the command path.
+multi-second round trip. `GraphClient::search_application_templates` implemented that older design;
+it has been **deleted** (it had no callers left — the command of the same name ranks against the
+cached corpus instead).
 
 The fast path, in two pieces:
 

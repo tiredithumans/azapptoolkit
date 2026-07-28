@@ -106,13 +106,6 @@ impl KeyVaultClient {
         self.send_json(Method::PUT, &path, req).await
     }
 
-    pub async fn delete_secret(&self, name: &str) -> Result<()> {
-        crate::validate::validate_secret_name(name)?;
-        let path = format!("/secrets/{name}");
-        let _ = self.send_core(Method::DELETE, &path, None).await?;
-        Ok(())
-    }
-
     async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let bytes = self.send_core(Method::GET, path, None).await?;
         serde_json::from_slice::<T>(&bytes).map_err(|e| KeyVaultError::Deserialize(e.to_string()))
