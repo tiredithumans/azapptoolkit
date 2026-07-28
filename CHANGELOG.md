@@ -7,6 +7,19 @@ the project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Enterprise Applications and Managed Identities warn when the directory
+  index truncated.** Both lists are filtered views of one shared
+  service-principal index that caps at 10 000 rows; past that they silently
+  showed a subset, so filtering for an app that exists returned "No matching
+  enterprise applications" and the operator concluded it wasn't in the tenant.
+  Note the trap this avoids: neither list can detect the cap from its own row
+  count — both are *subsets* of the index, so their totals sit below it even
+  when it truncated (the App Registrations list can, because its rows are the
+  capped set). The flag now comes from the index itself via a small, fallible
+  read, so a failure costs the notice and never the list.
+
 ### Fixed
 
 - **Bulk "Grant admin consent" now asks before it runs.** It was the one bulk
@@ -25,6 +38,30 @@ the project adheres to
   still the old one. Those cards now track the same reload bumps the audit tile
   already honoured. (The Managed Identities card has no bump to track and is
   unchanged.)
+
+- **A cancelled security audit no longer reads as a complete one.** Cancelling
+  mid-scan left an arbitrary prefix of the tenant scored, and every number on
+  the workbench — the posture counts, the finding groups, each "Fix all N" —
+  was computed over that prefix with no marker anywhere. Worst case, a
+  cancelled run that happened to find nothing rendered the green "No actionable
+  findings — nothing to fix right now" all-clear. On a security-posture surface
+  an unmarked partial is an unmarked false negative. The strip now carries a
+  persistent warning naming how many of how many principals were scored, and
+  the all-clear is replaced by an explicit "this is not an all-clear" for a
+  cancelled run. `total_apps` on the audit result now means what its name says
+  (the number of principals the run set out to score) rather than repeating the
+  scored count; it had no consumers.
+
+- **Detail-pane tabs keep their state.** Switching tabs in an App Registration,
+  Enterprise Application, or Managed Identity window unmounted the previous tab,
+  so every switch re-ran that tab's fetches and discarded its UI state — scroll
+  position, expanded rows, a half-filled add-credential or add-owner form.
+  Bouncing Overview→Permissions→Overview→Permissions cost four Exchange scope
+  lookups. All three panes now use the same keep-alive primitive the Security
+  workbench does. For managed identities this also makes the tabs lazy (opening
+  an identity no longer fires the Azure RBAC read unless you visit that tab) and
+  restores `.mi-tab`'s intended spacing, which an inline `display: block` had
+  been overriding.
 
 ### Changed
 

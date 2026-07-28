@@ -5,7 +5,7 @@ use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_core::models::Organization;
-use azapptoolkit_graph::client::{AppListQuery, AppPatch, CreateApplicationRequest};
+use azapptoolkit_graph::client::{AppListQuery, AppPatch, CreateApplicationRequest, SP_INDEX_MAX};
 
 use crate::dto::UiError;
 use crate::dto::applications::{
@@ -73,6 +73,45 @@ const APPS_PAGE_SIZE: u32 = azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE;
 /// does not. (The Enterprise Apps join previously capped at 5000 and dropped
 /// pairings the App Registrations list had.)
 pub(crate) const APPS_MAX: usize = 10_000;
+
+/// Coverage of the shared per-tenant service-principal index, for the surfaces
+/// that render a filtered *subset* of it.
+///
+/// The App Registrations list can detect its own truncation (`total >=
+/// APPS_MAX`) because its rows ARE the capped set. The Enterprise Applications
+/// and Managed Identities lists cannot: both filter the SP index down (dropping
+/// managed identities / keeping only them), so their row counts sit below the
+/// cap even on a tenant whose index truncated — a `len() >= cap` check there
+/// would never fire. They ask this instead.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryIndexStatus {
+    /// The SP index hit its row cap, so every surface reading it covers only
+    /// the first [`SP_INDEX_MAX`] service principals.
+    pub sp_index_truncated: bool,
+    /// The cap itself, so the notice can name the number without the frontend
+    /// keeping its own copy in sync.
+    pub sp_index_cap: usize,
+}
+
+/// Reports whether the shared SP index truncated for this tenant.
+///
+/// Reads through the same cache entry the lists populate, so on a warm tenant
+/// this is free and on a cold one it seeds the index the caller is about to
+/// need anyway. Deliberately fallible (`invoke_result`): a failure here must
+/// only cost the notice, never the list.
+#[tauri::command]
+pub async fn get_directory_index_status(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<DirectoryIndexStatus, UiError> {
+    let client = state.graph_for(&tenant_id);
+    let sps = cache::sp_index_cached(&state, &client, &tenant_id).await?;
+    Ok(DirectoryIndexStatus {
+        sp_index_truncated: sps.len() >= SP_INDEX_MAX,
+        sp_index_cap: SP_INDEX_MAX,
+    })
+}
 
 /// Lean list-row variant of [`list_applications`]: each row is flattened to
 /// the scalars the list renders, with credential status/counts/soonest-expiry

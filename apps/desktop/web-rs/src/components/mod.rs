@@ -15,6 +15,7 @@ pub mod global_search;
 pub mod group_autocomplete;
 pub mod held_permissions_panel;
 pub mod icon;
+pub mod index_cap_notice;
 pub mod list_scaffold;
 pub mod managed_scope_group_panel;
 pub mod modal_shell;
