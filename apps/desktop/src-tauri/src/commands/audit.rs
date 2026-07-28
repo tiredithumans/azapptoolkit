@@ -80,8 +80,20 @@ pub async fn run_audit(
     // permission confined to specific mailboxes scores below an org-wide one.
     let exo = audit_exchange_client(&state, &tenant_id);
 
-    let apps = client
-        .list_applications_all(
+    // These five tenant-wide reads are INDEPENDENT — every join between them
+    // (`seed_lean_sps_from_index`, `derive_orgwide_mail_scopes`,
+    // `sp_audit_candidates`) is synchronous and runs below, after all five land.
+    // Awaiting them serially made a large tenant wait out five full page-walks
+    // before the progress bar left 0/N; overlapped, that is one wait instead of
+    // the sum. Four of the five are best-effort (they swallow errors and return
+    // empty), so overlapping changes no failure semantics, and the
+    // `ThrottleGuard` attached above plus the transport's Retry-After handling
+    // already absorb the extra concurrent 429 pressure.
+    //
+    // Keep this a `join!`, not a `try_join!`: only the app listing is fallible,
+    // and short-circuiting it would abandon the other four mid-flight.
+    let (apps, sp_index, consent_grants, graph_roles_by_sp, sign_in) = futures::join!(
+        client.list_applications_all(
             // `$expand=owners` brings owner ids inline so the ownership audit
             // rules need no per-app round trip.
             //
@@ -96,33 +108,43 @@ pub async fn run_audit(
                 .with_top(PAGE_SIZE)
                 .with_expand("owners($select=id)"),
             Some(MAX_APPS_PER_RUN),
-        )
-        .await?;
+        ),
+        // ONE tenant-wide service-principal enumeration feeds BOTH the SP-only
+        // audit phase (below) and every per-app SP lookup score_one makes: its
+        // projection (id/appId/accountEnabled/…) is a superset of the lean
+        // fields score_one reads, so seeding the audit's lean SP cache FROM it
+        // makes each score_one lookup a cache hit at zero extra Graph cost. This
+        // replaces the former batched lean prewarm (~1 $batch POST per 20 apps)
+        // that re-fetched the very directory objects this index scan already
+        // returns. A cold/failed index (empty vec) simply leaves the per-app
+        // lean lookups to resolve as before.
+        prefetch_sp_index(&state.cache, &client, &tenant_id),
+        // Admin-consent flags + delegated scopes from ONE tenant-wide
+        // oauth2PermissionGrants read, replacing a per-app GET inside the
+        // scoring loop (an N+1 that dominated large runs' request budget and 429
+        // pressure).
+        prefetch_admin_consent_grants(&client),
+        // ONE tenant-wide appRoleAssignedTo read on the Microsoft Graph SP does
+        // double duty: the full per-SP granted Graph role values feed the SP-only
+        // scoring phase below, and the mail-scopable subset feeds score_one's
+        // scoped-mail reconciliation.
+        prefetch_graph_app_roles(&client),
+        // Sign-in activity report (needs AuditLog.Read.All + Entra ID P1/P2 + a
+        // supported directory role). A *missing consent* (distinct from a
+        // license/availability failure) sets `sign_in_consent_required`,
+        // surfacing a "Grant consent" button; either failure disables unused-app
+        // detection.
+        prefetch_sign_in_activity(&state, &client, &tenant_id),
+    );
 
-    // ONE tenant-wide service-principal enumeration feeds BOTH the SP-only audit
-    // phase (below) and every per-app SP lookup score_one makes: its projection
-    // (id/appId/accountEnabled/…) is a superset of the lean fields score_one
-    // reads, so seeding the audit's lean SP cache FROM it makes each score_one
-    // lookup a cache hit at zero extra Graph cost. This replaces the former
-    // batched lean prewarm (~1 $batch POST per 20 apps) that re-fetched the very
-    // directory objects this index scan already returns. A cold/failed index
-    // (empty vec) simply leaves the per-app lean lookups to resolve as before.
+    let apps = apps?;
+    let (admin_consent_clients, delegated_scopes_by_client) = consent_grants;
+    let (sign_in_available, sign_in_consent_required, sign_in_map) = sign_in;
+
     let app_ids: Vec<String> = apps.iter().map(|a| a.app_id.clone()).collect();
-    let sp_index = prefetch_sp_index(&state.cache, &client, &tenant_id).await;
     client.seed_lean_sps_from_index(&app_ids, &sp_index);
 
-    // Admin-consent flags + delegated scopes from ONE tenant-wide
-    // oauth2PermissionGrants read, replacing a per-app GET inside the scoring
-    // loop (an N+1 that dominated large runs' request budget and 429 pressure).
-    let (admin_consent_clients, delegated_scopes_by_client) =
-        prefetch_admin_consent_grants(&client).await;
     let admin_consent_clients = Arc::new(admin_consent_clients);
-
-    // ONE tenant-wide appRoleAssignedTo read on the Microsoft Graph SP does
-    // double duty: the full per-SP granted Graph role values feed the SP-only
-    // scoring phase below, and the mail-scopable subset feeds score_one's
-    // scoped-mail reconciliation.
-    let graph_roles_by_sp = prefetch_graph_app_roles(&client).await;
     let orgwide_mail_by_sp = Arc::new(derive_orgwide_mail_scopes(&graph_roles_by_sp));
 
     // SP-only phase candidates: service principals whose appId has NO local
@@ -138,13 +160,6 @@ pub async fn run_audit(
     // Scoring is unchanged — an open breaker leaves `mail_scopes` empty, the
     // same org-wide-weight default as the swallowed error (never under-reports).
     let exo_tripped = Arc::new(AtomicBool::new(false));
-
-    // Sign-in activity report (needs AuditLog.Read.All + Entra ID P1/P2 + a
-    // supported directory role). A *missing consent* (distinct from a
-    // license/availability failure) sets `sign_in_consent_required`, surfacing a
-    // "Grant consent" button; either failure disables unused-app detection.
-    let (sign_in_available, sign_in_consent_required, sign_in_map) =
-        prefetch_sign_in_activity(&state, &client, &tenant_id).await;
 
     emit_progress(
         &app_handle,

@@ -7,6 +7,42 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Bulk "Grant admin consent" now asks before it runs.** It was the one bulk
+  action that fired on the first click — every sibling arms an inline confirm
+  panel first, and the far less consequential "Remove expired credentials" makes
+  you type `REMOVE`. A misclick with 200 apps selected granted tenant-wide
+  consent, for all users, to every permission each of those apps requests, with
+  no preview and no undo. Grant now arms like the others and requires the typed
+  keyword `GRANT`, with a description that states the blast radius and the
+  selected count.
+
+- **Home's inventory counts refresh after a bulk mutation.** Home stays mounted
+  across view switches (keep-alive panes), so its App Registrations, credential,
+  and Enterprise Applications cards kept serving pre-mutation numbers until a
+  tenant switch or an explicit per-card Retry — delete 50 apps and the total was
+  still the old one. Those cards now track the same reload bumps the audit tile
+  already honoured. (The Managed Identities card has no bump to track and is
+  unchanged.)
+
+### Changed
+
+- **The security audit's five tenant-wide reads now overlap.** The app listing,
+  the service-principal index, the tenant-wide delegated-grant read, the Graph
+  app-role read, and the sign-in activity report were awaited one after another,
+  so a large tenant sat through five full page-walks before the progress bar left
+  0/N. They are independent — every join between them is synchronous and already
+  ran afterwards — so they now run concurrently and cost one wait rather than the
+  sum. Failure behaviour is unchanged: four of the five are best-effort and the
+  run still fails only if the app listing does.
+
+- **The sign-in activity report asks for full-size pages.** It was the last paged
+  read still on Graph's default of 100 rows, which made it a 10× round-trip
+  multiplier on the slowest, most rate-limited endpoint the audit touches — a
+  10 000-principal tenant walked ~100 serial pages where ~11 will do. As a side
+  effect its 200-page ceiling now covers ~200 000 rows instead of 20 000.
+
 ## [0.21.1] - 2026-07-27
 
 ### Changed
