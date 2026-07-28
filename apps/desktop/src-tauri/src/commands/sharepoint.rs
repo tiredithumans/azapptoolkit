@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Site, SitePermission};
@@ -18,6 +18,7 @@ use azapptoolkit_core::scoping::is_sharepoint_orgwide;
 use crate::commands::applications::invalidate_app_lists;
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::graph_roles::graph_role_index;
+use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
 use crate::dto::sharepoint::{
@@ -322,12 +323,6 @@ pub(crate) fn invalidate_site_sweep(cache: &Cache, tenant_id: &str) {
     cache.invalidate(CacheKind::Audit, &sweep_cache_key(tenant_id));
 }
 
-fn emit_sweep_progress(app_handle: &AppHandle, progress: SiteSweepProgress) {
-    if let Err(err) = app_handle.emit("site-sweep-progress", progress) {
-        tracing::warn!(?err, "failed to emit site-sweep-progress event");
-    }
-}
-
 /// Folds one site's permission-read outcome into the sweep accumulators. A
 /// failed site counts toward `sites_failed` — it must never read as "no
 /// grants", so coverage is never overstated.
@@ -396,8 +391,9 @@ pub async fn sweep_site_permissions(
         .await
         .map_err(sharepoint_err)?;
     let total = sites.len();
-    emit_sweep_progress(
+    emit_progress(
         &app_handle,
+        "site-sweep-progress",
         SiteSweepProgress {
             done: 0,
             total,
@@ -483,8 +479,9 @@ pub async fn sweep_site_permissions(
                 );
             }
             done += chunk.len();
-            emit_sweep_progress(
+            emit_progress(
                 &app_handle,
+                "site-sweep-progress",
                 SiteSweepProgress {
                     done,
                     total,

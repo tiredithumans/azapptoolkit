@@ -246,20 +246,6 @@ impl GraphClient {
         Ok(())
     }
 
-    /// Finds an existing admin-consent `oauth2PermissionGrant` matching
-    /// `clientId=client_sp_id AND resourceId=resource_sp_id AND
-    /// consentType=AllPrincipals`, or `None` if no such grant exists.
-    pub async fn find_admin_oauth2_grant(
-        &self,
-        client_sp_id: &str,
-        resource_sp_id: &str,
-    ) -> Result<Option<OAuth2PermissionGrant>> {
-        let grants = self.list_oauth2_grants(client_sp_id).await?;
-        Ok(grants
-            .into_iter()
-            .find(|g| g.resource_id == resource_sp_id && g.consent_type == "AllPrincipals"))
-    }
-
     pub async fn create_oauth2_grant(
         &self,
         grant: &OAuth2PermissionGrant,

@@ -7,6 +7,14 @@ the project adheres to
 
 ## [Unreleased]
 
+### Removed
+
+- **Four public client APIs with no callers**, including a superseded
+  server-side gallery search whose ~110 lines of tests were the only thing
+  exercising it (the command of the same name ranks against a cached corpus
+  instead). The caching doc claimed that method was "still present and
+  unit-tested" — corrected.
+
 ### Added
 
 - **Confirm dialogs can name the object they are about to destroy.** The dialog

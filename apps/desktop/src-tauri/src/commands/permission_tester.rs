@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_core::audit::{AuditPrincipalKind, MailPermissionScope};
@@ -39,6 +39,7 @@ use azapptoolkit_exchange::models::{
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::exchange::{aap_verdict_for, exchange_client, is_org_wide_auth_row};
 use crate::commands::graph_roles::graph_role_index;
+use crate::commands::progress::emit_progress;
 use crate::dto::UiError;
 use crate::dto::permission_tester::{
     MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult, PermissionTestResult,
@@ -393,12 +394,6 @@ pub async fn test_mailbox_access(
 /// is heavyweight, so this stays well below the Graph loops' caps.
 const PROBE_CONCURRENCY: usize = 4;
 
-fn emit_probe_progress(app_handle: &AppHandle, progress: MailboxProbeProgress) {
-    if let Err(err) = app_handle.emit("mailbox-probe-progress", progress) {
-        tracing::warn!(?err, "failed to emit mailbox-probe-progress event");
-    }
-}
-
 /// The mailbox reverse lookup: which applications can reach `mailbox`?
 ///
 /// Candidates come from two sources, merged by SP object id: ONE paged Graph
@@ -556,8 +551,9 @@ pub async fn find_mailbox_reachers(
     );
 
     let total = candidates.len();
-    emit_probe_progress(
+    emit_progress(
         &app_handle,
+        "mailbox-probe-progress",
         MailboxProbeProgress {
             done: 0,
             total,
@@ -609,7 +605,7 @@ pub async fn find_mailbox_reachers(
                     cancelled: cancel_for_task.is_cancelled(),
                 };
                 drop(guard);
-                emit_probe_progress(&app_handle, progress);
+                emit_progress(&app_handle, "mailbox-probe-progress", progress);
                 row
             }))
         },

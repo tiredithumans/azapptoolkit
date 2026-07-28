@@ -15,13 +15,14 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_core::audit::expired_password_key_ids;
 use azapptoolkit_graph::client::AppListQuery;
 
 use crate::commands::dispatch::dispatch_capped;
+use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
 use crate::dto::applications::CreateApplicationInput;
@@ -99,8 +100,9 @@ pub async fn bulk_remove_expired_credentials(
     let tracker = Arc::new(ConcurrencyThrottle::new(CONCURRENCY));
     let _throttle_guard = ThrottleGuard::attach(client.clone(), tracker.clone());
 
-    emit(
+    emit_progress(
         &app_handle,
+        "bulk-progress",
         BulkProgress {
             done: 0,
             total,
@@ -162,7 +164,7 @@ pub async fn bulk_remove_expired_credentials(
                     in_flight_cap: Some(tracker.current_limit()),
                 };
                 drop(guard);
-                emit(&app_handle, progress);
+                emit_progress(&app_handle, "bulk-progress", progress);
 
                 AppRemovalSummary {
                     object_id: app_obj_id,
@@ -248,7 +250,7 @@ pub async fn bulk_delete_applications(
                     in_flight_cap: Some(tracker.current_limit()),
                 };
                 drop(guard);
-                emit(&app_handle, progress);
+                emit_progress(&app_handle, "bulk-progress", progress);
                 match result {
                     Ok(()) => Ok(id),
                     Err(err) => Err(BulkDeleteFailure {
@@ -266,8 +268,9 @@ pub async fn bulk_delete_applications(
     )
     .await;
 
-    emit(
+    emit_progress(
         &app_handle,
+        "bulk-progress",
         BulkProgress {
             done: total,
             total,
@@ -340,7 +343,7 @@ pub async fn bulk_grant_permissions(
                     in_flight_cap: Some(tracker.current_limit()),
                 };
                 drop(guard);
-                emit(&app_handle, progress);
+                emit_progress(&app_handle, "bulk-progress", progress);
                 match res {
                     Ok((r, sp_created)) => (
                         BulkGrantOutcome {
@@ -376,8 +379,9 @@ pub async fn bulk_grant_permissions(
     )
     .await;
 
-    emit(
+    emit_progress(
         &app_handle,
+        "bulk-progress",
         BulkProgress {
             done: total,
             total,
@@ -795,8 +799,9 @@ where
         if cancel.is_cancelled() {
             break;
         }
-        emit(
+        emit_progress(
             app_handle,
+            "bulk-progress",
             BulkProgress {
                 done: i,
                 total,
@@ -807,8 +812,9 @@ where
         );
         outcomes.push(per_item(item).await);
     }
-    emit(
+    emit_progress(
         app_handle,
+        "bulk-progress",
         BulkProgress {
             done: total,
             total,
@@ -818,10 +824,4 @@ where
         },
     );
     (outcomes, cancel.is_cancelled())
-}
-
-fn emit(app_handle: &AppHandle, progress: BulkProgress) {
-    if let Err(err) = app_handle.emit("bulk-progress", progress) {
-        tracing::warn!(?err, "bulk-progress emit failed");
-    }
 }
