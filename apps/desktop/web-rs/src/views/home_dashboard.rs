@@ -28,6 +28,10 @@ pub fn HomeDashboard() -> impl IntoView {
     let apps = LocalResource::new(move || {
         let tenant = tenant.get();
         let _ = reload.get();
+        // Same keep-alive reasoning as `cached_audit` below: the dashboard stays
+        // mounted, so without this bump a bulk delete/create elsewhere leaves
+        // the inventory count showing its pre-mutation value.
+        let _ = session.apps_reload.get();
         async move {
             match tenant {
                 Some(t) => Some(applications::list_applications_with_pairing(&t.tenant_id).await),
@@ -39,6 +43,7 @@ pub fn HomeDashboard() -> impl IntoView {
     let enterprise = LocalResource::new(move || {
         let tenant = tenant.get();
         let _ = reload.get();
+        let _ = session.enterprise_apps_reload.get();
         async move {
             match tenant {
                 Some(t) => {
@@ -63,6 +68,10 @@ pub fn HomeDashboard() -> impl IntoView {
     let creds = LocalResource::new(move || {
         let tenant = tenant.get();
         let _ = reload.get();
+        // Credential expirations are derived from the app registrations, and the
+        // backend busts them transitively via `invalidate_app_lists` — so this
+        // card follows the same bump as `apps`.
+        let _ = session.apps_reload.get();
         async move {
             match tenant {
                 Some(t) => Some(credentials::list_credential_expirations(&t.tenant_id).await),

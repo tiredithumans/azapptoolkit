@@ -308,8 +308,14 @@ impl GraphClient {
         let token = self.audit_log_token()?;
 
         const MAX_PAGES: usize = 200;
+        // `$top` matters more here than anywhere else: Graph's default page of
+        // 100 would make a 10k-SP tenant ~100 serial round trips against the
+        // slowest, most rate-limited read in the crate. The endpoint documents
+        // `$top` support, the size carries into every `@odata.nextLink`, and an
+        // over-ask is clamped silently — so one parameter also lifts the
+        // MAX_PAGES ceiling from 20k rows to ~200k.
         let mut url = format!(
-            "{}/reports/servicePrincipalSignInActivities?$select=appId,lastSignInActivity",
+            "{}/reports/servicePrincipalSignInActivities?$select=appId,lastSignInActivity&$top={MAX_PAGE_SIZE}",
             self.beta_base()
         );
         let mut out = Vec::new();

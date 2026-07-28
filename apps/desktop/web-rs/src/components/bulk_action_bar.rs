@@ -180,7 +180,10 @@ pub fn BulkActionBar(
         Some(BulkAction::ScopeMailbox) => !parse_lines(&groups_text.get()).is_empty(),
         Some(BulkAction::ScopeSharePoint) => !parse_lines(&sites_text.get()).is_empty(),
         Some(BulkAction::AddOwner) => owner_pick.with(Option::is_some),
-        Some(BulkAction::Grant) | None => false,
+        // Tenant-wide, all-users, and not undone by a single click — gated on the
+        // typed keyword like the other two irreversible actions.
+        Some(BulkAction::Grant) => confirm_text.get().trim() == "GRANT",
+        None => false,
     });
 
     // The one runner for every action: snapshots the selection + any target
@@ -320,13 +323,7 @@ pub fn BulkActionBar(
                                         <Button
                                             class=cls
                                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                            on_click=Box::new(move |_| {
-                                                if a == BulkAction::Grant {
-                                                    run(a);
-                                                } else {
-                                                    armed.set(Some(a));
-                                                }
-                                            })
+                                            on_click=Box::new(move |_| armed.set(Some(a)))
                                             disabled=Signal::derive(move || busy.get())
                                         >
                                             {a.label()}
@@ -462,7 +459,10 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
         ..
     } = p;
 
-    let danger = matches!(action, BulkAction::RemoveExpired | BulkAction::Delete);
+    let danger = matches!(
+        action,
+        BulkAction::RemoveExpired | BulkAction::Delete | BulkAction::Grant
+    );
     let description: AnyView = match action {
         BulkAction::RemoveExpired => view! {
             <Body1 class="bulk-action__danger">
@@ -499,12 +499,20 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
                 {move || format!("Disable sign-in for the {} selected app(s) by disabling their service principals. Reversible — re-enable anytime from the enterprise app's Overview.", n())}
             </Body1>
         }.into_any(),
-        BulkAction::Grant => ().into_any(),
+        BulkAction::Grant => view! {
+            <Body1 class="bulk-action__danger">
+                {move || format!("Grant admin consent to the {} selected app(s) — this consents every permission each app requests, tenant-wide, on behalf of all users. Consent stays in place until revoked per app.", n())}
+            </Body1>
+        }.into_any(),
     };
 
     let input: AnyView = match action {
-        BulkAction::RemoveExpired | BulkAction::Delete => {
-            let keyword = if matches!(action, BulkAction::Delete) { "DELETE" } else { "REMOVE" };
+        BulkAction::RemoveExpired | BulkAction::Delete | BulkAction::Grant => {
+            let keyword = match action {
+                BulkAction::Delete => "DELETE",
+                BulkAction::Grant => "GRANT",
+                _ => "REMOVE",
+            };
             view! {
                 <div class="confirm-gate">
                     <Body1 class="confirm-gate__label">
@@ -601,9 +609,7 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
             }
             .into_any()
         }
-        BulkAction::RemoveRedundant | BulkAction::DisableSignIn | BulkAction::Grant => {
-            ().into_any()
-        }
+        BulkAction::RemoveRedundant | BulkAction::DisableSignIn => ().into_any(),
     };
 
     let confirm_label = match action {
@@ -614,7 +620,7 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
         BulkAction::AddOwner => "Add owner",
         BulkAction::DisableSignIn => "Disable sign-in",
         BulkAction::Delete => "Delete",
-        BulkAction::Grant => "Confirm",
+        BulkAction::Grant => "Grant consent",
     };
     let confirm_cls = if danger { "button--danger" } else { "" };
 
