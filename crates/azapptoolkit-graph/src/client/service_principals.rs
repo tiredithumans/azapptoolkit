@@ -193,9 +193,14 @@ impl GraphClient {
         // A tenant with more than SP_INDEX_MAX service principals degrades to
         // the first SP_INDEX_MAX rows instead of failing the Enterprise Apps
         // list, the App Registrations pairing join, and global search outright
-        // (all three read this one index). Matches the App Registrations list's
-        // APPS_MAX bound, so a frontend `len() >= cap` notice reads the same.
-        const SP_INDEX_MAX: usize = 10_000;
+        // (all three read this one index).
+        //
+        // NOTE for callers: unlike the App Registrations list — whose `total` IS
+        // this capped set, so a `len() >= cap` notice reads correctly — the
+        // Enterprise Apps and Managed Identities lists are FILTERED SUBSETS of
+        // this index. Their row counts sit below the cap even when the index
+        // truncated, so neither can detect truncation from its own length; they
+        // must ask about the index itself (`sp_index_truncated`).
         let (all, truncated) = self.collect_all_pages_capped(page, SP_INDEX_MAX).await?;
         if truncated {
             tracing::warn!(

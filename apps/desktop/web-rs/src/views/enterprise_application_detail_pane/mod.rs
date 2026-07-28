@@ -4,6 +4,7 @@
 //! Header strip + tab list (Overview, Credentials, Owners, Permissions) with
 //! per-tab content. Mirrors the App Registrations detail pane structure.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use azapptoolkit_core::models::DirectoryObject;
@@ -26,6 +27,7 @@ use crate::components::ui::{DataTable, DetailLoadError, DetailSkeleton, Skeleton
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::{OpenItemKind, use_session};
+use crate::util::keep_alive;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::pairing::jump_to_paired_app;
 use crate::views::tabs::EnterpriseTab;
@@ -190,6 +192,17 @@ fn EnterpriseAppPanel(
     let active_tab = RwSignal::new(EnterpriseTab::from_str(&restored).value().to_string());
     Effect::new(move |_| session.last_enterprise_tab.set(active_tab.get()));
 
+    // Insert-only latch of visited tabs — see `ApplicationDetailPane` for the
+    // same treatment. Ten tabs here, several of which (SSO, Provisioning,
+    // Activity) fetch on mount, so re-mounting per switch was the costlier half.
+    let visited = RwSignal::new(HashSet::from([active_tab.get_untracked()]));
+    Effect::new(move |_| {
+        let v = active_tab.get();
+        visited.update(|set| {
+            set.insert(v);
+        });
+    });
+
     // Derive a read-only signal from the RwSignal for easier access.
     let ro_signal = Signal::derive(move || detail_signal.get());
 
@@ -268,36 +281,66 @@ fn EnterpriseAppPanel(
                     .collect_view()}
             </TabList>
             <div class="app-detail__pane">
-                {move || match EnterpriseTab::from_str(&active_tab.get()) {
-                    EnterpriseTab::Overview => {
-                        view! { <OverviewContent signal=ro_signal /> }.into_any()
-                    }
-                    EnterpriseTab::Sso => view! { <SsoContent signal=ro_signal /> }.into_any(),
-                    EnterpriseTab::Credentials => {
-                        view! { <CredentialsContent signal=ro_signal /> }.into_any()
-                    }
-                    EnterpriseTab::Owners => {
-                        view! { <OwnersContent signal=ro_signal on_refresh=on_refresh /> }
-                            .into_any()
-                    }
-                    EnterpriseTab::Permissions => {
-                        view! { <PermissionsContent signal=ro_signal /> }.into_any()
-                    }
-                    EnterpriseTab::AppRoles => {
-                        view! { <AppRolesContent signal=ro_signal on_refresh=on_refresh /> }
-                            .into_any()
-                    }
-                    EnterpriseTab::Access => view! { <AccessContent signal=ro_signal /> }.into_any(),
-                    EnterpriseTab::Provisioning => {
-                        view! { <ProvisioningContent signal=ro_signal /> }.into_any()
-                    }
-                    EnterpriseTab::ConditionalAccess => {
-                        view! { <CaContent signal=ro_signal /> }.into_any()
-                    }
-                    EnterpriseTab::Activity => {
-                        view! { <ActivityContent signal=ro_signal /> }.into_any()
-                    }
-                }}
+                {keep_alive(
+                    active_tab,
+                    visited,
+                    EnterpriseTab::Overview.value(),
+                    move || view! { <OverviewContent signal=ro_signal /> },
+                )}
+                {keep_alive(
+                    active_tab,
+                    visited,
+                    EnterpriseTab::Sso.value(),
+                    move || view! { <SsoContent signal=ro_signal /> },
+                )}
+                {keep_alive(
+                    active_tab,
+                    visited,
+                    EnterpriseTab::Credentials.value(),
+                    move || view! { <CredentialsContent signal=ro_signal /> },
+                )}
+                {keep_alive(
+                    active_tab,
+                    visited,
+                    EnterpriseTab::Owners.value(),
+                    move || view! { <OwnersContent signal=ro_signal on_refresh=on_refresh /> },
+                )}
+                {keep_alive(
+                    active_tab,
+                    visited,
+                    EnterpriseTab::Permissions.value(),
+                    move || view! { <PermissionsContent signal=ro_signal /> },
+                )}
+                {keep_alive(
+                    active_tab,
+                    visited,
+                    EnterpriseTab::AppRoles.value(),
+                    move || view! { <AppRolesContent signal=ro_signal on_refresh=on_refresh /> },
+                )}
+                {keep_alive(
+                    active_tab,
+                    visited,
+                    EnterpriseTab::Access.value(),
+                    move || view! { <AccessContent signal=ro_signal /> },
+                )}
+                {keep_alive(
+                    active_tab,
+                    visited,
+                    EnterpriseTab::Provisioning.value(),
+                    move || view! { <ProvisioningContent signal=ro_signal /> },
+                )}
+                {keep_alive(
+                    active_tab,
+                    visited,
+                    EnterpriseTab::ConditionalAccess.value(),
+                    move || view! { <CaContent signal=ro_signal /> },
+                )}
+                {keep_alive(
+                    active_tab,
+                    visited,
+                    EnterpriseTab::Activity.value(),
+                    move || view! { <ActivityContent signal=ro_signal /> },
+                )}
             </div>
             {move || {
                 // A foreign-tenant / first-party SP (owned outside this tenant)

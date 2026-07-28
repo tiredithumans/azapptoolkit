@@ -46,6 +46,14 @@ pub const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 /// the safe request everywhere.
 pub(crate) const MAX_PAGE_SIZE: &str = "999";
 
+/// Row cap on the shared per-tenant service-principal index
+/// ([`GraphClient::list_service_principals_index`]). Public because the
+/// surfaces that read the index — the Enterprise Applications and Managed
+/// Identities lists — are filtered subsets of it and therefore cannot infer
+/// truncation from their own row counts; they compare the *index* length
+/// against this.
+pub const SP_INDEX_MAX: usize = 10_000;
+
 /// Observer fired on every 429 (or 5xx retry) the client handles. Consumers
 /// use this to back off concurrency when a tenant is under pressure; the
 /// retry middleware inside `send_core` still honors `Retry-After` on a

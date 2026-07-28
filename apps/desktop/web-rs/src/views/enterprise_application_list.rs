@@ -19,6 +19,7 @@ use crate::components::date_range_filter::DateRangeFilter;
 use crate::components::export_menu::ExportMenu;
 use crate::components::filter_chip::FilterChip;
 use crate::components::icon::{Icon, IconName};
+use crate::components::index_cap_notice::IndexCapNotice;
 use crate::components::list_scaffold::ListScaffold;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList};
@@ -280,6 +281,7 @@ fn LoadedEnterpriseApps(
                 <FilterChip label="Foreign" value="foreign" count=foreign facet=ent_filter />
             </div>
         </Show>
+        <IndexCapNotice noun="enterprise application" />
         <div class="app-list__selectbar">
             <span class="app-list__count">
                 {move || {

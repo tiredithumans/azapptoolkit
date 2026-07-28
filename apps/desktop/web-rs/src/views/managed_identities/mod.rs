@@ -26,6 +26,7 @@ use crate::bindings::diagnostics::{self, ListCacheKindDto};
 use crate::bindings::managed_identity::{self, ManagedIdentityDto, MiSubtype};
 use crate::components::export_menu::ExportMenu;
 use crate::components::filter_chip::FilterChip;
+use crate::components::index_cap_notice::IndexCapNotice;
 use crate::components::saved_views::SavedViews;
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
@@ -249,6 +250,7 @@ fn LoadedManagedIdentities(
             <FilterChip label="Enabled" value="enabled" count=enabled facet=mi_filter />
             <FilterChip label="Disabled" value="disabled" count=disabled facet=mi_filter />
         </div>
+        <IndexCapNotice noun="managed identity" />
         <Show
             when=move || filtered.with(|v| !v.is_empty())
             fallback=|| {

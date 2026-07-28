@@ -315,6 +315,13 @@ fn register_fixtures() {
         })
         .collect();
     mock_ok("list_enterprise_applications", &enterprise);
+    // The demo tenant is far below the SP-index cap, so the truncation notice
+    // stays hidden. Registered rather than left to the rejected-promise
+    // fallback so the demo console stays clean.
+    mock_ok(
+        "get_directory_index_status",
+        &serde_json::json!({ "spIndexTruncated": false, "spIndexCap": 10_000 }),
+    );
 
     let owners = vec![
         f::directory_object(

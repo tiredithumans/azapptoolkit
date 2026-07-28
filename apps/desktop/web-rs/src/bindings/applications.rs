@@ -15,6 +15,22 @@ pub async fn get_organization(tenant_id: &str) -> Result<Organization, UiError> 
     invoke_result("get_organization", TenantArg { tenant_id }).await
 }
 
+/// Coverage of the shared service-principal index. Read by the Enterprise
+/// Applications and Managed Identities lists, which render *filtered subsets*
+/// of that index and so cannot detect its truncation from their own row counts
+/// the way the App Registrations list can.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryIndexStatus {
+    pub sp_index_truncated: bool,
+    pub sp_index_cap: usize,
+}
+
+/// Fallible on purpose: a failure costs the truncation notice, never the list.
+pub async fn get_directory_index_status(tenant_id: &str) -> Result<DirectoryIndexStatus, UiError> {
+    invoke_result("get_directory_index_status", TenantArg { tenant_id }).await
+}
+
 /// Returns the full set of app registrations (paginated to completion on the
 /// backend, bounded by a safety cap) as lean list rows, each paired with its
 /// Enterprise App SP id. Search/date/credential filtering happens caller-side

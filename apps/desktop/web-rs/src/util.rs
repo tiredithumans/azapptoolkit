@@ -12,6 +12,15 @@ use wasm_bindgen_futures::JsFuture;
 /// Generic over the key `K` so it serves both the shell's `ActiveView` nav and a
 /// detail pane's string-keyed sub-tabs (`target` takes anything `Into<K>`, e.g.
 /// a `&'static str` for a `String` key).
+///
+/// The body is erased to `AnyView` **here**, not at the call sites. A detail
+/// pane mounts eight to ten tabs through this, and Leptos view types are deeply
+/// nested tuples: carrying them through the `Show`/`div` wrapper concretely made
+/// every instantiation a distinct, enormous type and crashed `rust-lld` with a
+/// SIGBUS while linking the wasm binary (an LLVM crash, not a diagnosable
+/// error). Erasing once collapses the wrapper's type to the same shape for every
+/// tab, which is what the `match`-with-`.into_any()`-arms these calls replaced
+/// was doing implicitly. Don't "optimize" this boxing away.
 pub fn keep_alive<K, F, V>(
     active: RwSignal<K>,
     visited: RwSignal<HashSet<K>>,
@@ -21,7 +30,7 @@ pub fn keep_alive<K, F, V>(
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     F: Fn() -> V + Send + Sync + 'static,
-    V: IntoView + 'static,
+    V: IntoView + Send + 'static,
 {
     let target = target.into();
     let key = target.clone();
@@ -35,7 +44,7 @@ where
                 view! {
                     <div style:display=move || {
                         if active.with(|a| *a == target) { "contents" } else { "none" }
-                    }>{body()}</div>
+                    }>{body().into_any()}</div>
                 }
             }
         </Show>

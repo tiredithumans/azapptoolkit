@@ -188,6 +188,28 @@ fn PostureStrip() -> impl IntoView {
             {move || {
                 ctrl.scan_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
             }}
+            // A cancelled scan leaves an arbitrary PREFIX of the tenant scored,
+            // and every number on this workbench — the counts above, the findings
+            // groups, each "Fix all N" — is computed over that prefix. On a
+            // security-posture surface an unmarked partial reads as an unmarked
+            // false negative, so say so and keep saying it until the next run.
+            {move || {
+                ctrl.result
+                    .with(|r| {
+                        r.as_ref()
+                            .filter(|r| r.cancelled)
+                            .map(|r| (r.items.len(), r.total_apps))
+                    })
+                    .map(|(scored, total)| {
+                        view! {
+                            <Callout tone="warn">
+                                {format!(
+                                    "This scan was cancelled early — {scored} of {total} principals were scored. Everything below covers only those; re-run for full coverage.",
+                                )}
+                            </Callout>
+                        }
+                    })
+            }}
             // AuditLog.Read.All consent prompt — the sign-in activity report
             // (behind the Unused finding) needs it. Offered when the last run
             // found it un-consented; granting re-runs the audit.

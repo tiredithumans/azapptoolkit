@@ -4,7 +4,7 @@
 //! the resources, signals, and mutation callbacks and passes them in; this
 //! component only reads those handles and renders.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Input, Select, Spinner, SpinnerSize, Tab, TabList};
@@ -25,6 +25,7 @@ use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::ui::{CopyableId, DataTable, DetailLoadError, SkeletonList};
 use crate::state::use_session;
+use crate::util::keep_alive;
 use crate::views::managed_identities::chip_kind_for;
 
 #[component]
@@ -98,6 +99,20 @@ pub fn ManagedIdentityDetailPane(
     let active_tab = RwSignal::new(session.last_mi_tab.get_untracked());
     Effect::new(move |_| session.last_mi_tab.set(active_tab.get()));
 
+    // Was three hand-rolled `style:display` toggles. Two things wrong with that:
+    // every tab mounted eagerly, so opening an identity fired the Azure RBAC
+    // read (an ARM round trip) even if the operator never left Overview; and the
+    // inline `display: block` overrode `.mi-tab`'s `display: flex`, so the class's
+    // `gap`/`flex-direction` had never applied. `keep_alive` toggles an outer
+    // wrapper instead, which fixes both and matches the other panes.
+    let visited = RwSignal::new(HashSet::from([active_tab.get_untracked()]));
+    Effect::new(move |_| {
+        let v = active_tab.get();
+        visited.update(|set| {
+            set.insert(v);
+        });
+    });
+
     view! {
         <DetailHeader
             kind=chip_kind
@@ -112,23 +127,26 @@ pub fn ManagedIdentityDetailPane(
             <Tab value="permissions">"Permissions"</Tab>
             <Tab value="azure">"Azure RBAC"</Tab>
         </TabList>
-        <div
-            class="mi-tab"
-            style:display=move || if active_tab.get() == "overview" { "block" } else { "none" }
-        >
+        {keep_alive(active_tab, visited, "overview", move || view! {
+        <div class="mi-tab">
             <dl class="mi-properties">
                 <dt>"Service principal id"</dt>
-            <dd><CopyableId value=mi_id label="service principal id" full=true /></dd>
+            <dd><CopyableId value=mi_id.clone() label="service principal id" full=true /></dd>
             <dt>"App id"</dt>
-            <dd><CopyableId value=mi_app_id label="app id" full=true /></dd>
+            <dd><CopyableId value=mi_app_id.clone() label="app id" full=true /></dd>
             <dt>"Status"</dt>
             <dd>{mi_enabled}</dd>
             </dl>
         </div>
-        <div
-            class="mi-tab"
-            style:display=move || if active_tab.get() == "permissions" { "block" } else { "none" }
-        >
+        })}
+        {keep_alive(active_tab, visited, "permissions", move || {
+        // Clone per render: `keep_alive`'s body must stay `Fn`, and the nested
+        // per-row closure below moves these into itself.
+        let mi_id_for_table = mi_id_for_table.clone();
+        let mi_app_id_for_scope = mi_app_id_for_scope.clone();
+        let mi_name_for_scope = mi_name_for_scope.clone();
+        view! {
+        <div class="mi-tab">
         <div>
             <header class="row-between">
                 <h4>"Current permissions"</h4>
@@ -267,10 +285,9 @@ pub fn ManagedIdentityDetailPane(
             </Suspense>
         </div>
         </div>
-        <div
-            class="mi-tab"
-            style:display=move || if active_tab.get() == "azure" { "block" } else { "none" }
-        >
+        }})}
+        {keep_alive(active_tab, visited, "azure", move || view! {
+        <div class="mi-tab">
         <div>
             <h4>"Azure RBAC roles"</h4>
             <AssignAzureRolePanel
@@ -403,6 +420,7 @@ pub fn ManagedIdentityDetailPane(
             </Suspense>
         </div>
         </div>
+        })}
     }
 }
 
