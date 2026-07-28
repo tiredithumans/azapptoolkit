@@ -243,9 +243,33 @@ where
             <SearchInput value=search placeholder=search_placeholder />
             <SavedViews view_key=view_key facet=facet search=search />
 
+            // Which non-table state (if any) this surface is in. Three lenses
+            // share this scaffold, so each of these was wrong on all three.
             {move || {
+                // A failed load already rendered `DetailLoadError` above. Without
+                // this early return the pane ALSO claimed "No matches — no X match
+                // this filter", which is both false and contradicts the error.
+                if error.with(Option::is_some) {
+                    return ().into_any();
+                }
                 if loading.get() && rows.with(Vec::is_empty) {
                     return view! { <SkeletonList rows=6 /> }.into_any();
+                }
+                // "Nothing here at all" and "your filter hid everything" are
+                // different situations and had the same message, which implied a
+                // filter was hiding data that does not exist.
+                if rows.with(Vec::is_empty) {
+                    return view! {
+                        <EmptyState
+                            icon=IconName::Search
+                            title=format!("No {} yet", noun.get_value())
+                            body=format!(
+                                "This tenant has no {} to report on.",
+                                noun.get_value(),
+                            )
+                        />
+                    }
+                        .into_any();
                 }
                 if matched.with(Vec::is_empty) {
                     return view! {
@@ -257,14 +281,32 @@ where
                     }
                         .into_any();
                 }
-                let total = rows.with(Vec::len);
-                let shown = matched.with(Vec::len);
+                ().into_any()
+            }}
+            // The table shell is built ONCE and hidden when there is nothing to
+            // show. It used to live inside the closure above, so every keystroke
+            // tore down and rebuilt the whole table — defeating the keyed <For>
+            // that exists precisely to patch rows in place.
+            {
                 let header_cells = headers
                     .with_value(|h| h.iter().map(|c| view! { <th>{*c}</th> }).collect_view());
-                let count_line = format!("{shown} of {total} {} match", noun.get_value());
                 view! {
-                    <div>
-                        <Body1>{count_line}</Body1>
+                    <div style:display=move || {
+                        let hidden = error.with(Option::is_some)
+                            || (loading.get() && rows.with(Vec::is_empty))
+                            || matched.with(Vec::is_empty);
+                        if hidden { "none" } else { "contents" }
+                    }>
+                        <Body1>
+                            {move || {
+                                format!(
+                                    "{} of {} {} match",
+                                    matched.with(Vec::len),
+                                    rows.with(Vec::len),
+                                    noun.get_value(),
+                                )
+                            }}
+                        </Body1>
                         <table class="data-table">
                             <thead>
                                 <tr>{header_cells}</tr>
@@ -321,8 +363,7 @@ where
                         }}
                     </div>
                 }
-                    .into_any()
-            }}
+            }
         </main>
     }
 }

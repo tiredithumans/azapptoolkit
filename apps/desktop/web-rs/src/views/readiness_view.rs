@@ -17,6 +17,7 @@ use thaw::Body1;
 use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 
 use crate::bindings::readiness;
+use crate::components::ui::{SectionHeader, SkeletonList};
 use crate::state::use_session;
 
 /// (badge class, label) for a verdict pill.
@@ -121,9 +122,7 @@ pub fn ReadinessView() -> impl IntoView {
 
     view! {
         <div class="readiness">
-            <div class="readiness__head">
-                <h2 class="readiness__title">"Access Readiness"</h2>
-            </div>
+            <SectionHeader title="Access Readiness".to_string() crumb="Account".to_string() />
             <Body1 class="hint">
                 "azapptoolkit acts with your delegated rights across three independent \
                  authorization planes — there is no single role that unlocks everything. This \
@@ -131,6 +130,10 @@ pub fn ReadinessView() -> impl IntoView {
                  haven't activated shows as Missing; activate it, then use \"Refresh token\" \
                  (top right) — that re-applies your roles and re-runs this check."
             </Body1>
+            // Local boundary only: the three-plane check is slow (Entra + Azure
+            // RBAC + Exchange), and without one this page sat blank while it ran.
+            // Deliberately NOT hoisted app-wide — lib.rs warns against that.
+            <Suspense fallback=move || view! { <SkeletonList rows=6 /> }>
             {move || {
                 Suspend::new(async move {
                     match report.await {
@@ -154,6 +157,7 @@ pub fn ReadinessView() -> impl IntoView {
                     }
                 })
             }}
+            </Suspense>
         </div>
     }
 }

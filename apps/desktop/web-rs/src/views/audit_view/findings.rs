@@ -9,7 +9,7 @@
 //! Positive signals (already-scoped access) sit demoted in a collapsed
 //! "Healthy configuration" disclosure below the ranked list.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use azapptoolkit_core::audit::AuditPrincipalKind;
@@ -204,18 +204,10 @@ fn finding_group_view(
         }
     });
     // `object_id -> application name` for failure labels (see BulkActionBar).
-    let names: Memo<Arc<HashMap<String, String>>> = Memo::new(move |_| {
-        Arc::new(ctrl.result.with(|r| {
-            r.as_ref()
-                .map(|r| {
-                    r.items
-                        .iter()
-                        .map(|i| (i.object_id.clone(), i.application_name.clone()))
-                        .collect()
-                })
-                .unwrap_or_default()
-        }))
-    });
+    // One shared memo on the controller — this used to be rebuilt per finding
+    // group, so a tenant with a dozen populated groups built a dozen identical
+    // full-tenant maps.
+    let names = ctrl.names;
     let bulk_actions = group_bulk_actions(key);
     let has_bulk = actionable && !bulk_actions.is_empty();
     let fix_all = move |_| {
