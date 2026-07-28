@@ -218,17 +218,23 @@ pub async fn get_application_detail(
     }
 
     let client = state.graph_for(&tenant_id);
-    let application = client.get_application(&object_id).await?;
 
-    // Wave 1: the SP lookup (keyed by appId) and the owners list (keyed by the
-    // application object id) are independent — run them concurrently.
-    let (service_principal, owners) = futures::future::try_join(
-        client.get_service_principal_by_app_id(&application.app_id),
-        client.list_owners(&application.id),
+    // Wave 1: the owners list keys off the application OBJECT id — the same id
+    // the caller passed — so it never needed the fetched application and was
+    // waiting a full round trip for nothing. Only the SP lookup genuinely
+    // depends on the manifest (it keys off `appId`).
+    let (application, owners) = futures::future::try_join(
+        client.get_application(&object_id),
+        client.list_owners(&object_id),
     )
     .await?;
 
-    // Wave 2: role assignments and delegated grants both key off the SP id and
+    // Wave 2: the SP lookup needs `appId` from the manifest above.
+    let service_principal = client
+        .get_service_principal_by_app_id(&application.app_id)
+        .await?;
+
+    // Wave 3: role assignments and delegated grants both key off the SP id and
     // are independent of each other.
     let (app_role_assignments, oauth2_permission_grants) = match service_principal.as_ref() {
         Some(sp) => {

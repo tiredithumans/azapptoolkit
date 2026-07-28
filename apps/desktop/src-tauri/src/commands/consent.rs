@@ -64,8 +64,15 @@ pub async fn list_oauth2_grants_audit(
     let client = state.graph_for(&tenant_id);
 
     // Reuse the shared per-tenant SP index for name resolution (same cache the
-    // App Registrations / Enterprise Apps lists use).
-    let sps = sp_index_cached(&state, &client, &tenant_id).await?;
+    // App Registrations / Enterprise Apps lists use). The grant read is
+    // independent of it — the index only resolves ids to names AFTER both land —
+    // so on a cold tenant these two full page-walks overlap instead of running
+    // back to back.
+    let (sps, grants) = futures::future::try_join(
+        sp_index_cached(&state, &client, &tenant_id),
+        client.list_all_oauth2_grants(),
+    )
+    .await?;
     let by_id: HashMap<&str, (&str, &str)> = sps
         .iter()
         .map(|sp| {
@@ -75,8 +82,6 @@ pub async fn list_oauth2_grants_audit(
             )
         })
         .collect();
-
-    let grants = client.list_all_oauth2_grants().await?;
 
     let mut rows: Vec<OAuth2GrantDto> = grants
         .into_iter()

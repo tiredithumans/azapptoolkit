@@ -16,6 +16,7 @@ use azapptoolkit_core::models::{Site, SitePermission};
 use azapptoolkit_core::scoping::is_sharepoint_orgwide;
 
 use crate::commands::applications::invalidate_app_lists;
+use crate::commands::dispatch::dispatch_capped;
 use crate::commands::graph_roles::graph_role_index;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
@@ -426,57 +427,77 @@ pub async fn sweep_site_permissions(
     // cap that is 250 round trips rather than 5000. Chunked so cancellation and
     // progress stay responsive between batches, and so a whole-batch failure
     // costs one chunk rather than the run.
-    for chunk in sites.chunks(SWEEP_BATCH) {
-        if cancel.is_cancelled() {
-            cancelled = true;
-            break;
-        }
-        let ids: Vec<String> = chunk.iter().map(|s| s.id.clone()).collect();
-        match client.batch_list_site_permissions(&ids).await {
-            Ok(results) => {
-                for (site, result) in chunk.iter().zip(results) {
-                    fold_site_result(
-                        &mut rows,
-                        &mut sites_scanned,
-                        &mut sites_failed,
-                        site,
-                        result,
-                    );
-                }
+    // Chunks are independent and results are folded per-chunk, so order does not
+    // matter — dispatch them through the shared driver with the tracker as the
+    // cap. Previously this loop awaited one chunk at a time, which meant the
+    // tracker attached above was never READ: the observer dutifully halved a
+    // number nothing consulted, so the adaptive back-off the comment advertises
+    // did not exist and the walk was fully serial besides.
+    let chunks: Vec<Vec<Site>> = sites.chunks(SWEEP_BATCH).map(<[Site]>::to_vec).collect();
+    let stopped_early = dispatch_capped(
+        chunks,
+        {
+            let tracker = tracker.clone();
+            move || tracker.current_limit()
+        },
+        |chunk| {
+            if cancel.is_cancelled() {
+                return None;
             }
-            Err(err) => {
-                // Whole-batch failure degrades to per-site reads rather than
-                // losing the chunk (the batched fan-out contract).
-                tracing::warn!(?err, "site sweep: batch failed; falling back to per-site");
-                for site in chunk {
-                    if cancel.is_cancelled() {
-                        cancelled = true;
-                        break;
+            let client = client.clone();
+            let cancel = cancel.clone();
+            Some(tokio::spawn(async move {
+                let ids: Vec<String> = chunk.iter().map(|s| s.id.clone()).collect();
+                match client.batch_list_site_permissions(&ids).await {
+                    Ok(results) => (chunk, results),
+                    Err(err) => {
+                        // Whole-batch failure degrades to per-site reads rather
+                        // than losing the chunk (the batched fan-out contract).
+                        tracing::warn!(?err, "site sweep: batch failed; falling back to per-site");
+                        let mut out = Vec::with_capacity(chunk.len());
+                        for site in &chunk {
+                            if cancel.is_cancelled() {
+                                break;
+                            }
+                            out.push(client.list_site_permissions(&site.id).await);
+                        }
+                        (chunk, out)
                     }
-                    let result = client.list_site_permissions(&site.id).await;
-                    fold_site_result(
-                        &mut rows,
-                        &mut sites_scanned,
-                        &mut sites_failed,
-                        site,
-                        result,
-                    );
                 }
+            }))
+        },
+        |joined| {
+            let Ok((chunk, results)) = joined else {
+                tracing::warn!("site sweep: chunk task failed to join");
+                return;
+            };
+            // A degraded chunk cut short by cancellation yields fewer results
+            // than sites; `zip` folds only the pairs that exist.
+            for (site, result) in chunk.iter().zip(results) {
+                fold_site_result(
+                    &mut rows,
+                    &mut sites_scanned,
+                    &mut sites_failed,
+                    site,
+                    result,
+                );
             }
-        }
-        done += chunk.len();
-        emit_sweep_progress(
-            &app_handle,
-            SiteSweepProgress {
-                done,
-                total,
-                current_site: chunk
-                    .last()
-                    .and_then(|s| s.display_name.clone().or_else(|| s.web_url.clone())),
-                cancelled: cancel.is_cancelled(),
-            },
-        );
-    }
+            done += chunk.len();
+            emit_sweep_progress(
+                &app_handle,
+                SiteSweepProgress {
+                    done,
+                    total,
+                    current_site: chunk
+                        .last()
+                        .and_then(|s| s.display_name.clone().or_else(|| s.web_url.clone())),
+                    cancelled: cancel.is_cancelled(),
+                },
+            );
+        },
+    )
+    .await;
+    cancelled = cancelled || stopped_early;
 
     cancelled = cancelled || cancel.is_cancelled();
     tracing::info!(

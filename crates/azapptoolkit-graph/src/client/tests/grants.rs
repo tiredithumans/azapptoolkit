@@ -237,3 +237,95 @@ async fn upsert_admin_oauth2_grant_noops_when_scopes_are_subset() {
         .unwrap();
     assert_eq!(grant.id.as_deref(), Some("g-1"));
 }
+
+/// The tenant-wide grant matrices are cached, so a second read must not hit
+/// Graph. `expect(1)` on the mock is the assertion.
+#[tokio::test]
+async fn tenant_wide_grant_reads_are_cached() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/oauth2PermissionGrants"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "grant-1",
+                "clientId": "sp-1",
+                "resourceId": "sp-graph",
+                "consentType": "AllPrincipals",
+                "scope": "User.Read"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    assert_eq!(client.list_all_oauth2_grants().await.unwrap().len(), 1);
+    assert_eq!(client.list_all_oauth2_grants().await.unwrap().len(), 1);
+}
+
+/// The invariant that makes caching a security-posture read safe: any grant
+/// WRITE drops the cached matrices, so a revoked grant can never keep rendering
+/// as present. Pinned here rather than trusted to seven command call sites —
+/// this is why the invalidation lives in the client (see `invalidate_grant_cache`).
+#[tokio::test]
+async fn a_grant_write_invalidates_the_cached_matrices() {
+    let server = MockServer::start().await;
+    // Two reads are expected: the cold one, then the re-read after the write.
+    Mock::given(method("GET"))
+        .and(path("/oauth2PermissionGrants"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "grant-1",
+                "clientId": "sp-1",
+                "resourceId": "sp-graph",
+                "consentType": "AllPrincipals",
+                "scope": "User.Read"
+            }]
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/oauth2PermissionGrants/grant-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    client.list_all_oauth2_grants().await.unwrap();
+    client.delete_oauth2_grant("grant-1").await.unwrap();
+    // Cache was swept by the delete, so this re-reads rather than serving stale.
+    client.list_all_oauth2_grants().await.unwrap();
+}
+
+/// The sweep is scoped to the `grants:` segment, so it must NOT evict the
+/// sign-in-activity report that shares `CacheKind::Permissions` — that is a slow
+/// beta endpoint and dumping it on every grant write would be a bad trade.
+#[tokio::test]
+async fn the_grant_sweep_spares_the_sign_in_activity_cache() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/reports/servicePrincipalSignInActivities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "appId": "app-1", "lastSignInActivity": null }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/oauth2PermissionGrants/grant-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri()).with_audit_log_token(StaticTokenProvider::new("a"));
+    client
+        .list_service_principal_sign_in_activities()
+        .await
+        .unwrap();
+    client.delete_oauth2_grant("grant-1").await.unwrap();
+    // Still cached — the `expect(1)` above fails if the sweep was over-broad.
+    client
+        .list_service_principal_sign_in_activities()
+        .await
+        .unwrap();
+}
