@@ -565,6 +565,11 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                 open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
                 title="Remove this federated credential?"
                 body="Any workload using this issuer/subject will stop being able to authenticate as the app. This cannot be undone."
+                // The name was already staged in `pending_remove` for this
+                // purpose and then discarded at the dialog.
+                subject=Signal::derive(move || {
+                    pending_remove.with(|p| p.as_ref().map(|(_, name)| name.clone())).unwrap_or_default()
+                })
                 confirm_label="Remove"
                 busy=Signal::derive(move || cmd.busy.get())
                 on_confirm=Callback::new(move |()| {
