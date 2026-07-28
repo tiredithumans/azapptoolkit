@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use azapptoolkit_core::models::{PreAuthorizedApplication, RequiredResourceAccess};
 use azapptoolkit_graph::GraphClient;
@@ -36,6 +36,7 @@ use azapptoolkit_graph::client::{
 use crate::commands::applications::{create_application_core, invalidate_app_lists};
 use crate::commands::managed_identity::grant_managed_identity_roles_core;
 use crate::commands::permissions::grant_admin_consent_core;
+use crate::commands::progress::emit_progress;
 use crate::dto::UiError;
 use crate::dto::applications::CreateApplicationInput;
 use crate::dto::backup::{
@@ -767,9 +768,7 @@ fn emit(app_handle: &AppHandle, done: usize, total: usize, current_app: Option<S
         cancelled: false,
         in_flight_cap: None,
     };
-    if let Err(err) = app_handle.emit("restore-progress", progress) {
-        tracing::warn!(?err, "failed to emit restore-progress event");
-    }
+    emit_progress(app_handle, "restore-progress", progress);
 }
 
 #[cfg(test)]

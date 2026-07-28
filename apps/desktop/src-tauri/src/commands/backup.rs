@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_core::models::{
@@ -29,7 +29,9 @@ use azapptoolkit_core::models::{
 use azapptoolkit_graph::{GraphClient, GraphError};
 
 use crate::commands::applications::{extract_auth_fields, indexes_cached};
+use crate::commands::dispatch::batch_or_serial;
 use crate::commands::dispatch::dispatch_capped;
+use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
 use crate::dto::backup::{
@@ -334,28 +336,20 @@ async fn backup_app_chunk(
         client.batch_get_applications_backup_json(&object_ids),
         client.batch_list_federated_credentials(&object_ids),
     );
-    let app_jsons: Vec<Result<serde_json::Value, GraphError>> = match apps_res {
-        Ok(v) => v,
-        Err(err) => {
-            tracing::warn!(error = %err, "backup: app batch failed; per-app fallback");
-            let mut v = Vec::with_capacity(object_ids.len());
-            for oid in &object_ids {
-                v.push(client.get_application_backup_json(oid).await);
-            }
-            v
-        }
-    };
-    let feds: Vec<Result<Vec<FederatedIdentityCredential>, GraphError>> = match feds_res {
-        Ok(v) => v,
-        Err(err) => {
-            tracing::warn!(error = %err, "backup: federated-cred batch failed; per-app fallback");
-            let mut v = Vec::with_capacity(object_ids.len());
-            for oid in &object_ids {
-                v.push(client.list_federated_credentials(oid).await);
-            }
-            v
-        }
-    };
+    let app_jsons: Vec<Result<serde_json::Value, GraphError>> = batch_or_serial(
+        "backup app",
+        &object_ids,
+        apps_res,
+        |oid: String| async move { client.get_application_backup_json(&oid).await },
+    )
+    .await;
+    let feds: Vec<Result<Vec<FederatedIdentityCredential>, GraphError>> = batch_or_serial(
+        "backup federated-cred",
+        &object_ids,
+        feds_res,
+        |oid: String| async move { client.list_federated_credentials(&oid).await },
+    )
+    .await;
 
     let mut out = Vec::with_capacity(chunk.len());
     for (i, (app_id, object_id)) in chunk.iter().enumerate() {
@@ -465,39 +459,27 @@ async fn backup_enterprise_chunk(
         client.batch_list_app_role_assigned_to(&sp_ids),
         client.batch_list_service_principal_groups(&sp_ids),
     );
-    let full_sps: Vec<Result<Option<ServicePrincipal>, GraphError>> = match sps_res {
-        Ok(v) => v,
-        Err(err) => {
-            tracing::warn!(error = %err, "backup: enterprise SP batch failed; per-SP fallback");
-            let mut v = Vec::with_capacity(sp_ids.len());
-            for id in &sp_ids {
-                v.push(client.get_service_principal_by_object_id(id).await);
-            }
-            v
-        }
-    };
-    let assigned: Vec<Result<Vec<AppRoleAssignment>, GraphError>> = match assigned_res {
-        Ok(v) => v,
-        Err(err) => {
-            tracing::warn!(error = %err, "backup: assignee batch failed; per-SP fallback");
-            let mut v = Vec::with_capacity(sp_ids.len());
-            for id in &sp_ids {
-                v.push(client.list_app_role_assigned_to(id).await);
-            }
-            v
-        }
-    };
-    let groups: Vec<Result<Vec<GroupSummary>, GraphError>> = match groups_res {
-        Ok(v) => v,
-        Err(err) => {
-            tracing::warn!(error = %err, "backup: group-membership batch failed; per-SP fallback");
-            let mut v = Vec::with_capacity(sp_ids.len());
-            for id in &sp_ids {
-                v.push(client.list_service_principal_groups(id).await);
-            }
-            v
-        }
-    };
+    let full_sps: Vec<Result<Option<ServicePrincipal>, GraphError>> = batch_or_serial(
+        "backup enterprise SP",
+        &sp_ids,
+        sps_res,
+        |id: String| async move { client.get_service_principal_by_object_id(&id).await },
+    )
+    .await;
+    let assigned: Vec<Result<Vec<AppRoleAssignment>, GraphError>> = batch_or_serial(
+        "backup assignee",
+        &sp_ids,
+        assigned_res,
+        |id: String| async move { client.list_app_role_assigned_to(&id).await },
+    )
+    .await;
+    let groups: Vec<Result<Vec<GroupSummary>, GraphError>> = batch_or_serial(
+        "backup group-membership",
+        &sp_ids,
+        groups_res,
+        |id: String| async move { client.list_service_principal_groups(&id).await },
+    )
+    .await;
 
     let mut out = Vec::with_capacity(chunk.len());
     for (i, index_sp) in chunk.iter().enumerate() {
@@ -633,23 +615,23 @@ async fn backup_managed_identities(
 
     // Phase 1: every MI's held app-role assignments. A read failure (whole-batch
     // or per-MI) degrades to empty, matching the prior best-effort per-MI read.
-    let assignments: Vec<Vec<AppRoleAssignment>> =
-        match client.batch_list_app_role_assignments(&mi_ids).await {
-            Ok(v) => v.into_iter().map(Result::unwrap_or_default).collect(),
-            Err(err) => {
-                tracing::warn!(error = %err, "backup: MI assignment batch failed; per-MI fallback");
-                let mut v = Vec::with_capacity(mi_ids.len());
-                for id in &mi_ids {
-                    v.push(
-                        client
-                            .list_app_role_assignments(id)
-                            .await
-                            .unwrap_or_default(),
-                    );
-                }
-                v
-            }
-        };
+    let assignments: Vec<Vec<AppRoleAssignment>> = batch_or_serial(
+        "backup MI assignment",
+        &mi_ids,
+        client
+            .batch_list_app_role_assignments(&mi_ids)
+            .await
+            // Per-item errors degrade to empty here (best-effort, as before);
+            // only a WHOLE-batch failure takes the per-item path.
+            .map(|v| v.into_iter().map(Result::unwrap_or_default).collect()),
+        |id: String| async move {
+            client
+                .list_app_role_assignments(&id)
+                .await
+                .unwrap_or_default()
+        },
+    )
+    .await;
 
     if cancel.is_cancelled() {
         return Err(cancelled_err());
@@ -888,9 +870,7 @@ fn emit(
         cancelled: false,
         in_flight_cap,
     };
-    if let Err(err) = app_handle.emit("backup-progress", progress) {
-        tracing::warn!(?err, "failed to emit backup-progress event");
-    }
+    emit_progress(app_handle, "backup-progress", progress);
 }
 
 #[cfg(test)]

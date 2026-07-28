@@ -14,13 +14,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use futures::stream::{self, StreamExt};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_arm::{KeyVaultResource, RoleAssignment};
 use azapptoolkit_core::cache::CacheKind;
 
 use crate::commands::dispatch::dispatch_capped;
+use crate::commands::progress::emit_progress;
 use crate::dto::UiError;
 use crate::dto::keyvault::{KeyVaultAccessRow, KeyVaultSweepProgress, KeyVaultSweepResult};
 use crate::state::AppState;
@@ -51,12 +52,6 @@ const KV_HIGH_PRIVILEGE_ROLES: &[&str] = &[
 /// the site sweep and the list caches).
 fn kv_sweep_cache_key(tenant_id: &str) -> String {
     format!("{tenant_id}|keyvault_sweep")
-}
-
-fn emit_kv_progress(app_handle: &AppHandle, progress: KeyVaultSweepProgress) {
-    if let Err(err) = app_handle.emit("keyvault-sweep-progress", progress) {
-        tracing::warn!(?err, "failed to emit keyvault-sweep-progress event");
-    }
 }
 
 /// Maps an ARM error to a `UiError`, replacing a 403's message with the
@@ -137,8 +132,9 @@ pub async fn sweep_key_vault_access(
         .filter_map(|v| v.id.clone().map(|scope| (scope, v)))
         .collect();
     let total = scoped_vaults.len();
-    emit_kv_progress(
+    emit_progress(
         &app_handle,
+        "keyvault-sweep-progress",
         KeyVaultSweepProgress {
             done: 0,
             total,
@@ -175,7 +171,7 @@ pub async fn sweep_key_vault_access(
                     cancelled: cancel_for_task.is_cancelled(),
                 };
                 drop(guard);
-                emit_kv_progress(&app_handle, progress);
+                emit_progress(&app_handle, "keyvault-sweep-progress", progress);
                 (vault, result)
             }))
         },

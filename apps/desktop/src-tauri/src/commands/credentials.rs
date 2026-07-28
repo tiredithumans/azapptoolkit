@@ -106,18 +106,10 @@ pub async fn save_credentials_to_file(
     rows: Vec<CredentialRowDto>,
     format: String,
 ) -> Result<Option<String>, UiError> {
-    if format != "csv" {
-        return Err(UiError::validation(
-            "unsupported_format",
-            format!("unsupported export format: {format}"),
-        ));
-    }
-    let content = credentials_to_csv(&rows);
-    let default_name = format!(
-        "credentials-{}.csv",
-        chrono::Utc::now().format("%Y%m%dT%H%M%S")
-    );
-    super::export::write_via_dialog(app_handle, "CSV", "csv", default_name, content).await
+    super::export::save_csv_via_dialog(app_handle, "credentials", &format, || {
+        credentials_to_csv(&rows)
+    })
+    .await
 }
 
 /// Serializes credential rows as CSV. Display names are app-controllable, so

@@ -25,6 +25,7 @@ use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::components::toast::ToastAction;
 use crate::components::type_chip::{AppKind, TypeChip};
+use crate::components::ui::Callout;
 use crate::components::ui::IconButton;
 use crate::hooks::use_command::use_command;
 use crate::state::{Session, use_session};
@@ -552,14 +553,16 @@ pub fn PermissionsTab(
                         }
                     })
             }}
-            {move || scope_note.get().map(|m| view! { <div class="alert alert--ok">{m}</div> })}
+            {move || {
+                scope_note.get().map(|m| view! { <Callout tone="ok" role="status">{m}</Callout> })
+            }}
             {move || consent_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
             {move || {
                 consent_result
                     .get()
                     .map(|r| {
                         view! {
-                            <div class="alert alert--ok">
+                            <Callout tone="ok" role="status">
                                 {format!(
                                     "Created {} role assignment(s); {} scope grant(s); {} skipped; {} failure(s).",
                                     r.role_assignments_created.len(),
@@ -567,7 +570,7 @@ pub fn PermissionsTab(
                                     r.role_assignments_skipped.len(),
                                     r.failures.len(),
                                 )}
-                            </div>
+                            </Callout>
                         }
                     })
             }}

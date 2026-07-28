@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_core::audit::{
@@ -36,6 +36,7 @@ use crate::commands::dispatch::dispatch_capped;
 use crate::commands::exchange::{exchange_client, resolve_mail_scopes_audit_cached};
 use crate::commands::export::{csv_field, write_via_dialog};
 use crate::commands::graph_roles::graph_role_index;
+use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
 use crate::dto::audit::{AuditProgress, AuditRunResult};
@@ -163,6 +164,7 @@ pub async fn run_audit(
 
     emit_progress(
         &app_handle,
+        "audit-progress",
         AuditProgress {
             done: 0,
             total,
@@ -219,7 +221,7 @@ pub async fn run_audit(
                     cancelled: cancel_for_task.is_cancelled(),
                 };
                 drop(guard);
-                emit_progress(&app_handle, progress);
+                emit_progress(&app_handle, "audit-progress", progress);
                 result
             }))
         },
@@ -253,6 +255,7 @@ pub async fn run_audit(
             done_count += 1;
             emit_progress(
                 &app_handle,
+                "audit-progress",
                 AuditProgress {
                     done: done_count,
                     total,
@@ -736,12 +739,6 @@ fn sp_audit_candidates(
         .filter(|sp| graph_roles_by_sp.get(&sp.id).is_some_and(|v| !v.is_empty()))
         .cloned()
         .collect()
-}
-
-fn emit_progress(app_handle: &AppHandle, progress: AuditProgress) {
-    if let Err(err) = app_handle.emit("audit-progress", progress) {
-        tracing::warn!(?err, "failed to emit audit-progress event");
-    }
 }
 
 struct ResourceResolver {

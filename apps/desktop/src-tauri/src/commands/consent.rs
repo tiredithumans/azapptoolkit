@@ -136,18 +136,10 @@ pub async fn save_oauth2_grants_to_file(
     rows: Vec<OAuth2GrantDto>,
     format: String,
 ) -> Result<Option<String>, UiError> {
-    if format != "csv" {
-        return Err(UiError::validation(
-            "unsupported_format",
-            format!("unsupported export format: {format}"),
-        ));
-    }
-    let content = grants_to_csv(&rows);
-    let default_name = format!(
-        "oauth2-grants-{}.csv",
-        chrono::Utc::now().format("%Y%m%dT%H%M%S")
-    );
-    super::export::write_via_dialog(app_handle, "CSV", "csv", default_name, content).await
+    super::export::save_csv_via_dialog(app_handle, "oauth2-grants", &format, || {
+        grants_to_csv(&rows)
+    })
+    .await
 }
 
 fn grants_to_csv(rows: &[OAuth2GrantDto]) -> String {
@@ -248,18 +240,10 @@ pub async fn save_app_permission_grants_to_file(
     rows: Vec<AppPermissionGrantDto>,
     format: String,
 ) -> Result<Option<String>, UiError> {
-    if format != "csv" {
-        return Err(UiError::validation(
-            "unsupported_format",
-            format!("unsupported export format: {format}"),
-        ));
-    }
-    let content = app_permissions_to_csv(&rows);
-    let default_name = format!(
-        "app-permissions-{}.csv",
-        chrono::Utc::now().format("%Y%m%dT%H%M%S")
-    );
-    super::export::write_via_dialog(app_handle, "CSV", "csv", default_name, content).await
+    super::export::save_csv_via_dialog(app_handle, "app-permissions", &format, || {
+        app_permissions_to_csv(&rows)
+    })
+    .await
 }
 
 fn app_permissions_to_csv(rows: &[AppPermissionGrantDto]) -> String {

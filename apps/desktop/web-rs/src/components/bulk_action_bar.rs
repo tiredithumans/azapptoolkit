@@ -27,6 +27,7 @@ use thaw::{Body1, Button, ButtonAppearance, Input, Spinner, SpinnerSize, Textare
 use crate::bindings::applications;
 use crate::bindings::bulk;
 use crate::bindings::events;
+use crate::components::ui::Callout;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
@@ -378,12 +379,11 @@ pub fn BulkActionBar(
                     summary
                         .get()
                         .map(|s| {
-                            let cls = if failures.with(|f| f.is_empty()) {
-                                "alert alert--ok"
-                            } else {
-                                "alert alert--warn"
-                            };
-                            view! { <div class=cls>{s}</div> }
+                            // `role="status"` so the outcome of a bulk mutation is
+                            // ANNOUNCED — a screen-reader user otherwise got no
+                            // signal that a 200-app delete had finished, or how.
+                            let tone = if failures.with(|f| f.is_empty()) { "ok" } else { "warn" };
+                            view! { <Callout tone=tone role="status">{s}</Callout> }
                         })
                 }}
                 {move || {
