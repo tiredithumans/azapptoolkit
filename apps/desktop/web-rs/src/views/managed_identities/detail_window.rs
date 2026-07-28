@@ -87,19 +87,19 @@ pub fn ManagedIdentityDetailWindow(
     // Its own resource so the non-Send binding runs on the local executor.
     let mail_scopes = LocalResource::new(move || {
         let tenant = tenant.get();
-        let id = mi_id.get();
         let _ = reload.get();
         async move {
             let Some(t) = tenant else {
                 return Ok(HashMap::<String, MailPermissionScope>::new());
             };
-            let app_id = managed_identity::list_managed_identities(&t.tenant_id)
-                .await
-                .ok()
-                .and_then(|list| list.into_iter().find(|m| m.id == id).map(|m| m.app_id));
-            let Some(app_id) = app_id else {
+            // Read `app_id` off the identity `mi_resource` already resolved
+            // rather than re-fetching the ENTIRE managed-identity list: this ran
+            // a second full-tenant list command on every open and every reload,
+            // for one field that was already in hand.
+            let Ok(Some(mi)) = mi_resource.await else {
                 return Ok(HashMap::new());
             };
+            let app_id = mi.app_id;
             let mail_values: Vec<String> = permissions
                 .await
                 .unwrap_or_default()

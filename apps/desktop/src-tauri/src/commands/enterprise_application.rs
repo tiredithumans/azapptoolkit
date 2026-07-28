@@ -139,10 +139,25 @@ pub async fn get_enterprise_application_detail(
         Vec::new()
     });
 
-    let paired_app_registration_id = client
-        .find_application_by_app_id(&sp.app_id)
-        .await?
-        .map(|a| a.id);
+    // The pairing join is `appId -> application object id`, which the pinned
+    // per-tenant app-registration index already answers in memory — anyone
+    // arriving here from a list has it warm, so the live lookup was a round trip
+    // for data in hand.
+    //
+    // HIT-ONLY on purpose: `app_name_index_cached` would, on a cold deep-link,
+    // enumerate every application in the tenant to answer one filtered lookup —
+    // strictly worse than the status quo. A miss falls back to the live call.
+    let paired_app_registration_id =
+        match crate::commands::applications::app_name_index_hit(&state.cache, &tenant_id) {
+            Some(index) => index
+                .iter()
+                .find(|a| a.app_id == sp.app_id)
+                .map(|a| a.id.clone()),
+            None => client
+                .find_application_by_app_id(&sp.app_id)
+                .await?
+                .map(|a| a.id),
+        };
 
     // The full SP from get_service_principal_by_object_id carries all fields.
     let dto = sp_to_enterprise_dto(sp, &tenant_id, paired_app_registration_id);

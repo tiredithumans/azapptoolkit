@@ -114,6 +114,43 @@ the project adheres to
 
 ### Changed
 
+- **The two heaviest tenant-wide grant matrices are cached.** Every delegated
+  grant in the tenant (`/oauth2PermissionGrants`) and every app-permission grant
+  (`appRoleAssignedTo` on the Microsoft Graph service principal — the read the
+  caching doc calls the one that dominates) were re-pulled from scratch by the
+  security audit *and* again by each Consent lens, so moving between those
+  surfaces paid for the same full-tenant walk twice.
+
+  Caching a security-posture read is only safe if a revoke can never keep
+  rendering as present, so the invalidation lives in the Graph client next to
+  the reads — the same reasoning that puts `CacheKind::ServicePrincipal`'s sweep
+  there. All seven grant mutators drop the matrices on `Ok`, which makes it
+  correct by construction rather than by remembering at the seven command files
+  that write grants. The sweep is scoped so it cannot evict the sign-in-activity
+  report that shares the same cache kind. Three tests pin all of this.
+
+- **The SharePoint site sweep actually throttles, and runs concurrently.** It
+  attached a `ConcurrencyThrottle` and then never read its limit, so the
+  observer halved a number nothing consulted — the adaptive back-off the comment
+  advertised did not exist, on the endpoint family the transport documents as
+  the throttle-happiest. The chunk walk was also fully serial. Both fixed by
+  routing it through the shared `dispatch_capped` driver with the tracker as the
+  cap.
+
+- **Three commands no longer await independent reads serially.** The app-detail
+  read waited a full round trip before fetching owners, though the owners list
+  keys off the object id the caller already passed; the delegated-grant audit
+  walked the service-principal index and the grant collection back to back; and
+  the enterprise-app detail paid a live Graph lookup for a pairing join the
+  pinned app-registration index already answers in memory (hit-only, so a cold
+  deep-link still uses the filtered live call rather than enumerating the
+  tenant).
+
+- **The managed-identity detail window stopped fetching the whole identity list
+  twice.** Its mail-scoping resource re-ran the full-tenant list command to read
+  one `app_id` off an identity another resource had already resolved — on every
+  open and every reload.
+
 - **The security audit's five tenant-wide reads now overlap.** The app listing,
   the service-principal index, the tenant-wide delegated-grant read, the Graph
   app-role read, and the sign-in activity report were awaited one after another,
