@@ -74,10 +74,26 @@ pub(crate) fn FindingsPane() -> impl IntoView {
                     <div class="finding-groups">
                         {(!any_findings)
                             .then(|| {
-                                view! {
-                                    <div class="alert alert--ok">
-                                        "No actionable findings — nothing to fix right now."
-                                    </div>
+                                // "Nothing to fix" is an all-clear, and a cancelled
+                                // run has not earned one — it scored an arbitrary
+                                // prefix of the tenant, so a clean result here means
+                                // "nothing found YET". Qualify rather than suppress:
+                                // the pane must not go silently blank.
+                                let partial = ctrl
+                                    .result
+                                    .with(|r| r.as_ref().is_some_and(|r| r.cancelled));
+                                if partial {
+                                    view! {
+                                        <div class="alert alert--warn">
+                                            "No actionable findings in the part of the tenant this cancelled scan reached. This is not an all-clear — re-run for full coverage."
+                                        </div>
+                                    }
+                                } else {
+                                    view! {
+                                        <div class="alert alert--ok">
+                                            "No actionable findings — nothing to fix right now."
+                                        </div>
+                                    }
                                 }
                             })}
                         {actionable

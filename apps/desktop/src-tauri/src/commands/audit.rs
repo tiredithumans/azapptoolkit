@@ -276,7 +276,12 @@ pub async fn run_audit(
 
     Ok(AuditRunResult {
         tenant_id,
-        total_apps: items.len(),
+        // The number of principals this run SET OUT to score, which is what the
+        // field name claims and what a cancelled run needs as its denominator —
+        // `items.len()` (what this used to be) is the number actually scored, so
+        // the two were identical on a full run and indistinguishable on a
+        // cancelled one, leaving the UI no way to express coverage.
+        total_apps: total,
         items,
         cancelled,
         sign_in_report_available: sign_in_available,
