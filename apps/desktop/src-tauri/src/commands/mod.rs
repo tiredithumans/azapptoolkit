@@ -24,6 +24,7 @@ pub mod keyvault_rbac;
 pub mod managed_identity;
 pub mod permission_tester;
 pub mod permissions;
+pub mod progress;
 pub mod readiness;
 pub mod remediation;
 pub mod restore;

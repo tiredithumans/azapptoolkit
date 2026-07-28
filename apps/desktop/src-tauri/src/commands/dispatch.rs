@@ -46,6 +46,45 @@ pub(crate) async fn dispatch_capped<I, T>(
     stopped_early
 }
 
+/// Resolves a batched Graph read, degrading to per-item reads when the whole
+/// batch failed.
+///
+/// The batched fan-out contract is that a whole-batch failure costs the batch,
+/// not the run: the caller falls back to individual reads so one bad `$batch`
+/// POST can't lose a chunk of a backup. That block — match, log, loop, collect —
+/// was written out six times in `backup.rs` alone, each differing only in the
+/// noun and which client method to call per item.
+///
+/// `per_item` is only invoked on the whole-batch failure path, so the happy path
+/// costs nothing.
+pub(crate) async fn batch_or_serial<T, I, F, Fut>(
+    what: &str,
+    ids: &[I],
+    batched: Result<Vec<T>, azapptoolkit_graph::GraphError>,
+    per_item: F,
+) -> Vec<T>
+where
+    // Owned item, not `&I`: the per-item Graph calls take `&str` and their
+    // futures borrow it, so a `Fn(&I) -> Fut` bound cannot name a lifetime that
+    // outlives the closure call. Callers pass an `async move` block that owns
+    // its id instead.
+    I: Clone,
+    F: Fn(I) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    match batched {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(error = %err, what, "batch failed; per-item fallback");
+            let mut v = Vec::with_capacity(ids.len());
+            for id in ids {
+                v.push(per_item(id.clone()).await);
+            }
+            v
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -94,6 +94,33 @@ pub(crate) async fn write_via_dialog(
     .map_err(|e| UiError::io(e.to_string()))?
 }
 
+/// CSV-only export: format guard + timestamped filename + save dialog.
+///
+/// The three report exports (delegated grants, app-permission grants, credential
+/// expirations) each hand-rolled the same preamble — reject any format that
+/// isn't `csv`, stamp `stem-YYYYMMDDTHHMMSS.csv`, hand off to
+/// [`write_via_dialog`]. Note this does NOT re-point them at
+/// [`save_export_via_dialog`]: that one owns the multi-format (JSON/CSV) picker,
+/// whereas these callers have prebuilt single-format content, which is exactly
+/// the case `write_via_dialog` documents itself as the entry point for.
+///
+/// `to_csv` is lazy so an unsupported format costs nothing to reject.
+pub(crate) async fn save_csv_via_dialog(
+    app_handle: AppHandle,
+    stem: &'static str,
+    format: &str,
+    to_csv: impl FnOnce() -> String,
+) -> Result<Option<String>, UiError> {
+    if format != "csv" {
+        return Err(UiError::validation(
+            "unsupported_format",
+            format!("unsupported export format: {format}"),
+        ));
+    }
+    let default_name = format!("{stem}-{}.csv", chrono::Utc::now().format("%Y%m%dT%H%M%S"));
+    write_via_dialog(app_handle, "CSV", "csv", default_name, to_csv()).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
