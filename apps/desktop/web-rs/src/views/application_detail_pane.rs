@@ -2,6 +2,8 @@
 //! + active tab body. Mirrors
 //!   `apps/desktop/web/src/views/ApplicationDetailPane.tsx`.
 
+use std::collections::HashSet;
+
 use leptos::prelude::*;
 use thaw::{Card, Tab, TabList};
 
@@ -11,6 +13,7 @@ use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{DetailLoadError, DetailSkeleton};
 use crate::hooks::use_command::use_command;
 use crate::state::{OpenItemKind, use_session};
+use crate::util::keep_alive;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::pairing::jump_to_paired_enterprise;
 use crate::views::tabs::{
@@ -87,6 +90,20 @@ pub fn ApplicationDetailPane(
     let active_tab = RwSignal::new(AppTab::from_str(&initial_tab).value().to_string());
     // Persist the active tab for the next app opened.
     Effect::new(move |_| session.last_app_tab.set(active_tab.get()));
+
+    // Insert-only latch of visited tabs (same shape as the Security workbench):
+    // a tab mounts on first visit and then stays in the DOM, hidden. Without it
+    // every tab switch re-ran that tab's IPC resources and discarded its UI
+    // state — scroll position, expanded rows, a half-filled add-credential or
+    // add-owner form. Bouncing Overview→Permissions→Overview→Permissions cost
+    // four Exchange scope lookups.
+    let visited = RwSignal::new(HashSet::from([active_tab.get_untracked()]));
+    Effect::new(move |_| {
+        let v = active_tab.get();
+        visited.update(|set| {
+            set.insert(v);
+        });
+    });
 
     let delete_open = RwSignal::new(false);
     // `use_command` owns the busy/error signals and the double-submit guard,
@@ -169,53 +186,78 @@ pub fn ApplicationDetailPane(
                                             .collect::<Vec<_>>()}
                                     </TabList>
                                     <div class="app-detail__pane">
-                                        {move || match AppTab::from_str(&active_tab.get()) {
-                                            AppTab::Overview => {
+                                        {keep_alive(
+                                            active_tab,
+                                            visited,
+                                            AppTab::Overview.value(),
+                                            move || {
                                                 view! {
                                                     <OverviewTab detail=detail_signal on_changed=bump_reload />
                                                 }
-                                                    .into_any()
-                                            }
-                                            AppTab::Credentials => {
+                                            },
+                                        )}
+                                        {keep_alive(
+                                            active_tab,
+                                            visited,
+                                            AppTab::Credentials.value(),
+                                            move || {
                                                 view! {
                                                     <CredentialsTab detail=detail_signal on_changed=bump_reload />
                                                 }
-                                                    .into_any()
-                                            }
-                                            AppTab::Authentication => {
+                                            },
+                                        )}
+                                        {keep_alive(
+                                            active_tab,
+                                            visited,
+                                            AppTab::Authentication.value(),
+                                            move || {
                                                 view! {
                                                     <AuthenticationTab detail=detail_signal on_changed=bump_reload />
                                                 }
-                                                    .into_any()
-                                            }
-                                            AppTab::Owners => {
+                                            },
+                                        )}
+                                        {keep_alive(
+                                            active_tab,
+                                            visited,
+                                            AppTab::Owners.value(),
+                                            move || {
                                                 view! {
                                                     <OwnersTab detail=detail_signal on_changed=bump_reload />
                                                 }
-                                                    .into_any()
-                                            }
-                                            AppTab::Permissions => {
+                                            },
+                                        )}
+                                        {keep_alive(
+                                            active_tab,
+                                            visited,
+                                            AppTab::Permissions.value(),
+                                            move || {
                                                 view! {
                                                     <PermissionsTab detail=detail_signal on_changed=bump_reload />
                                                 }
-                                                    .into_any()
-                                            }
-                                            AppTab::ExposeApi => {
+                                            },
+                                        )}
+                                        {keep_alive(
+                                            active_tab,
+                                            visited,
+                                            AppTab::ExposeApi.value(),
+                                            move || {
                                                 view! {
                                                     <ExposeApiTab detail=detail_signal on_changed=bump_reload />
                                                 }
-                                                    .into_any()
-                                            }
-                                            AppTab::ConditionalAccess => {
-                                                view! {
-                                                    <ConditionalAccessTab detail=detail_signal />
-                                                }
-                                                    .into_any()
-                                            }
-                                            AppTab::Activity => {
-                                                view! { <ActivityTab detail=detail_signal /> }.into_any()
-                                            }
-                                        }}
+                                            },
+                                        )}
+                                        {keep_alive(
+                                            active_tab,
+                                            visited,
+                                            AppTab::ConditionalAccess.value(),
+                                            move || view! { <ConditionalAccessTab detail=detail_signal /> },
+                                        )}
+                                        {keep_alive(
+                                            active_tab,
+                                            visited,
+                                            AppTab::Activity.value(),
+                                            move || view! { <ActivityTab detail=detail_signal /> },
+                                        )}
                                     </div>
                                     <ConfirmDialog
                                         open=Signal::derive(move || delete_open.get())
