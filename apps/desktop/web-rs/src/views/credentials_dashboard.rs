@@ -14,6 +14,7 @@ use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::credentials::{self, CredentialRowDto};
 use crate::components::audit_dashboard::AuditDashboard;
+use crate::components::ui::CopyableId;
 use crate::state::use_session;
 
 const CRITICAL_DAYS: i64 = 7;
@@ -96,7 +97,9 @@ fn credential_row(session: crate::state::Session, r: CredentialRowDto) -> impl I
         <tr>
             <td>
                 <div class="permissions-cell__primary">{r.app_display_name.clone()}</div>
-                <div class="permissions-cell__secondary mono">{r.app_id.clone()}</div>
+                <div class="permissions-cell__secondary">
+                    <CopyableId value=r.app_id.clone() label="app id" />
+                </div>
             </td>
             <td>{r.kind.as_str()}</td>
             <td>{r.credential_name.clone()}</td>

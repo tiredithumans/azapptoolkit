@@ -255,6 +255,10 @@ fn LoadedApps(
                 .map(|r| (r.id.clone(), r.display_name.clone()))
                 .collect(),
         );
+        // Publish for the standalone Bulk Actions page, which operates on this
+        // same selection but owns no rows to build the map from — without it its
+        // failure list is a column of raw GUIDs.
+        session.tenant_ui.app_names.set(Arc::clone(&map));
         Signal::stored(map)
     };
 

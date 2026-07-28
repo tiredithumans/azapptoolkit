@@ -41,6 +41,9 @@ pub(super) fn render_row(idx: usize, mi: ManagedIdentityDto) -> impl IntoView {
         c
     };
     let chip_kind = chip_kind_for(mi.mi_subtype);
+    // Mirrors the Enterprise Apps row: the Enabled/Disabled facet filtered on a
+    // state the row never displayed.
+    let is_disabled = mi.account_enabled == Some(false);
     let top = idx as f64 * ROW_HEIGHT;
     let display_name = if mi.display_name.is_empty() {
         mi.app_id.clone()
@@ -75,6 +78,14 @@ pub(super) fn render_row(idx: usize, mi: ManagedIdentityDto) -> impl IntoView {
                 <span class="row-meta">
                     <TypeChip kind=chip_kind compact=true />
                     <span class="app-list__row-title" title=title_name>{display_name}</span>
+                    {is_disabled
+                        .then(|| {
+                            view! {
+                                <span class="badge badge--unknown" title="Sign-in disabled — this identity's accountEnabled is false.">
+                                    "Disabled"
+                                </span>
+                            }
+                        })}
                 </span>
                 <span class="app-list__row-appid">{app_id}</span>
             </button>

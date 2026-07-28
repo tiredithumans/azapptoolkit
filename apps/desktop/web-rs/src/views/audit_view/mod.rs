@@ -20,7 +20,6 @@ pub(crate) use controller::AuditController;
 pub(crate) use findings::FindingsPane;
 pub(crate) use groups::ranked_actionable_findings;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use azapptoolkit_core::audit::{AuditItem, AuditPrincipalKind, RiskLevel};
@@ -28,8 +27,9 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
+use crate::components::icon::IconName;
 use crate::components::select_all_bar::SelectAllBar;
-use crate::components::ui::{SearchInput, TabBar, TabBarItem};
+use crate::components::ui::{CopyableId, EmptyState, SearchInput, TabBar, TabBarItem};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
@@ -126,19 +126,9 @@ pub fn AuditAppsPane() -> impl IntoView {
         }))
     });
     // `object_id -> application name` so a bulk failure names the app rather
-    // than printing its GUID.
-    let names: Memo<Arc<HashMap<String, String>>> = Memo::new(move |_| {
-        Arc::new(result.with(|r| {
-            r.as_ref()
-                .map(|r| {
-                    r.items
-                        .iter()
-                        .map(|i| (i.object_id.clone(), i.application_name.clone()))
-                        .collect()
-                })
-                .unwrap_or_default()
-        }))
-    });
+    // than printing its GUID — shared with the Findings groups via the
+    // controller so the full-tenant map is built once per scan, not per reader.
+    let names = ctrl.names;
     let selectbar_label = Signal::derive(move || {
         format!(
             "{} of {} apps match",
@@ -249,22 +239,33 @@ pub fn AuditAppsPane() -> impl IntoView {
                         // the whole filtered set. SP-only rows are excluded — the
                         // bulk commands loop app-registration cores, which have
                         // nothing to resolve for a principal without a local app.
-                        <SelectAllBar
-                            count_label=selectbar_label
-                            visible_ids=selectable_ids
-                            selected=selection
-                        />
+                        // An empty filter result used to render a select-all bar
+                        // controlling nothing plus a bare table header, under a
+                        // flat one-line notice. Hide those rather than unmount
+                        // them: the shell above is deliberately kept stable
+                        // across filter ticks so the keyed <For> can diff.
                         {move || {
                             filtered
                                 .with(|f| f.is_empty())
                                 .then(|| {
                                     view! {
-                                        <div class="alert">
-                                            "No applications match this filter."
-                                        </div>
+                                        <EmptyState
+                                            icon=IconName::Search
+                                            title="No matching apps".to_string()
+                                            body="No applications match this filter. Clear or widen the severity tab and search above to see more."
+                                                .to_string()
+                                        />
                                     }
                                 })
                         }}
+                        <div style:display=move || {
+                            if filtered.with(|f| f.is_empty()) { "none" } else { "contents" }
+                        }>
+                        <SelectAllBar
+                            count_label=selectbar_label
+                            visible_ids=selectable_ids
+                            selected=selection
+                        />
                         <table class="data-table">
                             <thead>
                                 <tr>
@@ -390,7 +391,9 @@ pub fn AuditAppsPane() -> impl IntoView {
                                                     }}
                                                 </td>
                                                 <td>{i.application_name.clone()}</td>
-                                                <td class="mono">{i.app_id.clone()}</td>
+                                                <td>
+                                                    <CopyableId value=i.app_id.clone() label="app id" />
+                                                </td>
                                                 <td>
                                                     <span class=format!(
                                                         "badge {}",
@@ -467,6 +470,7 @@ pub fn AuditAppsPane() -> impl IntoView {
                                     }
                                 })
                         }}
+                        </div>
                     </div>
                 }
                     .into_any()

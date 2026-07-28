@@ -242,7 +242,40 @@ pub fn BulkActionsView() -> impl IntoView {
                         // a result on screen); the hint shows whenever nothing is
                         // checked, including right after a run clears the selection.
                         view! {
+                            // Show WHAT is selected. Arriving from the list, this
+                            // page previously showed only a bare count, so an
+                            // operator typed DELETE against a set they could not
+                            // review. Sorted by name so the same selection always
+                            // reads the same way.
+                            {move || {
+                                let ids = session.tenant_ui.selected_app_ids.get();
+                                (!ids.is_empty())
+                                    .then(|| {
+                                        let names = session.tenant_ui.app_names.get();
+                                        let mut labels: Vec<String> = ids
+                                            .iter()
+                                            .map(|id| {
+                                                names.get(id).cloned().unwrap_or_else(|| id.clone())
+                                            })
+                                            .collect();
+                                        labels.sort_unstable();
+                                        view! {
+                                            <details class="bulk-selection" open=true>
+                                                <summary>
+                                                    {format!("{} app(s) selected", labels.len())}
+                                                </summary>
+                                                <ul class="bulk-selection__list">
+                                                    {labels
+                                                        .into_iter()
+                                                        .map(|l| view! { <li>{l}</li> })
+                                                        .collect_view()}
+                                                </ul>
+                                            </details>
+                                        }
+                                    })
+                            }}
                             <BulkActionBar
+                                names=Signal::derive(move || session.tenant_ui.app_names.get())
                                 selection=session.tenant_ui.selected_app_ids
                                 actions=Signal::derive(|| {
                                     vec![

@@ -203,6 +203,39 @@ pub fn CredentialsTab(
     let expired_result: RwSignal<Option<RemoveExpiredResult>> = RwSignal::new(None);
     let pending_secret: RwSignal<Option<String>> = RwSignal::new(None);
     let pending_cert: RwSignal<Option<String>> = RwSignal::new(None);
+    // Name the exact credential a Remove will destroy. An app with six secrets
+    // rendered six identical "Remove this client secret?" dialogs, so the
+    // operator had to trust that the button they clicked was the row they meant.
+    // Falls back to the key id, which is always present and is what the row
+    // shows anyway.
+    let pending_secret_label = Signal::derive(move || {
+        pending_secret
+            .with(|p| {
+                p.as_ref().map(|id| {
+                    secrets.with(|list| {
+                        list.iter()
+                            .find(|s| &s.key_id == id)
+                            .and_then(|s| s.display_name.clone())
+                            .unwrap_or_else(|| id.clone())
+                    })
+                })
+            })
+            .unwrap_or_default()
+    });
+    let pending_cert_label = Signal::derive(move || {
+        pending_cert
+            .with(|p| {
+                p.as_ref().map(|id| {
+                    certs.with(|list| {
+                        list.iter()
+                            .find(|c| &c.key_id == id)
+                            .and_then(|c| c.display_name.clone())
+                            .unwrap_or_else(|| id.clone())
+                    })
+                })
+            })
+            .unwrap_or_default()
+    });
     let pending_expired = RwSignal::new(false);
 
     let rotate_open = RwSignal::new(false);
@@ -967,6 +1000,7 @@ pub fn CredentialsTab(
                 open=Signal::derive(move || pending_secret.with(|p| p.is_some()))
                 title="Remove this client secret?"
                 body="Any caller still using this secret will start getting 401s immediately. This cannot be undone."
+                subject=pending_secret_label
                 confirm_label="Remove"
                 busy=Signal::derive(move || removing.with(|r| r.is_some()))
                 on_confirm=Callback::new(move |()| {
@@ -981,6 +1015,7 @@ pub fn CredentialsTab(
                 open=Signal::derive(move || pending_cert.with(|p| p.is_some()))
                 title="Remove this certificate?"
                 body="Any caller still using this certificate will fail to authenticate immediately. This cannot be undone."
+                subject=pending_cert_label
                 confirm_label="Remove"
                 busy=Signal::derive(move || removing_cert.with(|r| r.is_some()))
                 on_confirm=Callback::new(move |()| {

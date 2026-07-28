@@ -4,7 +4,8 @@
 //! original cross-field semantics (e.g. switching tenant clears the selected
 //! app and resets the view).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use leptos::prelude::*;
 
@@ -157,6 +158,14 @@ pub struct TenantScopedUi {
     // shell like the wizard so they survive view switches.
     pub new_app_chooser_open: RwSignal<bool>,
     pub gallery_open: RwSignal<bool>,
+    // `object_id -> display name` for every app registration in the tenant,
+    // published by the App Registrations list when it loads. The bulk commands
+    // take object ids and their outcomes carry only ids, so without this a
+    // failure list is a column of raw GUIDs. The list already had this map for
+    // its own inline bar; lifting it here lets the standalone Bulk Actions page
+    // — which owns no rows — label failures the same way. Tenant-scoped by
+    // nature: these ids belong to one tenant's directory.
+    pub app_names: RwSignal<Arc<HashMap<String, String>>>,
 }
 
 impl TenantScopedUi {
@@ -180,6 +189,7 @@ impl TenantScopedUi {
             sso_wizard_open: RwSignal::new(false),
             new_app_chooser_open: RwSignal::new(false),
             gallery_open: RwSignal::new(false),
+            app_names: RwSignal::new(Arc::new(HashMap::new())),
         }
     }
 
@@ -208,6 +218,7 @@ impl TenantScopedUi {
         self.sso_wizard_open.set(false);
         self.new_app_chooser_open.set(false);
         self.gallery_open.set(false);
+        self.app_names.set(Arc::new(HashMap::new()));
     }
 }
 
@@ -813,6 +824,10 @@ mod tests {
             ui.sso_wizard_open.set(true);
             ui.new_app_chooser_open.set(true);
             ui.gallery_open.set(true);
+            ui.app_names.set(Arc::new(HashMap::from([(
+                "app-1".to_string(),
+                "App One".to_string(),
+            )])));
 
             session.set_active_tenant(None);
 
@@ -836,6 +851,7 @@ mod tests {
             assert!(!ui.sso_wizard_open.get_untracked());
             assert!(!ui.new_app_chooser_open.get_untracked());
             assert!(!ui.gallery_open.get_untracked());
+            ui.app_names.with_untracked(|m| assert!(m.is_empty()));
             // And the Session-owned resets still happen alongside.
             assert_eq!(session.view.get_untracked(), ActiveView::Home);
         });

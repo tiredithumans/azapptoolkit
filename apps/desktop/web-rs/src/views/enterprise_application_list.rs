@@ -385,6 +385,10 @@ fn view_row(
     let name_click = display_name.clone();
     let app_id_string = sp.app_id;
     let is_foreign = sp.is_foreign_tenant;
+    // The list offers an Enabled/Disabled facet, but the rows never showed the
+    // state they filter on — so a filtered view and an unfiltered one looked
+    // identical row-for-row.
+    let is_disabled = sp.account_enabled == Some(false);
     let paired_app_id = sp.paired_app_registration_id.clone();
 
     // Descriptive per-row label so the row button announces which enterprise
@@ -408,6 +412,14 @@ fn view_row(
                 <span class="row-meta">
                     <TypeChip kind=AppKind::EnterpriseApp compact=true />
                     <span class="app-list__row-title" title=title_name>{display_name}</span>
+                    {is_disabled
+                        .then(|| {
+                            view! {
+                                <span class="badge badge--unknown" title="Sign-in disabled — this service principal's accountEnabled is false.">
+                                    "Disabled"
+                                </span>
+                            }
+                        })}
                     {is_foreign
                         .then(|| {
                             view! {

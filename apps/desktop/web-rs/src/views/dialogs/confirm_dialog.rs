@@ -16,6 +16,17 @@ pub fn ConfirmDialog(
     #[prop(into)] open: Signal<bool>,
     title: &'static str,
     body: &'static str,
+    /// The specific object this action will affect — a credential's display
+    /// name, a federated credential's subject, an app's name. Rendered bolded
+    /// under the body.
+    ///
+    /// `body` is `&'static str` and describes the *kind* of thing ("this client
+    /// secret"), which meant an app with six secrets showed six identical
+    /// dialogs and the operator had to trust that the button they clicked
+    /// belonged to the row they meant. Additive and optional so the existing
+    /// static call sites keep working and names thread in incrementally.
+    #[prop(into, optional)]
+    subject: Signal<String>,
     #[prop(default = "Confirm")] confirm_label: &'static str,
     #[prop(default = "Cancel")] cancel_label: &'static str,
     /// When non-empty, the confirm button stays disabled until the user types
@@ -59,6 +70,11 @@ pub fn ConfirmDialog(
                 <div class="modal" node_ref=modal_ref>
                     <h3 id="confirm-dialog-title">{title}</h3>
                     <Body1>{body}</Body1>
+                    {move || {
+                        let s = subject.get();
+                        (!s.is_empty())
+                            .then(|| view! { <p class="confirm-dialog__subject">{s}</p> })
+                    }}
                     {(!require_keyword.is_empty())
                         .then(|| {
                             view! {

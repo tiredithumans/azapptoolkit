@@ -8,6 +8,9 @@
 //! All fields are arena-backed handles, so the struct is `Copy` and closures
 //! capture it wholesale.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use leptos::prelude::*;
 
 use crate::bindings::audit::{self, AuditProgress, AuditRunResult};
@@ -36,6 +39,11 @@ pub(crate) struct AuditController {
     pub posture: Memo<Option<PostureCounts>>,
     pub consent_needed: Memo<bool>,
     pub total_items: Memo<Option<usize>>,
+    /// `object_id -> application name`, so a bulk failure names the app instead
+    /// of printing its GUID. Built ONCE per scan here because it was previously
+    /// rebuilt independently by every finding group and again by the All-apps
+    /// pane — a full-tenant HashMap per reader per render.
+    pub names: Memo<Arc<HashMap<String, String>>>,
     pub report_available: Memo<bool>,
     /// When a row's remediation succeeds, drops that item's remediations so
     /// the "Fix" button is gone for good (the audit cache is already busted
@@ -70,6 +78,18 @@ impl AuditController {
             result.with(|r| r.as_ref().is_some_and(|r| r.sign_in_consent_required))
         });
         let total_items = Memo::new(move |_| result.with(|r| r.as_ref().map(|r| r.items.len())));
+        let names: Memo<Arc<HashMap<String, String>>> = Memo::new(move |_| {
+            Arc::new(result.with(|r| {
+                r.as_ref()
+                    .map(|r| {
+                        r.items
+                            .iter()
+                            .map(|i| (i.object_id.clone(), i.application_name.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }))
+        });
         let report_available = Memo::new(move |_| {
             result.with(|r| r.as_ref().is_some_and(|r| r.sign_in_report_available))
         });
@@ -126,6 +146,7 @@ impl AuditController {
             posture,
             consent_needed,
             total_items,
+            names,
             report_available,
             on_remediated,
             on_bulk_done,

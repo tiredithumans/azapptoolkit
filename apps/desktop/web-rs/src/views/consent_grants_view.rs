@@ -11,7 +11,7 @@ use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::consent::{self, OAuth2GrantDto};
 use crate::components::audit_dashboard::AuditDashboard;
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, CopyableId};
 use crate::state::use_session;
 use crate::util::contains_ignore_case;
 
@@ -91,7 +91,9 @@ fn grant_row(session: crate::state::Session, r: OAuth2GrantDto) -> impl IntoView
         <tr>
             <td>
                 <div class="permissions-cell__primary">{r.client_display_name.clone()}</div>
-                <div class="permissions-cell__secondary mono">{client_app_id}</div>
+                <div class="permissions-cell__secondary">
+                    <CopyableId value=client_app_id label="client app id" />
+                </div>
             </td>
             <td>{r.resource_display_name.clone()}</td>
             <td>
