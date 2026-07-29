@@ -7,6 +7,39 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Permissions-tab Scope column let one resource's row borrow another's
+  verdict.** The effective-scope map is keyed on permission *value* alone, but
+  two resources expose an identically named `Mail.Read` / `Mail.ReadWrite` /
+  `Mail.Send` / `Contacts.*` — so an app declaring a mail permission on both
+  Microsoft Graph *and* the legacy Office 365 Exchange Online resource painted
+  the Exchange Online row with the Graph row's badge. The legacy rows aren't
+  scopable at all, so an "Org-wide" badge there read as a scoping failure on a
+  permission that could never be scoped. The same hole gave a *delegated* mail
+  row the application verdict, contradicting the column's own contract that
+  delegated permissions read "—". The verdict is now gated on the row's own
+  resource and kind, matching the resource-aware checks the rest of the frontend
+  already used.
+
+### Added
+
+- **A callout naming legacy Office 365 Exchange Online mailbox grants.** That
+  resource's own `Mail.*` / `Calendars.*` / `Contacts.*` / `MailboxSettings.*`
+  appRoles (the Outlook REST API, decommissioned March 2024) can't be confined —
+  RBAC for Applications covers Microsoft Graph and EWS only — but they still
+  count as org-wide mailbox reach, so a surviving grant flips the identically
+  named Graph permission's verdict back to `OrgWide`. A correctly migrated,
+  correctly scoped app therefore read "Org-wide" with nothing on the page
+  explaining why, and no scoping action could clear it (those roles are never
+  scope targets, so the grant strip never touches them). The app-registration
+  Permissions tab and the shared held-permissions panel (enterprise apps and
+  managed identities) now name the offending grants and say that removing them is
+  the fix. The resource's live-protocol roles — `full_access_as_app`,
+  `EWS.AccessAsApp`, `Exchange.ManageAsApp`, `IMAP`/`POP`/`SMTP.*AsApp` — are
+  deliberately excluded, so the callout can never advise breaking EWS, Exchange
+  Online PowerShell, or IMAP/POP/SMTP.
+
 ## [0.22.0] - 2026-07-28
 
 ### Fixed

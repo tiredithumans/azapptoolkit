@@ -15,6 +15,9 @@ use crate::bindings::exchange;
 use crate::bindings::permissions::{self, GrantResult};
 use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
 use crate::components::icon::IconName;
+use crate::components::legacy_exchange_grants_callout::{
+    AppPermissionRow, LegacyExchangeGrantsCallout,
+};
 use crate::components::permission_picker::PickerSelection;
 use crate::components::requires_role::RequiresRole;
 use crate::components::scope_badge::{
@@ -436,6 +439,27 @@ pub fn PermissionsTab(
                 scope_unavailable.get().map(|e| {
                     view! { <ScopeUnavailableBanner error=e on_retry=move |_| reload_scopes() /> }
                 })
+            }}
+            // Legacy Office 365 Exchange Online mail grants can't be scoped and
+            // override the Graph rows' verdicts, so nothing in the table above can
+            // explain an "Org-wide" badge on a scoped app. Declared rows carry
+            // their grant state, so the callout sees both halves.
+            {move || {
+                let rows = detail
+                    .with(|d| {
+                        d.resolved_permissions
+                            .iter()
+                            .filter(|p| p.permission_kind == PermissionKind::Application)
+                            .filter_map(|p| {
+                                Some(AppPermissionRow {
+                                    resource_app_id: Some(p.resource_app_id.clone()),
+                                    value: p.permission_value.clone()?,
+                                    granted: p.runtime_assignment_id.is_some(),
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                view! { <LegacyExchangeGrantsCallout rows=rows /> }
             }}
             {move || {
                 // The empty check reads only the (stable) resolved set, so this

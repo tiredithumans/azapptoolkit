@@ -17,6 +17,7 @@ pub mod group_autocomplete;
 pub mod held_permissions_panel;
 pub mod icon;
 pub mod index_cap_notice;
+pub mod legacy_exchange_grants_callout;
 pub mod list_scaffold;
 pub mod managed_scope_group_panel;
 pub mod modal_shell;
