@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-07-29
+
 ### Fixed
 
 - **The Permissions-tab Scope column let one resource's row borrow another's
