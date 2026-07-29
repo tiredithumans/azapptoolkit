@@ -124,6 +124,30 @@ pub fn is_scopable_exchange_resource_permission(
     resource_app_id.is_some_and(|id| exchange_role_for_resource_permission(id, value).is_some())
 }
 
+/// True for an application permission on the legacy **Office 365 Exchange
+/// Online** resource that names a mailbox capability RBAC for Applications
+/// cannot confine: that resource's own `Mail.*` / `Calendars.*` / `Contacts.*` /
+/// `MailboxSettings.*` appRoles, which authorized the Outlook REST API
+/// (deprecated, endpoints decommissioned March 2024).
+///
+/// These sit in the awkward middle of the two-resource split. They are **not**
+/// scopable — RBAC for Applications supports Microsoft Graph and EWS only, so
+/// [`exchange_role_for_resource_permission`] returns `None` for them — yet they
+/// still *name* a mailbox permission, so a surviving grant unions with (and
+/// therefore defeats) the RBAC scope of the identically named Microsoft Graph
+/// permission. Removing the grant is the only remedy, which is why the UI calls
+/// them out instead of offering a "Scope…" action that can't be honoured.
+///
+/// Deliberately **excludes** the rest of the resource's appRoles:
+/// [`EWS_FULL_ACCESS_AS_APP`] IS scopable (via `Application EWS.AccessAsApp`),
+/// and `EWS.AccessAsApp` / `Exchange.ManageAsApp` / `IMAP.AccessAsApp` /
+/// `POP.AccessAsApp` / `SMTP.SendAsApp` back protocols that are very much alive.
+/// Widening this to "everything on resource `00000002-…`" would tell an operator
+/// to break EWS, Exchange Online PowerShell, or IMAP/POP/SMTP.
+pub fn is_unscopable_legacy_exchange_permission(resource_app_id: &str, value: &str) -> bool {
+    resource_app_id == OFFICE365_EXCHANGE_ONLINE_APP_ID && graph_mail_role(value).is_some()
+}
+
 /// True for a grant that reaches **every** mailbox with full access regardless
 /// of which individual mail permission is being examined — today only the EWS
 /// [`EWS_FULL_ACCESS_AS_APP`] scope.
@@ -262,6 +286,50 @@ mod tests {
             );
             // The same value on Graph does map.
             assert!(exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, value).is_some());
+        }
+    }
+
+    #[test]
+    fn unscopable_legacy_exchange_permissions_are_the_outlook_rest_family_only() {
+        // The set the UI calls out: named like a Graph mail permission, but on the
+        // legacy resource, so no RBAC role can confine it.
+        for value in [
+            "Mail.Read",
+            "Mail.ReadWrite",
+            "Mail.Send",
+            "Calendars.ReadWrite",
+            "Contacts.ReadWrite",
+            "MailboxSettings.Read",
+        ] {
+            assert!(
+                is_unscopable_legacy_exchange_permission(OFFICE365_EXCHANGE_ONLINE_APP_ID, value),
+                "{value} on Office 365 Exchange Online is unscopable and must be called out"
+            );
+            // The identically named Graph permission is scopable, never called out.
+            assert!(!is_unscopable_legacy_exchange_permission(
+                MICROSOFT_GRAPH_APP_ID,
+                value
+            ));
+        }
+    }
+
+    #[test]
+    fn unscopable_legacy_exchange_spares_the_live_protocol_roles() {
+        // Load-bearing exclusions: `full_access_as_app` IS scopable, and the rest
+        // back EWS / Exchange Online PowerShell / IMAP / POP / SMTP. Calling any of
+        // them "remove this" would break a working integration.
+        for value in [
+            EWS_FULL_ACCESS_AS_APP,
+            "EWS.AccessAsApp",
+            "Exchange.ManageAsApp",
+            "IMAP.AccessAsApp",
+            "POP.AccessAsApp",
+            "SMTP.SendAsApp",
+        ] {
+            assert!(
+                !is_unscopable_legacy_exchange_permission(OFFICE365_EXCHANGE_ONLINE_APP_ID, value),
+                "{value} backs a live protocol (or is scopable) — must never be called out"
+            );
         }
     }
 

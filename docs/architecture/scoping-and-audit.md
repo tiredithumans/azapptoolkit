@@ -141,6 +141,29 @@ itself instead of a bare GUID; the callout additionally names it as a **blanket*
 overrides per-permission mailbox scopes, mirroring `reconcile_orgwide_grant` so the two surfaces
 can't appear to contradict each other. Pinned by `orgwide_scope_callout` unit + GUI tests.
 
+**The scope *verdict* is resource-gated too, not just the actions.** `mail_scopes` is keyed on
+permission value alone, so `permission_scope_cell` (via the pure `scope_cell_for`) consumes a verdict
+**only** when the row is an Application permission *and* `is_exchange_scopable_on(resource, value)`.
+Without that gate an app declaring `Mail.ReadWrite` on both resources paints Exchange Online's
+un-scopable row with Graph's badge — "Org-wide" on a row that was never scopable reads as a scoping
+failure — and a delegated `Mail.Read` inherits the application verdict. Pinned by `scope_badge` unit
+tests; both call sites (`permissions_tab`, `held_permissions_panel`) route through the one function.
+
+**Legacy Exchange Online mail grants are the "scoped app still reads Org-wide" trap.** Office 365
+Exchange Online's own `Mail.*`/`Calendars.*`/`Contacts.*`/`MailboxSettings.*` appRoles (retired
+Outlook REST) have no RBAC role, yet `held_orgwide_mail_grants` filters with the **value-only**
+`is_scopable_exchange_permission`, so a surviving grant enters the org-wide set and
+`reconcile_orgwide_grant` flips the identically named *Graph* permission to `OrgWide`. That is
+correct (never under-report — nothing confines those grants once the AAP is gone), but it is
+unfixable from any scoping surface: `targets_from_declared` never targets them, so
+`remove_unscoped_grants` never strips them and re-running the scope flow changes nothing. Only
+removing the grant helps, so `LegacyExchangeGrantsCallout` names them on the app-reg Permissions tab
+and in `HeldPermissionsPanel`. Its predicate is `core::scoping::is_unscopable_legacy_exchange_permission`
+— the resource's mail-named roles **only**. Never widen it to the whole resource:
+`full_access_as_app` is scopable, and `EWS.AccessAsApp` / `Exchange.ManageAsApp` /
+`IMAP`/`POP`/`SMTP.*AsApp` back live protocols, so naming them would tell an operator to break a
+working integration.
+
 **Known display gap:** `full_access_as_app` is not in the audit's high/medium risk lists, so it
 shows no risk badge even though it is the broadest mailbox grant there is. Adding it would shift
 audit ranking (an operator-visible change needing a CHANGELOG note), so it is deliberately left

@@ -20,6 +20,9 @@ use azapptoolkit_dto::permissions::PermissionKind;
 use leptos::prelude::*;
 
 use crate::components::icon::IconName;
+use crate::components::legacy_exchange_grants_callout::{
+    AppPermissionRow, LegacyExchangeGrantsCallout,
+};
 use crate::components::permission_picker::{MICROSOFT_GRAPH_APP_ID, PickerSelection};
 use crate::components::scope_badge::{
     app_permission_risk_badge, is_sharepoint_orgwide, permission_scope_cell,
@@ -95,6 +98,20 @@ pub fn HeldPermissionsPanel(
         };
         view! { <div class=cls>{msg}</div> }
     });
+
+    // Legacy Office 365 Exchange Online mail grants can't be scoped and override
+    // the mailbox scope of the identically named Graph permissions, so they need
+    // naming here too — everything in this table is a live grant.
+    let legacy_rows: Vec<AppPermissionRow> = permissions
+        .iter()
+        .filter_map(|p| {
+            Some(AppPermissionRow {
+                resource_app_id: p.resource_app_id.clone(),
+                value: p.app_role_value.clone()?,
+                granted: true,
+            })
+        })
+        .collect();
 
     let has_actions = on_revoke.is_some() || on_scope.is_some();
     let mut headers = vec!["Resource", "Permission"];
@@ -194,6 +211,7 @@ pub fn HeldPermissionsPanel(
 
     view! {
         {banner}
+        <LegacyExchangeGrantsCallout rows=legacy_rows />
         <DataTable
             headers=headers
             rows=permissions
