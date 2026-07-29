@@ -59,15 +59,68 @@ pub fn app_permission_risk_badge(value: &str) -> AnyView {
     }
 }
 
-/// Renders the "Scope" cell for a permission row. Mail/calendar/contacts
-/// permissions use the live Exchange verdict (`mail_scope`); SharePoint `Sites.*`
-/// permissions derive their verdict from the permission name. Everything else
-/// shows a muted dash. `is_application` is whether the row is an *application*
-/// permission — only those are scopable via Exchange RBAC for Applications, so a
-/// delegated mail permission always reads "not applicable" (—).
-/// `scope_loading` is whether the Exchange lookup is still in flight — a
-/// scopable row without a verdict then reads "Resolving…" instead of the
-/// (alarming, and wrong-while-loading) "Unknown".
+/// What the "Scope" cell should render for one permission row — the pure
+/// decision, split from the markup so the resource-awareness below is
+/// unit-testable (rendering returns an opaque `AnyView`).
+#[derive(Debug, Clone, PartialEq)]
+enum ScopeCell {
+    /// A live Exchange verdict (or `Unknown` when the lookup failed).
+    Mailbox(MailPermissionScope),
+    /// Exchange lookup still in flight.
+    Resolving,
+    /// `Sites.Selected` — SharePoint's scoped model, derived from the name.
+    SitesSelected,
+    /// A broad `Sites.*` — org-wide, derived from the name.
+    SitesOrgWide,
+    /// Not scopable by any mechanism.
+    NotApplicable,
+}
+
+/// Picks the cell for a row. Mail/calendar/contacts application permissions use
+/// the live Exchange verdict (`mail_scope`); SharePoint `Sites.*` permissions
+/// derive theirs from the permission name; everything else is a muted dash.
+///
+/// **The Exchange verdict is gated on the row's own resource *and* on the row
+/// being an Application permission**, because `mail_scope` is looked up by the
+/// caller from a map keyed on permission *value* alone. Two resources expose an
+/// identically named `Mail.Read`/`Mail.ReadWrite`/`Mail.Send`/`Contacts.*` and
+/// only Microsoft Graph's is RBAC-scopable, so an ungated lookup makes Office
+/// 365 Exchange Online's un-scopable row inherit the Graph row's verdict — an
+/// app whose Graph permissions read "Org-wide" paints the legacy rows "Org-wide"
+/// too, implying a scope failure on rows that were never scopable. The same hole
+/// let a *delegated* `Mail.Read` inherit the application verdict, contradicting
+/// this function's own contract.
+fn scope_cell_for(
+    value: Option<&str>,
+    resource_app_id: Option<&str>,
+    mail_scope: Option<MailPermissionScope>,
+    is_application: bool,
+    scope_loading: bool,
+) -> ScopeCell {
+    if is_application && value.is_some_and(|v| is_exchange_scopable_on(resource_app_id, v)) {
+        return match mail_scope {
+            Some(scope) => ScopeCell::Mailbox(scope),
+            // No live verdict: in flight ⇒ say so; otherwise the lookup failed ⇒
+            // "Unknown", not the not-applicable dash, so it isn't mistaken for a
+            // non-scopable permission.
+            None if scope_loading => ScopeCell::Resolving,
+            None => ScopeCell::Mailbox(MailPermissionScope::Unknown),
+        };
+    }
+    match value {
+        Some("Sites.Selected") => ScopeCell::SitesSelected,
+        Some(v) if is_sharepoint_orgwide(v) => ScopeCell::SitesOrgWide,
+        _ => ScopeCell::NotApplicable,
+    }
+}
+
+/// Renders the "Scope" cell for a permission row — see [`scope_cell_for`] for
+/// the decision (including why the Exchange verdict is resource-gated).
+/// `is_application` is whether the row is an *application* permission — only
+/// those are scopable via Exchange RBAC for Applications, so a delegated mail
+/// permission always reads "not applicable" (—). `scope_loading` is whether the
+/// Exchange lookup is still in flight, so a scopable row without a verdict reads
+/// "Resolving…" instead of the (alarming, and wrong-while-loading) "Unknown".
 pub fn permission_scope_cell(
     value: Option<&str>,
     resource_app_id: Option<&str>,
@@ -75,32 +128,24 @@ pub fn permission_scope_cell(
     is_application: bool,
     scope_loading: bool,
 ) -> AnyView {
-    if let Some(scope) = mail_scope {
-        return mailbox_scope_badge(scope);
-    }
-    // An application mail-scopable permission with no live verdict: in flight ⇒
-    // say so; otherwise the lookup failed ⇒ show "Unknown", not the
-    // not-applicable dash, so it isn't mistaken for a non-scopable permission.
-    // (Delegated permissions are never RBAC-scopable, so they fall through to —.)
-    // Resource-aware, so Office 365 Exchange Online's un-scopable `Mail.Read`
-    // reads "—" rather than an alarming "Unknown" for a verdict that will never
-    // arrive.
-    if is_application && value.is_some_and(|v| is_exchange_scopable_on(resource_app_id, v)) {
-        if scope_loading {
-            return view! {
-                <span
-                    class="badge badge--unknown"
-                    title="Querying Exchange for the effective mailbox scope — this takes a few seconds"
-                >
-                    "Resolving…"
-                </span>
-            }
-            .into_any();
+    match scope_cell_for(
+        value,
+        resource_app_id,
+        mail_scope,
+        is_application,
+        scope_loading,
+    ) {
+        ScopeCell::Mailbox(scope) => mailbox_scope_badge(scope),
+        ScopeCell::Resolving => view! {
+            <span
+                class="badge badge--unknown"
+                title="Querying Exchange for the effective mailbox scope — this takes a few seconds"
+            >
+                "Resolving…"
+            </span>
         }
-        return mailbox_scope_badge(MailPermissionScope::Unknown);
-    }
-    match value {
-        Some("Sites.Selected") => view! {
+        .into_any(),
+        ScopeCell::SitesSelected => view! {
             <span
                 class="badge badge--ok"
                 title="Confined to individually-granted sites (Sites.Selected)"
@@ -109,13 +154,13 @@ pub fn permission_scope_cell(
             </span>
         }
         .into_any(),
-        Some(v) if is_sharepoint_orgwide(v) => view! {
+        ScopeCell::SitesOrgWide => view! {
             <span class="badge badge--danger" title="Grants access to every site in the tenant">
                 "Org-wide"
             </span>
         }
         .into_any(),
-        _ => view! { <span class="muted">"—"</span> }.into_any(),
+        ScopeCell::NotApplicable => view! { <span class="muted">"—"</span> }.into_any(),
     }
 }
 
@@ -168,5 +213,121 @@ pub fn mailbox_scope_badge(scope: MailPermissionScope) -> AnyView {
                     .into_any()
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use azapptoolkit_core::scoping::{
+        MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID as EXO,
+    };
+
+    const GRAPH: &str = MICROSOFT_GRAPH_APP_ID;
+
+    fn cell(value: &str, resource: &str, scope: Option<MailPermissionScope>) -> ScopeCell {
+        scope_cell_for(Some(value), Some(resource), scope, true, false)
+    }
+
+    #[test]
+    fn exchange_onlines_mail_lookalikes_never_borrow_the_graph_verdict() {
+        // The regression: `mail_scope` is looked up by value alone, so an app
+        // declaring `Mail.ReadWrite` on BOTH resources handed the Office 365
+        // Exchange Online row the Graph row's verdict — painting an un-scopable
+        // legacy row "Org-wide" as if its scoping had failed.
+        assert_eq!(
+            cell("Mail.ReadWrite", EXO, Some(MailPermissionScope::OrgWide)),
+            ScopeCell::NotApplicable,
+        );
+        // ...while Graph's identically named permission still shows its verdict.
+        assert_eq!(
+            cell("Mail.ReadWrite", GRAPH, Some(MailPermissionScope::OrgWide)),
+            ScopeCell::Mailbox(MailPermissionScope::OrgWide),
+        );
+    }
+
+    #[test]
+    fn exchange_onlines_mail_lookalikes_never_read_unknown_or_resolving() {
+        // Not just the verdict: a row that can never be scoped must not claim a
+        // verdict is coming, in either the loading or the failed state.
+        assert_eq!(
+            scope_cell_for(Some("Mail.Send"), Some(EXO), None, true, true),
+            ScopeCell::NotApplicable,
+        );
+        assert_eq!(
+            scope_cell_for(Some("Mail.Send"), Some(EXO), None, true, false),
+            ScopeCell::NotApplicable,
+        );
+    }
+
+    #[test]
+    fn the_ews_scope_on_exchange_online_does_show_its_verdict() {
+        // The one mailbox permission that IS scopable on the legacy resource —
+        // gating by resource must not swallow it.
+        assert_eq!(
+            cell(
+                "full_access_as_app",
+                EXO,
+                Some(MailPermissionScope::OrgWide)
+            ),
+            ScopeCell::Mailbox(MailPermissionScope::OrgWide),
+        );
+    }
+
+    #[test]
+    fn delegated_mail_rows_are_not_applicable_even_with_a_verdict() {
+        // Exchange RBAC scopes application permissions only; the value-keyed map
+        // would otherwise hand a delegated `Mail.Read` the application verdict.
+        assert_eq!(
+            scope_cell_for(
+                Some("Mail.Read"),
+                Some(GRAPH),
+                Some(MailPermissionScope::OrgWide),
+                false,
+                false,
+            ),
+            ScopeCell::NotApplicable,
+        );
+    }
+
+    #[test]
+    fn a_graph_mail_row_without_a_verdict_resolves_then_reads_unknown() {
+        assert_eq!(
+            scope_cell_for(Some("Mail.Read"), Some(GRAPH), None, true, true),
+            ScopeCell::Resolving,
+        );
+        assert_eq!(
+            scope_cell_for(Some("Mail.Read"), Some(GRAPH), None, true, false),
+            ScopeCell::Mailbox(MailPermissionScope::Unknown),
+        );
+    }
+
+    #[test]
+    fn a_row_whose_resource_is_unknown_is_not_applicable() {
+        // `None` = a resource this build didn't resolve; it can't be judged
+        // scopable, so it must not borrow a verdict either.
+        assert_eq!(
+            scope_cell_for(
+                Some("Mail.Read"),
+                None,
+                Some(MailPermissionScope::OrgWide),
+                true,
+                false,
+            ),
+            ScopeCell::NotApplicable,
+        );
+    }
+
+    #[test]
+    fn sharepoint_verdicts_still_come_from_the_name() {
+        assert_eq!(
+            cell("Sites.Selected", GRAPH, None),
+            ScopeCell::SitesSelected
+        );
+        assert_eq!(cell("Sites.Read.All", GRAPH, None), ScopeCell::SitesOrgWide);
+        assert_eq!(
+            cell("Directory.Read.All", GRAPH, None),
+            ScopeCell::NotApplicable
+        );
     }
 }
