@@ -25,7 +25,12 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 base64 = "0.22"
-web-sys = { version = "0.3", features = ["MediaQueryList", "MediaQueryListEvent", "Window", "Document", "HtmlElement", "Element", "Node", "NodeList", "Clipboard", "Navigator", "ResizeObserver", "ResizeObserverEntry", "Storage", "File", "FileList", "Blob", "HtmlInputElement", "Event"] }
+# `ClipboardEvent` + `DataTransfer` back the redirect-URI editor's multi-line
+# paste (`components/uri_list_editor.rs`). Both resolve transitively today
+# (tachys generates the `paste` event type, thaw pulls DataTransfer), so
+# declaring them is a no-op for the build — and the point: a thaw/tachys bump
+# that dropped either would otherwise silently break pasting a block of URLs.
+web-sys = { version = "0.3", features = ["MediaQueryList", "MediaQueryListEvent", "Window", "Document", "HtmlElement", "Element", "Node", "NodeList", "Clipboard", "ClipboardEvent", "DataTransfer", "Navigator", "ResizeObserver", "ResizeObserverEntry", "Storage", "File", "FileList", "Blob", "HtmlInputElement", "Event"] }
 console_error_panic_hook = "0.1"
 futures = "0.3"
 

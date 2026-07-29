@@ -1,12 +1,13 @@
 //! Application detail-pane tab identity. A typed enum so the match in
 //! `ApplicationDetailPane` is exhaustive — adding a tab forces an update here,
-//! which the compiler enforces. The pane still stores the *string* value (Thaw's
-//! `TabList` is string-keyed and two-way bound); this enum is the bridge between
+//! which the compiler enforces. The pane still stores the *string* value
+//! (`TabBar` is string-keyed and two-way bound); this enum is the bridge between
 //! that string and an exhaustive match.
 
 /// Tabs for the app registration detail pane, in display order. String values
-/// match the `Tab value` attributes used by Thaw's `TabList`. Stale persisted or
-/// deep-linked values are clamped to a live tab via [`AppTab::from_str`].
+/// match the `TabBarItem::value`s the pane builds from [`AppTab::ALL`]. Stale
+/// persisted or deep-linked values are clamped to a live tab via
+/// [`AppTab::from_str`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppTab {
     Overview,
@@ -20,7 +21,7 @@ pub enum AppTab {
 }
 
 impl AppTab {
-    /// All tabs in display order — used to build the `TabList`.
+    /// All tabs in display order — used to build the `TabBar`.
     pub const ALL: &'static [Self] = &[
         Self::Overview,
         Self::Credentials,

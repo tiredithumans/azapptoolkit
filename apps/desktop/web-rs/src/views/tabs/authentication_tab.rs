@@ -4,33 +4,25 @@
 //! portal's "Authentication" blade, minus the parts this toolkit doesn't manage.
 //!
 //! Loads current values via `get_application_authentication`, then Save does a
-//! full-replace write via `set_application_authentication` (each URI box is the
-//! complete set for that platform, so the editor must load before it saves).
-//! Reply URIs are validated server-side (no wildcards; https / loopback-http /
-//! custom schemes only) — the rejection reason surfaces inline.
+//! full-replace write via `set_application_authentication` (each platform's list
+//! is the complete set for that platform, so the editor must load before it
+//! saves).
+//!
+//! Reply URIs are edited one per row (`components::uri_list_editor`) and checked
+//! against the same `core::redirect` validator the backend runs, so an offender
+//! is marked on its own row before the round trip. That check is advisory: Save
+//! is never blocked and `set_application_authentication` stays the authority.
 
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
+use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 
 use crate::bindings::applications::{self, ApplicationAuthenticationDto, ApplicationDetail};
 use crate::components::ui::DetailSkeleton;
+use crate::components::uri_list_editor::{UriListEditor, UriListState, redirect_uri_reason};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
-
-/// Splits a redirect-URI textarea into trimmed, non-empty entries. Unlike the
-/// scope forms' `parse_lines`, this splits on newlines ONLY: a redirect URI may
-/// legally contain a comma or semicolon (e.g. in a query string), so those must
-/// not split one URI into two. The UI labels each box "one per line".
-fn lines_to_uris(raw: &str) -> Vec<String> {
-    raw.lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
 use crate::util::no_tenant;
 
 #[component]
@@ -91,10 +83,13 @@ fn AuthenticationForm(
     let session = use_session();
     let cmd = use_command();
 
-    // Seed the editable fields from the loaded settings (one URI per line).
-    let web = RwSignal::new(dto.web_redirect_uris.join("\n"));
-    let spa = RwSignal::new(dto.spa_redirect_uris.join("\n"));
-    let public_client = RwSignal::new(dto.public_client_redirect_uris.join("\n"));
+    // One row per URI. Each list owns its own row state and hands back a
+    // `Vec<String>` on save — the write is a full replace, which is why the tab
+    // loads before it saves.
+    let web = UriListState::validated(&dto.web_redirect_uris, redirect_uri_reason);
+    let spa = UriListState::validated(&dto.spa_redirect_uris, redirect_uri_reason);
+    let public_client =
+        UriListState::validated(&dto.public_client_redirect_uris, redirect_uri_reason);
     let logout = RwSignal::new(dto.logout_url.clone().unwrap_or_default());
     let fallback = RwSignal::new(dto.is_fallback_public_client);
     let access_token = RwSignal::new(dto.enable_access_token_issuance);
@@ -113,9 +108,11 @@ fn AuthenticationForm(
                     (!l.is_empty()).then_some(l)
                 };
                 let input = ApplicationAuthenticationDto {
-                    web_redirect_uris: lines_to_uris(&web.get()),
-                    spa_redirect_uris: lines_to_uris(&spa.get()),
-                    public_client_redirect_uris: lines_to_uris(&public_client.get()),
+                    // `to_uris` reads untracked: trimmed, blanks dropped, order
+                    // preserved — the same contract `lines_to_uris` had.
+                    web_redirect_uris: web.to_uris(),
+                    spa_redirect_uris: spa.to_uris(),
+                    public_client_redirect_uris: public_client.to_uris(),
                     logout_url,
                     is_fallback_public_client: fallback.get(),
                     enable_access_token_issuance: access_token.get(),
@@ -132,17 +129,29 @@ fn AuthenticationForm(
     view! {
         <div class="form-grid">
             <Body1>
-                "Reply (redirect) URIs — one per line. Wildcards aren't allowed; use https (or http only for localhost) or a custom scheme for installed apps."
+                "Reply (redirect) URIs. Wildcards aren't allowed; use https (or http only for localhost) or a custom scheme for installed apps."
             </Body1>
-            <Field label="Web redirect URIs">
-                <Textarea value=web />
-            </Field>
-            <Field label="Single-page application (SPA) redirect URIs">
-                <Textarea value=spa />
-            </Field>
-            <Field label="Mobile & desktop (public client) redirect URIs">
-                <Textarea value=public_client />
-            </Field>
+            <UriListEditor
+                state=web
+                class="uri-list--web"
+                label="Web redirect URIs"
+                noun="web redirect URI"
+                placeholder="https://contoso.com/auth/callback"
+            />
+            <UriListEditor
+                state=spa
+                class="uri-list--spa"
+                label="Single-page application (SPA) redirect URIs"
+                noun="SPA redirect URI"
+                placeholder="https://contoso.com/"
+            />
+            <UriListEditor
+                state=public_client
+                class="uri-list--public-client"
+                label="Mobile & desktop (public client) redirect URIs"
+                noun="public client redirect URI"
+                placeholder="myapp://auth"
+            />
             <Field label="Front-channel logout URL">
                 <Input value=logout />
             </Field>
@@ -188,24 +197,5 @@ fn AuthenticationForm(
                 </Button>
             </div>
         </div>
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::lines_to_uris;
-
-    #[test]
-    fn splits_on_newlines_only_and_trims() {
-        assert_eq!(
-            lines_to_uris("https://a/cb\n  https://b/cb  \n"),
-            ["https://a/cb", "https://b/cb"]
-        );
-        // A comma/semicolon in a query string must NOT split one URI into two.
-        assert_eq!(
-            lines_to_uris("https://a/cb?x=1,2;3"),
-            ["https://a/cb?x=1,2;3"]
-        );
-        assert!(lines_to_uris("\n  \n").is_empty());
     }
 }

@@ -10,13 +10,21 @@ pub struct TabBarItem {
     pub label: &'static str,
 }
 
-/// Underlined tab bar bound to an `RwSignal<String>`. Use as a lighter-weight
-/// alternative to Thaw's `TabList` when we want a custom underline indicator
-/// and tighter visual integration with the rest of the UI.
+/// Underlined tab bar bound to an `RwSignal<String>`. **The** tab implementation
+/// — every tab strip and segmented choice in the app routes through it: the two
+/// detail panes, the Security / Settings / Bulk Actions sub-tabs, the audit
+/// dashboard's facet bar, and small two-option pickers like the Access tab's
+/// Users/Groups.
 ///
-/// Implements the WAI-ARIA tabs pattern: roving `tabindex` (only the active tab
-/// is in the tab order) and Left/Right/Home/End move between tabs with automatic
-/// activation (the focused tab becomes selected).
+/// It replaced Thaw's `TabList` app-wide, which is an accessibility fix and not
+/// a matter of taste: `thaw::Tab` emits `role="tab"` + `aria-selected` but has
+/// no roving `tabindex` and no keydown handler, so the 10-tab enterprise pane
+/// cost a keyboard user ten Tab presses to cross. This implements the full
+/// WAI-ARIA tabs pattern: roving `tabindex` (only the active tab is a tab stop)
+/// and Left/Right/Home/End move between tabs with automatic activation. It also
+/// made a CSS workaround redundant — `.ui-tabs` scrolls natively, where
+/// `.thaw-tab-list` needed an app-side `overflow-x` patch to stop clipping the
+/// tabs past the pane edge.
 #[component]
 pub fn TabBar(items: Vec<TabBarItem>, selected: RwSignal<String>) -> impl IntoView {
     let values: Vec<String> = items.iter().map(|i| i.value.to_string()).collect();
@@ -85,9 +93,16 @@ pub fn TabBar(items: Vec<TabBarItem>, selected: RwSignal<String>) -> impl IntoVi
                     };
                     let value_click = value.clone();
                     let on_click = move |_| selected.set(value_click.clone());
+                    // `.to_string()`, not the bare bool: Leptos renders a `bool`
+                    // attribute as a *boolean* attribute — present-and-empty for
+                    // true, omitted for false — so the selected tab shipped
+                    // `aria-selected=""`, which is not a valid ARIA value, and
+                    // no tab ever carried `aria-selected="true"`. Matches how
+                    // `global_search.rs` and `permission_tester_view.rs` already
+                    // set the same attribute.
                     let aria_selected = {
                         let v = value.clone();
-                        move || selected.get() == v
+                        move || (selected.get() == v).to_string()
                     };
                     // Roving tabindex — only the active tab is a tab stop.
                     let tabindex = move || {

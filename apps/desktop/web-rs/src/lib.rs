@@ -87,7 +87,7 @@ fn App() -> impl IntoView {
 ///
 /// `initial_theme` samples `prefers-color-scheme` **once**, but `styles.css`
 /// reacts to it live — so flipping the OS theme with the app open left Thaw's
-/// components (Input, Button, TabList, Spinner) rendering light on dark app
+/// components (Input, Button, Spinner) rendering light on dark app
 /// chrome until the next restart. Subscribing to the media query fixes the half
 /// that was static.
 ///

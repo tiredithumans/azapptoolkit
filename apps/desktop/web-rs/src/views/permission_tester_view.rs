@@ -9,13 +9,13 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Tab, TabList};
+use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 use wasm_bindgen::JsCast;
 
 use crate::bindings::permission_tester::{self, PermissionTestResult};
 use crate::bindings::{TenantContext, auth, search};
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{Callout, SectionHeader};
+use crate::components::ui::{Callout, SectionHeader, TabBar, TabBarItem};
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 
@@ -355,10 +355,13 @@ pub fn PermissionTesterView() -> impl IntoView {
                     })
             }}
 
-            <TabList selected_value=resource_tab>
-                <Tab value="exchange">"Exchange mailbox"</Tab>
-                <Tab value="sharepoint">"SharePoint site"</Tab>
-            </TabList>
+            <TabBar
+                items=vec![
+                    TabBarItem { value: "exchange", label: "Exchange mailbox" },
+                    TabBarItem { value: "sharepoint", label: "SharePoint site" },
+                ]
+                selected=resource_tab
+            />
 
             {move || {
                 if resource_tab.get() == "exchange" {

@@ -1,7 +1,16 @@
 //! A single list-filter chip: a labeled, count-bearing toggle used by the App
 //! Registration / Enterprise Application / Managed Identity list filter bars.
-//! Models the audit view's posture-card pattern — a plain `<button>`, **never** a
-//! dynamic Thaw `TabList` (those pull `uuid-v4` on wasm, a known no-go).
+//! Models the audit view's posture-card pattern — a plain `<button>` rather than
+//! a Thaw `Tab`, which takes only `class` / `value` / `children` and so cannot
+//! carry the count badge or the zero-count `disabled` state below.
+//!
+//! (This previously claimed a dynamic Thaw `TabList` "pulls `uuid-v4` on wasm, a
+//! known no-go". Both halves were false: `thaw::tab_list` contains no `uuid`
+//! reference at all — a tab's identity is the caller's `value` string — and
+//! `ConfigProvider` mints a `Uuid::new_v4()` on wasm at root mount on every
+//! single boot, so uuid-on-wasm cannot be a no-go or this app would not start.
+//! Three of the six `TabList` call sites were already dynamic. The real reason
+//! to keep this a `<button>` is the API-capability one above.)
 //!
 //! Clicking sets the host view's `facet` signal to this chip's `value`. The chip
 //! mutes + disables at a zero count *unless* it is the active selection, so a user

@@ -68,6 +68,24 @@ impl BulkAction {
             BulkAction::Delete => "Delete",
         }
     }
+
+    /// Whether this action destroys or revokes something, and so must render
+    /// red wherever it is offered. One definition, used by BOTH the arming
+    /// chip and the confirm button — they disagreed before: the chip reddened
+    /// only `Delete`, so "Remove expired credentials" and "Remove redundant
+    /// permissions" armed as ordinary buttons despite deleting credentials and
+    /// revoking grants across the whole selection.
+    ///
+    /// `DisableSignIn` is excluded deliberately: it is reversible (re-enable
+    /// flips it back), and reserving red for the irreversible keeps the signal
+    /// worth reading. `Grant` is not destructive either, but it stays in the
+    /// confirm-side danger set below on its own high-privilege grounds.
+    fn is_destructive(self) -> bool {
+        matches!(
+            self,
+            BulkAction::RemoveExpired | BulkAction::RemoveRedundant | BulkAction::Delete
+        )
+    }
 }
 
 #[component]
@@ -319,7 +337,7 @@ pub fn BulkActionBar(
                                 .get()
                                 .into_iter()
                                 .map(|a| {
-                                    let cls = if a == BulkAction::Delete { "button--danger" } else { "" };
+                                    let cls = if a.is_destructive() { "button--danger" } else { "" };
                                     view! {
                                         <Button
                                             class=cls
@@ -459,10 +477,9 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
         ..
     } = p;
 
-    let danger = matches!(
-        action,
-        BulkAction::RemoveExpired | BulkAction::Delete | BulkAction::Grant
-    );
+    // Destructive actions plus `Grant`, which is additive but tenant-wide and
+    // keeps its red emphasis on the point-of-no-return button.
+    let danger = action.is_destructive() || matches!(action, BulkAction::Grant);
     let description: AnyView = match action {
         BulkAction::RemoveExpired => view! {
             <Body1 class="bulk-action__danger">
