@@ -9,10 +9,7 @@ use std::sync::Arc;
 
 use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
-use thaw::{
-    Body1, Button, ButtonAppearance, Card, Field, Input, Spinner, SpinnerSize, Tab, TabList,
-    Textarea,
-};
+use thaw::{Body1, Button, ButtonAppearance, Card, Field, Input, Spinner, SpinnerSize, Textarea};
 
 use crate::bindings::applications;
 use crate::bindings::auth;
@@ -20,10 +17,14 @@ use crate::bindings::enterprise_application::{self, EnterpriseApplicationDetail}
 use crate::bindings::sso::{self, OidcSsoSummary, SamlSsoSummary, SsoConfigDto};
 use crate::components::claims_editor::{ClaimsEditor, ClaimsEditorState};
 use crate::components::detail_header::DetailHeader;
+use crate::components::directory_search::{DirectoryScope, DirectorySearch};
 use crate::components::requires_role::RequiresRole;
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{DataTable, DetailLoadError, DetailSkeleton, SkeletonList};
+use crate::components::ui::{
+    DataTable, DetailLoadError, DetailSkeleton, SkeletonList, TabBar, TabBarItem,
+};
+use crate::components::uri_list_editor::{UriListEditor, UriListState, redirect_uri_reason};
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::{OpenItemKind, use_session};
@@ -274,12 +275,15 @@ fn EnterpriseAppPanel(
                         })
                 }}
             </DetailHeader>
-            <TabList selected_value=active_tab>
-                {EnterpriseTab::ALL
-                    .iter()
-                    .map(|t| view! { <Tab value=t.value()>{t.label()}</Tab> })
-                    .collect_view()}
-            </TabList>
+            <TabBar
+                items={
+                    EnterpriseTab::ALL
+                        .iter()
+                        .map(|t| TabBarItem { value: t.value(), label: t.label() })
+                        .collect::<Vec<_>>()
+                }
+                selected=active_tab
+            />
             <div class="app-detail__pane">
                 {keep_alive(
                     active_tab,

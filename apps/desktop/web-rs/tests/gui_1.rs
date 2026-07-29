@@ -17,6 +17,8 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 mod application_detail;
 #[path = "gui/application_list.rs"]
 mod application_list;
+#[path = "gui/authentication_tab.rs"]
+mod authentication_tab;
 #[path = "gui/enterprise_application_list.rs"]
 mod enterprise_application_list;
 #[path = "gui/open_items_dock.rs"]

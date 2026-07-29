@@ -12,8 +12,9 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
     let busy: RwSignal<Option<String>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let selected_role = RwSignal::new(DEFAULT_ACCESS_ROLE.to_string());
+    // Owned here (not by `DirectorySearch`) purely so the mutation handlers
+    // can clear the box after a successful round trip.
     let raw_query = RwSignal::new(String::new());
-    let query = use_debounced(raw_query.into(), 300);
     let pending_remove: RwSignal<Option<String>> = RwSignal::new(None);
     let pending_assign: RwSignal<Option<String>> = RwSignal::new(None);
     // Which directory object type the search targets ("users" or "groups").
@@ -33,25 +34,20 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
         }
     });
 
-    let candidates = LocalResource::new(move || {
-        let q = query.get();
-        let tenant = tenant.get();
-        let groups = principal_kind.get() == "groups";
-        async move {
-            let q = q.trim().to_string();
-            if q.len() < 2 {
-                return Ok::<Vec<DirectoryObject>, String>(Vec::new());
-            }
-            let Some(t) = tenant else {
-                return Ok(Vec::new());
-            };
-            let result = if groups {
-                applications::search_groups(&t.tenant_id, &q).await
-            } else {
-                applications::search_users(&t.tenant_id, &q).await
-            };
-            result.map_err(|e| e.message)
+    // Switching between Users and Groups clears the query. `candidates` already
+    // re-runs on `principal_kind`, so this is not for correctness — it is the
+    // behaviour the two buttons carried inline before they became a `TabBar`,
+    // which can only write the one signal it is bound to. Searching the group
+    // directory for a half-typed person's name returns nothing useful, so the
+    // box starts clean.
+    Effect::new(move |prev: Option<String>| {
+        let kind = principal_kind.get();
+        // Skip the first run: it would clear a query the user may have arrived
+        // with, and there is nothing to reset on mount anyway.
+        if prev.is_some_and(|p| p != kind) {
+            raw_query.set(String::new());
         }
+        kind
     });
 
     let assign = move |principal_id: String| {
@@ -152,11 +148,12 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                                             let aid_busy = a.assignment_id.clone();
                                             view! {
                                                 <tr>
-                                                    <td>{principal}</td>
-                                                    <td>{ptype}</td>
-                                                    <td>{role}</td>
-                                                    <td>
+                                                    <td class="cell-mid">{principal}</td>
+                                                    <td class="cell-mid">{ptype}</td>
+                                                    <td class="cell-mid">{role}</td>
+                                                    <td class="cell-mid">
                                                         <Button
+                                                            class="button--danger"
                                                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                             disabled=Signal::derive(move || {
                                                                 busy.with(|b| b.as_deref() == Some(aid_busy.as_str()))
@@ -178,7 +175,7 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                             }
                             Err(e) => {
                                 view! {
-                                    <Body1 class="app-detail__error">
+                                    <Body1 class="form-error">
                                         {format!("error [{}]: {}", e.code, e.message)}
                                     </Body1>
                                 }
@@ -192,7 +189,7 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
             <h4>"Grant access"</h4>
             <Field label="Role">
                 <select
-                    class="ent-access__role"
+                    class="ui-select"
                     on:change=move |ev| selected_role.set(event_target_value(&ev))
                 >
                     <option value=DEFAULT_ACCESS_ROLE>"Default access"</option>
@@ -210,117 +207,42 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                         .collect_view()}
                 </select>
             </Field>
-            <Field label="Assign">
-                <div class="actions-row">
-                    <Button
-                        appearance=Signal::derive(move || {
-                            if principal_kind.get() == "users" {
-                                ButtonAppearance::Primary
-                            } else {
-                                ButtonAppearance::Secondary
-                            }
-                        })
-                        on_click=Box::new(move |_| {
-                            principal_kind.set("users".into());
-                            raw_query.set(String::new());
-                        })
-                    >
-                        "Users"
-                    </Button>
-                    <Button
-                        appearance=Signal::derive(move || {
-                            if principal_kind.get() == "groups" {
-                                ButtonAppearance::Primary
-                            } else {
-                                ButtonAppearance::Secondary
-                            }
-                        })
-                        on_click=Box::new(move |_| {
-                            principal_kind.set("groups".into());
-                            raw_query.set(String::new());
-                        })
-                    >
-                        "Groups"
-                    </Button>
-                </div>
-            </Field>
-            <Field label="Search by name (2+ chars)">
-                <Input value=raw_query placeholder="Search the directory…" />
-            </Field>
-            {move || {
-                if raw_query.get().trim().len() < 2 {
-                    return ().into_any();
-                }
-                view! {
-                    <Suspense fallback=move || {
-                        view! {
-                            <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Searching…" />
-                        }
-                    }>
-                        {move || Suspend::new(async move {
-                            match candidates.await {
-                                Err(msg) => {
-                                    view! {
-                                        <Body1 class="app-detail__error">
-                                            {format!("Search failed: {msg}")}
-                                        </Body1>
-                                    }
-                                        .into_any()
-                                }
-                                Ok(users) if users.is_empty() => {
-                                    view! { <Body1>"No matches."</Body1> }.into_any()
-                                }
-                                Ok(users) => {
-                                    view! {
-                                        <ul class="candidates">
-                                            {users
-                                                .into_iter()
-                                                .map(|u| {
-                                                    let id_click = u.id.clone();
-                                                    let id_busy = u.id.clone();
-                                                    let display = u
-                                                        .display_name
-                                                        .clone()
-                                                        .unwrap_or_else(|| u.id.clone());
-                                                    // Groups have no UPN — label them as such instead
-                                                    // of falling back to a bare GUID.
-                                                    let upn = u
-                                                        .user_principal_name
-                                                        .clone()
-                                                        .unwrap_or_else(|| "Group".to_string());
-                                                    view! {
-                                                        <li>
-                                                            <div>
-                                                                <div>{display}</div>
-                                                                <div class="mono small">{upn}</div>
-                                                            </div>
-                                                            <Button
-                                                                appearance=Signal::derive(|| {
-                                                                    ButtonAppearance::Primary
-                                                                })
-                                                                disabled=Signal::derive(move || {
-                                                                    busy.with(|b| b.as_deref() == Some(id_busy.as_str()))
-                                                                })
-                                                                on_click=Box::new(move |_| pending_assign.set(Some(id_click.clone())))
-                                                            >
-                                                                "Assign"
-                                                            </Button>
-                                                        </li>
-                                                    }
-                                                })
-                                                .collect_view()}
-                                        </ul>
-                                    }
-                                        .into_any()
-                                }
-                            }
-                        })}
-                    </Suspense>
-                }
-                    .into_any()
-            }}
+            // The same `TabBar` the permission picker uses for its
+            // Application/Delegated choice — this is the identical shape
+            // (pick which KIND of thing the list below searches), so it takes
+            // the same primitive rather than a second hand-rolled pair of
+            // buttons whose "selected" state was a Primary appearance.
+            <TabBar
+                items=vec![
+                    TabBarItem { value: "users", label: "Users" },
+                    TabBarItem { value: "groups", label: "Groups" },
+                ]
+                selected=principal_kind
+            />
+            // The same debounced directory search the Settings owner editors and
+            // the Exchange group typeahead use. `query` is handed in and
+            // `clear_on_pick=false` because this flow is asynchronous: picking
+            // only stages the confirm dialog, and `assign` clears the box once
+            // the round trip returns `Ok`.
+            <DirectorySearch
+                scope=Signal::derive(move || {
+                    if principal_kind.get() == "groups" {
+                        DirectoryScope::Groups
+                    } else {
+                        DirectoryScope::Users
+                    }
+                })
+                on_pick=Callback::new(move |o: DirectoryObject| pending_assign.set(Some(o.id)))
+                query=raw_query
+                clear_on_pick=false
+                label="Search by name (2+ chars)"
+                action_label="Assign"
+                row_disabled=Callback::new(move |id: String| {
+                    busy.with(|b| b.as_deref() == Some(id.as_str()))
+                })
+            />
 
-            {move || error.get().map(|e| view! { <Body1 class="app-detail__error">{e}</Body1> })}
+            {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
             <GroupMembershipSection sp_id=sp_id />
             <ConfirmDialog
                 open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
@@ -399,8 +321,9 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
     let pending_add: RwSignal<Option<String>> = RwSignal::new(None);
     let pending_remove: RwSignal<Option<String>> = RwSignal::new(None);
 
+    // Owned here (not by `DirectorySearch`) purely so the mutation handlers
+    // can clear the box after a successful round trip.
     let raw_query = RwSignal::new(String::new());
-    let query = use_debounced(raw_query.into(), 300);
 
     let memberships = LocalResource::new(move || {
         let tenant = tenant.get();
@@ -413,23 +336,6 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                 }
                 None => Ok(Vec::new()),
             }
-        }
-    });
-
-    let candidates = LocalResource::new(move || {
-        let q = query.get();
-        let tenant = tenant.get();
-        async move {
-            let q = q.trim().to_string();
-            if q.len() < 2 {
-                return Ok::<Vec<DirectoryObject>, String>(Vec::new());
-            }
-            let Some(t) = tenant else {
-                return Ok(Vec::new());
-            };
-            applications::search_groups(&t.tenant_id, &q)
-                .await
-                .map_err(|e| e.message)
         }
     });
 
@@ -499,7 +405,12 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
     };
 
     view! {
-        <h4>"Group memberships" <RequiresRole capability_key="group_membership" /></h4>
+        <header class="row-between">
+            <div class="row">
+                <strong>"Group memberships"</strong>
+                <RequiresRole capability_key="group_membership" />
+            </div>
+        </header>
         <p class="muted">
             "Groups this service principal is a direct member of. Group-gated APIs — e.g. Power BI's \"Service principals can use Fabric APIs\" tenant setting — grant API access via security-group membership."
         </p>
@@ -526,16 +437,21 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                                     let gid = g.id.clone();
                                     view! {
                                         <tr>
+                                            // Two-line identity cell: stays top-aligned
+                                            // per `.cell-mid`'s carve-out — the name should
+                                            // start where you read it, and only the control
+                                            // columns centre against it.
                                             <td>
                                                 <div>{g.display_name.clone()}</div>
                                                 <div class="mono small">{g.id.clone()}</div>
                                             </td>
-                                            <td>{type_label}</td>
-                                            <td>
+                                            <td class="cell-mid">{type_label}</td>
+                                            <td class="cell-mid">
                                                 {(!dynamic)
                                                     .then(|| {
                                                         view! {
                                                             <Button
+                                                                class="button--danger"
                                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                                 disabled=Signal::derive(move || busy.get())
                                                                 on_click=Box::new(move |_| {
@@ -557,7 +473,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                     }
                     Err(e) => {
                         view! {
-                            <Body1 class="app-detail__error">
+                            <Body1 class="form-error">
                                 {format!("error [{}]: {}", e.code, e.message)}
                             </Body1>
                         }
@@ -566,74 +482,18 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                 }
             })}
         </Suspense>
-        <Field label="Add to group (search by name, 2+ chars)">
-            <Input value=raw_query placeholder="Search groups…" />
-        </Field>
-        {move || {
-            if raw_query.get().trim().len() < 2 {
-                return ().into_any();
-            }
-            view! {
-                <Suspense fallback=move || {
-                    view! {
-                        <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Searching…" />
-                    }
-                }>
-                    {move || Suspend::new(async move {
-                        match candidates.await {
-                            Err(msg) => {
-                                view! {
-                                    <Body1 class="app-detail__error">
-                                        {format!("Search failed: {msg}")}
-                                    </Body1>
-                                }
-                                    .into_any()
-                            }
-                            Ok(groups) if groups.is_empty() => {
-                                view! { <Body1>"No matches."</Body1> }.into_any()
-                            }
-                            Ok(groups) => {
-                                view! {
-                                    <ul class="candidates">
-                                        {groups
-                                            .into_iter()
-                                            .map(|g| {
-                                                let id_click = g.id.clone();
-                                                let display = g
-                                                    .display_name
-                                                    .clone()
-                                                    .unwrap_or_else(|| g.id.clone());
-                                                view! {
-                                                    <li>
-                                                        <div>
-                                                            <div>{display}</div>
-                                                            <div class="mono small">{g.id.clone()}</div>
-                                                        </div>
-                                                        <Button
-                                                            appearance=Signal::derive(|| {
-                                                                ButtonAppearance::Primary
-                                                            })
-                                                            disabled=Signal::derive(move || busy.get())
-                                                            on_click=Box::new(move |_| {
-                                                                pending_add.set(Some(id_click.clone()))
-                                                            })
-                                                        >
-                                                            "Add"
-                                                        </Button>
-                                                    </li>
-                                                }
-                                            })
-                                            .collect_view()}
-                                    </ul>
-                                }
-                                    .into_any()
-                            }
-                        }
-                    })}
-                </Suspense>
-            }
-                .into_any()
-        }}
+        // Same primitive as the assignments block above, group-scoped. Adding a
+        // membership also stages a confirm dialog, so the box is cleared by the
+        // mutation, not by the pick.
+        <DirectorySearch
+            scope=Signal::derive(|| DirectoryScope::Groups)
+            on_pick=Callback::new(move |g: DirectoryObject| pending_add.set(Some(g.id)))
+            query=raw_query
+            clear_on_pick=false
+            label="Add to group (search by name, 2+ chars)"
+            placeholder="Search groups…"
+            row_disabled=Callback::new(move |_id: String| busy.get())
+        />
         {move || {
             error
                 .get()
@@ -658,7 +518,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                             .into_any()
                     } else {
                         view! {
-                            <Body1 class="app-detail__error">
+                            <Body1 class="form-error">
                                 {format!("error [{}]: {}", e.code, e.message)}
                             </Body1>
                         }

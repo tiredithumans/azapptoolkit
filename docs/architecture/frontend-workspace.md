@@ -27,6 +27,81 @@ surfaces reuse it rather than re-implementing the markup.
 - **Notices/alerts** — `components::ui::Callout` (`info`/`ok`/`warn`/`danger`, reusing the `.alert`
   classes). New alert markup goes through it; migrate any raw `<div class="alert alert--…">` you
   touch.
+- **Repeatable list-of-values field** — `components::uri_list_editor::UriListEditor`, backed by a
+  `Copy` `UriListState` the parent builds from its DTO and reads back with `to_uris()` (pure
+  presentation + state; the caller owns the save). One plain `<input>` per entry inside a
+  `<ul>`/`<li>` under `role="group"` + `aria-labelledby` — **not** a thaw `<Field>`, which mints
+  one id and injects it into every descendant input, so N rows would share a DOM id, and **not**
+  a thaw `<Input>`: its bordered/rounded box with an animated brand underline is right for a
+  standalone field and wrong for forty stacked rows, and overriding it means out-specificity-ing
+  rules thaw injects into `<head>` at runtime. The row owns its control, styled flat like a
+  `.data-table` row with the affordance revealed on hover/focus. Rows are keyed by a stable
+  `usize`, never by index, or an insert next to the caret drops focus mid-keystroke. A multi-line
+  paste splits into rows — newlines only, because a redirect URI may legally contain `,` or `;`.
+  **Validation is per-list and opt-in** (`UriListState::validated` + a `UriValidator` fn pointer):
+  reply URLs and redirect URIs take `redirect_uri_reason` (the backend's own
+  `core::redirect::validate_redirect_uri`); SAML **identifiers do not** — a bare `urn:` Entity ID
+  is ordinary there and the redirect rules reject `urn:` on purpose, so one shared validator would
+  red-bar a correct SAML config. It is **advisory** either way: it points at the offender before
+  the round trip — the backend `?`s out of its loop and reports only the first — but never gates
+  Save, because a client rule that drifted from the server's would make an object unsavable
+  through the UI. Focus after add/remove/paste is handed over via a `focus_key` signal the target
+  row claims from its own effect, **never** `request_animation_frame` — rAF does not fire in a
+  hidden tab, so it works only while someone is watching and would flake the headless browser
+  gate. Add/remove/paste announce through one `role="status"` line per list; the entry count is
+  deliberately NOT live (it tracks row values, so it would fire on every keystroke). Used by the
+  App Registration Authentication tab (3 lists) and the enterprise SSO tab (5); don't reintroduce
+  a newline-separated `<Textarea>` for a set of values. `sso_wizard_dialog.rs` is the one
+  remaining migration.
+- **Select / dropdown** — `.ui-select` (a class, not a component: these are bare `<select>`s
+  inside a thaw `Field`). Metrics match the thaw input/button they sit beside, chevron is an
+  inline-SVG data URI because the CSP forbids fetching one, and the stroke colour is baked into
+  the URI so the dark-mode override swaps the whole image — keep the two in sync. `:root` also
+  sets `color-scheme`, which is the only thing that reaches the OS-drawn popup list and the
+  scrollbars; without it they render light on a dark page.
+- **Pick-one-of-N (tabs and segmented choice)** — `components::ui::TabBar` + `TabBarItem`, bound
+  to one `RwSignal<String>`. **The** tab implementation: both detail panes, Security / Settings /
+  Bulk Actions sub-tabs, the audit dashboard's facet bar, Resource Access, the permission picker's
+  Application/Delegated choice, and the Access tab's Users/Groups. Do **not** reach for thaw's
+  `TabList` — it was removed app-wide because `thaw::Tab` has no roving `tabindex` and no keydown
+  handler, so a 10-tab strip is ten Tab presses with no arrow keys; `.ui-tabs` also scrolls
+  natively where `.thaw-tab-list` needed an app-side `overflow-x` patch. Don't hand-roll a pair of
+  buttons whose selected state is a Primary `appearance` either. `TabBar` only writes its bound
+  signal, so a side effect on change (clearing a search box) belongs in an `Effect` that skips its
+  first run. **`aria-selected` must be a *string*** (`(sel == v).to_string()`): bound to a bare
+  `bool`, Leptos renders a boolean attribute — `aria-selected=""` when true, absent when false —
+  and neither is a valid ARIA value.
+  Two things legitimately stay different, and "consolidate" must not eat them: `FilterChip` keeps
+  its count badge and zero-count disabled state (thaw's `Tab` takes only `class`/`value`/`children`
+  and could not express either), and `.ui-select` stays where the option list is long or open-ended.
+- **Directory search-and-pick** — `components::directory_search::DirectorySearch`, the single
+  debounced "type 2+ chars, pick a `DirectoryObject`" control (`OwnerPicker`, `GroupAutocomplete`
+  and the Settings DL picker are thin named wrappers over it). It **never mutates** — it hands the
+  whole picked object to `on_pick`, which is what lets one component back a direct callback, a
+  text-field append, and a stage-then-confirm dialog flow; a caller with the object can derive a
+  name, an id, or a mail address, and none of those can reconstruct the object. `scope` is a
+  `Signal<DirectoryScope>` so a caller can drive it from a `TabBar`. Pass your own `query` +
+  `clear_on_pick=false` when the box should clear only after a mutation succeeds. The results
+  region gates on the **raw** query, not the debounced one, so an untouched box renders nothing
+  rather than "No matches." — the bug two of the four copies had.
+- **Form field labels** — thaw `<Field label=…>`, demoted app-wide by a single
+  `.thaw-field__label` rule (medium weight, `--text-muted`). Thaw's default renders a label
+  identical to body text, which flattens every form; don't re-specify label typography per view.
+- **Table row actions** — a control in a `.data-table` cell needs `class="cell-mid"`, because the
+  base rule is `vertical-align: top` and a 32px button sits ~7px below a single line of text.
+  Multi-line *identity* cells deliberately stay top-aligned — the name should start where you read
+  it — so classify the control columns, not the whole row.
+- **Detail-tab roots** must appear in the tab-grid selector in `styles.css` (`display: grid;
+  gap: var(--space-4)`), or the tab's rhythm silently falls back to UA `<h4>`/`<p>` margin
+  collapse. `.ent-access`/`.ent-owners` had no rule at all for exactly this reason. If a root also
+  contains `<h4>`s, zero their UA margin or the grid gap and the margin stack.
+- **Destructive actions** — `button--danger`, on every control that destroys or revokes. Labeled
+  buttons get border + red text + faint fill; icon-only ones (`.ui-icon-btn`, chip `×`) get the
+  red glyph alone with the tint deferred to `:hover`, so a per-row trash repeated down a long list
+  reads as actions rather than errors. Do **not** re-add `border-color` to the icon-only rule — a
+  `.ui-icon-btn` has a transparent 1px border, so colouring it paints the heavy red square that
+  rule exists to avoid. Reversible actions (Disable sign-in) stay un-reddened on purpose; bulk
+  actions derive it from `BulkAction::is_destructive()` rather than per-call-site match arms.
 
 ## The open-items workspace (one shared working set)
 

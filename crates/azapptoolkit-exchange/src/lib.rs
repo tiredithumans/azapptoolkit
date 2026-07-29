@@ -19,4 +19,8 @@ pub mod roles;
 
 pub use client::{EXCHANGE_BASE, ExchangeClient, member_of_group_filter};
 pub use error::{ExchangeError, Result};
-pub use roles::{exchange_role_for_graph_permission, is_scopable_exchange_permission};
+pub use roles::{
+    EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
+    exchange_role_for_permission, exchange_role_for_resource_permission, is_blanket_mailbox_grant,
+    is_scopable_exchange_permission,
+};

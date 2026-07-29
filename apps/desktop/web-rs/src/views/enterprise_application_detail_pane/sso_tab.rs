@@ -83,15 +83,19 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
     });
     let mode_cmd = use_command();
 
-    // SAML editable fields — multiple identifiers / reply URLs, one per line.
-    let identifiers = RwSignal::new(cfg.identifier_uris.join("\n"));
-    let reply_urls = RwSignal::new(cfg.reply_urls.join("\n"));
+    // SAML editable fields — one row per entry (`components::uri_list_editor`),
+    // the same editor the App Registration Authentication tab uses.
+    // Identifiers get NO validator: a SAML Entity ID is routinely a bare
+    // `urn:`, which the redirect rules reject on purpose. Reply URLs are
+    // genuine redirect URIs and do take them.
+    let identifiers = UriListState::new(&cfg.identifier_uris);
+    let reply_urls = UriListState::validated(&cfg.reply_urls, redirect_uri_reason);
     let logout_url = RwSignal::new(cfg.logout_url.clone().unwrap_or_default());
     // SAML signing-cert expiry notification recipients (one per line).
-    let notification_emails = RwSignal::new(cfg.notification_emails.join("\n"));
+    let notification_emails = UriListState::new(&cfg.notification_emails);
     // OIDC editable fields (one URI per line).
-    let redirect_uris = RwSignal::new(cfg.redirect_uris.join("\n"));
-    let spa_uris = RwSignal::new(cfg.spa_redirect_uris.join("\n"));
+    let redirect_uris = UriListState::validated(&cfg.redirect_uris, redirect_uri_reason);
+    let spa_uris = UriListState::validated(&cfg.spa_redirect_uris, redirect_uri_reason);
     // Cert rotation.
     let cert_subject = RwSignal::new(String::new());
     let rotated_cert: RwSignal<Option<String>> = RwSignal::new(None);
@@ -146,8 +150,8 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                     let l = logout_url.get_untracked().trim().to_string();
                     (!l.is_empty()).then_some(l)
                 };
-                let ids = split_lines(&identifiers.get_untracked());
-                let replies = split_lines(&reply_urls.get_untracked());
+                let ids = identifiers.to_uris();
+                let replies = reply_urls.to_uris();
                 async move {
                     sso::set_saml_urls(&tenant_id, &object_id, &ids, &replies, logout.as_deref())
                         .await
@@ -164,8 +168,8 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
             },
             move |tenant_id| {
                 let object_id = object_id.get_value();
-                let web = split_lines(&redirect_uris.get_untracked());
-                let spa = split_lines(&spa_uris.get_untracked());
+                let web = redirect_uris.to_uris();
+                let spa = spa_uris.to_uris();
                 async move { sso::set_oidc_redirect_uris(&tenant_id, &object_id, &web, &spa).await }
             },
         );
@@ -201,7 +205,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
             },
             move |tenant_id| {
                 let sp_id = sp_id.get_value();
-                let emails = split_lines(&notification_emails.get_untracked());
+                let emails = notification_emails.to_uris();
                 async move { sso::set_notification_emails(&tenant_id, &sp_id, &emails).await }
             },
         );
@@ -249,7 +253,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
             </dl>
             <Field label="Set sign-on method">
                 <select
-                    class="ent-access__role"
+                    class="ui-select"
                     on:change=move |ev| selected_mode.set(event_target_value(&ev))
                 >
                     <option value="saml" selected=is_saml>
@@ -277,12 +281,20 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
             // ---- editable config (branches on the SAVED mode) ----
             <Show when=move || is_saml fallback=|| ()>
                 <h4>"SAML configuration"</h4>
-                <Field label="Identifiers (Entity IDs — one per line)">
-                    <Textarea value=identifiers />
-                </Field>
-                <Field label="Reply URLs (ACS — one per line)">
-                    <Textarea value=reply_urls />
-                </Field>
+                <UriListEditor
+                    state=identifiers
+                    class="uri-list--saml-identifiers"
+                    label="Identifiers (Entity IDs)"
+                    noun="identifier"
+                    placeholder="https://saml.contoso.com/sp"
+                />
+                <UriListEditor
+                    state=reply_urls
+                    class="uri-list--saml-reply"
+                    label="Reply URLs (ACS)"
+                    noun="reply URL"
+                    placeholder="https://saml.contoso.com/acs"
+                />
                 <Field label="Logout URL">
                     <Input value=logout_url />
                 </Field>
@@ -316,9 +328,13 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 }}
 
                 <h4>"Signing-certificate notification emails"</h4>
-                <Field label="Notification emails (one per line, max 5)">
-                    <Textarea value=notification_emails />
-                </Field>
+                <UriListEditor
+                    state=notification_emails
+                    class="uri-list--notification-emails"
+                    label="Notification emails (max 5)"
+                    noun="notification email"
+                    placeholder="identity-team@contoso.com"
+                />
                 <Body1 class="hint">
                     "Entra emails these addresses 60/30/7 days before the SAML signing certificate expires. After saving, open the app's SSO blade in the Entra admin center once so Entra enables the notifications."
                 </Body1>
@@ -360,12 +376,20 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
             </Show>
             <Show when=move || is_oidc fallback=|| ()>
                 <h4>"OIDC configuration"</h4>
-                <Field label="Redirect URIs (web — one per line)">
-                    <Textarea value=redirect_uris />
-                </Field>
-                <Field label="Redirect URIs (SPA — one per line)">
-                    <Textarea value=spa_uris />
-                </Field>
+                <UriListEditor
+                    state=redirect_uris
+                    class="uri-list--oidc-web"
+                    label="Redirect URIs (web)"
+                    noun="web redirect URI"
+                    placeholder="https://contoso.com/signin-oidc"
+                />
+                <UriListEditor
+                    state=spa_uris
+                    class="uri-list--oidc-spa"
+                    label="Redirect URIs (SPA)"
+                    noun="SPA redirect URI"
+                    placeholder="https://contoso.com/"
+                />
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(save_oidc_uris)
@@ -423,13 +447,4 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 })}
         </div>
     }
-}
-
-/// Splits a textarea (one entry per line) into a trimmed, non-empty Vec.
-fn split_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect()
 }

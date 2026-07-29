@@ -20,24 +20,51 @@ use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
 use crate::components::permission_picker::{MICROSOFT_GRAPH_APP_ID, PickerSelection};
-use crate::components::scope_badge::{is_exchange_scopable, is_sharepoint_orgwide};
+use azapptoolkit_core::scoping::is_blanket_mailbox_grant;
 
-/// The held grants that read as organization-wide, as `(value, app_role_id)`:
-/// a scopable mail permission whose resolved verdict is not `Scoped`
-/// (`OrgWide`/`Unknown`/unresolved all count — the audit's never-under-report
-/// posture), or any org-wide `Sites.*` (`Sites.Selected` excluded — it IS the
-/// scoped model).
+use crate::components::scope_badge::{is_exchange_scopable_on, is_sharepoint_orgwide};
+
+/// One held grant that reads as organization-wide, carrying everything the
+/// wizard needs to be pre-seeded to it.
+struct OrgwideGrant {
+    value: String,
+    app_role_id: String,
+    resource_app_id: String,
+}
+
+/// The held grants that read as organization-wide: a scopable mail permission
+/// whose resolved verdict is not `Scoped` (`OrgWide`/`Unknown`/unresolved all
+/// count — the audit's never-under-report posture), or any org-wide `Sites.*`
+/// (`Sites.Selected` excluded — it IS the scoped model).
+///
+/// Mail scopability is judged against the row's **own resource**: the EWS
+/// `full_access_as_app` scope belongs here (it reaches every mailbox, and RBAC
+/// can confine it), while Office 365 Exchange Online's un-scopable
+/// `Mail.Read`-family roles must not be — offering "Scope…" for one would promise
+/// a confinement the backend correctly refuses.
 fn orgwide_grants(
     permissions: &[AppRoleGrantDto],
     scope_map: &HashMap<String, MailPermissionScope>,
-) -> Vec<(String, String)> {
+) -> Vec<OrgwideGrant> {
     permissions
         .iter()
         .filter_map(|p| {
-            let v = p.app_role_value.clone()?;
-            let orgwide_mail = is_exchange_scopable(&v)
-                && !matches!(scope_map.get(&v), Some(MailPermissionScope::Scoped { .. }));
-            (orgwide_mail || is_sharepoint_orgwide(&v)).then(|| (v, p.app_role_id.clone()))
+            let value = p.app_role_value.clone()?;
+            let orgwide_mail = is_exchange_scopable_on(p.resource_app_id.as_deref(), &value)
+                && !matches!(
+                    scope_map.get(&value),
+                    Some(MailPermissionScope::Scoped { .. })
+                );
+            (orgwide_mail || is_sharepoint_orgwide(&value)).then(|| OrgwideGrant {
+                value,
+                app_role_id: p.app_role_id.clone(),
+                // A `Sites.*` role is always Microsoft Graph's, so the fallback
+                // can't misattribute one.
+                resource_app_id: p
+                    .resource_app_id
+                    .clone()
+                    .unwrap_or_else(|| MICROSOFT_GRAPH_APP_ID.to_string()),
+            })
         })
         .collect()
 }
@@ -55,26 +82,36 @@ pub fn OrgwideScopeCallout(
     on_scope: Callback<PickerSelection>,
 ) -> impl IntoView {
     let orgwide = orgwide_grants(&permissions, &scope_map);
-    orgwide.first().cloned().map(|(first_value, first_role_id)| {
+    let first = orgwide.first().map(|g| PickerSelection {
+        resource_app_id: g.resource_app_id.clone(),
+        kind: PermissionKind::Application,
+        permission_id: g.app_role_id.clone(),
+        permission_value: g.value.clone(),
+    });
+    first.map(|sel| {
         let listing = orgwide
             .iter()
-            .map(|(v, _)| v.clone())
+            .map(|g| g.value.clone())
             .collect::<Vec<_>>()
             .join(", ");
-        // A held mail/Sites value is a Microsoft Graph application role, so the
-        // pre-seed selection is fully determined here (same reasoning as the
-        // held-permissions row's "Scope…").
-        let sel = PickerSelection {
-            resource_app_id: MICROSOFT_GRAPH_APP_ID.to_string(),
-            kind: PermissionKind::Application,
-            permission_id: first_role_id,
-            permission_value: first_value,
-        };
+        // A blanket grant reaches every mailbox with full access, which overrides
+        // any per-permission mailbox scope on this principal — the same rule the
+        // backend applies when it forces a scoped verdict back to org-wide. Say so,
+        // or a scope that reads "Scoped" elsewhere looks contradictory here.
+        let blanket = orgwide
+            .iter()
+            .any(|g| is_blanket_mailbox_grant(&g.value))
+            .then_some(
+                " Note: full_access_as_app (Exchange Web Services) reaches every mailbox on its \
+                 own, so it overrides any per-permission mailbox scope until it is removed — \
+                 scope it first.",
+            );
         view! {
             <div class="alert alert--warn">
                 {format!(
                     "This identity holds organization-wide access: {listing}. It can be confined to specific mailboxes (Exchange RBAC) or sites (Sites.Selected).",
                 )}
+                {blanket}
                 <div class="actions-row">
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -94,14 +131,23 @@ mod tests {
     use azapptoolkit_core::audit::ScopeMechanism;
 
     fn grant(value: Option<&str>) -> AppRoleGrantDto {
+        on_resource(value, Some(MICROSOFT_GRAPH_APP_ID))
+    }
+
+    fn on_resource(value: Option<&str>, resource_app_id: Option<&str>) -> AppRoleGrantDto {
         AppRoleGrantDto {
             assignment_id: "aid".to_string(),
             resource_id: "res".to_string(),
+            resource_app_id: resource_app_id.map(str::to_string),
             resource_display_name: Some("Microsoft Graph".to_string()),
             app_role_id: format!("role-{}", value.unwrap_or("none")),
             app_role_value: value.map(str::to_string),
         }
     }
+
+    /// Office 365 Exchange Online's app id — the resource that carries the EWS
+    /// scope (and its own un-scopable `Mail.Read` family).
+    const EXO: &str = "00000002-0000-0ff1-ce00-000000000000";
 
     #[test]
     fn orgwide_grants_flags_unscoped_mail_and_broad_sites_only() {
@@ -121,7 +167,10 @@ mod tests {
             grant(Some("User.Read.All")),  // not scopable by either mechanism
             grant(None),                   // no value resolved ⇒ excluded
         ];
-        let got = orgwide_grants(&perms, &scope_map);
+        let got: Vec<(String, String)> = orgwide_grants(&perms, &scope_map)
+            .into_iter()
+            .map(|g| (g.value, g.app_role_id))
+            .collect();
         assert_eq!(
             got,
             vec![
@@ -139,5 +188,38 @@ mod tests {
         let perms = vec![grant(Some("Mail.Send"))];
         let got = orgwide_grants(&perms, &HashMap::new());
         assert_eq!(got.len(), 1, "unresolved scoping must not under-report");
+    }
+
+    #[test]
+    fn orgwide_grants_flag_the_ews_scope_and_seed_its_own_resource() {
+        // `full_access_as_app` reaches every mailbox and RBAC can confine it, so it
+        // belongs in the callout — and the wizard must be seeded with the Exchange
+        // Online resource, not Microsoft Graph, or the pre-seeded selection names a
+        // permission that resource doesn't have.
+        let perms = vec![on_resource(Some("full_access_as_app"), Some(EXO))];
+        let got = orgwide_grants(&perms, &HashMap::new());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].value, "full_access_as_app");
+        assert_eq!(got[0].resource_app_id, EXO);
+    }
+
+    #[test]
+    fn orgwide_grants_skip_exchange_onlines_unscopable_mail_roles() {
+        // Same value name, different resource: Office 365 Exchange Online's
+        // `Mail.Read` (retired Outlook REST) has no RBAC role, so offering "Scope…"
+        // would promise a confinement the backend refuses to apply.
+        let perms = vec![on_resource(Some("Mail.Read"), Some(EXO))];
+        assert!(orgwide_grants(&perms, &HashMap::new()).is_empty());
+        // ...while Graph's identically named permission IS flagged.
+        let perms = vec![on_resource(Some("Mail.Read"), Some(MICROSOFT_GRAPH_APP_ID))];
+        assert_eq!(orgwide_grants(&perms, &HashMap::new()).len(), 1);
+    }
+
+    #[test]
+    fn orgwide_grants_skip_a_row_whose_resource_is_unknown() {
+        // An unresolved resource can't be judged scopable; the row already renders
+        // id-only, so it must not gain a scope affordance either.
+        let perms = vec![on_resource(Some("Mail.Read"), None)];
+        assert!(orgwide_grants(&perms, &HashMap::new()).is_empty());
     }
 }

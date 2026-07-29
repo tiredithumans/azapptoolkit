@@ -981,6 +981,7 @@ pub fn CredentialsTab(
                         "Rotate (keep old)"
                     </Button>
                     <Button
+                        class="button--danger"
                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                         on_click=Box::new(move |_| do_rotate(true))
                         disabled=Signal::derive(move || cmd_rotate.busy.get())

@@ -89,10 +89,18 @@
   --nav-width: 240px;
   --nav-width-collapsed: 56px;
   --topbar-height: 52px;
+
+  /* Tells the engine which palette the NATIVE controls should use. Without it a
+     <select>'s popup list, the scrollbars, and any native form widget render in
+     light chrome no matter how dark the page is — the one part of the UI CSS
+     cannot reach, because the popup is drawn by the OS. Set alongside the
+     tokens so it flips with them. */
+  color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
+    color-scheme: dark;
     --border: #3b3b3b;
     --border-strong: #4a4a4a;
     --canvas: #1a1a1a;
@@ -181,6 +189,21 @@ textarea:focus-visible {
   box-shadow: var(--focus-ring);
 }
 
+/* Thaw's `<Field label=…>` renders its label at body size, regular weight, and
+ * the primary foreground — byte-identical to the value underneath it, so with
+ * ~70 Fields across the app a label read as just another line of content and a
+ * form had no visual hierarchy at all. (The Access tab's "Role" / "Assign" /
+ * "Search by name" stack was the clearest case.) Demote it the way the app
+ * already demotes its own hand-rolled `.sso-field__label`: same size, medium
+ * weight, muted — the label is the quieter half of a label/value pair.
+ * App-side because Thaw offers no token for this; `.thaw-field__label` is a
+ * single class, so this rule out-specificities nothing and simply lands later
+ * in the cascade than Thaw's runtime-injected `.thaw-label--regular`. */
+.thaw-field__label {
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
+}
+
 /* Thaw <Input> renders a `.thaw-input` wrapper span around the inner
  * `.thaw-input__input`; with no width set, the wrapper collapses to
  * min-content and clips long placeholder hints. Fill the container so the
@@ -195,25 +218,37 @@ textarea:focus-visible {
  * / Primary alike — red text on a faint red tint, clearly destructive without
  * painting list-heavy views solid red. Also covers the confirm button inside
  * ConfirmDialog (the commit / point of no return). */
-.thaw-button.button--danger,
-.ui-icon-btn.button--danger,
-.saved-view-chip__remove.button--danger {
+/* Labeled destructive buttons (text: Delete / Remove / Revoke) get the full
+ * treatment — red border, red text, faint red fill — so the whole box reads
+ * destructive at a glance. */
+.thaw-button.button--danger {
   border-color: var(--danger);
   color: var(--danger);
+  background: var(--danger-soft);
 }
-.thaw-button.button--danger:hover,
-.ui-icon-btn.button--danger:hover,
-.saved-view-chip__remove.button--danger:hover {
+.thaw-button.button--danger:hover {
   border-color: var(--danger);
   color: var(--danger);
+  background: var(--danger-soft);
   filter: brightness(0.94);
 }
-/* Labeled (Thaw) destructive buttons also get a faint red fill so the box reads
- * clearly destructive; the icon-only Revoke and the chip "×" keep just the red
- * colour so they don't become heavy red squares. */
-.thaw-button.button--danger,
-.thaw-button.button--danger:hover {
+/* Icon-only destructive actions (a row's trash, a saved-view chip's "×") take
+ * the red GLYPH and nothing else at rest. These repeat once per row, and a red
+ * outline on every row of a long list reads as forty errors rather than forty
+ * actions — which is why the box is deliberately withheld until hover, when the
+ * pointer is actually on the target. (This rule previously set `border-color`
+ * against its own stated intent: `.ui-icon-btn` has a 1px *transparent* border,
+ * so colouring it painted exactly the heavy red square the comment disclaimed.)
+ * Red is still the signal, so every destructive icon button must carry this
+ * class — see the census in the same commit. */
+.ui-icon-btn.button--danger,
+.saved-view-chip__remove.button--danger {
+  color: var(--danger);
+}
+.ui-icon-btn.button--danger:hover,
+.saved-view-chip__remove.button--danger:hover {
   background: var(--danger-soft);
+  color: var(--danger);
 }
 
 h1,
@@ -320,6 +355,16 @@ h3 {
 .read-field strong {
   display: block;
   margin-bottom: 2px;
+}
+/* A <dl> used as a read-only label/value pair. Without this the UA's default
+   `margin-inline-start: 40px` on <dd> indents every value away from its own
+   label, which read as an accident on the SSO tab. */
+.read-field dt {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.read-field dd {
+  margin: 0;
 }
 
 .alert {
@@ -1778,10 +1823,28 @@ h3 {
 .credentials-tab,
 .overview-tab,
 .activity-tab,
+.authentication-tab,
 .conditional-access-tab,
 .audit-view {
   display: grid;
   gap: var(--space-4);
+}
+/* The enterprise pane's own tab roots. These classes existed in the markup but
+   had NO rule at all, so those tabs had no vertical rhythm of their own — the
+   spacing between "Assigned users & groups", "Grant access" and "Group
+   memberships" was whatever the UA's <h4> margins collapsed to, while every
+   sibling tab above is a grid with a token gap. */
+.ent-access,
+.ent-owners {
+  display: grid;
+  gap: var(--space-4);
+}
+/* Zero the UA <h4> margin once the grid gap owns the rhythm — keeping both
+   doubles the space above every section. (`.sso-tab h4` keeps its own margin
+   because that root is a flex column with a smaller gap.) */
+.ent-access h4,
+.ent-owners h4 {
+  margin: 0;
 }
 /* Per-app sign-in summary above the change log (Activity tab). */
 .signin-summary {
@@ -2674,6 +2737,83 @@ h3 {
   border-color: var(--border);
 }
 
+/* ---- Select (dropdown) ---- */
+/* The app had NO select styling at all: both the Access tab's "Role" picker and
+   the SSO tab's "Set sign-on method" rendered as raw native <select>s — browser
+   grey 1px border, square corners, zero padding, and a font the UA picked
+   (Arial), so they didn't even inherit the app's typeface. Next to the app's
+   rounded, padded inputs and buttons they read as someone else's control.
+   Metrics deliberately match `.thaw-input` / `.ui-icon-btn` (32px box,
+   --radius-md) so a select can sit beside either without a seam.
+   Applied via `.ui-select`; `.thaw-select` is swept in too so thaw's own Select
+   (claims editor) lands in the same language instead of thaw's separate token
+   set. */
+.ui-select,
+.thaw-select {
+  -webkit-appearance: none;
+  appearance: none;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 32px;
+  /* Right padding leaves room for the chevron; without it a long option label
+     runs underneath the arrow. */
+  padding: 0 calc(var(--space-5) + var(--space-1)) 0 var(--space-2);
+  border: 1px solid var(--border);
+  /* --radius-sm, not --radius-md: these sit inline with thaw `Input`s in the
+     same form (Access tab: Role above the directory search), and thaw's
+     `--borderRadiusMedium` resolves to 4px. 6px here left a visible seam. */
+  border-radius: var(--radius-sm);
+  background-color: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-base);
+  line-height: 30px;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
+
+  /* Chevron. `appearance: none` removes the native arrow, so one is drawn here
+     as an inline SVG data URI — no network request (the CSP forbids one) and no
+     extra wrapper element to hang a pseudo-element on, since these are bare
+     <select>s inside a thaw Field. The stroke is baked into the URI and so
+     cannot use a CSS variable; the dark-mode override below swaps the whole
+     image. Keep the two in sync. */
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%235b5b5b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right var(--space-2) center;
+  background-size: 16px 16px;
+}
+.ui-select:hover,
+.thaw-select:hover {
+  border-color: var(--border-strong);
+  background-color: var(--bg-subtle);
+}
+.ui-select:focus-visible,
+.thaw-select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+.ui-select:disabled,
+.thaw-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* The popup list is drawn by the OS; `color-scheme` on :root does the heavy
+   lifting, but naming the colours keeps Linux/Chrome from falling back to white
+   rows on a dark page. */
+.ui-select option,
+.thaw-select option {
+  background-color: var(--surface);
+  color: var(--text);
+}
+@media (prefers-color-scheme: dark) {
+  .ui-select,
+  .thaw-select {
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23b0b0b0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  }
+}
+
 /* ---- SearchInput clear (×) ---- */
 /* Sits in the Thaw input suffix slot; appears only when the field is non-empty
    (the component gates the render). Sized to match the suffix icon row. */
@@ -2812,17 +2952,6 @@ h3 {
   line-height: 1.2;
 }
 
-/* Thaw's <TabList> powers the App Registration / Enterprise / Managed Identity
-   detail-pane tabs. It is `flex-wrap: nowrap` with no overflow handling, and each
-   `.thaw-tab` is `flex-shrink: 0`, so when the tab row is wider than the pane —
-   a narrow screen, or the many-tab App Registration detail even on desktop — the
-   tabs past the edge spill out and get clipped by `.app-detail`'s
-   `overflow-x: hidden`, leaving them unreachable. Let the strip scroll
-   horizontally within the pane instead (thin scrollbar; swipe on touch). */
-.thaw-tab-list {
-  overflow-x: auto;
-  scrollbar-width: thin;
-}
 
 /* ---- TabBar (underline) ---- */
 .ui-tabs {
@@ -3240,6 +3369,16 @@ h3 {
 }
 .sso-tab h4 {
   margin: var(--space-3, 12px) 0 0;
+  /* Match the "Secrets (2)" section titles on the sibling tabs, which are a
+     plain bold <strong> at body size — an <h4> defaults smaller, so the SSO
+     tab's sections read as a different rank of heading than everyone else's. */
+  font-size: var(--text-base);
+}
+/* `.sso-tab` is a stretch flex column, so every direct child filled the pane —
+   including the buttons, which rendered as full-width bars. Nothing else in the
+   app does that: an action sits at its natural width. */
+.sso-tab > .thaw-button {
+  align-self: flex-start;
 }
 .sso-field {
   display: flex;
@@ -3903,4 +4042,111 @@ h3 {
   padding-left: var(--space-4);
   max-height: 12rem;
   overflow-y: auto;
+}
+
+/* ---------- Redirect-URI list editor (components/uri_list_editor.rs) ---------- */
+/* One row per URI instead of a newline-separated textarea. An app with forty
+   reply URLs was a single scrolling text box in which no line could be removed
+   on its own and none could be marked as the one the API was about to reject.
+   Styled as a flat, separated list — the same language as `.data-table` rows on
+   the sibling tabs — NOT as stacked form fields: forty bordered input boxes read
+   as a wall of chrome. The control only draws itself on hover/focus. Bounded
+   height so three stacked editors don't push Save off the tab; the bound only
+   bites past ~8 rows, which is exactly the case this exists for. */
+.uri-list {
+  display: grid;
+  gap: var(--space-2);
+}
+.uri-list__label {
+  font-size: var(--text-base);
+}
+.uri-list__rows {
+  list-style: none;
+  margin: 0;
+  /* 2px, not 0: the box scrolls, and a focused row's `--focus-ring` box-shadow
+     would otherwise be clipped (and provoke a horizontal scrollbar). */
+  padding: 2px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.uri-list__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0 var(--space-1);
+  /* Matches `.data-table td`: a hairline between rows, no box around them. */
+  border-bottom: 1px solid var(--border);
+  /* Transparent by default so a marked row shifts colour, not layout. */
+  border-left: 2px solid transparent;
+}
+.uri-list__row:last-child {
+  border-bottom: none;
+}
+/* The editable value. Reads as table text at rest and only reveals a control on
+   hover/focus, which is what keeps a long list flat. `background` and `border`
+   are the two properties thaw's input would have set — this owns both. */
+.uri-list__input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  /* Same rhythm as `.data-table td`. */
+  padding: 6px var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-base);
+  line-height: 20px;
+  outline: none;
+  transition: background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard);
+}
+.uri-list__input::placeholder {
+  color: var(--text-faint);
+}
+.uri-list__input:hover {
+  background: var(--bg-subtle);
+}
+.uri-list__input:focus {
+  background: var(--bg-subtle);
+  border-color: var(--accent);
+}
+.uri-list__input:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+/* Red trash, via the shared `.button--danger` — destructive actions are red
+   app-wide. Icon-only danger is a red glyph with no box (see that rule), which
+   is what lets forty of them stack without the list reading as forty errors. */
+.uri-list__remove {
+  justify-self: end;
+}
+/* A rejected/duplicate row is marked with a left accent bar rather than by
+   recolouring the control's border, which would vanish the moment the operator
+   focused the row to fix it. Colour is never the only signal — the row also
+   carries `aria-invalid` and a message. */
+.uri-list__row--rejected {
+  border-left-color: var(--danger);
+}
+.uri-list__row--duplicate {
+  border-left-color: var(--warning);
+}
+.uri-list__issue {
+  grid-column: 1 / -1;
+  padding: 0 var(--space-2) 6px;
+  font-size: var(--text-xs);
+  color: var(--danger);
+  word-break: break-word;
+}
+.uri-list__row--duplicate .uri-list__issue {
+  color: var(--warning);
+}
+/* A live region must be in the DOM before its text changes or the change is
+   never announced — hence always rendered, empty at rest, with a reserved line
+   so add/remove doesn't jog the layout. */
+.uri-list__status {
+  margin: 0;
+  min-height: 1em;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
 }

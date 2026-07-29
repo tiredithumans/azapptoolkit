@@ -12,13 +12,14 @@ use std::future::Future;
 
 use azapptoolkit_dto::UiError;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Tab, TabList};
+use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::components::export_menu::ExportMenu;
 use crate::components::icon::IconName;
 use crate::components::saved_views::SavedViews;
 use crate::components::ui::{
-    DetailLoadError, EmptyState, IconButton, SearchInput, SectionHeader, SkeletonList,
+    DetailLoadError, EmptyState, IconButton, SearchInput, SectionHeader, SkeletonList, TabBar,
+    TabBarItem,
 };
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
@@ -234,12 +235,15 @@ where
             }}
             {move || banner.with_value(|b| rows.with(|all| b(all.as_slice())))}
 
-            <TabList selected_value=facet>
-                {facets
-                    .into_iter()
-                    .map(|(value, label)| view! { <Tab value=value>{label}</Tab> })
-                    .collect_view()}
-            </TabList>
+            <TabBar
+                items={
+                    facets
+                        .into_iter()
+                        .map(|(value, label)| TabBarItem { value, label })
+                        .collect::<Vec<_>>()
+                }
+                selected=facet
+            />
             <SearchInput value=search placeholder=search_placeholder />
             <SavedViews view_key=view_key facet=facet search=search />
 

@@ -13,7 +13,9 @@ use azapptoolkit_core::models::{
     AppRole, Application, DirectoryObject, KeyCredential, Organization, PasswordCredential,
 };
 use azapptoolkit_dto::UiError;
-use azapptoolkit_dto::applications::{ApplicationDetail, ApplicationListRowDto};
+use azapptoolkit_dto::applications::{
+    ApplicationAuthenticationDto, ApplicationDetail, ApplicationListRowDto,
+};
 use azapptoolkit_dto::audit::AuditRunResult;
 use azapptoolkit_dto::bulk::BulkProgress;
 use azapptoolkit_dto::config::AuthConfigStatus;
@@ -36,6 +38,7 @@ use azapptoolkit_dto::permissions::{
 };
 use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use azapptoolkit_dto::sharepoint::SiteSweepProgress;
+use azapptoolkit_dto::sso::SsoConfigDto;
 use chrono::{DateTime, TimeZone, Utc};
 
 /// A `UiError` with the given code and message (the error-path mock payload).
@@ -220,6 +223,55 @@ pub fn application_detail(object_id: &str, app_id: &str, display_name: &str) -> 
         app_role_assignments: Vec::new(),
         oauth2_permission_grants: Vec::new(),
         resolved_permissions: Vec::new(),
+    }
+}
+
+/// Authentication-tab settings (per-platform reply URLs + flow toggles). Both
+/// commands are `invoke_result`, so nothing forced a fixture before — but the
+/// GUI tests need the load to succeed (`reset()` restores `LoudReject`) and the
+/// demo renders this tab.
+pub fn application_authentication(
+    web: &[&str],
+    spa: &[&str],
+    public_client: &[&str],
+) -> ApplicationAuthenticationDto {
+    ApplicationAuthenticationDto {
+        web_redirect_uris: web.iter().map(|s| s.to_string()).collect(),
+        spa_redirect_uris: spa.iter().map(|s| s.to_string()).collect(),
+        public_client_redirect_uris: public_client.iter().map(|s| s.to_string()).collect(),
+        logout_url: None,
+        is_fallback_public_client: false,
+        enable_access_token_issuance: false,
+        enable_id_token_issuance: false,
+    }
+}
+
+/// A SAML-configured enterprise app's SSO tab: identifiers, reply URLs, logout,
+/// signing cert and notification recipients. Enough list-shaped fields to show
+/// the SSO tab's editors doing real work in the demo.
+pub fn sso_config(object_id: &str, app_id: &str) -> SsoConfigDto {
+    SsoConfigDto {
+        object_id: object_id.to_string(),
+        service_principal_id: object_id.to_string(),
+        app_id: app_id.to_string(),
+        sso_mode: Some("saml".to_string()),
+        entity_id: Some("https://saml.contoso.com/sp".to_string()),
+        identifier_uris: vec![
+            "https://saml.contoso.com/sp".to_string(),
+            "urn:contoso:saml:sp".to_string(),
+        ],
+        reply_urls: vec![
+            "https://saml.contoso.com/acs".to_string(),
+            "https://eu.saml.contoso.com/acs".to_string(),
+        ],
+        logout_url: Some("https://saml.contoso.com/slo".to_string()),
+        redirect_uris: Vec::new(),
+        spa_redirect_uris: Vec::new(),
+        signing_cert_thumbprint: Some("A1B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
+        signing_cert_expiry: Some("2027-04-30".to_string()),
+        notification_emails: vec!["identity-team@contoso.com".to_string()],
+        claims_policy: None,
+        claims_policy_id: None,
     }
 }
 
@@ -599,8 +651,12 @@ pub fn global_search_apps(display_names: &[&str]) -> azapptoolkit_dto::search::G
 // ---------------- Permission picker (catalog) ----------------
 
 /// Microsoft Graph's well-known first-party appId — the picker's default
-/// resource, and the only one the MI / SP grant flows resource-scope against.
+/// resource, and the one most mail/`Sites.*` permissions live on.
 pub const MICROSOFT_GRAPH_APP_ID: &str = "00000003-0000-0000-c000-000000000000";
+
+/// The legacy **Office 365 Exchange Online** appId — the other resource Exchange
+/// scoping covers, via its EWS `full_access_as_app` scope.
+pub const OFFICE365_EXCHANGE_ONLINE_APP_ID: &str = "00000002-0000-0ff1-ce00-000000000000";
 
 /// The Microsoft Graph entry for the picker's resource dropdown.
 pub fn graph_resource_summary() -> CatalogResourceSummary {
@@ -833,6 +889,23 @@ pub fn directory_user_search() -> Vec<DirectoryObject> {
     ]
 }
 
+/// Demo groups returned by `search_groups` — the Access tab's Users/Groups
+/// picker and the Exchange scope typeahead.
+pub fn directory_group_search() -> Vec<DirectoryObject> {
+    let g = |seed: &str, name: &str| DirectoryObject {
+        id: guid(seed),
+        display_name: Some(name.to_string()),
+        user_principal_name: None,
+        mail: None,
+        odata_type: Some("#microsoft.graph.group".to_string()),
+    };
+    vec![
+        g("grp:sales", "Sales Team"),
+        g("grp:finance", "Finance Mailboxes"),
+        g("grp:saas", "SaaS Applications"),
+    ]
+}
+
 /// Demo distribution lists returned by `search_distribution_lists` (each carries
 /// a mail address), for the SSO notification-email picker.
 /// Sample Entra application-gallery templates for the "Browse the gallery"
@@ -1034,8 +1107,24 @@ pub fn held_grant(value: &str) -> AppRoleGrantDto {
     AppRoleGrantDto {
         assignment_id: guid(&format!("held:{value}")),
         resource_id: guid("graph-sp"),
+        resource_app_id: Some(MICROSOFT_GRAPH_APP_ID.to_string()),
         resource_display_name: Some("Microsoft Graph".to_string()),
         app_role_id: guid(&format!("role:{value}")),
+        app_role_value: Some(value.to_string()),
+    }
+}
+
+/// A held app-role grant on the legacy **Office 365 Exchange Online** resource —
+/// how the EWS `full_access_as_app` scope reaches a principal. Distinct from
+/// [`held_grant`] because scopability is per-resource: this resource's own
+/// `Mail.Read`-family roles are NOT RBAC-scopable, while `full_access_as_app` is.
+pub fn held_exchange_grant(value: &str) -> AppRoleGrantDto {
+    AppRoleGrantDto {
+        assignment_id: guid(&format!("held:exo:{value}")),
+        resource_id: guid("exo-sp"),
+        resource_app_id: Some(OFFICE365_EXCHANGE_ONLINE_APP_ID.to_string()),
+        resource_display_name: Some("Office 365 Exchange Online".to_string()),
+        app_role_id: guid(&format!("exo-role:{value}")),
         app_role_value: Some(value.to_string()),
     }
 }

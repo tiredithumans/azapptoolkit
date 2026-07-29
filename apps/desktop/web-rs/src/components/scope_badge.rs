@@ -19,10 +19,20 @@ use crate::components::ui::Badge;
 
 // Scope predicates are re-exported from `azapptoolkit_core::scoping` so the badge
 // rendering here and the backend grant/scope logic share one authoritative
-// definition. `is_exchange_scopable` keeps the name its callers use, but is now
-// the map-backed check (a `Mail.*`-lookalike with no Exchange role is correctly
-// reported as NOT scopable, unlike the old prefix check).
-pub use azapptoolkit_core::scoping::is_scopable_exchange_permission as is_exchange_scopable;
+// definition. Both are map-backed, not prefix checks (a `Mail.*`-lookalike with no
+// Exchange role is correctly reported as NOT scopable).
+//
+// Exchange scopability is exposed **only** in its resource-aware form. Mailbox
+// permissions live on two resources — Microsoft Graph and the legacy Office 365
+// Exchange Online, whose own `Mail.Read`-family appRoles (retired Outlook REST)
+// have no RBAC role — and both expose an appRole literally named `Mail.Read`. A
+// value-only answer therefore can't be right for every row: it would offer a
+// "Scope…" action the backend correctly refuses to honour, show an "Unknown"
+// verdict that never arrives, and seed the wizard with the wrong resource. Pass
+// the row's own resource (`None` for one the backend didn't resolve ⇒ not
+// scopable). The value-only core predicate stays available to the *backend*, whose
+// audit gate legitimately scans a flattened value list.
+pub use azapptoolkit_core::scoping::is_scopable_exchange_resource_permission as is_exchange_scopable_on;
 pub use azapptoolkit_core::scoping::is_sharepoint_orgwide;
 
 /// Risk badge (`High risk` / `Medium`, with a tooltip) for an application
@@ -60,6 +70,7 @@ pub fn app_permission_risk_badge(value: &str) -> AnyView {
 /// (alarming, and wrong-while-loading) "Unknown".
 pub fn permission_scope_cell(
     value: Option<&str>,
+    resource_app_id: Option<&str>,
     mail_scope: Option<MailPermissionScope>,
     is_application: bool,
     scope_loading: bool,
@@ -71,7 +82,10 @@ pub fn permission_scope_cell(
     // say so; otherwise the lookup failed ⇒ show "Unknown", not the
     // not-applicable dash, so it isn't mistaken for a non-scopable permission.
     // (Delegated permissions are never RBAC-scopable, so they fall through to —.)
-    if is_application && value.map(is_exchange_scopable).unwrap_or(false) {
+    // Resource-aware, so Office 365 Exchange Online's un-scopable `Mail.Read`
+    // reads "—" rather than an alarming "Unknown" for a verdict that will never
+    // arrive.
+    if is_application && value.is_some_and(|v| is_exchange_scopable_on(resource_app_id, v)) {
         if scope_loading {
             return view! {
                 <span

@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use tauri::State;
 
 use azapptoolkit_core::models::AppRoleAssignment;
+use azapptoolkit_core::scoping::OFFICE365_EXCHANGE_ONLINE_APP_ID;
 use azapptoolkit_graph::GraphClient;
 
 use crate::dto::UiError;
@@ -41,7 +42,9 @@ pub async fn list_held_app_role_grants(
 
 /// Microsoft Graph's first-party app id; mail/calendar/contacts and
 /// `Sites.*` application permissions are exposed as appRoles on this resource.
-pub(crate) const MICROSOFT_GRAPH_APP_ID: &str = "00000003-0000-0000-c000-000000000000";
+/// Re-exported from `azapptoolkit_core::scoping` (which the WASM frontend shares)
+/// so the id has one definition.
+pub(crate) use azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID;
 
 /// Builds `appRoleId -> permission value` for Microsoft Graph's appRoles, plus
 /// the Graph resource service-principal id. Used to translate the GUIDs in an
@@ -67,47 +70,145 @@ pub(crate) async fn graph_role_index(
     Ok((sp.id, map))
 }
 
-/// Resolves a service principal's **held** app-role assignments
-/// (`appRoleAssignments`) into display DTOs, translating Microsoft Graph
-/// appRole ids to permission values (e.g. `Mail.Read`). Roles on non-Graph
-/// resources keep the id only (`app_role_value = None`), matching what the UI
-/// can render today. Shared by the managed-identity and enterprise-app
-/// "held permissions" views — both read the same assignments.
+/// One resource's appRole index: its service-principal object id (what an
+/// `appRoleAssignment.resourceId` points at) and `appRoleId -> value`.
+pub(crate) struct ResourceRoles {
+    /// The resource's *application* id — the stable well-known GUID, which is
+    /// what `azapptoolkit_core::scoping` keys its role map on.
+    pub app_id: &'static str,
+    /// The resource service principal's object id in *this* tenant.
+    pub sp_object_id: String,
+    pub role_value_by_id: HashMap<String, String>,
+}
+
+impl ResourceRoles {
+    /// The appRole id for `value` on this resource, if it exposes one.
+    fn role_id_for(&self, value: &str) -> Option<&str> {
+        self.role_value_by_id
+            .iter()
+            .find(|(_, v)| v.as_str() == value)
+            .map(|(id, _)| id.as_str())
+    }
+}
+
+/// The appRole indexes for **every resource that carries mailbox permissions**:
+/// Microsoft Graph (mail/calendar/contacts) and the legacy Office 365 Exchange
+/// Online resource (the EWS `full_access_as_app` scope).
 ///
-/// Best effort: if the Graph role index can't be built, every row falls back to
+/// Exchange scoping used to read Microsoft Graph alone, which made
+/// `full_access_as_app` invisible to it — an AAP migration then removed the
+/// legacy policy without assigning `Application EWS.AccessAsApp` or revoking the
+/// org-wide grant, silently widening the app's reach to every mailbox. Every
+/// target-derivation, grant-stripping and org-wide-reconciliation path resolves
+/// its resources through here so none of them can regress to Graph-only.
+///
+/// Microsoft Graph is required (its absence is a broken tenant and a hard error,
+/// as before). Office 365 Exchange Online is **best-effort**: a tenant with no
+/// EWS-consenting app has no service principal for it, which is normal and must
+/// not fail a scoping operation.
+pub(crate) async fn mailbox_resource_roles(
+    client: &GraphClient,
+) -> Result<Vec<ResourceRoles>, UiError> {
+    let (graph_sp_id, graph_roles) = graph_role_index(client).await?;
+    let mut out = vec![ResourceRoles {
+        app_id: MICROSOFT_GRAPH_APP_ID,
+        sp_object_id: graph_sp_id,
+        role_value_by_id: graph_roles,
+    }];
+    if let Ok(Some(sp)) = client
+        .resolve_resource_sp(OFFICE365_EXCHANGE_ONLINE_APP_ID)
+        .await
+    {
+        out.push(ResourceRoles {
+            app_id: OFFICE365_EXCHANGE_ONLINE_APP_ID,
+            sp_object_id: sp.id,
+            role_value_by_id: sp
+                .app_roles
+                .iter()
+                .map(|r| (r.id.clone(), r.value.clone()))
+                .collect(),
+        });
+    }
+    Ok(out)
+}
+
+/// Looks up which mailbox resource an `appRoleAssignment` was granted on, and
+/// the permission value it names: `(resource_app_id, resource_sp_object_id, value)`.
+/// `None` when the grant is on some other resource, or names a role this tenant's
+/// resource SP doesn't expose.
+pub(crate) fn resolve_grant<'a>(
+    resources: &'a [ResourceRoles],
+    resource_sp_id: &str,
+    app_role_id: &str,
+) -> Option<(&'a str, &'a str, &'a str)> {
+    let r = resources
+        .iter()
+        .find(|r| r.sp_object_id == resource_sp_id)?;
+    let value = r.role_value_by_id.get(app_role_id)?;
+    Some((r.app_id, r.sp_object_id.as_str(), value.as_str()))
+}
+
+/// Resolves a bare permission `value` to the mailbox resource that exposes it:
+/// `(resource_app_id, resource_sp_object_id, app_role_id)`. For callers handed a
+/// permission list with no resource context (a managed-identity grant form, a
+/// caller-supplied value set). Resources are searched in order, so Microsoft
+/// Graph wins a name it shares with Office 365 Exchange Online — which is the
+/// right precedence: the Graph permission is the one RBAC for Applications can
+/// scope.
+pub(crate) fn resolve_value<'a>(
+    resources: &'a [ResourceRoles],
+    value: &str,
+) -> Option<(&'a str, &'a str, &'a str)> {
+    resources.iter().find_map(|r| {
+        let role_id = r.role_id_for(value)?;
+        Some((r.app_id, r.sp_object_id.as_str(), role_id))
+    })
+}
+
+/// Resolves a service principal's **held** app-role assignments
+/// (`appRoleAssignments`) into display DTOs, translating appRole ids to
+/// permission values (e.g. `Mail.Read`, `full_access_as_app`) for the resources
+/// the toolkit resolves. Roles on any other resource keep the id only
+/// (`app_role_value = None`), matching what the UI can render today. Shared by
+/// the managed-identity and enterprise-app "held permissions" views — both read
+/// the same assignments.
+///
+/// Office 365 Exchange Online is resolved alongside Microsoft Graph so a
+/// principal holding the EWS `full_access_as_app` scope reads as that scope
+/// instead of a bare GUID — the scope the audit and the Permission tester now
+/// treat as org-wide mailbox reach, which the UI has to be able to name and
+/// offer to confine.
+///
+/// Best effort: if the role indexes can't be built, every row falls back to
 /// id-only rather than failing the surrounding view.
 pub(crate) async fn resolve_app_role_grants(
     client: &GraphClient,
     assignments: Vec<AppRoleAssignment>,
 ) -> Vec<AppRoleGrantDto> {
-    let (graph_sp_id, graph_roles) = graph_role_index(client).await.unwrap_or_default();
-    map_app_role_grants(&graph_sp_id, &graph_roles, assignments)
+    let resources = mailbox_resource_roles(client).await.unwrap_or_default();
+    map_app_role_grants(&resources, assignments)
 }
 
-/// Pure mapping of held app-role assignments to DTOs given a resolved Graph
-/// role index. Split from [`resolve_app_role_grants`] so the resolution logic is
-/// unit-testable without a live Graph client.
+/// Pure mapping of held app-role assignments to DTOs given resolved resource
+/// role indexes. Split from [`resolve_app_role_grants`] so the resolution logic
+/// is unit-testable without a live Graph client.
 fn map_app_role_grants(
-    graph_sp_id: &str,
-    graph_roles: &HashMap<String, String>,
+    resources: &[ResourceRoles],
     assignments: Vec<AppRoleAssignment>,
 ) -> Vec<AppRoleGrantDto> {
     assignments
         .into_iter()
         .map(|a| {
-            // Only Microsoft Graph's appRole ids are resolvable to values here;
-            // a role on any other resource keeps its id (value stays `None`).
-            let app_role_value = if a.resource_id == graph_sp_id {
-                graph_roles.get(&a.app_role_id).cloned()
-            } else {
-                None
-            };
+            // A grant is resolved against the resource it was actually made on, so
+            // an appRole id can never be read off the wrong resource's index.
+            let resolved = resolve_grant(resources, &a.resource_id, &a.app_role_id);
             AppRoleGrantDto {
                 assignment_id: a.id,
+                resource_app_id: resolved.map(|(app_id, _, _)| app_id.to_string()),
                 resource_id: a.resource_id,
                 resource_display_name: a.resource_display_name,
                 app_role_id: a.app_role_id,
-                app_role_value,
+                app_role_value: resolved.map(|(_, _, value)| value.to_string()),
             }
         })
         .collect()
@@ -117,10 +218,24 @@ fn map_app_role_grants(
 mod tests {
     use super::*;
 
+    fn resources() -> Vec<ResourceRoles> {
+        vec![
+            ResourceRoles {
+                app_id: MICROSOFT_GRAPH_APP_ID,
+                sp_object_id: "graph-sp".to_string(),
+                role_value_by_id: [("role-mail-read".to_string(), "Mail.Read".to_string())].into(),
+            },
+            ResourceRoles {
+                app_id: OFFICE365_EXCHANGE_ONLINE_APP_ID,
+                sp_object_id: "exo-sp".to_string(),
+                role_value_by_id: [("role-ews".to_string(), "full_access_as_app".to_string())]
+                    .into(),
+            },
+        ]
+    }
+
     #[test]
-    fn map_app_role_grants_resolves_graph_roles_and_passes_others_through() {
-        let mut roles = HashMap::new();
-        roles.insert("role-mail-read".to_string(), "Mail.Read".to_string());
+    fn map_app_role_grants_resolves_both_resources_and_passes_others_through() {
         let assignments = vec![
             AppRoleAssignment {
                 id: "a1".into(),
@@ -131,25 +246,59 @@ mod tests {
             },
             AppRoleAssignment {
                 id: "a2".into(),
+                resource_id: "exo-sp".into(),
+                app_role_id: "role-ews".into(),
+                resource_display_name: Some("Office 365 Exchange Online".into()),
+                ..Default::default()
+            },
+            AppRoleAssignment {
+                id: "a3".into(),
                 resource_id: "other-sp".into(),
                 app_role_id: "role-x".into(),
                 resource_display_name: Some("Other API".into()),
                 ..Default::default()
             },
         ];
-        let out = map_app_role_grants("graph-sp", &roles, assignments);
-        assert_eq!(out.len(), 2);
-        // Graph role id resolved to its value…
+        let out = map_app_role_grants(&resources(), assignments);
+        assert_eq!(out.len(), 3);
+        // Graph role id resolved to its value, with its resource app id…
         assert_eq!(out[0].app_role_value.as_deref(), Some("Mail.Read"));
-        // …a role on a non-Graph resource keeps the id only.
-        assert_eq!(out[1].app_role_value, None);
-        assert_eq!(out[1].app_role_id, "role-x");
-        assert_eq!(out[1].resource_display_name.as_deref(), Some("Other API"));
+        assert_eq!(
+            out[0].resource_app_id.as_deref(),
+            Some(MICROSOFT_GRAPH_APP_ID)
+        );
+        // …the EWS scope reads as itself rather than a bare GUID, so the UI can
+        // name it and offer to confine it…
+        assert_eq!(out[1].app_role_value.as_deref(), Some("full_access_as_app"));
+        assert_eq!(
+            out[1].resource_app_id.as_deref(),
+            Some(OFFICE365_EXCHANGE_ONLINE_APP_ID)
+        );
+        // …and a role on any other resource keeps the id only.
+        assert_eq!(out[2].app_role_value, None);
+        assert_eq!(out[2].resource_app_id, None);
+        assert_eq!(out[2].app_role_id, "role-x");
+        assert_eq!(out[2].resource_display_name.as_deref(), Some("Other API"));
+    }
+
+    #[test]
+    fn map_app_role_grants_never_reads_a_role_off_the_wrong_resource() {
+        // Both mailbox resources expose an appRole named `Mail.Read` under
+        // different ids. A grant is resolved against the resource it was made on,
+        // so Graph's id must not resolve against the Exchange Online index.
+        let assignments = vec![AppRoleAssignment {
+            id: "a1".into(),
+            resource_id: "exo-sp".into(),
+            app_role_id: "role-mail-read".into(), // Graph's id, EXO's resource
+            ..Default::default()
+        }];
+        let out = map_app_role_grants(&resources(), assignments);
+        assert_eq!(out[0].app_role_value, None);
     }
 
     #[test]
     fn map_app_role_grants_with_empty_index_yields_id_only() {
-        // An empty Graph index (lookup failed) must not match any resource id,
+        // No resolved resources (lookup failed) must not match any resource id,
         // so every row falls back to id-only rather than mis-resolving.
         let assignments = vec![AppRoleAssignment {
             id: "a1".into(),
@@ -157,7 +306,7 @@ mod tests {
             app_role_id: "role-mail-read".into(),
             ..Default::default()
         }];
-        let out = map_app_role_grants("", &HashMap::new(), assignments);
+        let out = map_app_role_grants(&[], assignments);
         assert_eq!(out[0].app_role_value, None);
     }
 }

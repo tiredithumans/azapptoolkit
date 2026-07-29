@@ -20,9 +20,9 @@
 //! expensive sweep/probe result survives flipping between them.
 
 use leptos::prelude::*;
-use thaw::{Body1, Tab, TabList};
+use thaw::Body1;
 
-use crate::components::ui::SectionHeader;
+use crate::components::ui::{SectionHeader, TabBar, TabBarItem};
 
 mod keyvault;
 mod mailboxes;
@@ -41,11 +41,14 @@ pub fn ResourceAccessView() -> impl IntoView {
             <Body1>
                 "Reverse lookups: pick a resource plane and see which applications and identities can reach what."
             </Body1>
-            <TabList selected_value=tab>
-                <Tab value="mailboxes">"Mailboxes"</Tab>
-                <Tab value="sites">"Sites"</Tab>
-                <Tab value="keyvault">"Key Vault"</Tab>
-            </TabList>
+            <TabBar
+                items=vec![
+                    TabBarItem { value: "mailboxes", label: "Mailboxes" },
+                    TabBarItem { value: "sites", label: "Sites" },
+                    TabBarItem { value: "keyvault", label: "Key Vault" },
+                ]
+                selected=tab
+            />
             <div style:display=move || {
                 if tab.get() == "mailboxes" { "contents" } else { "none" }
             }>

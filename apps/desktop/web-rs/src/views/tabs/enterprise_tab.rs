@@ -2,13 +2,13 @@
 //! `EnterpriseApplicationDetailPane` is exhaustive — adding a tab forces an
 //! update here, which the compiler enforces (replacing the former 10 inline
 //! string arms with a "Unknown tab" fallthrough). The pane still stores the
-//! *string* value (Thaw's `TabList` is string-keyed and two-way bound); this enum
+//! *string* value (`TabBar` is string-keyed and two-way bound); this enum
 //! bridges that string and an exhaustive match. Mirrors [`super::app_tab::AppTab`].
 
 /// Tabs for the enterprise application detail pane, in display order. String
-/// values match the `Tab value` attributes used by Thaw's `TabList`. Stale
-/// persisted or deep-linked values are clamped to a live tab via
-/// [`EnterpriseTab::from_str`].
+/// values match the `TabBarItem::value`s the pane builds from
+/// [`EnterpriseTab::ALL`]. Stale persisted or deep-linked values are clamped to
+/// a live tab via [`EnterpriseTab::from_str`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnterpriseTab {
     Overview,

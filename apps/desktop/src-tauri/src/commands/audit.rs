@@ -26,7 +26,9 @@ use azapptoolkit_core::audit::{
 };
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
-use azapptoolkit_core::scoping::is_scopable_exchange_permission;
+use azapptoolkit_core::scoping::{
+    EWS_FULL_ACCESS_AS_APP, OFFICE365_EXCHANGE_ONLINE_APP_ID, is_scopable_exchange_permission,
+};
 use azapptoolkit_exchange::{ExchangeClient, ExchangeError};
 use azapptoolkit_graph::GraphClient;
 use azapptoolkit_graph::client::AppListQuery;
@@ -93,7 +95,7 @@ pub async fn run_audit(
     //
     // Keep this a `join!`, not a `try_join!`: only the app listing is fallible,
     // and short-circuiting it would abandon the other four mid-flight.
-    let (apps, sp_index, consent_grants, graph_roles_by_sp, sign_in) = futures::join!(
+    let (apps, sp_index, consent_grants, graph_roles_by_sp, ews_full_access_sps, sign_in) = futures::join!(
         client.list_applications_all(
             // `$expand=owners` brings owner ids inline so the ownership audit
             // rules need no per-app round trip.
@@ -130,6 +132,12 @@ pub async fn run_audit(
         // scoring phase below, and the mail-scopable subset feeds score_one's
         // scoped-mail reconciliation.
         prefetch_graph_app_roles(&client),
+        // ONE tenant-wide appRoleAssignedTo read on the legacy Office 365 Exchange
+        // Online SP, for the EWS `full_access_as_app` grants the Graph matrix
+        // can't see. Kept SEPARATE from the Graph matrix on purpose: it feeds only
+        // score_one's reconciliation, so the SP-only phase's candidate rule
+        // ("holds a Graph application grant") is unchanged.
+        prefetch_ews_full_access_grants(&client),
         // Sign-in activity report (needs AuditLog.Read.All + Entra ID P1/P2 + a
         // supported directory role). A *missing consent* (distinct from a
         // license/availability failure) sets `sign_in_consent_required`,
@@ -146,7 +154,10 @@ pub async fn run_audit(
     client.seed_lean_sps_from_index(&app_ids, &sp_index);
 
     let admin_consent_clients = Arc::new(admin_consent_clients);
-    let orgwide_mail_by_sp = Arc::new(derive_orgwide_mail_scopes(&graph_roles_by_sp));
+    let orgwide_mail_by_sp = Arc::new(derive_orgwide_mail_scopes(
+        &graph_roles_by_sp,
+        &ews_full_access_sps,
+    ));
 
     // SP-only phase candidates: service principals whose appId has NO local
     // application object (foreign enterprise apps, managed identities, orphaned
@@ -581,13 +592,66 @@ async fn prefetch_graph_app_roles(client: &GraphClient) -> HashMap<String, Vec<S
     graph_roles_by_sp
 }
 
-/// The mail-scopable subset of each SP's granted Graph roles (empty sets
-/// dropped) — the org-wide-granted mail permissions score_one reconciles against
-/// a scoped RBAC verdict.
+/// Service principals holding the EWS `full_access_as_app` scope as an org-wide
+/// grant, from ONE tenant-wide `appRoleAssignedTo` read on the legacy Office 365
+/// Exchange Online resource.
+///
+/// That resource is not Microsoft Graph, so [`prefetch_graph_app_roles`] can't see
+/// these grants — and a surviving one reaches **every** mailbox with full access,
+/// which defeats any RBAC mailbox scope on the same principal. Without it the
+/// audit reported a scoped verdict (and the reduced scoped-mail weight) for a
+/// principal that still had org-wide reach.
+///
+/// Best-effort: a tenant with no EWS-consenting app has no service principal for
+/// the resource at all, which is normal — an empty set simply means no blanket
+/// grant to reconcile against.
+async fn prefetch_ews_full_access_grants(client: &GraphClient) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let Ok(Some(sp)) = client
+        .resolve_resource_sp(OFFICE365_EXCHANGE_ONLINE_APP_ID)
+        .await
+    else {
+        return out;
+    };
+    let full_access_role_ids: HashSet<&str> = sp
+        .app_roles
+        .iter()
+        .filter(|r| r.value == EWS_FULL_ACCESS_AS_APP)
+        .map(|r| r.id.as_str())
+        .collect();
+    if full_access_role_ids.is_empty() {
+        return out;
+    }
+    match client.list_app_role_assigned_to(&sp.id).await {
+        Ok(assigned) => {
+            for a in assigned {
+                if a.principal_type.as_deref() == Some("ServicePrincipal")
+                    && full_access_role_ids.contains(a.app_role_id.as_str())
+                {
+                    out.insert(a.principal_id);
+                }
+            }
+        }
+        Err(err) => {
+            tracing::info!(
+                ?err,
+                "audit: Office 365 Exchange Online app-role assignments read failed; \
+                 org-wide EWS reconciliation unavailable"
+            );
+        }
+    }
+    out
+}
+
+/// The org-wide-granted mailbox permissions `score_one` reconciles against a
+/// scoped RBAC verdict: the mail-scopable subset of each SP's granted Graph roles,
+/// **plus** the EWS `full_access_as_app` scope for the principals in
+/// `ews_full_access_sps`. Empty sets are dropped.
 fn derive_orgwide_mail_scopes(
     graph_roles_by_sp: &HashMap<String, Vec<String>>,
+    ews_full_access_sps: &HashSet<String>,
 ) -> HashMap<String, HashSet<String>> {
-    graph_roles_by_sp
+    let mut out: HashMap<String, HashSet<String>> = graph_roles_by_sp
         .iter()
         .map(|(sp_id, values)| {
             let mail: HashSet<String> = values
@@ -598,7 +662,15 @@ fn derive_orgwide_mail_scopes(
             (sp_id.clone(), mail)
         })
         .filter(|(_, mail)| !mail.is_empty())
-        .collect()
+        .collect();
+    // A principal can hold the EWS scope and no Graph mail role at all, so this
+    // inserts as well as extends.
+    for sp_id in ews_full_access_sps {
+        out.entry(sp_id.clone())
+            .or_default()
+            .insert(EWS_FULL_ACCESS_AS_APP.to_string());
+    }
+    out
 }
 
 /// The tenant's service-principal index (get-or-fetch, cached under
@@ -993,6 +1065,50 @@ mod tests {
             service_principal_type: sp_type.map(str::to_string),
             ..ServicePrincipal::default()
         }
+    }
+
+    #[test]
+    fn orgwide_mail_scopes_include_the_ews_scope_from_the_legacy_resource() {
+        // The EWS `full_access_as_app` grant lives on Office 365 Exchange Online,
+        // not Microsoft Graph, so the Graph matrix can't see it. Without it a
+        // principal with a scoped RBAC role but a surviving org-wide EWS grant
+        // scored as scoped — an under-report, since it still reaches every mailbox.
+        let graph_roles: HashMap<String, Vec<String>> = [
+            (
+                "sp-mixed".to_string(),
+                vec!["Mail.Read".to_string(), "User.Read.All".to_string()],
+            ),
+            // Holds no mail role at all: the EWS grant must still register, so this
+            // has to insert rather than only extend.
+            ("sp-ews-only".to_string(), vec!["User.Read.All".to_string()]),
+        ]
+        .into();
+        let ews: HashSet<String> = ["sp-mixed".to_string(), "sp-ews-only".to_string()].into();
+
+        let out = derive_orgwide_mail_scopes(&graph_roles, &ews);
+
+        assert_eq!(
+            out.get("sp-mixed"),
+            Some(
+                &["Mail.Read".to_string(), EWS_FULL_ACCESS_AS_APP.to_string()]
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+            ),
+            "the Graph mail role and the EWS scope must both be reconciled against"
+        );
+        assert_eq!(
+            out.get("sp-ews-only"),
+            Some(&[EWS_FULL_ACCESS_AS_APP.to_string()].into_iter().collect())
+        );
+    }
+
+    #[test]
+    fn orgwide_mail_scopes_drop_principals_with_no_mailbox_grant() {
+        // Non-mail roles alone leave nothing to reconcile — the entry is dropped so
+        // the map stays the mail-relevant subset it claims to be.
+        let graph_roles: HashMap<String, Vec<String>> =
+            [("sp-1".to_string(), vec!["Directory.Read.All".to_string()])].into();
+        assert!(derive_orgwide_mail_scopes(&graph_roles, &HashSet::new()).is_empty());
     }
 
     // The SP-only candidate filter: no local application AND ≥1 Graph

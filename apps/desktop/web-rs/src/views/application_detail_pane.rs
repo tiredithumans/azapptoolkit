@@ -5,12 +5,12 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
-use thaw::{Card, Tab, TabList};
+use thaw::Card;
 
 use crate::bindings::applications;
 use crate::components::detail_header::DetailHeader;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{DetailLoadError, DetailSkeleton};
+use crate::components::ui::{DetailLoadError, DetailSkeleton, TabBar, TabBarItem};
 use crate::hooks::use_command::use_command;
 use crate::state::{OpenItemKind, use_session};
 use crate::util::keep_alive;
@@ -84,8 +84,8 @@ pub fn ApplicationDetailPane(
         .get_untracked()
         .unwrap_or_else(|| session.last_app_tab.get_untracked());
     session.tenant_ui.pending_app_tab.set(None);
-    // Thaw's `TabList` is string-keyed and two-way bound, so the active tab stays
-    // a `String`; `AppTab` is only the bridge that clamps stale values and drives
+    // `TabBar` is string-keyed and two-way bound, so the active tab stays a
+    // `String`; `AppTab` is only the bridge that clamps stale values and drives
     // the exhaustive match below.
     let active_tab = RwSignal::new(AppTab::from_str(&initial_tab).value().to_string());
     // Persist the active tab for the next app opened.
@@ -177,14 +177,18 @@ pub fn ApplicationDetailPane(
                                                 })
                                         }}
                                     </DetailHeader>
-                                    <TabList selected_value=active_tab>
-                                        {AppTab::ALL
-                                            .iter()
-                                            .map(|tab| {
-                                                view! { <Tab value=tab.value()>{tab.label()}</Tab> }
-                                            })
-                                            .collect::<Vec<_>>()}
-                                    </TabList>
+                                    <TabBar
+                                        items={
+                                            AppTab::ALL
+                                                .iter()
+                                                .map(|tab| TabBarItem {
+                                                    value: tab.value(),
+                                                    label: tab.label(),
+                                                })
+                                                .collect::<Vec<_>>()
+                                        }
+                                        selected=active_tab
+                                    />
                                     <div class="app-detail__pane">
                                         {keep_alive(
                                             active_tab,
