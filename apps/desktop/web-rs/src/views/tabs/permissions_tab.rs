@@ -18,7 +18,7 @@ use crate::components::icon::IconName;
 use crate::components::permission_picker::PickerSelection;
 use crate::components::requires_role::RequiresRole;
 use crate::components::scope_badge::{
-    is_exchange_scopable, is_sharepoint_orgwide, permission_scope_cell,
+    is_exchange_scopable_on, is_sharepoint_orgwide, permission_scope_cell,
 };
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
@@ -206,7 +206,7 @@ pub fn PermissionsTab(
             let has = d.resolved_permissions.iter().any(|p| {
                 p.permission_value
                     .as_deref()
-                    .is_some_and(is_exchange_scopable)
+                    .is_some_and(|v| is_exchange_scopable_on(Some(&p.resource_app_id), v))
             });
             (d.application.id.clone(), has)
         });
@@ -579,7 +579,7 @@ pub fn PermissionsTab(
                     d.resolved_permissions.iter().any(|p| {
                         p.permission_value
                             .as_deref()
-                            .is_some_and(is_exchange_scopable)
+                            .is_some_and(|v| is_exchange_scopable_on(Some(&p.resource_app_id), v))
                     })
                 });
                 has_mail
@@ -687,6 +687,9 @@ where
     let runtime_grant_id = p.runtime_grant_id.clone();
     let permission_value = p.permission_value.clone();
     let scope_value = p.permission_value.clone();
+    // Scopability is per-resource (both mailbox resources expose a `Mail.Read`),
+    // so the Scope cell needs the row's own resource, not just its value.
+    let scope_resource_app_id = p.resource_app_id.clone();
     let permission_kind = p.permission_kind;
     // Identity of the declared row, for the "remove declaration" (not-granted) path.
     let remove_resource_app_id = p.resource_app_id.clone();
@@ -703,6 +706,7 @@ where
                     icon=IconName::Trash
                     aria_label="Revoke application permission".to_string()
                     title="Revoke".to_string()
+                    class="button--danger".to_string()
                     on_click=Callback::new(on_click)
                 />
             }
@@ -716,6 +720,7 @@ where
                         icon=IconName::Trash
                         aria_label="Revoke delegated permission".to_string()
                         title="Revoke".to_string()
+                        class="button--danger".to_string()
                         on_click=Callback::new(on_click)
                     />
                 }
@@ -740,6 +745,7 @@ where
                     icon=IconName::Trash
                     aria_label="Remove declared permission".to_string()
                     title="Remove".to_string()
+                    class="button--danger".to_string()
                     on_click=Callback::new(on_click)
                 />
             }
@@ -820,6 +826,7 @@ where
                             .and_then(|v| mail_scopes.with(|m| m.get(v).cloned()));
                         permission_scope_cell(
                             scope_value.as_deref(),
+                            Some(&scope_resource_app_id),
                             mail_scope,
                             is_app,
                             scopes_loading.get(),

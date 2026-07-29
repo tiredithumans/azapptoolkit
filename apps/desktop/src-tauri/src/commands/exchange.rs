@@ -17,15 +17,18 @@ use tauri::State;
 use azapptoolkit_core::audit::{MailPermissionScope, ScopeMechanism};
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{AppRoleAssignment, Application};
-use azapptoolkit_core::scoping::is_scopable_exchange_permission;
+use azapptoolkit_core::scoping::{is_blanket_mailbox_grant, is_scopable_exchange_permission};
 use azapptoolkit_exchange::models::{ExoApplicationAccessPolicy, ExoAuthorizationResult};
 use azapptoolkit_exchange::{
-    ExchangeClient, ExchangeError, exchange_role_for_graph_permission, member_of_group_filter,
+    ExchangeClient, ExchangeError, exchange_role_for_permission,
+    exchange_role_for_resource_permission, member_of_group_filter,
 };
 use azapptoolkit_graph::GraphClient;
 
 use crate::commands::applications::invalidate_app_lists;
-use crate::commands::graph_roles::{MICROSOFT_GRAPH_APP_ID, graph_role_index};
+use crate::commands::graph_roles::{
+    ResourceRoles, mailbox_resource_roles, resolve_grant, resolve_value,
+};
 use crate::dto::UiError;
 use crate::dto::exchange::{
     AapMigrationItem, AapMigrationReport, ExchangeAccessRemovalResult, ExchangeAccessResult,
@@ -95,44 +98,69 @@ pub(crate) async fn exchange_client_checked(
 }
 
 /// An Exchange permission the app declares/holds, paired with its Exchange
-/// application role and the Graph appRole id that backs it (used to remove the
-/// unscoped Entra grant).
+/// application role and the *exact* Entra app-role grant that backs it — the
+/// resource plus the appRole id — so the unscoped grant can be removed without
+/// ambiguity.
+///
+/// The resource is load-bearing: `full_access_as_app` lives on Office 365
+/// Exchange Online while every other scopable value lives on Microsoft Graph,
+/// and both resources expose appRoles named `Mail.Read`. Keying a strip on the
+/// value alone would either miss the grant or remove the wrong one.
 #[derive(Clone)]
 struct ExchangeTarget {
+    /// Permission value, e.g. `Mail.Send` or `full_access_as_app`.
     graph_value: String,
     exchange_role: &'static str,
     app_role_id: String,
+    /// Object id of the resource service principal the grant is against.
+    resource_sp_object_id: String,
 }
 
-/// Builds an [`ExchangeTarget`] for a Graph permission value, or `None` when the
-/// value isn't one of the Exchange-scopable mail/calendar/contacts permissions.
-/// The single construction point shared by all three target-derivation paths
+/// Builds an [`ExchangeTarget`] for a permission on a known resource, or `None`
+/// when that resource doesn't expose it as an Exchange-scopable permission. The
+/// single construction point shared by all three target-derivation paths
 /// (declared perms, granted assignments, and the managed-identity value list),
 /// so the `ExchangeTarget` shape and the scopability check live in one place.
-fn exchange_target(app_role_id: String, graph_value: String) -> Option<ExchangeTarget> {
-    exchange_role_for_graph_permission(&graph_value).map(|exchange_role| ExchangeTarget {
-        graph_value,
-        exchange_role,
-        app_role_id,
+fn exchange_target(
+    resource_app_id: &str,
+    resource_sp_object_id: &str,
+    app_role_id: String,
+    graph_value: String,
+) -> Option<ExchangeTarget> {
+    exchange_role_for_resource_permission(resource_app_id, &graph_value).map(|exchange_role| {
+        ExchangeTarget {
+            graph_value,
+            exchange_role,
+            app_role_id,
+            resource_sp_object_id: resource_sp_object_id.to_string(),
+        }
     })
 }
 
-/// Targets derived from the app's *declared* permissions (`requiredResourceAccess`).
-fn targets_from_declared(
-    app: &Application,
-    role_value_by_id: &HashMap<String, String>,
-) -> Vec<ExchangeTarget> {
+/// Targets derived from the app's *declared* permissions
+/// (`requiredResourceAccess`), across **every** mailbox-bearing resource — not
+/// Microsoft Graph alone, or a declared EWS `full_access_as_app` would be
+/// silently unscopable.
+fn targets_from_declared(app: &Application, resources: &[ResourceRoles]) -> Vec<ExchangeTarget> {
     let mut out = Vec::new();
-    for resource in &app.required_resource_access {
-        if resource.resource_app_id != MICROSOFT_GRAPH_APP_ID {
+    for declared in &app.required_resource_access {
+        let Some(resource) = resources
+            .iter()
+            .find(|r| r.app_id == declared.resource_app_id)
+        else {
             continue;
-        }
-        for access in &resource.resource_access {
+        };
+        for access in &declared.resource_access {
             if access.r#type != "Role" {
                 continue;
             }
-            if let Some(value) = role_value_by_id.get(&access.id)
-                && let Some(t) = exchange_target(access.id.clone(), value.clone())
+            if let Some(value) = resource.role_value_by_id.get(&access.id)
+                && let Some(t) = exchange_target(
+                    resource.app_id,
+                    &resource.sp_object_id,
+                    access.id.clone(),
+                    value.clone(),
+                )
             {
                 out.push(t);
             }
@@ -198,20 +226,23 @@ fn filter_targets_by_value(
     }
 }
 
-/// Targets derived from the app's *granted* Entra app-role assignments. Used
-/// during migration, where the app already holds org-wide grants.
+/// Targets derived from the app's *granted* Entra app-role assignments, across
+/// **every** mailbox-bearing resource. Used during migration, where the app
+/// already holds org-wide grants.
 fn targets_from_grants(
     assignments: &[AppRoleAssignment],
-    graph_resource_sp_id: &str,
-    role_value_by_id: &HashMap<String, String>,
+    resources: &[ResourceRoles],
 ) -> Vec<ExchangeTarget> {
     let mut out = Vec::new();
     for a in assignments {
-        if a.resource_id != graph_resource_sp_id {
-            continue;
-        }
-        if let Some(value) = role_value_by_id.get(&a.app_role_id)
-            && let Some(t) = exchange_target(a.app_role_id.clone(), value.clone())
+        if let Some((resource_app_id, resource_sp_id, value)) =
+            resolve_grant(resources, &a.resource_id, &a.app_role_id)
+            && let Some(t) = exchange_target(
+                resource_app_id,
+                resource_sp_id,
+                a.app_role_id.clone(),
+                value.to_string(),
+            )
         {
             out.push(t);
         }
@@ -223,10 +254,13 @@ fn targets_from_grants(
 /// service principal, so the scoped Exchange grant is not unioned away.
 /// Returns the permission values actually removed; appends any failures to
 /// `warnings`.
+///
+/// Each target names its own resource service principal, so a grant is matched
+/// on `(resource, appRole)` — never on the appRole id alone, which two resources
+/// can legitimately share.
 async fn remove_unscoped_grants(
     client: &GraphClient,
     sp_id: &str,
-    graph_resource_sp_id: &str,
     targets: &[ExchangeTarget],
     warnings: &mut Vec<String>,
 ) -> Vec<String> {
@@ -241,7 +275,7 @@ async fn remove_unscoped_grants(
     for t in targets {
         let found = assignments
             .iter()
-            .find(|a| a.resource_id == graph_resource_sp_id && a.app_role_id == t.app_role_id);
+            .find(|a| a.resource_id == t.resource_sp_object_id && a.app_role_id == t.app_role_id);
         if let Some(a) = found {
             match client.remove_app_role_assignment(sp_id, &a.id).await {
                 Ok(()) => removed.push(t.graph_value.clone()),
@@ -279,7 +313,6 @@ struct ApplyExchangeMailboxScopeParams<'a> {
     app_id: &'a str,
     sp_object_id: &'a str,
     display_name: &'a str,
-    graph_resource_sp_id: &'a str,
     targets: &'a [ExchangeTarget],
     groups: &'a [String],
     remove_unscoped: bool,
@@ -351,7 +384,6 @@ async fn apply_exchange_mailbox_scope(
         app_id,
         sp_object_id,
         display_name,
-        graph_resource_sp_id,
         targets,
         groups,
         remove_unscoped,
@@ -434,7 +466,6 @@ async fn apply_exchange_mailbox_scope(
         remove_unscoped_grants(
             graph,
             sp_object_id,
-            graph_resource_sp_id,
             &targets_safe_to_strip(scoped),
             &mut warnings,
         )
@@ -488,16 +519,16 @@ pub async fn grant_exchange_mailbox_access(
     // The list caches are busted unconditionally on success below (line ~450),
     // so the `created` flag isn't needed here.
     let (entra_sp, _created) = graph.ensure_service_principal(&app.app_id).await?;
-    let (graph_resource_sp_id, role_value_by_id) = graph_role_index(&graph).await?;
+    let resources = mailbox_resource_roles(&graph).await?;
 
     let targets = filter_targets_by_value(
-        targets_from_declared(&app, &role_value_by_id),
+        targets_from_declared(&app, &resources),
         permissions.as_deref(),
     );
     let mut warnings = Vec::new();
     if targets.is_empty() {
         warnings.push(
-            "application declares no Exchange-scopable Graph permissions (Mail/Calendars/Contacts) matching the request; nothing to scope".into(),
+            "application declares no Exchange-scopable permissions (Mail/Calendars/Contacts, or the EWS full_access_as_app scope) matching the request; nothing to scope".into(),
         );
     }
 
@@ -509,7 +540,6 @@ pub async fn grant_exchange_mailbox_access(
         app_id: &app.app_id,
         sp_object_id: &entra_sp.id,
         display_name: &app.display_name,
-        graph_resource_sp_id: &graph_resource_sp_id,
         targets: &targets,
         groups: &groups,
         remove_unscoped: remove_unscoped_entra_grants,
@@ -536,23 +566,26 @@ pub async fn grant_managed_identity_scoped_exchange_access(
 ) -> Result<ExchangeAccessResult, UiError> {
     let graph = state.graph_for(&tenant_id);
     let exo = exchange_client_checked(&state, &tenant_id).await?;
-    let (graph_resource_sp_id, role_value_by_id) = graph_role_index(&graph).await?;
-
-    // value -> appRole id, so `remove_unscoped_grants` can find the org-wide
-    // assignment for each permission to strip.
-    let id_by_value: HashMap<&str, &str> = role_value_by_id
-        .iter()
-        .map(|(id, value)| (value.as_str(), id.as_str()))
-        .collect();
+    let resources = mailbox_resource_roles(&graph).await?;
 
     let mut warnings = Vec::new();
     let mut targets = Vec::new();
     for perm in &mail_permissions {
-        let app_role_id = id_by_value
-            .get(perm.as_str())
-            .map(|id| id.to_string())
-            .unwrap_or_default();
-        match exchange_target(app_role_id, perm.clone()) {
+        // The caller sends bare permission values, so resolve each to the
+        // resource that exposes it (Graph for mail/calendar/contacts, Office 365
+        // Exchange Online for the EWS scope) — `remove_unscoped_grants` then has
+        // the exact `(resource, appRole)` pair to strip.
+        let target = resolve_value(&resources, perm).and_then(
+            |(resource_app_id, resource_sp_id, app_role_id)| {
+                exchange_target(
+                    resource_app_id,
+                    resource_sp_id,
+                    app_role_id.to_string(),
+                    perm.clone(),
+                )
+            },
+        );
+        match target {
             Some(t) => targets.push(t),
             None => warnings.push(format!(
                 "{perm} is not an Exchange-scopable permission; skipped"
@@ -574,7 +607,6 @@ pub async fn grant_managed_identity_scoped_exchange_access(
         app_id: &app_id,
         sp_object_id: &managed_identity_id,
         display_name: &app_display_name,
-        graph_resource_sp_id: &graph_resource_sp_id,
         targets: &targets,
         groups: &groups,
         remove_unscoped: remove_unscoped_entra_grants,
@@ -627,6 +659,26 @@ pub(crate) fn is_org_wide_auth_row(r: &ExoAuthorizationResult) -> bool {
             .as_str(),
         "" | "notapplicable" | "organizationconfig" | "organizationscope" | "organization"
     )
+}
+
+/// True when a `Test-ServicePrincipalAuthorization` row confers `value` — either
+/// because it *is* that permission's dedicated role, or because it's one of the
+/// **composite** roles that bundle several permissions (`Application Mail Full
+/// Access` → `Mail.ReadWrite` + `Mail.Send`; `Application Exchange Full Access`
+/// → five permissions).
+///
+/// Matching `RoleName` alone missed every composite role, so a correctly scoped
+/// app produced no matching row and read `OrgWide`. The cmdlet reports the
+/// bundle in `GrantedPermissions`, so that is the authoritative field; the
+/// role-name check stays as the fast path and as a fallback for a row that omits
+/// the list.
+fn row_grants_permission(row: &ExoAuthorizationResult, role: &str, value: &str) -> bool {
+    if row.role_name.as_deref() == Some(role) {
+        return true;
+    }
+    row.granted_permissions
+        .as_deref()
+        .is_some_and(|granted| granted.split(',').any(|g| g.trim() == value))
 }
 
 /// Folds the authorization rows for one Exchange role into a single verdict:
@@ -721,6 +773,11 @@ fn count_member_of_group(filter: &str) -> usize {
 /// `OrgWide` (what `Test-ServicePrincipalAuthorization` alone misses — it can't
 /// see Entra grants). A legacy Application Access Policy is exempt: it genuinely
 /// confines an org-wide grant. Org-wide / unknown verdicts pass through.
+///
+/// A **blanket** grant (the EWS `full_access_as_app` scope) vetoes the scope of
+/// *every* permission, not just its own name: it reaches every mailbox with full
+/// access, so a `Mail.Read` confined to one group is still effectively org-wide
+/// while it survives.
 fn reconcile_orgwide_grant(
     verdict: MailPermissionScope,
     perm: &str,
@@ -733,23 +790,29 @@ fn reconcile_orgwide_grant(
             ..
         }
     );
-    if scoped_via_rbac && orgwide_granted.contains(perm) {
+    let defeated = orgwide_granted.contains(perm)
+        || orgwide_granted.iter().any(|g| is_blanket_mailbox_grant(g));
+    if scoped_via_rbac && defeated {
         MailPermissionScope::OrgWide
     } else {
         verdict
     }
 }
 
-/// Mail/calendar/contacts Graph permission **values** that `sp_object_id` holds
-/// as **org-wide Entra app-role grants** (appRoleAssignments on the Microsoft
-/// Graph resource). `Test-ServicePrincipalAuthorization` deliberately *excludes*
-/// these — it reports only the Exchange RBAC layer — so a scoped RBAC verdict
-/// must be reconciled against them: per Microsoft's RBAC-for-Applications
-/// guidance, an un-stripped org-wide grant *unions* with the scoped role to
-/// reach every mailbox ("remove the assignment … in Microsoft Entra ID.
-/// Otherwise, the union … results in no effective resource scoping"). A legacy
-/// Application Access Policy, by contrast, genuinely confines an org-wide grant,
-/// so it is *not* reconciled away (see [`verdict_from_rows`] / [`aap_verdict_for`]).
+/// Mailbox permission **values** that `sp_object_id` holds as **org-wide Entra
+/// app-role grants** — across Microsoft Graph (mail/calendar/contacts) *and* the
+/// legacy Office 365 Exchange Online resource (the EWS `full_access_as_app`
+/// scope). `Test-ServicePrincipalAuthorization` deliberately *excludes* these —
+/// it reports only the Exchange RBAC layer — so a scoped RBAC verdict must be
+/// reconciled against them: per Microsoft's RBAC-for-Applications guidance, an
+/// un-stripped org-wide grant *unions* with the scoped role to reach every
+/// mailbox ("remove the assignment … in Microsoft Entra ID. Otherwise, the union
+/// … results in no effective resource scoping"). A legacy Application Access
+/// Policy, by contrast, genuinely confines an org-wide grant, so it is *not*
+/// reconciled away (see [`verdict_from_rows`] / [`aap_verdict_for`]).
+///
+/// Reading Graph alone here was an under-report: a surviving org-wide EWS grant
+/// reaches every mailbox, but the verdict still read `Scoped`.
 ///
 /// Best-effort: any read failure yields an empty set (no reconciliation) rather
 /// than fabricating an org-wide verdict from a transient error.
@@ -757,7 +820,7 @@ pub(crate) async fn held_orgwide_mail_grants(
     graph: &GraphClient,
     sp_object_id: &str,
 ) -> HashSet<String> {
-    let Ok((graph_sp_id, role_value_by_id)) = graph_role_index(graph).await else {
+    let Ok(resources) = mailbox_resource_roles(graph).await else {
         return HashSet::new();
     };
     let Ok(assignments) = graph.list_app_role_assignments(sp_object_id).await else {
@@ -765,12 +828,13 @@ pub(crate) async fn held_orgwide_mail_grants(
     };
     assignments
         .iter()
-        // Only Microsoft Graph appRole ids resolve to mail permission values;
-        // guard on the resource so an id collision on another API can't match.
-        .filter(|a| a.resource_id == graph_sp_id)
-        .filter_map(|a| role_value_by_id.get(&a.app_role_id))
+        // Resolve each grant against the resource it was made on, so an appRole
+        // id collision across APIs can't match the wrong permission.
+        .filter_map(|a| {
+            resolve_grant(&resources, &a.resource_id, &a.app_role_id).map(|(_, _, value)| value)
+        })
         .filter(|v| is_scopable_exchange_permission(v))
-        .cloned()
+        .map(str::to_string)
         .collect()
 }
 
@@ -802,7 +866,7 @@ pub(crate) async fn resolve_mail_scopes(
 ) -> Result<HashMap<String, MailPermissionScope>, ExchangeError> {
     let scopable: Vec<(&String, &'static str)> = graph_perms
         .iter()
-        .filter_map(|p| exchange_role_for_graph_permission(p).map(|role| (p, role)))
+        .filter_map(|p| exchange_role_for_permission(p).map(|role| (p, role)))
         .collect();
     if scopable.is_empty() {
         return Ok(HashMap::new());
@@ -847,9 +911,12 @@ pub(crate) async fn resolve_mail_scopes(
     // scope name → (group_count, recipient_filter); `None` = unresolved scope.
     let mut scope_cache: HashMap<String, Option<(u32, String)>> = HashMap::new();
     for (perm, role) in scopable {
+        // A composite role (`Application Mail Full Access`, `Application Exchange
+        // Full Access`) confers this permission without carrying its role name,
+        // so match the granted-permission list too.
         let matching: Vec<&ExoAuthorizationResult> = rows
             .iter()
-            .filter(|r| r.role_name.as_deref() == Some(role))
+            .filter(|r| row_grants_permission(r, role, perm))
             .collect();
         let mut verdict = verdict_from_rows(&matching);
         // Apply the legacy-AAP fallback only when RBAC shows org-wide.
@@ -927,7 +994,7 @@ pub(crate) async fn resolve_mail_scopes_audit_cached(
     // `resolve_mail_scopes` and the Permissions-tab commands).
     let mut scopable: Vec<&str> = graph_perms
         .iter()
-        .filter(|p| exchange_role_for_graph_permission(p).is_some())
+        .filter(|p| exchange_role_for_permission(p).is_some())
         .map(String::as_str)
         .collect();
     if scopable.is_empty() {
@@ -978,21 +1045,22 @@ pub async fn get_mail_permission_scopes(
         return Ok(cached);
     }
     let graph = state.graph_for(&tenant_id);
-    // The app manifest read and the Graph role index are independent — overlap
-    // them instead of paying two serial round trips on a cold Permissions tab.
-    let (app, (_, role_value_by_id)) = futures::future::try_join(
+    // The app manifest read and the resource role indexes are independent —
+    // overlap them instead of paying serial round trips on a cold Permissions tab.
+    let (app, resources) = futures::future::try_join(
         async {
             graph
                 .get_application(&object_id)
                 .await
                 .map_err(UiError::from)
         },
-        graph_role_index(&graph),
+        mailbox_resource_roles(&graph),
     )
     .await?;
 
-    // Declared, Exchange-scopable Graph permissions on this app.
-    let scopable: Vec<String> = targets_from_declared(&app, &role_value_by_id)
+    // Declared, Exchange-scopable permissions on this app (Graph mail/calendar/
+    // contacts plus the EWS `full_access_as_app` scope).
+    let scopable: Vec<String> = targets_from_declared(&app, &resources)
         .into_iter()
         .map(|t| t.graph_value)
         .collect();
@@ -1020,7 +1088,7 @@ pub async fn get_mail_permission_scopes(
     let entries: Vec<MailScopeEntry> = scopable
         .into_iter()
         .filter_map(|p| {
-            let role = exchange_role_for_graph_permission(&p)?;
+            let role = exchange_role_for_permission(&p)?;
             let scope = scopes
                 .get(&p)
                 .cloned()
@@ -1053,7 +1121,7 @@ pub async fn get_mail_scopes_for_principal(
     // Nothing scopable ⇒ no Exchange call (and no needless consent prompt).
     if !permissions
         .iter()
-        .any(|p| exchange_role_for_graph_permission(p).is_some())
+        .any(|p| exchange_role_for_permission(p).is_some())
     {
         return Ok(Vec::new());
     }
@@ -1087,7 +1155,7 @@ pub async fn get_mail_scopes_for_principal(
     let entries: Vec<MailScopeEntry> = permissions
         .into_iter()
         .filter_map(|p| {
-            let role = exchange_role_for_graph_permission(&p)?;
+            let role = exchange_role_for_permission(&p)?;
             let scope = scopes
                 .get(&p)
                 .cloned()
@@ -1271,12 +1339,73 @@ pub async fn remove_exchange_scope_group_members(
 
 // ---------------- Migrate legacy Application Access Policies ----------------
 
+/// Groups the tenant's policies into the per-application batches a migration
+/// runs on, dropping the ones that must not be migrated. Pure, so the two
+/// exclusion rules are unit-testable without Exchange.
+///
+/// Two rules, both load-bearing:
+/// - **`RestrictAccess` only.** A `DenyAccess` policy is a *blocklist* (every
+///   mailbox EXCEPT its group), while an RBAC management scope is an allow-list.
+///   Rebuilding one as the other inverts the policy — the app would gain exactly
+///   the mailboxes it was denied and lose the rest — so those are reported, never
+///   migrated. A policy with no readable `AccessRight` is equally unsafe to guess
+///   at, so it is excluded too.
+/// - **One batch per application.** Several `RestrictAccess` policies on one app
+///   grant access to the *union* of their groups (`New-ApplicationAccessPolicy`
+///   evaluation rule 3), and an app gets exactly one management scope. Migrating
+///   them one at a time meant the second policy's group was silently dropped —
+///   `ensure_management_scope` keeps the existing scope — after which both
+///   policies were deleted and those mailboxes lost access.
+fn group_policies_for_migration(
+    policies: Vec<ExoApplicationAccessPolicy>,
+) -> (Vec<(String, Vec<ExoApplicationAccessPolicy>)>, Vec<String>) {
+    let mut batches: Vec<(String, Vec<ExoApplicationAccessPolicy>)> = Vec::new();
+    let mut excluded = Vec::new();
+    for policy in policies {
+        let Some(policy_app_id) = policy.app_id.clone() else {
+            excluded.push("policy without an AppId skipped".to_string());
+            continue;
+        };
+        match policy.access_right.as_deref().map(str::trim) {
+            Some(right) if right.eq_ignore_ascii_case("RestrictAccess") => {}
+            Some(right) => {
+                excluded.push(format!(
+                    "{policy_app_id}: skipped a {right} policy — only RestrictAccess policies are \
+                     migratable. A DenyAccess policy blocks its group and allows every other \
+                     mailbox, whereas an RBAC management scope allows only what it names, so \
+                     migrating it would invert the policy. Re-express the exclusion as a \
+                     management-scope recipient filter instead."
+                ));
+                continue;
+            }
+            None => {
+                excluded.push(format!(
+                    "{policy_app_id}: skipped a policy with no readable AccessRight — \
+                     RestrictAccess and DenyAccess migrate to opposite scopes, so it can't be \
+                     guessed."
+                ));
+                continue;
+            }
+        }
+        match batches.iter_mut().find(|(a, _)| *a == policy_app_id) {
+            Some((_, batch)) => batch.push(policy),
+            None => batches.push((policy_app_id, vec![policy])),
+        }
+    }
+    (batches, excluded)
+}
+
 /// Migrates legacy Application Access Policies to RBAC for Applications,
 /// following the Microsoft-documented steps: create a management scope from the
-/// policy's scoping group, register the service principal, assign the scoped
-/// roles, remove the unscoped Entra consent, then remove the policy. `dry_run`
+/// policies' scoping groups, register the service principal, assign the scoped
+/// roles, remove the unscoped Entra consent, then remove the policies. `dry_run`
 /// reports the plan without mutating anything. When `app_id` is `None`, every
 /// policy in the tenant is processed.
+///
+/// Migration is **per application**, not per policy, and only `RestrictAccess`
+/// policies qualify — see [`group_policies_for_migration`]. The legacy policies
+/// are deleted only once every org-wide grant they were constraining has actually
+/// been re-scoped; see [`migrate_one`].
 ///
 /// `scope_name` optionally overrides the management-scope name for this
 /// migration; when `None` (or blank) it defaults to the tenant's configured
@@ -1295,7 +1424,7 @@ pub async fn migrate_application_access_policies(
     let graph = state.graph_for(&tenant_id);
     let exo = exchange_client_checked(&state, &tenant_id).await?;
 
-    let (graph_resource_sp_id, role_value_by_id) = graph_role_index(&graph).await?;
+    let resources = mailbox_resource_roles(&graph).await?;
 
     let mut policies = exo.get_application_access_policies().await?;
     if let Some(filter_app) = &app_id {
@@ -1313,20 +1442,16 @@ pub async fn migrate_application_access_policies(
     // the same pattern fresh scoped grants use.
     let tenant_defaults = load_tenant_defaults(&tenant_id);
 
-    let mut items = Vec::new();
-    let mut failures = Vec::new();
+    let (batches, mut failures) = group_policies_for_migration(policies);
 
-    for policy in policies {
-        let Some(policy_app_id) = policy.app_id.clone() else {
-            failures.push("policy without an AppId skipped".into());
-            continue;
-        };
+    let mut items = Vec::new();
+    for (policy_app_id, batch) in batches {
         match migrate_one(
             &graph,
             &exo,
-            &policy,
-            &graph_resource_sp_id,
-            &role_value_by_id,
+            &policy_app_id,
+            &batch,
+            &resources,
             scope_override.as_deref(),
             &tenant_defaults,
             dry_run,
@@ -1345,64 +1470,112 @@ pub async fn migrate_application_access_policies(
     })
 }
 
+/// Whether the legacy policies may be deleted, given what the migration managed
+/// to re-scope. Pure so the rule is unit-testable.
+///
+/// An Application Access Policy is the **only** thing constraining an app's
+/// org-wide Entra grants, so deleting one while any of those grants survives
+/// widens the app's reach to every mailbox — the exact regression that shipped
+/// when a policy confining the EWS `full_access_as_app` scope was deleted without
+/// the scope ever being re-created. So:
+/// - every target re-scoped and stripped ⇒ delete (the documented step 5);
+/// - **no** targets at all ⇒ delete: the app holds none of the permissions an AAP
+///   can constrain, so the policy governs nothing and removing it changes no
+///   effective access;
+/// - some targets stripped, some not ⇒ **keep** every policy. The surviving
+///   grants are still confined by it.
+fn policies_safe_to_remove(target_count: usize, removed_grant_count: usize) -> bool {
+    target_count == 0 || removed_grant_count == target_count
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn migrate_one(
     graph: &GraphClient,
     exo: &ExchangeClient,
-    policy: &azapptoolkit_exchange::models::ExoApplicationAccessPolicy,
-    graph_resource_sp_id: &str,
-    role_value_by_id: &HashMap<String, String>,
+    app_id: &str,
+    policies: &[ExoApplicationAccessPolicy],
+    resources: &[ResourceRoles],
     scope_override: Option<&str>,
     tenant_defaults: &TenantDefaults,
     dry_run: bool,
 ) -> Result<AapMigrationItem, String> {
-    let app_id = policy.app_id.clone().ok_or("policy has no AppId")?;
-    let scope_group = policy
-        .scope_name
-        .clone()
-        .ok_or("policy has no scope group (ScopeName)")?;
-
+    let identities: Vec<String> = policies.iter().filter_map(|p| p.identity.clone()).collect();
     let mut warnings = Vec::new();
 
     // Resolve the Entra service principal (needed for the EXO pointer ObjectId
     // and to remove the unscoped grants).
     let entra_sp = graph
-        .get_service_principal_by_app_id(&app_id)
+        .get_service_principal_by_app_id(app_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or("no Entra service principal for this app")?;
 
-    // Resolve the scope group to its distinguished name for MemberOfGroup.
-    let group = exo
-        .get_group(&scope_group)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("scope group '{scope_group}' not found"))?;
-    let dn = group
-        .distinguished_name
-        .ok_or_else(|| format!("scope group '{scope_group}' has no distinguished name"))?;
+    // Resolve EVERY policy's scoping group to its DistinguishedName: the app's
+    // one management scope has to span all of them, because that union is what
+    // the policies granted. A group we can't resolve aborts the app's migration
+    // before anything is mutated — building a scope that silently omits it would
+    // cut those mailboxes off.
+    let mut dns: Vec<String> = Vec::new();
+    for policy in policies {
+        let scope_group = policy
+            .scope_name
+            .clone()
+            .or_else(|| policy.scope_identity.clone())
+            .ok_or("policy has no scope group (ScopeName)")?;
+        let group = exo
+            .get_group(&scope_group)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("scope group '{scope_group}' not found"))?;
+        let dn = group
+            .distinguished_name
+            .ok_or_else(|| format!("scope group '{scope_group}' has no distinguished name"))?;
+        if !dns.contains(&dn) {
+            dns.push(dn);
+        }
+    }
+    if policies.len() > 1 {
+        warnings.push(format!(
+            "folded {} RestrictAccess policies into one management scope spanning {} group(s) — \
+             their combined effect was access to the union of those groups",
+            policies.len(),
+            dns.len()
+        ));
+    }
 
     let scope_name = scope_override
         .map(str::to_string)
-        .unwrap_or_else(|| tenant_defaults.scope_name_for(&app_id));
-    let scope_filter = member_of_group_filter(&[dn]);
+        .unwrap_or_else(|| tenant_defaults.scope_name_for(app_id));
+    let scope_filter = member_of_group_filter(&dns);
 
-    // Roles come from what the app actually holds today.
+    // Roles come from what the app actually holds today — across Microsoft Graph
+    // AND Office 365 Exchange Online, so a policy confining the EWS
+    // `full_access_as_app` scope migrates to `Application EWS.AccessAsApp`
+    // instead of being silently dropped.
     let assignments = graph
         .list_app_role_assignments(&entra_sp.id)
         .await
         .map_err(|e| e.to_string())?;
-    let targets = targets_from_grants(&assignments, graph_resource_sp_id, role_value_by_id);
+    let targets = targets_from_grants(&assignments, resources);
     if targets.is_empty() {
         warnings.push(
-            "app holds no Exchange-scopable Graph permissions; only the policy is removed".into(),
+            "app holds none of the permissions an Application Access Policy can constrain \
+             (Graph Mail/Calendars/Contacts, or the EWS full_access_as_app scope), so the policy \
+             governs no effective access"
+                .into(),
         );
     }
 
     if dry_run {
+        let removable = policies_safe_to_remove(targets.len(), targets.len());
+        if !removable {
+            warnings.push(
+                "the legacy policy would be kept until every org-wide grant is re-scoped".into(),
+            );
+        }
         return Ok(AapMigrationItem {
-            app_id,
-            source_policy_identity: policy.identity.clone(),
+            app_id: app_id.to_string(),
+            source_policy_identities: identities.clone(),
             scope_name: Some(scope_name),
             scope_filter: Some(scope_filter),
             roles_assigned: targets
@@ -1410,7 +1583,7 @@ async fn migrate_one(
                 .map(|t| t.exchange_role.to_string())
                 .collect(),
             removed_entra_grants: targets.iter().map(|t| t.graph_value.clone()).collect(),
-            removed_policy: false,
+            removed_policies: if removable { identities } else { Vec::new() },
             status: "planned".into(),
             warnings,
         });
@@ -1420,44 +1593,64 @@ async fn migrate_one(
     exo.ensure_management_scope(&scope_name, &scope_filter)
         .await
         .map_err(|e| e.to_string())?;
-    exo.ensure_service_principal(&app_id, &entra_sp.id, &entra_sp.display_name)
+    exo.ensure_service_principal(app_id, &entra_sp.id, &entra_sp.display_name)
         .await
         .map_err(|e| e.to_string())?;
 
     // 3. scoped role assignments (idempotent). Track which targets ended up
     //    scoped so step 4 only strips the org-wide grant for those.
     let (roles_assigned, _roles_skipped, scoped) =
-        assign_scoped_roles(exo, &app_id, &scope_name, &targets, &mut warnings).await;
+        assign_scoped_roles(exo, app_id, &scope_name, &targets, &mut warnings).await;
 
     // 4. remove the unscoped Entra grants so scoping is effective — but only for
     //    permissions whose scoped role actually landed (never strand the app).
     let removed_entra_grants = remove_unscoped_grants(
         graph,
         &entra_sp.id,
-        graph_resource_sp_id,
         &targets_safe_to_strip(scoped),
         &mut warnings,
     )
     .await;
 
-    // 5. remove the legacy policy.
-    let mut removed_policy = false;
-    if let Some(identity) = &policy.identity {
-        match exo.remove_application_access_policy(identity).await {
-            Ok(()) => removed_policy = true,
-            Err(err) => warnings.push(format!("failed to remove legacy policy: {err}")),
+    // 5. remove the legacy policies — ONLY once nothing they were constraining is
+    //    still granted org-wide (see `policies_safe_to_remove`).
+    let mut removed_policies = Vec::new();
+    let mut status = "migrated";
+    if policies_safe_to_remove(targets.len(), removed_entra_grants.len()) {
+        for identity in &identities {
+            match exo.remove_application_access_policy(identity).await {
+                Ok(()) => removed_policies.push(identity.clone()),
+                Err(err) => {
+                    warnings.push(format!("failed to remove legacy policy {identity}: {err}"));
+                    status = "partial";
+                }
+            }
         }
+    } else {
+        let kept: Vec<&str> = targets
+            .iter()
+            .map(|t| t.graph_value.as_str())
+            .filter(|v| !removed_entra_grants.iter().any(|r| r == v))
+            .collect();
+        warnings.push(format!(
+            "KEPT the legacy policy: {} still granted organization-wide in Microsoft Entra ID. \
+             The policy is the only thing confining {} today, so removing it would give this app \
+             access to every mailbox. Re-run once the grant(s) are scoped.",
+            kept.join(", "),
+            if kept.len() == 1 { "it" } else { "them" }
+        ));
+        status = "partial";
     }
 
     Ok(AapMigrationItem {
-        app_id,
-        source_policy_identity: policy.identity.clone(),
+        app_id: app_id.to_string(),
+        source_policy_identities: identities,
         scope_name: Some(scope_name),
         scope_filter: Some(scope_filter),
         roles_assigned,
         removed_entra_grants,
-        removed_policy,
-        status: "migrated".into(),
+        removed_policies,
+        status: status.into(),
         warnings,
     })
 }
@@ -1466,16 +1659,136 @@ async fn migrate_one(
 mod tests {
     use super::*;
 
+    use azapptoolkit_core::models::{RequiredResourceAccess, ResourceAccess};
+    use azapptoolkit_core::scoping::{
+        EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
+    };
+
     fn target(value: &str) -> ExchangeTarget {
         ExchangeTarget {
             graph_value: value.to_string(),
             exchange_role: "Application Mail.Read",
             app_role_id: "role-id".to_string(),
+            resource_sp_object_id: "graph-sp".to_string(),
         }
     }
 
     fn values(targets: &[ExchangeTarget]) -> Vec<&str> {
         targets.iter().map(|t| t.graph_value.as_str()).collect()
+    }
+
+    /// The two mailbox resources as they resolve in a tenant, with one appRole
+    /// each keyed `role-<value>`.
+    fn mailbox_resources() -> Vec<ResourceRoles> {
+        let index = |values: &[&str]| -> HashMap<String, String> {
+            values
+                .iter()
+                .map(|v| (format!("role-{v}"), v.to_string()))
+                .collect()
+        };
+        vec![
+            ResourceRoles {
+                app_id: MICROSOFT_GRAPH_APP_ID,
+                sp_object_id: "graph-sp".to_string(),
+                role_value_by_id: index(&["Mail.Read", "Mail.Send", "User.Read.All"]),
+            },
+            ResourceRoles {
+                app_id: OFFICE365_EXCHANGE_ONLINE_APP_ID,
+                sp_object_id: "exo-sp".to_string(),
+                // The legacy resource exposes the EWS scope AND its own
+                // Outlook-REST `Mail.Read` appRole (a different GUID).
+                role_value_by_id: [
+                    (
+                        format!("exo-role-{EWS_FULL_ACCESS_AS_APP}"),
+                        EWS_FULL_ACCESS_AS_APP.to_string(),
+                    ),
+                    ("exo-role-Mail.Read".to_string(), "Mail.Read".to_string()),
+                ]
+                .into(),
+            },
+        ]
+    }
+
+    fn declared(resource_app_id: &str, role_ids: &[&str]) -> RequiredResourceAccess {
+        RequiredResourceAccess {
+            resource_app_id: resource_app_id.to_string(),
+            resource_access: role_ids
+                .iter()
+                .map(|id| ResourceAccess {
+                    id: id.to_string(),
+                    r#type: "Role".to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    fn grant(resource_sp_id: &str, app_role_id: &str) -> AppRoleAssignment {
+        AppRoleAssignment {
+            id: format!("assign-{app_role_id}"),
+            resource_id: resource_sp_id.to_string(),
+            app_role_id: app_role_id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn declared_targets_span_graph_and_the_legacy_ews_scope() {
+        // The EWS `full_access_as_app` scope is the one non-Graph permission an
+        // Application Access Policy could confine. Deriving targets from Microsoft
+        // Graph alone made it invisible: no `Application EWS.AccessAsApp` was ever
+        // assigned and its org-wide grant was never stripped.
+        let app = Application {
+            required_resource_access: vec![
+                declared(
+                    MICROSOFT_GRAPH_APP_ID,
+                    &["role-Mail.Read", "role-User.Read.All"],
+                ),
+                declared(
+                    OFFICE365_EXCHANGE_ONLINE_APP_ID,
+                    &[&format!("exo-role-{EWS_FULL_ACCESS_AS_APP}")],
+                ),
+            ],
+            ..Default::default()
+        };
+        let targets = targets_from_declared(&app, &mailbox_resources());
+        assert_eq!(values(&targets), ["Mail.Read", EWS_FULL_ACCESS_AS_APP]);
+        // Each target carries the resource SP its grant lives on, so the strip
+        // can't hit the wrong resource.
+        assert_eq!(targets[0].resource_sp_object_id, "graph-sp");
+        assert_eq!(targets[1].resource_sp_object_id, "exo-sp");
+        assert_eq!(targets[1].exchange_role, "Application EWS.AccessAsApp");
+    }
+
+    #[test]
+    fn declared_targets_skip_exchange_onlines_own_mail_roles() {
+        // Office 365 Exchange Online's `Mail.Read` (retired Outlook REST) has no
+        // RBAC-for-Applications counterpart, so it must not become a target —
+        // stripping it would leave the app with no scoped replacement.
+        let app = Application {
+            required_resource_access: vec![declared(
+                OFFICE365_EXCHANGE_ONLINE_APP_ID,
+                &["exo-role-Mail.Read"],
+            )],
+            ..Default::default()
+        };
+        assert!(targets_from_declared(&app, &mailbox_resources()).is_empty());
+    }
+
+    #[test]
+    fn granted_targets_span_both_resources_and_keep_resources_apart() {
+        // Migration derives its targets from held grants. Both resources expose an
+        // appRole named `Mail.Read`; each target must point at the resource its own
+        // grant was made on.
+        let assignments = vec![
+            grant("graph-sp", "role-Mail.Send"),
+            grant("exo-sp", &format!("exo-role-{EWS_FULL_ACCESS_AS_APP}")),
+            grant("exo-sp", "exo-role-Mail.Read"), // not RBAC-scopable
+            grant("other-sp", "role-Mail.Read"),   // unrelated resource
+        ];
+        let targets = targets_from_grants(&assignments, &mailbox_resources());
+        assert_eq!(values(&targets), ["Mail.Send", EWS_FULL_ACCESS_AS_APP]);
+        assert_eq!(targets[0].resource_sp_object_id, "graph-sp");
+        assert_eq!(targets[1].resource_sp_object_id, "exo-sp");
     }
 
     #[test]
@@ -1601,6 +1914,22 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_lets_a_surviving_ews_grant_defeat_every_scope() {
+        // `full_access_as_app` reaches every mailbox with full access, so while it
+        // survives org-wide, a `Mail.Read` confined to one group is still org-wide
+        // in effect — even though the granted set never names `Mail.Read`.
+        let granted: HashSet<String> = [EWS_FULL_ACCESS_AS_APP.to_string()].into_iter().collect();
+        assert!(matches!(
+            reconcile_orgwide_grant(rbac_scope(), "Mail.Read", &granted),
+            MailPermissionScope::OrgWide
+        ));
+        assert!(matches!(
+            reconcile_orgwide_grant(rbac_scope(), "Calendars.ReadWrite", &granted),
+            MailPermissionScope::OrgWide
+        ));
+    }
+
+    #[test]
     fn reconcile_never_downgrades_legacy_aap_scope() {
         // A RestrictAccess AAP genuinely confines an org-wide grant — exempt.
         let granted: HashSet<String> = ["Mail.Read".to_string()].into_iter().collect();
@@ -1700,6 +2029,55 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn composite_roles_confer_each_bundled_permission() {
+        // `Application Mail Full Access` grants Mail.ReadWrite + Mail.Send without
+        // carrying either permission's role name. Matching RoleName alone found no
+        // row for `Mail.Send`, so a correctly scoped app read org-wide.
+        let mut row = auth_row(
+            "Application Mail Full Access",
+            Some("azapptoolkit_app-1"),
+            "CustomRecipientScope",
+        );
+        row.granted_permissions = Some("Mail.ReadWrite, Mail.Send".to_string());
+        assert!(row_grants_permission(
+            &row,
+            "Application Mail.Send",
+            "Mail.Send"
+        ));
+        assert!(row_grants_permission(
+            &row,
+            "Application Mail.ReadWrite",
+            "Mail.ReadWrite"
+        ));
+        // A permission the composite does NOT bundle still doesn't match.
+        assert!(!row_grants_permission(
+            &row,
+            "Application Calendars.Read",
+            "Calendars.Read"
+        ));
+        // ...and a permission substring must not match a longer value.
+        let mut basic = auth_row("Application Mail.ReadBasic", None, "CustomRecipientScope");
+        basic.granted_permissions = Some("Mail.ReadBasic".to_string());
+        assert!(!row_grants_permission(
+            &basic,
+            "Application Mail.Read",
+            "Mail.Read"
+        ));
+    }
+
+    #[test]
+    fn dedicated_role_name_still_matches_without_a_permission_list() {
+        // The fast path / fallback: a row that omits GrantedPermissions is still
+        // matched by its role name.
+        let row = auth_row("Application Mail.Read", None, "CustomRecipientScope");
+        assert!(row_grants_permission(
+            &row,
+            "Application Mail.Read",
+            "Mail.Read"
+        ));
+    }
+
     fn aap(app_id: &str, access_right: &str, scope: Option<&str>) -> ExoApplicationAccessPolicy {
         ExoApplicationAccessPolicy {
             identity: Some("policy-1".into()),
@@ -1741,6 +2119,69 @@ mod tests {
     fn aap_ignores_policies_for_other_apps() {
         let policies = [aap("other-app", "RestrictAccess", Some("Sales"))];
         assert!(aap_verdict_for(&policies, "app-1").is_none());
+    }
+
+    #[test]
+    fn migration_never_converts_a_deny_access_policy() {
+        // A DenyAccess policy blocks its group and allows every other mailbox; a
+        // management scope allows only what it names. Migrating one would invert
+        // it — the app would gain exactly the mailboxes it was denied. It must be
+        // reported, never batched.
+        let (batches, excluded) =
+            group_policies_for_migration(vec![aap("app-1", "DenyAccess", Some("Execs"))]);
+        assert!(batches.is_empty(), "DenyAccess must never be migrated");
+        assert_eq!(excluded.len(), 1);
+        assert!(excluded[0].contains("DenyAccess"));
+        assert!(excluded[0].contains("invert"));
+    }
+
+    #[test]
+    fn migration_skips_a_policy_with_no_readable_access_right() {
+        // RestrictAccess and DenyAccess migrate to opposite scopes, so an absent
+        // AccessRight can't be guessed.
+        let mut policy = aap("app-1", "RestrictAccess", Some("Sales"));
+        policy.access_right = None;
+        let (batches, excluded) = group_policies_for_migration(vec![policy]);
+        assert!(batches.is_empty());
+        assert_eq!(excluded.len(), 1);
+    }
+
+    #[test]
+    fn migration_batches_every_policy_of_one_app_together() {
+        // Two RestrictAccess policies on one app grant access to the UNION of
+        // their groups, and an app gets exactly one management scope. Migrating
+        // them separately dropped the second group (ensure_management_scope keeps
+        // the existing scope) and then deleted both policies.
+        let (batches, excluded) = group_policies_for_migration(vec![
+            aap("app-1", "RestrictAccess", Some("Sales")),
+            aap("app-2", "RestrictAccess", Some("Support")),
+            aap("app-1", "RestrictAccess", Some("Finance")),
+        ]);
+        assert!(excluded.is_empty());
+        assert_eq!(batches.len(), 2, "one batch per application");
+        assert_eq!(batches[0].0, "app-1");
+        assert_eq!(batches[0].1.len(), 2, "both of app-1's policies");
+        assert_eq!(batches[1].0, "app-2");
+        assert_eq!(batches[1].1.len(), 1);
+    }
+
+    #[test]
+    fn migration_keeps_the_policy_while_any_grant_is_still_org_wide() {
+        // The policy is the ONLY thing constraining a surviving org-wide grant, so
+        // deleting it widens the app's reach to every mailbox — the regression that
+        // shipped when an EWS-confining policy was deleted with nothing re-scoped.
+        assert!(
+            !policies_safe_to_remove(2, 1),
+            "one of two grants stripped ⇒ keep the policy"
+        );
+        assert!(
+            !policies_safe_to_remove(1, 0),
+            "nothing stripped ⇒ keep the policy"
+        );
+        // Fully re-scoped ⇒ the documented step 5 runs.
+        assert!(policies_safe_to_remove(2, 2));
+        // No constrainable grant at all ⇒ the policy governs nothing.
+        assert!(policies_safe_to_remove(0, 0));
     }
 
     #[test]

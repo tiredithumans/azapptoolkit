@@ -18,7 +18,7 @@ use crate::bindings::graph_roles;
 use crate::bindings::managed_identity;
 use crate::bindings::permissions as permissions_bindings;
 use crate::components::icon::IconName;
-use crate::components::scope_badge::is_exchange_scopable;
+use crate::components::scope_badge::is_exchange_scopable_on;
 use crate::components::ui::{DetailLoadError, DetailSkeleton, EmptyState};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -104,8 +104,12 @@ pub fn ManagedIdentityDetailWindow(
                 .await
                 .unwrap_or_default()
                 .iter()
+                .filter(|p| {
+                    p.app_role_value
+                        .as_deref()
+                        .is_some_and(|v| is_exchange_scopable_on(p.resource_app_id.as_deref(), v))
+                })
                 .filter_map(|p| p.app_role_value.clone())
-                .filter(|v| is_exchange_scopable(v))
                 .collect();
             if mail_values.is_empty() {
                 return Ok(HashMap::new());

@@ -9,6 +9,47 @@ editing `azapptoolkit-core::audit`, `commands::exchange`, `commands::sharepoint`
 Mail/calendar/contacts application permissions are scopable via Exchange RBAC for Applications, so
 their *effective* risk depends on whether they're confined to specific mailboxes.
 
+**Two resources carry mailbox permissions, not one.** `azapptoolkit-core::scoping` maps the eleven
+Microsoft Graph mail/calendar/contacts values **and** the EWS `full_access_as_app` scope, which is an
+appRole on the legacy **Office 365 Exchange Online** resource (`00000002-…`) — exactly the set
+Microsoft documents an [Application Access
+Policy](https://learn.microsoft.com/exchange/permissions-exo/application-access-policies) as able to
+confine, so an AAP migration can always map what a policy was restricting. Its RBAC counterpart is
+`Application EWS.AccessAsApp`. Consequences to preserve:
+
+- **Every path that names a concrete Entra grant resolves it through
+  `graph_roles::mailbox_resource_roles`** (both resource SPs + their appRole indexes), never
+  `graph_role_index` alone. `ExchangeTarget` carries `resource_sp_object_id`, so a strip matches on
+  `(resource, appRole)` — both resources expose an appRole literally named `Mail.Read`, so a
+  value-only or id-only match hits the wrong grant. This was a real regression: Graph-only filters
+  meant a policy confining `full_access_as_app` migrated to *nothing* — no scoped role, no consent
+  revoked (the symptom: admin consent still granted), policy deleted anyway.
+- **Office 365 Exchange Online's own `Mail.Read`-style appRoles deliberately do NOT map.** They
+  authorize the retired Outlook REST API; RBAC for Applications supports MS Graph and EWS only, so
+  `exchange_role_for_resource_permission` returns `None` for them. Mapping them would strip a grant
+  that has no scoped replacement. Use the resource-aware function wherever the resource is known;
+  the value-only `exchange_role_for_permission` exists for the probe/badge paths and is unambiguous
+  only because the two resources share no *mapped* value names.
+- **`full_access_as_app` is a blanket grant.** `is_blanket_mailbox_grant` marks it, and
+  `reconcile_orgwide_grant` lets a surviving one force `OrgWide` for **every** permission on that
+  principal — it reaches all mailboxes with full access, so a `Mail.Read` confined to one group is
+  still org-wide in effect. The audit picks these up from one extra tenant-wide read
+  (`prefetch_ews_full_access_grants`), kept **separate** from the Graph `appRoleAssignedTo` matrix so
+  the SP-only phase's candidate rule ("holds a Graph application grant") is unchanged.
+- **Composite roles confer permissions without carrying their names.** `Application Mail Full Access`
+  and `Application Exchange Full Access` bundle several permissions, so `verdict_from_rows` matches
+  rows via `row_grants_permission`, which reads `GrantedPermissions` as well as `RoleName`. Matching
+  role names alone reported a correctly scoped app as org-wide.
+
+Not mapped, on purpose: the rest of the ~22 supported application roles (`MailboxFolder.*`,
+`MailboxItem.*`, `SMTP.SendAsApp`, `MailboxConfigItem.*`, `MailTips.ReadBasic.All`). They are
+RBAC-scopable today but were never AAP-scopable, so they don't affect migration parity — adding one
+is additive, but it widens `is_scopable_exchange_permission` and therefore the audit's scoped-mail
+weighting, which needs a CHANGELOG note. `-RecipientAdministrativeUnitScope` is likewise a read-only
+capability here: an AU-scoped assignment is *read* correctly (`is_org_wide_auth_row` won't call it
+org-wide; the enrich step simply finds no management scope), but the grant paths only build
+`MemberOfGroup` management scopes.
+
 **The `mail_scopes` map.** `score_application` reads `AppPermissions.mail_scopes` (a
 `value → MailPermissionScope` map in `azapptoolkit-core::audit`): a permission confirmed `Scoped`
 earns a reduced weight (high 10→3, medium 5→2) and a positive Rule-11 note instead of the org-wide
@@ -45,6 +86,27 @@ reconciled against `held_orgwide_mail_grants` (`reconcile_orgwide_grant` in
 legacy AAP, which genuinely confines an org-wide grant. This is what catches "scope created but
 org-wide grant never removed".
 
+**Migrating a legacy AAP is not a mechanical rewrite.** `migrate_application_access_policies` +
+`migrate_one` follow Microsoft's five documented steps (scope → SP pointer → scoped roles → remove
+Entra consent → remove policy), with three guards that the doc's happy path doesn't mention and whose
+absence each caused a real widening of access:
+
+- **`RestrictAccess` only** (`group_policies_for_migration`, pure + tested). A `DenyAccess` policy is
+  a *blocklist* — every mailbox except its group — and a management scope is an allow-list, so
+  converting one inverts it: the app gains exactly what it was denied and loses the rest. `DenyAccess`
+  (and an unreadable `AccessRight`) is reported, never migrated. Note `aap_verdict_for` has always
+  got this distinction right for *verdicts*; it was only the migration that didn't consult it.
+- **One batch per application.** Several `RestrictAccess` policies on one app grant the *union* of
+  their groups (`New-ApplicationAccessPolicy` evaluation rule 3) and an app gets exactly one
+  management scope, so they migrate into one scope spanning every group. Migrating them one at a time
+  silently dropped all but the first (`ensure_management_scope` keeps an existing scope) and then
+  deleted every policy. `AapMigrationItem` is therefore per **app**, with
+  `source_policy_identities` / `removed_policies` as vectors.
+- **The policy outlives an un-stripped grant** (`policies_safe_to_remove`, pure + tested). Step 5 runs
+  only when every target's org-wide grant was actually removed, or when there were no constrainable
+  targets at all (the policy then governs nothing). A partial strip **keeps** every policy and reports
+  `partial` naming the blockers — the policy is the only thing still confining them.
+
 **Legacy Application Access Policies (AAP).** The detail path resolves the legacy AAP up front
 (`enrich`-gated, so the bulk audit never pays the extra call) — keyed only on appId via an
 independent cmdlet, so it overrides an org-wide RBAC verdict **and** answers when the probe itself
@@ -64,6 +126,25 @@ on the SP's app id + its *granted* app-role values) instead of `get_mail_permiss
 reads a manifest). The badge rendering for all three surfaces lives in one place —
 `web-rs/components/scope_badge.rs` (`permission_scope_cell` / `mailbox_scope_badge` /
 `is_exchange_scopable`).
+
+**The frontend is resource-aware too, and has to be.** `AppRoleGrantDto` carries
+`resource_app_id` (`None` for a resource the backend doesn't resolve, whose row still renders
+id-only), because a *value* alone can't answer scopability once two resources are in play. Every
+held-permission surface (MI detail + window, enterprise Permissions tab, `OrgwideScopeCallout`,
+`permission_scope_cell`) uses **`is_exchange_scopable_on(resource, value)`**, and the app-reg
+Permissions tab passes `ResolvedPermission::resource_app_id`. Two things break if a surface reverts
+to the value-only `is_exchange_scopable`: Exchange Online's un-scopable `Mail.Read` gains a "Scope…"
+action the backend correctly refuses to honour (and an alarming "Unknown" verdict that will never
+arrive), and a `full_access_as_app` row seeds the wizard with Microsoft Graph — a resource that
+doesn't expose it. `resolve_app_role_grants` resolves both resources so the EWS scope reads as
+itself instead of a bare GUID; the callout additionally names it as a **blanket** grant that
+overrides per-permission mailbox scopes, mirroring `reconcile_orgwide_grant` so the two surfaces
+can't appear to contradict each other. Pinned by `orgwide_scope_callout` unit + GUI tests.
+
+**Known display gap:** `full_access_as_app` is not in the audit's high/medium risk lists, so it
+shows no risk badge even though it is the broadest mailbox grant there is. Adding it would shift
+audit ranking (an operator-visible change needing a CHANGELOG note), so it is deliberately left
+alone here rather than folded into a correctness fix.
 
 **Error-body hygiene.** Exchange error bodies are sanitized (`client.rs::sanitize_error_body`)
 because a 403 can return a NUL-padded blob; log the `ui_code`, never the raw body.

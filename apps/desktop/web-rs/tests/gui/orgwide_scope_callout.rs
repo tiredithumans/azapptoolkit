@@ -30,12 +30,21 @@ fn click_button(label: &str) {
 /// Mount the MI detail window on its Permissions tab with the given held
 /// grants (mail scoping unresolved — the empty map reads org-wide).
 async fn mount_with_grants(values: &[&str]) -> ts::Mounted {
+    let grants: Vec<_> = values.iter().map(|v| fixtures::held_grant(v)).collect();
+    mount_with(grants).await
+}
+
+/// As [`mount_with_grants`], but the caller supplies the grant DTOs — so a test
+/// can hold a permission on the legacy Office 365 Exchange Online resource
+/// instead of Microsoft Graph.
+async fn mount_with(
+    grants: Vec<azapptoolkit_dto::managed_identity::AppRoleGrantDto>,
+) -> ts::Mounted {
     ts::reset();
     ts::mock_ok(
         "list_managed_identities",
         &fixtures::managed_identities(&["mi-prod-api"]),
     );
-    let grants: Vec<_> = values.iter().map(|v| fixtures::held_grant(v)).collect();
     ts::mock_ok("list_held_app_role_grants", &grants);
     ts::mock_ok(
         "get_mail_scopes_for_principal",
@@ -78,6 +87,38 @@ async fn callout_names_orgwide_values_and_scope_opens_the_wizard_preseeded() {
     // the preseed contract jumps straight to the choose-access step.
     click_button("Scope…");
     ts::wait_for(|| ts::body_contains("Step 2 of 3")).await;
+}
+
+#[wasm_bindgen_test]
+async fn callout_names_the_ews_scope_and_warns_that_it_overrides_mailbox_scopes() {
+    // `full_access_as_app` lives on Office 365 Exchange Online, not Microsoft
+    // Graph. It reaches every mailbox with full access, so it must appear here —
+    // and the note has to say it overrides per-permission mailbox scopes, matching
+    // the backend rule that forces a scoped verdict back to org-wide while it
+    // survives.
+    let _m = mount_with(vec![fixtures::held_exchange_grant("full_access_as_app")]).await;
+    ts::wait_for(|| ts::body_contains("holds organization-wide access")).await;
+    assert!(
+        ts::body_contains("full_access_as_app"),
+        "the callout names the EWS scope"
+    );
+    assert!(
+        ts::body_contains("overrides any per-permission mailbox scope"),
+        "the blanket-grant note explains why other scopes don't help yet"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn callout_ignores_exchange_onlines_unscopable_mail_role() {
+    // Same value name as Graph's, different resource: Office 365 Exchange Online's
+    // `Mail.Read` (retired Outlook REST) has no RBAC role, so offering "Scope…"
+    // would promise a confinement the backend refuses to apply.
+    let _m = mount_with(vec![fixtures::held_exchange_grant("Mail.Read")]).await;
+    ts::wait_for(|| ts::body_contains("Mail.Read")).await;
+    assert!(
+        !ts::body_contains("holds organization-wide access"),
+        "an un-scopable Exchange Online role must not offer scoping"
+    );
 }
 
 #[wasm_bindgen_test]

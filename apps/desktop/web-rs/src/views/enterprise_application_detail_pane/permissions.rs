@@ -6,7 +6,7 @@ use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeS
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
 use crate::components::orgwide_scope_callout::OrgwideScopeCallout;
 use crate::components::permission_picker::PickerSelection;
-use crate::components::scope_badge::{is_exchange_scopable, is_sharepoint_orgwide};
+use crate::components::scope_badge::{is_exchange_scopable_on, is_sharepoint_orgwide};
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
@@ -58,12 +58,19 @@ pub(super) fn PermissionsContent(
             let Some(t) = tenant else {
                 return Ok(HashMap::<String, MailPermissionScope>::new());
             };
+            // Resource-aware: the EWS `full_access_as_app` scope on Office 365
+            // Exchange Online counts, that resource's own `Mail.Read` family
+            // (retired Outlook REST, no RBAC role) does not.
             let mail_values: Vec<String> = granted
                 .await
                 .unwrap_or_default()
                 .iter()
+                .filter(|p| {
+                    p.app_role_value
+                        .as_deref()
+                        .is_some_and(|v| is_exchange_scopable_on(p.resource_app_id.as_deref(), v))
+                })
                 .filter_map(|p| p.app_role_value.clone())
-                .filter(|v| is_exchange_scopable(v))
                 .collect();
             if mail_values.is_empty() {
                 return Ok(HashMap::new());
@@ -205,8 +212,12 @@ pub(super) fn PermissionsContent(
                             // the held list + scope verdicts after a coarse grant.
                             let mail_values: Vec<String> = list
                                 .iter()
+                                .filter(|p| {
+                                    p.app_role_value.as_deref().is_some_and(|v| {
+                                        is_exchange_scopable_on(p.resource_app_id.as_deref(), v)
+                                    })
+                                })
                                 .filter_map(|p| p.app_role_value.clone())
-                                .filter(|v| is_exchange_scopable(v))
                                 .collect();
                             let has_sites = list.iter().any(|p| {
                                 p.app_role_value

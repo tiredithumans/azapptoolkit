@@ -7,6 +7,235 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **The EWS `full_access_as_app` scope was invisible to every Exchange scoping
+  path, and migrating its Application Access Policy widened the app's access.**
+  Per [Microsoft's AAP
+  documentation](https://learn.microsoft.com/exchange/permissions-exo/application-access-policies),
+  a policy can confine eleven Microsoft Graph mail permissions **and** the
+  Exchange Web Services `full_access_as_app` scope — the latter an appRole on the
+  legacy *Office 365 Exchange Online* resource, not on Graph. Target derivation,
+  grant stripping and org-wide reconciliation all filtered to the Graph resource
+  SP, so for an app scoped that way the migration assigned no
+  `Application EWS.AccessAsApp` role and revoked no consent (the admin consent
+  stayed granted), yet **still deleted the legacy policy** and reported
+  `migrated` — leaving the app with org-wide EWS access to every mailbox. The
+  same blind spot made the Permissions-tab Scope column, the security audit and
+  the Permission tester report a mail permission as `Scoped` while a surviving
+  org-wide EWS grant still reached every mailbox: an under-report, the one
+  direction those surfaces are not allowed to err in. All of them now resolve
+  grants against both mailbox-bearing resources via one shared index
+  (`graph_roles::mailbox_resource_roles`), each scope target carries the resource
+  its grant lives on so a strip can't hit the wrong API, and a surviving
+  `full_access_as_app` grant vetoes *every* per-permission scope verdict rather
+  than only its own name. Office 365 Exchange Online's own `Mail.Read`-style
+  appRoles (retired Outlook REST) deliberately do **not** map — RBAC for
+  Applications covers MS Graph and EWS only, so claiming a scope there would
+  strip a grant that has no scoped replacement.
+
+- **A `DenyAccess` Application Access Policy migrated into its own inverse.** The
+  migration filtered policies by appId alone and never read `AccessRight`. A
+  `DenyAccess` policy is a blocklist — every mailbox *except* its group — whereas
+  an RBAC management scope allows only what it names, so converting one gave the
+  app access to exactly the mailboxes it had been denied and removed the rest.
+  Only `RestrictAccess` policies are migrated now; a `DenyAccess` policy (or one
+  whose `AccessRight` can't be read) is reported with an explanation instead.
+
+- **Apps with several Application Access Policies silently lost scope groups.**
+  Policies were migrated one at a time, each deriving the same per-app management
+  scope name; `ensure_management_scope` keeps an existing scope, so the second
+  policy's group never made it into the filter — and then both policies were
+  deleted, cutting those mailboxes off. Migration now batches every
+  `RestrictAccess` policy of one app into a single scope spanning all their
+  groups, which is what the policies granted (their combined effect is the union
+  — `New-ApplicationAccessPolicy` evaluation rule 3).
+
+- **The legacy policy is no longer deleted while it is still load-bearing.**
+  Deletion (documented step 5) now runs only once every org-wide grant the policy
+  was constraining has actually been re-scoped. Anything left org-wide keeps its
+  policy and the run reports `partial`, naming the grants that held it back —
+  because that policy is the only thing still restricting them.
+
+- **Composite RBAC roles read as organization-wide.** `Application Mail Full
+  Access` and `Application Exchange Full Access` bundle several permissions and
+  carry none of their individual role names, so matching
+  `Test-ServicePrincipalAuthorization` rows on `RoleName` alone found no row for
+  (say) `Mail.Send` and fell through to the no-rows ⇒ org-wide default. A
+  correctly scoped app was reported as unscoped, inflating its audit score. Rows
+  are now matched on `GrantedPermissions` as well, which is where the cmdlet
+  reports the bundle.
+
+- **The UI couldn't name the permission the backend had started acting on.** Held
+  app-role grants resolved values for Microsoft Graph only, so a principal holding
+  the EWS `full_access_as_app` scope showed a bare GUID, got no Scope verdict, no
+  Exchange scoping section and no org-wide callout — while the audit and the
+  Permission tester had begun treating that grant as org-wide mailbox reach.
+  `AppRoleGrantDto` now carries `resource_app_id` and resolves values for both
+  mailbox resources, and every held-permission surface judges scopability with
+  `is_exchange_scopable_on(resource, value)` instead of the value alone. That
+  distinction is load-bearing in both directions: Office 365 Exchange Online's own
+  `Mail.Read` (retired Outlook REST, no RBAC role) no longer offers a "Scope…"
+  action the backend refuses to honour or shows an "Unknown" verdict that will
+  never arrive, and a `full_access_as_app` row seeds the Grant-access wizard with
+  its *own* resource rather than Microsoft Graph, which doesn't expose it.
+
+- **The org-wide callout now explains a blanket grant.** When a principal holds
+  `full_access_as_app`, the callout says it reaches every mailbox on its own and
+  overrides any per-permission mailbox scope until removed — the same rule
+  `reconcile_orgwide_grant` applies, so the callout and the Scope column can no
+  longer appear to contradict each other.
+
+- **A migration that stopped short no longer reads as a success.** The result
+  header and per-app rows distinguish `migrated` from `partial`, show
+  "Legacy policies: N kept" rather than a bare boolean, and render each app's
+  warnings inline — which is where "kept the policy because X is still org-wide"
+  is explained. A dry run says explicitly that nothing has changed yet.
+
+### Changed
+
+- **`AapMigrationItem` is per application, not per policy.**
+  `source_policy_identity: Option<String>` became `source_policy_identities:
+  Vec<String>` and `removed_policy: bool` became `removed_policies: Vec<String>`,
+  since one item can now fold several policies and may deliberately delete none
+  of them. `status` gains `partial`. The migration result list also renders each
+  item's warnings, which is where the "kept the policy because X is still
+  org-wide" explanation lands.
+
+- **One directory-search control instead of four copies.** The Settings
+  default-owner editors, the Settings SSO-notification distribution-list picker,
+  the Exchange scope forms' group typeahead, and both search blocks on the
+  enterprise Access tab each carried their own copy of the same sixty lines —
+  same 300 ms debounce, same 2-character gate, same `Suspense` + "Searching…"
+  spinner, same `.candidates` markup — and had already drifted: two showed a
+  bare "No matches." under an untouched search box (their empty-check could not
+  tell "searched and found none" from "hasn't searched yet"), and the Access tab
+  subtitled a group with the literal word "Group" where the others showed the
+  object id. `components::directory_search::DirectorySearch` now backs all of
+  them; it never mutates anything, handing the picked `DirectoryObject` to the
+  caller, which is what lets one component serve a direct callback, a
+  text-field append, and a stage-then-confirm dialog flow. Net −477/+134 lines.
+
+- **One tab implementation instead of two.** Six surfaces used Thaw's `TabList`
+  while the rest used the in-house `TabBar`. They now all use `TabBar`, which is
+  an accessibility fix rather than a matter of taste: `thaw::Tab` emits
+  `role="tab"` and `aria-selected` but has **no roving `tabindex` and no keydown
+  handler**, so the 10-tab enterprise detail pane cost a keyboard user ten Tab
+  presses to cross and offered no arrow-key movement at all. Converting also
+  deleted a CSS workaround — `.thaw-tab-list` needed an app-side `overflow-x`
+  patch to stop clipping tabs past the pane edge, which `.ui-tabs` never needed.
+  `FilterChip` deliberately stays a `<button>` (Thaw's `Tab` takes only
+  `class`/`value`/`children`, so it cannot carry a count badge or the
+  zero-count disabled state), and selects stay selects where the option list is
+  long.
+
+### Fixed
+
+- **A false rationale that was steering design decisions.** `FilterChip`'s doc
+  comment asserted that a dynamic Thaw `TabList` "pulls `uuid-v4` on wasm, a
+  known no-go". Both halves were wrong: thaw's `tab_list/` contains no `uuid`
+  reference at all — a tab's identity is the caller's `value` string — and
+  `ConfigProvider` mints a `Uuid::new_v4()` on wasm at root mount on every
+  single boot, so uuid-on-wasm cannot be a no-go or the app would not start.
+  Three of the six `TabList` call sites were already dynamic and shipping. The
+  claim had no supporting evidence anywhere in the repo's history.
+
+- **Form labels read as labels.** A thaw `<Field>` label rendered at body size,
+  regular weight and the primary foreground — typographically identical to the
+  value underneath it — across ~97 fields, so a form had a heading tier and then
+  two indistinguishable tiers below it. Labels are now medium-weight and muted,
+  matching the treatment the app had already hand-rolled for `.sso-field__label`
+  on three of those ~100 sites. One rule; every dialog, wizard step and detail
+  tab gets the hierarchy.
+
+- **The enterprise Access tab.** Its "Assign: Users / Groups" choice was a pair
+  of buttons whose selected state was a Primary appearance — the only instance
+  of that technique in the app; it now uses `TabBar`, the same primitive the
+  permission picker uses for its identical Application/Delegated choice, which
+  brings `role="tab"`, roving tabindex and arrow-key navigation with it. Row
+  actions were 7px above their own row text (`.data-table` cells are
+  `vertical-align: top` and the button is taller than a line), fixed with the
+  `.cell-mid` opt-out that already existed and that five other tables use —
+  except on the two-line group-identity cell, which stays top-aligned per that
+  rule's own carve-out. `.ent-access` and `.ent-owners` had **no CSS rule at
+  all**, so those tabs' vertical rhythm was whatever the UA's `<h4>` margins
+  collapsed to while every sibling tab was a token-gapped grid. The "Requires:
+  Groups Administrator" pill sat *inside* the `<h4>`, inheriting its bold.
+  Search failures used `.app-detail__error` (the whole-pane variant: 16px
+  padding, no `pre-wrap`, so it dropped the backend's guidance line breaks)
+  where the two equivalent primitives use `.form-error`.
+
+### Fixed
+
+- **Tabs never announced which one was selected.** `TabBar` bound `aria-selected`
+  to a `bool`, which Leptos renders as a *boolean* attribute — present-and-empty
+  for true, omitted for false — so the active tab shipped `aria-selected=""`,
+  not a valid ARIA value, and no tab ever carried `aria-selected="true"`. Now
+  set as a string, matching how `global_search.rs` and `permission_tester_view.rs`
+  already set the same attribute. Affects every `TabBar`: Security, Settings,
+  Bulk Actions, the permission picker, and the Access tab.
+
+- **Destructive actions are red everywhere, and red now means destructive.** A
+  census of every button in the front-end found the treatment applied by hand
+  and unevenly: three one-click Trash buttons on the API permissions tab
+  (revoke an app-role assignment, revoke a delegated scope, strip a declared
+  permission from the manifest) rendered in the ordinary glyph colour, as did
+  both **Remove** buttons on the enterprise **Access** tab, Exchange scoping's
+  "Remove all…", and "Rotate & remove existing" — which sits next to "Rotate
+  (keep old)" and deletes every existing secret. In Bulk Actions only *Delete*
+  reddened, so "Remove expired credentials" and "Remove redundant permissions"
+  armed as ordinary buttons; that now comes from a single
+  `BulkAction::is_destructive()` instead of two hand-maintained match arms that
+  disagreed. The shared CSS rule also contradicted its own comment: it promised
+  icon-only actions "just the red colour so they don't become heavy red squares"
+  while setting `border-color` on a transparent 1px border — i.e. drawing
+  exactly that square. Labeled buttons keep border + text + fill; icon-only ones
+  are a red glyph with the tint deferred to hover, so a forty-row list reads as
+  forty actions rather than forty errors. `DisableSignIn` is deliberately left
+  un-reddened: it is reversible, and reserving red for the irreversible is what
+  makes it worth reading.
+
+- **Dropdowns look like the rest of the app.** There was no select styling at
+  all, so the Access tab's "Role" picker and the SSO tab's "Set sign-on method"
+  rendered as raw native controls — browser-grey border, square corners, no
+  padding, and a UA-chosen font, so they didn't even inherit the app's typeface.
+  Both now use a `.ui-select` primitive whose metrics match the inputs and
+  buttons they sit beside, with an inline-SVG chevron (no network request; the
+  CSP forbids one). The root also declares `color-scheme`, which is what makes
+  the *native* parts CSS cannot reach — the dropdown popup list, scrollbars —
+  follow the dark theme instead of staying light.
+
+- **The enterprise SSO tab matches its siblings.** Its five "one per line"
+  textareas (SAML identifiers and reply URLs, OIDC web and SPA redirect URIs,
+  notification emails) are now the same per-row editor the Authentication tab
+  uses. Validation is per-list rather than shared, which the migration forced
+  into the open: a SAML Entity ID is routinely a bare `urn:`, and the redirect
+  rules reject `urn:` on purpose — one shared validator would have painted a red
+  bar on a correct SAML config. Reply URLs and redirect URIs take the redirect
+  rules; identifiers and emails don't. Also fixed there: every button rendered
+  as a full-width bar (the tab is a stretch flex column and nothing constrained
+  them), section headings sat a rank below the sibling tabs' titles, and the
+  read-only "Current method" value carried the browser's default 40px `<dd>`
+  indent. The GitHub Pages demo now mocks `get_sso_config`, so the SSO tab shows
+  the tab instead of an error.
+
+- **Redirect URIs are edited one per row, not as a block of text.** All three
+  platform lists on an app registration's Authentication tab were
+  newline-separated text boxes, so an app with thirty web reply URLs was a small
+  scrolling textarea in which no single entry could be removed without hand
+  editing the text around it — and leaving a stray fragment behind was one
+  keystroke away. Each URI is now its own field with its own Remove button, the
+  list carries an entry count, and "Add" appends a row (Enter from a row does the
+  same, and pasting a multi-line block still works — it splits into one row per
+  line rather than collapsing into a single unusable entry). Entries are checked
+  as you type against the *same* validator the backend runs, so an offending URI
+  is marked on its own row, with the reason, before you save: previously the
+  backend reported only the **first** rejection across all three platforms, so
+  three bad URIs cost three round trips and nothing pointed at which line was
+  wrong. Exact repeats are flagged too. None of this blocks Save — the backend
+  remains the authority, so a rule the client doesn't mirror can never make an
+  app unsavable through the UI.
+
 ### Removed
 
 - **Four public client APIs with no callers**, including a superseded

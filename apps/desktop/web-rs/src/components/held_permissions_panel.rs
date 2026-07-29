@@ -115,14 +115,19 @@ pub fn HeldPermissionsPanel(
         let risk = value.as_deref().map(app_permission_risk_badge);
         let scope = value.as_deref().and_then(|v| scope_map.get(v).cloned());
         let scope_value = value.clone();
+        let scope_resource = p.resource_app_id.clone();
         let assignment_id = p.assignment_id.clone();
+        let row_resource_app_id = scope_resource.clone();
         let scope_btn = on_scope.and_then(|cb| {
             let v = value.clone()?;
             is_held_scopable(&v).then(|| {
-                // Held-scopable ⇒ a Microsoft Graph `Sites.*` application role,
-                // so the selection is fully determined here.
+                // Seed from the row's OWN resource, falling back to Microsoft Graph
+                // for a row whose resource wasn't resolved (a `Sites.*` role is
+                // always Graph's, so the fallback can't misattribute one).
                 let sel = PickerSelection {
-                    resource_app_id: MICROSOFT_GRAPH_APP_ID.to_string(),
+                    resource_app_id: row_resource_app_id
+                        .clone()
+                        .unwrap_or_else(|| MICROSOFT_GRAPH_APP_ID.to_string()),
                     kind: PermissionKind::Application,
                     permission_id: app_role_id.clone(),
                     permission_value: v.clone(),
@@ -164,7 +169,13 @@ pub fn HeldPermissionsPanel(
                             <td class="cell-mid">
                                 // This panel only receives the resolved map, so it can't
                                 // distinguish in-flight from failed — no loading state here.
-                                {permission_scope_cell(scope_value.as_deref(), scope, true, false)}
+                                {permission_scope_cell(
+                                    scope_value.as_deref(),
+                                    scope_resource.as_deref(),
+                                    scope,
+                                    true,
+                                    false,
+                                )}
                             </td>
                         }
                     })}

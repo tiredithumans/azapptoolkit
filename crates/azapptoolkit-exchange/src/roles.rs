@@ -1,5 +1,7 @@
-//! Maps Microsoft Graph application permissions to the equivalent Exchange
-//! Online RBAC "application role" names.
+//! Maps application permissions to the equivalent Exchange Online RBAC
+//! "application role" names — the Microsoft Graph mail/calendar/contacts set
+//! plus the EWS `full_access_as_app` scope on the legacy Office 365 Exchange
+//! Online resource.
 //!
 //! The canonical mapping now lives in `azapptoolkit_core::scoping` so the WASM
 //! frontend's scope badges and this backend share one definition; this module
@@ -7,5 +9,7 @@
 //! root re-export in `lib.rs`).
 
 pub use azapptoolkit_core::scoping::{
-    exchange_role_for_graph_permission, is_scopable_exchange_permission,
+    EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
+    exchange_role_for_permission, exchange_role_for_resource_permission, is_blanket_mailbox_grant,
+    is_scopable_exchange_permission,
 };

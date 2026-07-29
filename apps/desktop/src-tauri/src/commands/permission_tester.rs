@@ -38,7 +38,7 @@ use azapptoolkit_exchange::models::{
 
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::exchange::{aap_verdict_for, exchange_client, is_org_wide_auth_row};
-use crate::commands::graph_roles::graph_role_index;
+use crate::commands::graph_roles::{graph_role_index, mailbox_resource_roles, resolve_grant};
 use crate::commands::progress::emit_progress;
 use crate::dto::UiError;
 use crate::dto::permission_tester::{
@@ -63,13 +63,17 @@ async fn orgwide_mailbox_grant(
         .get_service_principal_by_app_id(app_id)
         .await
         .ok()??;
-    let (_, role_value_by_id) = graph_role_index(&client).await.ok()?;
+    // Across BOTH mailbox-bearing resources: reading Microsoft Graph alone missed
+    // an org-wide EWS `full_access_as_app` grant, which reaches every mailbox.
+    let resources = mailbox_resource_roles(&client).await.ok()?;
     let assignments = client.list_app_role_assignments(&sp.id).await.ok()?;
     let mut perms: Vec<String> = assignments
         .iter()
-        .filter_map(|a| role_value_by_id.get(&a.app_role_id))
+        .filter_map(|a| {
+            resolve_grant(&resources, &a.resource_id, &a.app_role_id).map(|(_, _, value)| value)
+        })
         .filter(|value| is_scopable_exchange_permission(value))
-        .cloned()
+        .map(str::to_string)
         .collect();
     perms.sort();
     perms.dedup();

@@ -289,6 +289,24 @@ fn register_fixtures() {
         scopes_by_id.get(oid).cloned().unwrap_or_default()
     });
 
+    // Authentication tab. Both its commands are fallible, so an unmocked read
+    // can't panic — but without this a visitor clicking Authentication got the
+    // DemoFriendly rejection where the form should be. Seeded with enough reply
+    // URLs to show the per-row editor doing its job.
+    mock_ok(
+        "get_application_authentication",
+        &f::application_authentication(
+            &[
+                "https://crm.contoso.com/signin-oidc",
+                "https://crm.contoso.com/auth/callback",
+                "https://staging.crm.contoso.com/signin-oidc",
+                "http://localhost:5173/signin-oidc",
+            ],
+            &["https://crm.contoso.com/"],
+            &["myapp://auth"],
+        ),
+    );
+
     // ---- Enterprise Applications: list + per-id detail ----
     let ent_specs: &[(&str, bool, bool)] = &[
         // (name, account_enabled, is_foreign_tenant)
@@ -386,6 +404,10 @@ fn register_fixtures() {
             f::group_membership("SaaS Applications", true, false),
         ],
     );
+    // The SSO tab is fallible, so an unmocked read can't panic — but without
+    // this a visitor clicking SSO got the DemoFriendly rejection where the
+    // whole tab should be, on the surface this app is most known for.
+    mock_ok("get_sso_config", &f::sso_config("sp-demo", "app-demo"));
     mock_ok(
         "get_enterprise_app_provisioning",
         &vec![f::provisioning_job(
@@ -395,16 +417,24 @@ fn register_fixtures() {
         )],
     );
 
-    // Held Microsoft Graph app-role grants — the Permissions/"granted" tab on
-    // BOTH enterprise apps and managed identities (shared command). Varied per id
-    // so different principals show different grants.
+    // Held app-role grants — the Permissions/"granted" tab on BOTH enterprise apps
+    // and managed identities (shared command). Varied per id so different
+    // principals show different grants. One variant holds the legacy EWS
+    // `full_access_as_app` scope on Office 365 Exchange Online: it's the broadest
+    // mailbox grant there is, it's Exchange-RBAC-scopable, and a surviving one
+    // defeats every other mailbox scope — so the demo shows the org-wide callout
+    // naming it, which is the flow an operator migrating off Application Access
+    // Policies actually walks.
     let held_variants: Vec<Vec<_>> = vec![
         vec![
             f::held_grant("User.Read.All"),
             f::held_grant("Group.Read.All"),
         ],
         vec![f::held_grant("Mail.Send"), f::held_grant("Files.Read.All")],
-        vec![f::held_grant("Directory.Read.All")],
+        vec![
+            f::held_grant("Directory.Read.All"),
+            f::held_exchange_grant("full_access_as_app"),
+        ],
     ];
     mock_each("list_held_app_role_grants", move |args| {
         let id = args
@@ -504,10 +534,12 @@ fn register_fixtures() {
     // ---- Settings (per-tenant defaults) + owner search ----
     // get_tenant_defaults is an infallible `invoke`, so it MUST be mocked or the
     // demo panics on the rejected-promise fallback. search_users powers the owner
-    // pickers (Settings + the Owners tabs).
+    // pickers (Settings + the Owners tabs); search_groups powers the Access tab's
+    // Groups scope and the Exchange scope typeahead.
     mock_ok("get_tenant_defaults", &f::tenant_defaults());
     mock_ok("set_tenant_defaults", &());
     mock_ok("search_users", &f::directory_user_search());
+    mock_ok("search_groups", &f::directory_group_search());
     mock_ok("search_distribution_lists", &f::distribution_list_search());
     // "New application" → Browse the gallery: template search + instantiate.
     // Args-aware so the demo runs the real substring match over the sample

@@ -361,6 +361,7 @@ pub fn ExchangeScopingSection(
                                 <strong>"Current Exchange role assignments"</strong>
                                 <span class="row-actions">
                                     <Button
+                                        class="button--danger"
                                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                         on_click=Box::new(move |_| confirm_remove.set(true))
                                         disabled=Signal::derive(move || remove_cmd.busy.get())
@@ -480,7 +481,7 @@ pub fn ExchangeScopingSection(
                                 <strong>"Migrate legacy Application Access Policy"</strong>
                             </header>
                             <Body1>
-                                "If this app is still scoped by a legacy Application Access Policy, migrate it to RBAC: a management scope is built from the policy's group, the scoped roles are assigned, the org-wide Entra grants are removed, and the policy is deleted. Preview first to see the plan."
+                                "If this app is still scoped by a legacy Application Access Policy, migrate it to RBAC: a management scope is built from the policy's group (all of them, if the app has several), the scoped roles are assigned, and the matching org-wide Entra grants are removed — Microsoft Graph mail permissions and the Exchange Web Services full_access_as_app scope alike. The legacy policy is deleted only once every grant it was confining has been re-scoped; anything left org-wide keeps its policy, because that policy is the only thing still restricting it. Only RestrictAccess policies are migrated: a DenyAccess policy is a blocklist and has no equivalent management scope. Preview first to see the plan."
                             </Body1>
                             <Field label="Management scope name (optional)">
                                 <Input
@@ -528,31 +529,89 @@ pub fn ExchangeScopingSection(
                                 mig_result
                                     .get()
                                     .map(|r| {
-                                        let header = if r.dry_run {
-                                            format!(
-                                                "Plan: {} policy(ies) would be migrated.",
-                                                r.items.len(),
-                                            )
+                                        // "partial" means the run did real work but
+                                        // deliberately stopped short — almost always
+                                        // "kept the legacy policy because a grant is
+                                        // still org-wide". That has to read as
+                                        // needs-attention, not as a plain success, or
+                                        // an operator walks away believing the
+                                        // migration finished.
+                                        let needs_attention = !r.dry_run
+                                            && r.items.iter().any(|i| i.status != "migrated");
+                                        let header = match (r.dry_run, needs_attention) {
+                                            (true, _) => {
+                                                format!("Plan: {} app(s) would be migrated. Nothing has changed yet.", r.items.len())
+                                            }
+                                            (false, false) => format!("Migrated {} app(s).", r.items.len()),
+                                            (false, true) => {
+                                                format!(
+                                                    "Migrated {} app(s), but some need attention — see the notes below.",
+                                                    r.items.len(),
+                                                )
+                                            }
+                                        };
+                                        let header_class = if needs_attention || !r.failures.is_empty() {
+                                            "alert alert--warn"
                                         } else {
-                                            format!("Migrated {} policy(ies).", r.items.len())
+                                            "alert alert--ok"
                                         };
                                         let items = r.items.clone();
                                         let failures = r.failures.clone();
                                         view! {
-                                            <div class="alert alert--ok">{header}</div>
+                                            <div class=header_class>{header}</div>
                                             <ul class="warnings">
                                                 {items
                                                     .into_iter()
                                                     .map(|i| {
+                                                        let scoped = if i.roles_assigned.is_empty() {
+                                                            "none".to_string()
+                                                        } else {
+                                                            i.roles_assigned.join(", ")
+                                                        };
+                                                        let stripped = if i.removed_entra_grants.is_empty() {
+                                                            "none".to_string()
+                                                        } else {
+                                                            i.removed_entra_grants.join(", ")
+                                                        };
+                                                        let policies = match (
+                                                            i.removed_policies.len(),
+                                                            i.source_policy_identities.len(),
+                                                        ) {
+                                                            (0, n) => format!("{n} kept"),
+                                                            (removed, n) if removed == n => {
+                                                                format!("{removed} removed")
+                                                            }
+                                                            (removed, n) => {
+                                                                format!("{removed} of {n} removed")
+                                                            }
+                                                        };
                                                         let line = format!(
-                                                            "{} — {} | roles: {} | removed grants: {} | policy removed: {}",
+                                                            "{} — {}. Scoped roles: {scoped}. Org-wide grants removed: {stripped}. Legacy policies: {policies}.",
                                                             i.app_id,
                                                             i.status,
-                                                            i.roles_assigned.join(", "),
-                                                            i.removed_entra_grants.join(", "),
-                                                            i.removed_policy,
                                                         );
-                                                        view! { <li>{line}</li> }
+                                                        let warnings = i.warnings.clone();
+                                                        let row_class = if i.status == "migrated" {
+                                                            ""
+                                                        } else {
+                                                            "form-error"
+                                                        };
+                                                        view! {
+                                                            <li class=row_class>
+                                                                {line}
+                                                                {(!warnings.is_empty())
+                                                                    .then(|| {
+                                                                        view! {
+                                                                            <ul>
+                                                                                {warnings
+                                                                                    .into_iter()
+                                                                                    .map(|w| view! { <li class="hint">{w}</li> })
+                                                                                    .collect_view()}
+                                                                            </ul>
+                                                                        }
+                                                                    })}
+                                                            </li>
+                                                        }
                                                     })
                                                     .collect_view()}
                                                 {failures

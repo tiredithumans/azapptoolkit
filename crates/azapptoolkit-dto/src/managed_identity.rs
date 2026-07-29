@@ -57,11 +57,21 @@ pub struct ManagedIdentityDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppRoleGrantDto {
     pub assignment_id: String,
+    /// The resource **service principal's** object id (what
+    /// `appRoleAssignment.resourceId` points at).
     pub resource_id: String,
+    /// The resource's stable *application* id, when it is one the toolkit
+    /// resolves (Microsoft Graph, Office 365 Exchange Online). Needed by any
+    /// caller that reasons about the permission — scopability is per-resource,
+    /// and both of those resources expose an appRole named `Mail.Read` — or that
+    /// seeds a permission picker from this row.
+    #[serde(default)]
+    pub resource_app_id: Option<String>,
     pub resource_display_name: Option<String>,
     pub app_role_id: String,
-    /// Resolved permission value (e.g. `Mail.Read`) when known — currently
-    /// filled for Microsoft Graph roles; `None` for other resources.
+    /// Resolved permission value (e.g. `Mail.Read`, `full_access_as_app`) when
+    /// known — filled for the resources named by `resource_app_id`; `None` for
+    /// any other resource, whose row renders the raw appRole id.
     pub app_role_value: Option<String>,
 }
 

@@ -1,12 +1,14 @@
 //! Permission-*scoping* predicates shared by the backend and the WASM frontend.
 //!
-//! Both surfaces need to answer the same two questions about a Graph application
+//! Both surfaces need to answer the same two questions about an application
 //! permission value, and they must answer them identically:
-//! - **Exchange** (mail/calendar/contacts): can this permission be resource-scoped
-//!   via RBAC for Applications? The answer is authoritative only if it matches the
-//!   exact set Exchange recognises, so it is derived from the role *map*, never a
-//!   loose prefix check (`Mail.ReadWrite.Shared` looks mail-ish but has no Exchange
-//!   application role, so it is **not** scopable).
+//! - **Exchange** (mail/calendar/contacts, plus the EWS `full_access_as_app`
+//!   scope on the legacy Office 365 Exchange Online resource): can this
+//!   permission be resource-scoped via RBAC for Applications? The answer is
+//!   authoritative only if it matches the exact set Exchange recognises, so it is
+//!   derived from the role *map*, never a loose prefix check
+//!   (`Mail.ReadWrite.Shared` looks mail-ish but has no Exchange application
+//!   role, so it is **not** scopable).
 //! - **SharePoint** (`Sites.*`): scoping is encoded by the permission name —
 //!   `Sites.Selected` is the scoped model, every other `Sites.*` is org-wide.
 //!
@@ -15,17 +17,38 @@
 //! definition instead of drifting copies. `azapptoolkit-exchange` re-exports the
 //! Exchange helpers for its existing callers.
 
-/// The Exchange application role that grants the same capability as
-/// `graph_permission` (e.g. `Mail.Read` -> `Application Mail.Read`). Returns
-/// `None` for Graph permissions that have no Exchange application role (these
-/// are not scopable via RBAC for Applications and must stay org-wide).
+/// Microsoft Graph's first-party app id — the resource that exposes the
+/// mail/calendar/contacts **application** permissions.
+pub const MICROSOFT_GRAPH_APP_ID: &str = "00000003-0000-0000-c000-000000000000";
+
+/// The legacy **Office 365 Exchange Online** resource. It carries the EWS
+/// [`EWS_FULL_ACCESS_AS_APP`] scope, which is the one non-Graph permission the
+/// old Application Access Policies could confine — so every Exchange scoping
+/// path has to understand it, not just the Graph resource.
+pub const OFFICE365_EXCHANGE_ONLINE_APP_ID: &str = "00000002-0000-0ff1-ce00-000000000000";
+
+/// Exchange Web Services full-mailbox-access scope, exposed as an appRole on
+/// [`OFFICE365_EXCHANGE_ONLINE_APP_ID`] (never on Microsoft Graph). Documented
+/// as an Application-Access-Policy-supported scope, and scopable under RBAC for
+/// Applications via `Application EWS.AccessAsApp`.
+pub const EWS_FULL_ACCESS_AS_APP: &str = "full_access_as_app";
+
+/// RBAC-for-Applications role backing [`EWS_FULL_ACCESS_AS_APP`].
+const EWS_ACCESS_AS_APP_ROLE: &str = "Application EWS.AccessAsApp";
+
+/// The Exchange application role for a **Microsoft Graph** mail/calendar/contacts
+/// application permission. This set is exactly the Graph permission list
+/// Application Access Policies supported, so an AAP migration can always map
+/// what a policy was confining.
 ///
 /// Source: <https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac>
-/// ("Supported Application Roles"). Only the mail/calendar/contacts subset
-/// commonly used with the old Application Access Policies is mapped here; the
-/// full role list is larger.
-pub fn exchange_role_for_graph_permission(graph_permission: &str) -> Option<&'static str> {
-    let role = match graph_permission {
+/// ("Supported Application Roles") ∩
+/// <https://learn.microsoft.com/en-us/exchange/permissions-exo/application-access-policies>
+/// ("Supported permissions"). The full RBAC role list is larger (mailbox
+/// folders/items, SMTP, MailTips, and the composite full-access roles); those
+/// were never AAP-scopable, so they are deliberately absent here.
+fn graph_mail_role(value: &str) -> Option<&'static str> {
+    let role = match value {
         "Mail.Read" => "Application Mail.Read",
         "Mail.ReadBasic" | "Mail.ReadBasic.All" => "Application Mail.ReadBasic",
         "Mail.ReadWrite" => "Application Mail.ReadWrite",
@@ -41,12 +64,76 @@ pub fn exchange_role_for_graph_permission(graph_permission: &str) -> Option<&'st
     Some(role)
 }
 
-/// True when `graph_permission` is an Exchange mailbox permission that can be
+/// The Exchange application role that grants the same capability as the
+/// permission `value` on `resource_app_id` — the **authoritative** form, used by
+/// every path that has to name a concrete Entra app-role grant (deriving scope
+/// targets, stripping the org-wide grant). Returns `None` when the resource
+/// doesn't expose a scopable mailbox permission of that name.
+///
+/// The resource matters: the legacy Office 365 Exchange Online resource exposes
+/// `Mail.Read`-style appRoles of its own for the retired Outlook REST API, and
+/// those have **no** RBAC-for-Applications counterpart (the supported protocols
+/// are MS Graph and EWS only). Matching them to `Application Mail.Read` would
+/// claim a scope the toolkit can't actually enforce, so only the EWS scope maps
+/// on that resource.
+pub fn exchange_role_for_resource_permission(
+    resource_app_id: &str,
+    value: &str,
+) -> Option<&'static str> {
+    match resource_app_id {
+        MICROSOFT_GRAPH_APP_ID => graph_mail_role(value),
+        OFFICE365_EXCHANGE_ONLINE_APP_ID => {
+            (value == EWS_FULL_ACCESS_AS_APP).then_some(EWS_ACCESS_AS_APP_ROLE)
+        }
+        _ => None,
+    }
+}
+
+/// The Exchange application role for a permission `value` whose resource isn't
+/// known at the call site (the effective-scope probe, badge rendering, a
+/// caller-supplied permission list). Unambiguous because the two mapped
+/// resources share no value names: `full_access_as_app` exists only on Office
+/// 365 Exchange Online, and every other mapped value only on Microsoft Graph.
+/// Prefer [`exchange_role_for_resource_permission`] wherever the resource IS
+/// known.
+pub fn exchange_role_for_permission(value: &str) -> Option<&'static str> {
+    graph_mail_role(value).or(exchange_role_for_resource_permission(
+        OFFICE365_EXCHANGE_ONLINE_APP_ID,
+        value,
+    ))
+}
+
+/// True when `value` is an Exchange mailbox permission that can be
 /// resource-scoped via RBAC for Applications. Authoritative (map-backed): a
 /// permission that merely *looks* like a mail permission but has no Exchange
 /// application role is **not** scopable.
-pub fn is_scopable_exchange_permission(graph_permission: &str) -> bool {
-    exchange_role_for_graph_permission(graph_permission).is_some()
+pub fn is_scopable_exchange_permission(value: &str) -> bool {
+    exchange_role_for_permission(value).is_some()
+}
+
+/// [`is_scopable_exchange_permission`] for a permission whose resource IS known —
+/// the form every surface that has a resource id should use. Office 365 Exchange
+/// Online's own `Mail.Read`-family appRoles (retired Outlook REST) have no RBAC
+/// role, so only the resource-aware answer can tell them apart from Microsoft
+/// Graph's identically named ones. A `None` resource means "a resource this build
+/// doesn't resolve", which is never scopable.
+pub fn is_scopable_exchange_resource_permission(
+    resource_app_id: Option<&str>,
+    value: &str,
+) -> bool {
+    resource_app_id.is_some_and(|id| exchange_role_for_resource_permission(id, value).is_some())
+}
+
+/// True for a grant that reaches **every** mailbox with full access regardless
+/// of which individual mail permission is being examined — today only the EWS
+/// [`EWS_FULL_ACCESS_AS_APP`] scope.
+///
+/// Such a surviving org-wide grant defeats *every* per-permission RBAC scope on
+/// the same principal (RBAC and Entra grants union), so the effective-scope
+/// reconciliation treats it as a blanket veto rather than matching it against
+/// one permission value.
+pub fn is_blanket_mailbox_grant(value: &str) -> bool {
+    value == EWS_FULL_ACCESS_AS_APP
 }
 
 /// True for an org-wide SharePoint permission — every `Sites.*` except
@@ -94,9 +181,10 @@ impl ScopeKind {
     }
 }
 
-/// The mechanism (if any) that can resource-scope the Graph permission `value`.
-/// Single source of truth: mail/calendar/contacts → Exchange RBAC; `Sites.Selected`
-/// or a broad `Sites.*` → SharePoint `Sites.Selected`; everything else (e.g.
+/// The mechanism (if any) that can resource-scope the permission `value`.
+/// Single source of truth: mail/calendar/contacts and the EWS
+/// `full_access_as_app` scope → Exchange RBAC; `Sites.Selected` or a broad
+/// `Sites.*` → SharePoint `Sites.Selected`; everything else (e.g.
 /// `Directory.Read.All`) is org-wide only and returns `None`.
 pub fn scope_kind(value: &str) -> Option<ScopeKind> {
     if is_scopable_exchange_permission(value) {
@@ -115,24 +203,86 @@ mod tests {
     #[test]
     fn maps_common_mail_permissions() {
         assert_eq!(
-            exchange_role_for_graph_permission("Mail.Read"),
+            exchange_role_for_permission("Mail.Read"),
             Some("Application Mail.Read")
         );
         assert_eq!(
-            exchange_role_for_graph_permission("Calendars.ReadWrite"),
+            exchange_role_for_permission("Calendars.ReadWrite"),
             Some("Application Calendars.ReadWrite")
         );
         assert_eq!(
-            exchange_role_for_graph_permission("Mail.ReadBasic.All"),
+            exchange_role_for_permission("Mail.ReadBasic.All"),
             Some("Application Mail.ReadBasic")
         );
     }
 
     #[test]
     fn unmapped_permission_returns_none() {
-        assert_eq!(exchange_role_for_graph_permission("User.Read.All"), None);
+        assert_eq!(exchange_role_for_permission("User.Read.All"), None);
         assert!(!is_scopable_exchange_permission("Directory.Read.All"));
         assert!(is_scopable_exchange_permission("Mail.Send"));
+    }
+
+    #[test]
+    fn ews_full_access_as_app_maps_on_the_exchange_online_resource() {
+        // The one non-Graph permission Application Access Policies could
+        // confine. It must map, or an AAP migration silently leaves the app with
+        // org-wide EWS access to every mailbox.
+        assert_eq!(
+            exchange_role_for_resource_permission(
+                OFFICE365_EXCHANGE_ONLINE_APP_ID,
+                EWS_FULL_ACCESS_AS_APP
+            ),
+            Some("Application EWS.AccessAsApp")
+        );
+        assert!(is_scopable_exchange_permission(EWS_FULL_ACCESS_AS_APP));
+        assert_eq!(
+            scope_kind(EWS_FULL_ACCESS_AS_APP),
+            Some(ScopeKind::Exchange)
+        );
+        // ...and only on that resource — Graph never exposes it.
+        assert_eq!(
+            exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, EWS_FULL_ACCESS_AS_APP),
+            None
+        );
+    }
+
+    #[test]
+    fn exchange_online_mail_lookalikes_have_no_rbac_role() {
+        // Office 365 Exchange Online exposes its own `Mail.Read`-style appRoles
+        // for the retired Outlook REST API. RBAC for Applications covers only MS
+        // Graph and EWS, so those must NOT map — claiming otherwise would report
+        // a scope the toolkit can't enforce and would strip a grant with no
+        // scoped replacement.
+        for value in ["Mail.Read", "Mail.Send", "Calendars.ReadWrite"] {
+            assert_eq!(
+                exchange_role_for_resource_permission(OFFICE365_EXCHANGE_ONLINE_APP_ID, value),
+                None,
+                "{value} on Office 365 Exchange Online must not map to an RBAC role"
+            );
+            // The same value on Graph does map.
+            assert!(exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, value).is_some());
+        }
+    }
+
+    #[test]
+    fn unknown_resource_maps_nothing() {
+        assert_eq!(
+            exchange_role_for_resource_permission(
+                "11111111-2222-3333-4444-555555555555",
+                "Mail.Read"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn only_ews_full_access_is_a_blanket_grant() {
+        // A blanket grant vetoes every per-permission scope verdict, so the set
+        // must stay exactly the permission that really reaches all mailboxes.
+        assert!(is_blanket_mailbox_grant(EWS_FULL_ACCESS_AS_APP));
+        assert!(!is_blanket_mailbox_grant("Mail.ReadWrite"));
+        assert!(!is_blanket_mailbox_grant("Mail.Read"));
     }
 
     #[test]

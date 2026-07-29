@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Input, Select, Spinner, SpinnerSize, Tab, TabList};
+use thaw::{Body1, Button, ButtonAppearance, Input, Select, Spinner, SpinnerSize};
 
 use azapptoolkit_core::audit::MailPermissionScope;
 
@@ -20,10 +20,12 @@ use crate::components::held_permissions_panel::HeldPermissionsPanel;
 use crate::components::orgwide_scope_callout::OrgwideScopeCallout;
 use crate::components::permission_picker::PickerSelection;
 use crate::components::requires_role::RequiresRole;
-use crate::components::scope_badge::is_exchange_scopable;
+use crate::components::scope_badge::is_exchange_scopable_on;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
-use crate::components::ui::{CopyableId, DataTable, DetailLoadError, SkeletonList};
+use crate::components::ui::{
+    CopyableId, DataTable, DetailLoadError, SkeletonList, TabBar, TabBarItem,
+};
 use crate::state::use_session;
 use crate::util::keep_alive;
 use crate::views::managed_identities::chip_kind_for;
@@ -122,11 +124,14 @@ pub fn ManagedIdentityDetailPane(
             refreshing=refreshing
         />
         // (managed identities can't be deleted from here — no on_delete passed)
-        <TabList selected_value=active_tab>
-            <Tab value="overview">"Overview"</Tab>
-            <Tab value="permissions">"Permissions"</Tab>
-            <Tab value="azure">"Azure RBAC"</Tab>
-        </TabList>
+        <TabBar
+            items=vec![
+                TabBarItem { value: "overview", label: "Overview" },
+                TabBarItem { value: "permissions", label: "Permissions" },
+                TabBarItem { value: "azure", label: "Azure RBAC" },
+            ]
+            selected=active_tab
+        />
         {keep_alive(active_tab, visited, "overview", move || view! {
         <div class="mi-tab">
             <dl class="mi-properties">
@@ -221,10 +226,18 @@ pub fn ManagedIdentityDetailPane(
                             // not on a per-row "Scope…" button. Shown only when the
                             // MI holds a scopable mail permission; the `reload` bump
                             // refetches the held list + scope verdicts after a grant.
+                            // Resource-aware: the EWS `full_access_as_app` scope on
+                            // Office 365 Exchange Online counts, that resource's own
+                            // `Mail.Read` family (retired Outlook REST, no RBAC role)
+                            // does not.
                             let mail_values: Vec<String> = list
                                 .iter()
+                                .filter(|p| {
+                                    p.app_role_value.as_deref().is_some_and(|v| {
+                                        is_exchange_scopable_on(p.resource_app_id.as_deref(), v)
+                                    })
+                                })
                                 .filter_map(|p| p.app_role_value.clone())
-                                .filter(|v| is_exchange_scopable(v))
                                 .collect();
                             let exchange_section = (!mail_values.is_empty())
                                 .then(move || {

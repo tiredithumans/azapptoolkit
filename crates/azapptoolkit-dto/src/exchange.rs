@@ -112,18 +112,26 @@ pub struct ExchangeAccessRemovalResult {
     pub warnings: Vec<String>,
 }
 
-/// Per-application result of migrating a legacy Application Access Policy to
+/// Per-application result of migrating legacy Application Access Policies to
 /// RBAC for Applications.
+///
+/// One item per **application**, not per policy: an app can carry several
+/// `RestrictAccess` policies, whose combined effect is access to the union of
+/// their groups, so they migrate into ONE management scope spanning every group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AapMigrationItem {
     pub app_id: String,
-    pub source_policy_identity: Option<String>,
+    /// Identities of every policy folded into this app's migration.
+    pub source_policy_identities: Vec<String>,
     pub scope_name: Option<String>,
     pub scope_filter: Option<String>,
     pub roles_assigned: Vec<String>,
     pub removed_entra_grants: Vec<String>,
-    pub removed_policy: bool,
-    /// `planned` for a dry run; `migrated` / `failed` for a real run.
+    /// Identities of the policies actually deleted. Empty when the policies were
+    /// deliberately **kept** — they still confine the app's org-wide grants, so
+    /// deleting one whose permissions weren't fully re-scoped would widen access.
+    pub removed_policies: Vec<String>,
+    /// `planned` for a dry run; `migrated` / `partial` / `failed` for a real run.
     pub status: String,
     pub warnings: Vec<String>,
 }
