@@ -7,6 +7,8 @@ the project adheres to
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-28
+
 ### Fixed
 
 - **The EWS `full_access_as_app` scope was invisible to every Exchange scoping
