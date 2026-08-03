@@ -36,6 +36,24 @@ use crate::state::{AppState, CancelFlag};
 
 const CONCURRENCY: usize = 4;
 
+/// Where [`run_bulk_seq`] sends its progress events.
+///
+/// The driver took an `&AppHandle`, which made it untestable without a Tauri
+/// runtime — and `tauri`'s `test` feature (for `mock_app()`) breaks the Windows
+/// test binary with STATUS_ENTRYPOINT_NOT_FOUND, since enabling it alongside the
+/// WebView2 runtime mismatches an entrypoint at link time. The driver never
+/// needed a runtime, only a sink; this is the narrower dependency, and it lets
+/// the tests assert the progress sequence as well as the loop control.
+trait ProgressSink {
+    fn emit(&self, payload: BulkProgress);
+}
+
+impl<R: tauri::Runtime> ProgressSink for AppHandle<R> {
+    fn emit(&self, payload: BulkProgress) {
+        emit_progress(self, "bulk-progress", payload);
+    }
+}
+
 /// Lets [`run_bulk_seq`] ask an opaque outcome whether the run should stop.
 ///
 /// The driver is generic over the outcome type, so it cannot reach into an
@@ -840,8 +858,8 @@ pub async fn bulk_disable_sign_in(
 /// in-flight work finishes). Returns `(outcomes, cancelled)`; callers apply their
 /// own cache invalidation from the outcomes. The caller resets the flag and
 /// clones it (the `reset()` must stay at the command top, the AGENTS.md footgun).
-async fn run_bulk_seq<R: tauri::Runtime, T, O, Fut>(
-    app_handle: &AppHandle<R>,
+async fn run_bulk_seq<S: ProgressSink, T, O, Fut>(
+    progress: &S,
     cancel: &CancelFlag,
     items: Vec<T>,
     label: impl Fn(&T) -> String,
@@ -857,17 +875,13 @@ where
         if cancel.is_cancelled() {
             break;
         }
-        emit_progress(
-            app_handle,
-            "bulk-progress",
-            BulkProgress {
-                done: i,
-                total,
-                current_app: Some(label(&item)),
-                cancelled: false,
-                in_flight_cap: None,
-            },
-        );
+        progress.emit(BulkProgress {
+            done: i,
+            total,
+            current_app: Some(label(&item)),
+            cancelled: false,
+            in_flight_cap: None,
+        });
         let outcome = per_item(item).await;
         // Stop the run when the SESSION died rather than this item. A dead
         // refresh token can't be re-minted silently, so every remaining item
@@ -882,17 +896,13 @@ where
             break;
         }
     }
-    emit_progress(
-        app_handle,
-        "bulk-progress",
-        BulkProgress {
-            done: total,
-            total,
-            current_app: None,
-            cancelled: cancel.is_cancelled(),
-            in_flight_cap: None,
-        },
-    );
+    progress.emit(BulkProgress {
+        done: total,
+        total,
+        current_app: None,
+        cancelled: cancel.is_cancelled(),
+        in_flight_cap: None,
+    });
     (outcomes, cancel.is_cancelled())
 }
 
@@ -915,17 +925,35 @@ mod tests {
         }
     }
 
-    /// A handle with no webview, enough for `emit_progress` to be a real call.
-    fn handle() -> AppHandle<tauri::test::MockRuntime> {
-        tauri::test::mock_app().handle().clone()
+    /// Records what the driver would have emitted over IPC.
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<BulkProgress>>);
+
+    impl ProgressSink for Recorder {
+        fn emit(&self, payload: BulkProgress) {
+            self.0.lock().unwrap().push(payload);
+        }
     }
 
-    async fn drive(
+    impl Recorder {
+        /// `(done, current_app)` per event, in order.
+        fn events(&self) -> Vec<(usize, Option<String>)> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|p| (p.done, p.current_app.clone()))
+                .collect()
+        }
+    }
+
+    async fn drive_with(
+        rec: &Recorder,
         cancel: &CancelFlag,
         items: Vec<BulkScopeOutcome>,
     ) -> (Vec<BulkScopeOutcome>, bool) {
         run_bulk_seq(
-            &handle(),
+            rec,
             cancel,
             items,
             |o| o.object_id.clone(),
@@ -934,10 +962,19 @@ mod tests {
         .await
     }
 
+    async fn drive(
+        cancel: &CancelFlag,
+        items: Vec<BulkScopeOutcome>,
+    ) -> (Vec<BulkScopeOutcome>, bool) {
+        drive_with(&Recorder::default(), cancel, items).await
+    }
+
     #[tokio::test]
-    async fn processes_every_item_when_nothing_goes_wrong() {
+    async fn processes_every_item_and_reports_progress_before_each() {
         let cancel = CancelFlag::default();
-        let (out, cancelled) = drive(
+        let rec = Recorder::default();
+        let (out, cancelled) = drive_with(
+            &rec,
             &cancel,
             vec![
                 scope_outcome("a", None),
@@ -948,6 +985,18 @@ mod tests {
         .await;
         assert_eq!(out.len(), 3);
         assert!(!cancelled);
+        // One event per item naming the app ABOUT to be processed (so the UI
+        // shows what is happening, not what already happened), then a final
+        // done == total with no current app.
+        assert_eq!(
+            rec.events(),
+            vec![
+                (0, Some("a".into())),
+                (1, Some("b".into())),
+                (2, Some("c".into())),
+                (3, None),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -957,9 +1006,13 @@ mod tests {
         // Cancel button safe on the destructive commands (delete, disable).
         let cancel = CancelFlag::default();
         cancel.cancel();
-        let (out, cancelled) = drive(&cancel, vec![scope_outcome("a", None)]).await;
+        let rec = Recorder::default();
+        let (out, cancelled) = drive_with(&rec, &cancel, vec![scope_outcome("a", None)]).await;
         assert!(out.is_empty(), "cancelled before item 1 ⇒ nothing ran");
         assert!(cancelled);
+        // Only the terminal event, and it reports the cancellation.
+        assert_eq!(rec.events(), vec![(1, None)]);
+        assert!(rec.0.lock().unwrap()[0].cancelled);
     }
 
     #[tokio::test]
@@ -987,7 +1040,9 @@ mod tests {
         // so every remaining item fails identically. Continuing turned one
         // recoverable "re-authenticate" into a wall of N opaque failures.
         let cancel = CancelFlag::default();
-        let (out, cancelled) = drive(
+        let rec = Recorder::default();
+        let (out, cancelled) = drive_with(
+            &rec,
             &cancel,
             vec![
                 scope_outcome("a", None),
