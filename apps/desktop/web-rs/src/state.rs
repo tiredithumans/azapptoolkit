@@ -685,11 +685,12 @@ impl Session {
     /// first so a dead session still gets the recovery action instead of a
     /// dead-end message, without growing another copy of the code set.
     ///
-    /// The two codes are the wire contract from `azapptoolkit_dto`'s
-    /// `From<AuthError>`: `InvalidGrant`/`RefreshTokenMissing` → `refresh_missing`,
-    /// `NotSignedIn` → `not_signed_in`.
+    /// The code set is [`azapptoolkit_dto::UiError::is_reauth_fatal`] — the one
+    /// definition, shared with the backend. It used to be a `matches!` here AND
+    /// one in `shell.rs`, which AGENTS.md flagged as a footgun ("a new
+    /// re-auth-fatal code must extend BOTH sets").
     pub fn report_if_session_dead(&self, e: &azapptoolkit_dto::UiError) -> bool {
-        if !matches!(e.code.as_str(), "refresh_missing" | "not_signed_in") {
+        if !e.is_reauth_fatal() {
             return false;
         }
         let session = *self;

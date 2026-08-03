@@ -75,6 +75,23 @@ impl UiError {
         UiError::new("io", message, true)
     }
 
+    /// True for the wire codes that mean **the session is dead**, not that this
+    /// one operation failed: a refresh token that can no longer be re-minted
+    /// silently (`refresh_missing`, from `InvalidGrant`/`RefreshTokenMissing`) or
+    /// no session at all (`not_signed_in`). Both need ONE interactive round trip
+    /// (`reauthenticate`) — not a sign-out, which would drop every data cache.
+    ///
+    /// **The single definition.** This predicate was previously three
+    /// hand-maintained `matches!` arms across the frontend, which AGENTS.md
+    /// called out as a footgun ("a new re-auth-fatal code must extend BOTH
+    /// `matches!` sets"). It lives here because `azapptoolkit-dto` is the one
+    /// crate both the Tauri backend and the WASM frontend share, so adding a code
+    /// is now one edit rather than a hunt. Retryability is orthogonal: these are
+    /// never `retryable`, because retrying without re-auth just fails again.
+    pub fn is_reauth_fatal(&self) -> bool {
+        matches!(self.code.as_str(), "refresh_missing" | "not_signed_in")
+    }
+
     /// (De)serialization error: fixed `serde` code, never retryable.
     pub fn serde(message: impl Into<String>) -> Self {
         UiError::new("serde", message, false)

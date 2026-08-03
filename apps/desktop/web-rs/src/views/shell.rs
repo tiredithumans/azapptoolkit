@@ -97,7 +97,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                              Retry the action that failed.",
                         );
                     }
-                    Err(e) if matches!(e.code.as_str(), "refresh_missing" | "not_signed_in") => {
+                    Err(e) if e.is_reauth_fatal() => {
                         // Silent re-mint can't fix a dead refresh token; re-auth
                         // interactively in place rather than dumping the user to
                         // the sign-in screen.

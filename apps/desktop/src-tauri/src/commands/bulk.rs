@@ -28,13 +28,73 @@ use crate::dto::UiError;
 use crate::dto::applications::CreateApplicationInput;
 use crate::dto::bulk::{
     AppRemovalSummary, BulkAddOwnerResult, BulkCreateOutcome, BulkCreateResult, BulkCreateSpec,
-    BulkDeleteFailure, BulkDeleteResult, BulkDisableOutcome, BulkDisableSignInResult,
+    BulkDeleteFailure, BulkDeleteResult, BulkDisableOutcome, BulkDisableSignInResult, BulkError,
     BulkGrantOutcome, BulkGrantResult, BulkOwnerOutcome, BulkProgress, BulkRemoveExpiredResult,
     BulkRemoveRedundantOutcome, BulkRemoveRedundantResult, BulkScopeOutcome, BulkScopeResult,
 };
 use crate::state::{AppState, CancelFlag};
 
 const CONCURRENCY: usize = 4;
+
+/// Lets [`run_bulk_seq`] ask an opaque outcome whether the run should stop.
+///
+/// The driver is generic over the outcome type, so it cannot reach into an
+/// `error` field itself. Implemented per outcome rather than passed as a closure
+/// at each call site so the answer can't drift between the six bulk commands —
+/// they all mean the same thing by "the session died".
+trait BulkOutcome {
+    /// True when this item failed for a reason that makes every *remaining*
+    /// item fail the same way. See [`BulkError::is_reauth_fatal`].
+    fn session_fatal(&self) -> bool;
+}
+
+/// The common shape: one optional structured error per outcome.
+macro_rules! bulk_outcome_error_field {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl BulkOutcome for $ty {
+            fn session_fatal(&self) -> bool {
+                self.error.as_ref().is_some_and(BulkError::is_reauth_fatal)
+            }
+        }
+    )+};
+}
+
+bulk_outcome_error_field!(
+    AppRemovalSummary,
+    BulkCreateOutcome,
+    BulkGrantOutcome,
+    BulkRemoveRedundantOutcome,
+    BulkScopeOutcome,
+    BulkOwnerOutcome,
+    BulkDisableOutcome,
+);
+
+/// Rejects a bulk-create spec that cannot possibly succeed, without touching
+/// Graph. Split out of the command closure so the rules are unit-testable: a
+/// wrong `signInAudience` is rejected here, and letting it through instead means
+/// N failed round trips and N confusing per-item errors.
+fn validate_create_spec(spec: &BulkCreateSpec) -> Option<BulkCreateOutcome> {
+    let invalid = |message: String| {
+        Some(BulkCreateOutcome {
+            display_name: spec.display_name.clone(),
+            status: "invalid".into(),
+            app_id: None,
+            message: Some(message),
+            // A local rejection never reached the backend, so it carries no wire
+            // code and says nothing about the session.
+            error: None,
+        })
+    };
+    if spec.display_name.trim().is_empty() {
+        return invalid("display name is required".into());
+    }
+    if let Some(aud) = &spec.sign_in_audience
+        && !VALID_AUDIENCES.contains(&aud.as_str())
+    {
+        return invalid(format!("unrecognised signInAudience: {aud}"));
+    }
+    None
+}
 
 /// Accepted `signInAudience` values for bulk-create validation.
 const VALID_AUDIENCES: &[&str] = &[
@@ -136,7 +196,7 @@ pub async fn bulk_remove_expired_credentials(
             Some(tokio::spawn(async move {
                 let mut removed = Vec::new();
                 let mut failed = Vec::new();
-                let mut error: Option<String> = None;
+                let mut error: Option<BulkError> = None;
                 if !expired_key_ids.is_empty() {
                     for key_id in &expired_key_ids {
                         if cancel.is_cancelled() {
@@ -147,7 +207,7 @@ pub async fn bulk_remove_expired_credentials(
                             Err(err) => {
                                 failed.push(key_id.clone());
                                 if error.is_none() {
-                                    error = Some(err.to_string());
+                                    error = Some(UiError::from(err).into());
                                 }
                             }
                         }
@@ -352,7 +412,11 @@ pub async fn bulk_grant_permissions(
                                 + r.scope_grants_upserted.len(),
                             skipped: r.role_assignments_skipped.len(),
                             failed: r.failures.len(),
-                            error: r.failures.first().map(|f| f.message.clone()),
+                            error: r.failures.first().map(|f| BulkError {
+                                code: "partial_failure".into(),
+                                message: f.message.clone(),
+                                retryable: false,
+                            }),
                         },
                         sp_created,
                     ),
@@ -362,7 +426,7 @@ pub async fn bulk_grant_permissions(
                             granted: 0,
                             skipped: 0,
                             failed: 0,
-                            error: Some(e.message),
+                            error: Some(e.into()),
                         },
                         false,
                     ),
@@ -431,24 +495,8 @@ pub async fn bulk_create_applications(
         |spec| {
             let client = client.clone();
             async move {
-                // Validate.
-                if spec.display_name.trim().is_empty() {
-                    return BulkCreateOutcome {
-                        display_name: spec.display_name,
-                        status: "invalid".into(),
-                        app_id: None,
-                        message: Some("display name is required".into()),
-                    };
-                }
-                if let Some(aud) = &spec.sign_in_audience
-                    && !VALID_AUDIENCES.contains(&aud.as_str())
-                {
-                    return BulkCreateOutcome {
-                        display_name: spec.display_name,
-                        status: "invalid".into(),
-                        app_id: None,
-                        message: Some(format!("unrecognised signInAudience: {aud}")),
-                    };
+                if let Some(rejection) = validate_create_spec(&spec) {
+                    return rejection;
                 }
                 if validate_only {
                     return BulkCreateOutcome {
@@ -456,6 +504,7 @@ pub async fn bulk_create_applications(
                         status: "valid".into(),
                         app_id: None,
                         message: None,
+                        error: None,
                     };
                 }
                 let input = CreateApplicationInput {
@@ -470,12 +519,14 @@ pub async fn bulk_create_applications(
                         status: "created".into(),
                         app_id: Some(r.application.app_id),
                         message: None,
+                        error: None,
                     },
                     Err(e) => BulkCreateOutcome {
                         display_name: spec.display_name,
                         status: "failed".into(),
                         app_id: None,
-                        message: Some(e.message),
+                        message: Some(e.message.clone()),
+                        error: Some(e.into()),
                     },
                 }
             }
@@ -537,7 +588,7 @@ pub async fn bulk_remove_redundant_permissions(
                         object_id,
                         removed: Vec::new(),
                         skipped: Vec::new(),
-                        error: Some(e.message),
+                        error: Some(e.into()),
                     },
                 }
             }
@@ -590,7 +641,7 @@ pub async fn bulk_scope_mailbox_access(
                 )
                 .await
                 .err()
-                .map(|e| e.message);
+                .map(BulkError::from);
                 BulkScopeOutcome { object_id, error }
             }
         },
@@ -641,7 +692,7 @@ pub async fn bulk_scope_sharepoint_access(
                 )
                 .await
                 .err()
-                .map(|e| e.message);
+                .map(BulkError::from);
                 BulkScopeOutcome { object_id, error }
             }
         },
@@ -700,14 +751,14 @@ pub async fn bulk_add_owner(
                             object_id,
                             added: false,
                             skipped: false,
-                            error: Some(UiError::from(e).message),
+                            error: Some(UiError::from(e).into()),
                         },
                     },
                     Err(e) => BulkOwnerOutcome {
                         object_id,
                         added: false,
                         skipped: false,
-                        error: Some(UiError::from(e).message),
+                        error: Some(UiError::from(e).into()),
                     },
                 }
             }
@@ -757,7 +808,7 @@ pub async fn bulk_disable_sign_in(
                 )
                 .await
                 .err()
-                .map(|e| e.message);
+                .map(BulkError::from);
                 BulkDisableOutcome { object_id, error }
             }
         },
@@ -783,8 +834,8 @@ pub async fn bulk_disable_sign_in(
 /// in-flight work finishes). Returns `(outcomes, cancelled)`; callers apply their
 /// own cache invalidation from the outcomes. The caller resets the flag and
 /// clones it (the `reset()` must stay at the command top, the AGENTS.md footgun).
-async fn run_bulk_seq<T, O, Fut>(
-    app_handle: &AppHandle,
+async fn run_bulk_seq<R: tauri::Runtime, T, O, Fut>(
+    app_handle: &AppHandle<R>,
     cancel: &CancelFlag,
     items: Vec<T>,
     label: impl Fn(&T) -> String,
@@ -792,6 +843,7 @@ async fn run_bulk_seq<T, O, Fut>(
 ) -> (Vec<O>, bool)
 where
     Fut: Future<Output = O>,
+    O: BulkOutcome,
 {
     let total = items.len();
     let mut outcomes = Vec::with_capacity(total);
@@ -810,7 +862,19 @@ where
                 in_flight_cap: None,
             },
         );
-        outcomes.push(per_item(item).await);
+        let outcome = per_item(item).await;
+        // Stop the run when the SESSION died rather than this item. A dead
+        // refresh token can't be re-minted silently, so every remaining item
+        // would fail identically — turning one recoverable "re-authenticate"
+        // into a wall of N indistinguishable failures, after mutating nothing.
+        // Halting leaves the already-processed outcomes intact and surfaces the
+        // fatal code to the UI, which drives in-place re-auth (never a sign-out
+        // — that would drop every data cache; see AGENTS.md).
+        let fatal = outcome.session_fatal();
+        outcomes.push(outcome);
+        if fatal {
+            break;
+        }
     }
     emit_progress(
         app_handle,
@@ -824,4 +888,169 @@ where
         },
     );
     (outcomes, cancel.is_cancelled())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err(code: &str) -> BulkError {
+        BulkError {
+            code: code.into(),
+            message: format!("{code} happened"),
+            retryable: false,
+        }
+    }
+
+    fn scope_outcome(object_id: &str, error: Option<BulkError>) -> BulkScopeOutcome {
+        BulkScopeOutcome {
+            object_id: object_id.into(),
+            error,
+        }
+    }
+
+    /// A handle with no webview, enough for `emit_progress` to be a real call.
+    fn handle() -> AppHandle<tauri::test::MockRuntime> {
+        tauri::test::mock_app().handle().clone()
+    }
+
+    async fn drive(
+        cancel: &CancelFlag,
+        items: Vec<BulkScopeOutcome>,
+    ) -> (Vec<BulkScopeOutcome>, bool) {
+        run_bulk_seq(
+            &handle(),
+            cancel,
+            items,
+            |o| o.object_id.clone(),
+            |o| async move { o },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn processes_every_item_when_nothing_goes_wrong() {
+        let cancel = CancelFlag::default();
+        let (out, cancelled) = drive(
+            &cancel,
+            vec![
+                scope_outcome("a", None),
+                scope_outcome("b", None),
+                scope_outcome("c", None),
+            ],
+        )
+        .await;
+        assert_eq!(out.len(), 3);
+        assert!(!cancelled);
+    }
+
+    #[tokio::test]
+    async fn a_cancel_before_the_first_item_processes_nothing() {
+        // The flag is polled BEFORE each item, so a cancel that lands before the
+        // loop starts must mutate nothing at all — the property that makes the
+        // Cancel button safe on the destructive commands (delete, disable).
+        let cancel = CancelFlag::default();
+        cancel.cancel();
+        let (out, cancelled) = drive(&cancel, vec![scope_outcome("a", None)]).await;
+        assert!(out.is_empty(), "cancelled before item 1 ⇒ nothing ran");
+        assert!(cancelled);
+    }
+
+    #[tokio::test]
+    async fn per_item_errors_are_collected_and_do_not_stop_the_run() {
+        // An ordinary per-item failure is data, not a halt: the remaining
+        // selection still gets processed.
+        let cancel = CancelFlag::default();
+        let (out, cancelled) = drive(
+            &cancel,
+            vec![
+                scope_outcome("a", Some(err("forbidden"))),
+                scope_outcome("b", None),
+                scope_outcome("c", Some(err("app_not_found"))),
+            ],
+        )
+        .await;
+        assert_eq!(out.len(), 3, "a per-item error must not end the run");
+        assert!(!cancelled);
+        assert_eq!(out.iter().filter(|o| o.error.is_some()).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_dead_session_halts_the_run_instead_of_burning_the_selection() {
+        // `refresh_missing` means the refresh token can't be re-minted silently,
+        // so every remaining item fails identically. Continuing turned one
+        // recoverable "re-authenticate" into a wall of N opaque failures.
+        let cancel = CancelFlag::default();
+        let (out, cancelled) = drive(
+            &cancel,
+            vec![
+                scope_outcome("a", None),
+                scope_outcome("b", Some(err("refresh_missing"))),
+                scope_outcome("c", None),
+                scope_outcome("d", None),
+            ],
+        )
+        .await;
+        assert_eq!(out.len(), 2, "stops AFTER recording the fatal outcome");
+        assert_eq!(out[1].object_id, "b");
+        assert!(
+            out[1]
+                .error
+                .as_ref()
+                .is_some_and(BulkError::is_reauth_fatal),
+            "the fatal outcome is kept so the UI can offer re-auth"
+        );
+        // Not a user cancellation — the distinction drives different UI copy.
+        assert!(!cancelled);
+    }
+
+    #[test]
+    fn only_session_death_is_fatal() {
+        assert!(scope_outcome("a", Some(err("refresh_missing"))).session_fatal());
+        assert!(scope_outcome("a", Some(err("not_signed_in"))).session_fatal());
+        // Everything else is a per-item problem the run should survive —
+        // `consent_required` especially: it is per-resource, and a later item
+        // may well need a scope the caller already has.
+        for code in [
+            "forbidden",
+            "throttled",
+            "app_not_found",
+            "consent_required",
+        ] {
+            assert!(
+                !scope_outcome("a", Some(err(code))).session_fatal(),
+                "{code} must not halt the run"
+            );
+        }
+        assert!(!scope_outcome("a", None).session_fatal());
+    }
+
+    #[test]
+    fn create_specs_with_a_bad_audience_are_rejected_before_any_round_trip() {
+        let spec = |name: &str, aud: Option<&str>| BulkCreateSpec {
+            display_name: name.into(),
+            sign_in_audience: aud.map(str::to_string),
+            description: None,
+        };
+
+        assert!(validate_create_spec(&spec("Ok", None)).is_none());
+        for aud in VALID_AUDIENCES {
+            assert!(
+                validate_create_spec(&spec("Ok", Some(aud))).is_none(),
+                "{aud} is in VALID_AUDIENCES and must pass"
+            );
+        }
+
+        let rejected = validate_create_spec(&spec("Ok", Some("AzureADandPersonal"))).unwrap();
+        assert_eq!(rejected.status, "invalid");
+        assert!(rejected.message.unwrap().contains("AzureADandPersonal"));
+        // A local rejection carries no wire code, so it can never be mistaken
+        // for a session failure by the run-level fatal check.
+        assert!(rejected.error.is_none());
+
+        // Whitespace-only names are rejected too — Graph would take the round
+        // trip and fail.
+        let blank = validate_create_spec(&spec("   ", None)).unwrap();
+        assert_eq!(blank.status, "invalid");
+    }
 }

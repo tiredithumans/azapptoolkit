@@ -15,8 +15,11 @@ use tauri::{AppHandle, Emitter};
 /// `event` is the channel the frontend's `use_progress_stream` subscribes to
 /// (`audit-progress`, `bulk-progress`, …); it is `&'static str` so the name is
 /// always a literal at the call site rather than a computed string.
-pub(crate) fn emit_progress<P: Serialize + Clone>(
-    app_handle: &AppHandle,
+/// Generic over the Tauri runtime so tests can pass a `MockRuntime` handle
+/// (`tauri::test::mock_app()`) instead of needing a real webview. Production
+/// call sites are unaffected: bare `AppHandle` is `AppHandle<Wry>`.
+pub(crate) fn emit_progress<R: tauri::Runtime, P: Serialize + Clone>(
+    app_handle: &AppHandle<R>,
     event: &'static str,
     payload: P,
 ) {

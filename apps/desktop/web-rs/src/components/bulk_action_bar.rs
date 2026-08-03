@@ -40,6 +40,72 @@ use crate::util::parse_lines;
 pub struct BulkFailure {
     pub label: String,
     pub reason: String,
+    /// The backend wire code, when this failure came from a command call.
+    /// `None` for failures the frontend synthesizes (e.g. "3 credentials could
+    /// not be removed", derived from counts rather than an error).
+    ///
+    /// Kept because flattening the error to its message alone loses the one bit
+    /// the UI must act on: a mid-run `refresh_missing` means the SESSION died,
+    /// not that this app failed, and it needs a re-auth prompt rather than a
+    /// line in a failure list.
+    pub code: Option<String>,
+}
+
+/// One bulk outcome's failure, if any — the shape every per-item outcome DTO
+/// shares. A local trait over foreign types so the seven `parse_*` helpers can
+/// share one collector instead of repeating the same
+/// filter_map-over-outcomes/build-BulkFailure skeleton.
+trait BulkRow {
+    fn object_id(&self) -> &str;
+    fn error(&self) -> Option<&bulk::BulkError>;
+}
+
+macro_rules! bulk_row {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl BulkRow for $ty {
+            fn object_id(&self) -> &str { &self.object_id }
+            fn error(&self) -> Option<&bulk::BulkError> { self.error.as_ref() }
+        }
+    )+};
+}
+
+bulk_row!(
+    bulk::BulkGrantOutcome,
+    bulk::BulkRemoveRedundantOutcome,
+    bulk::BulkScopeOutcome,
+    bulk::BulkOwnerOutcome,
+    bulk::BulkDisableOutcome,
+);
+
+/// The failed rows of a bulk run, labelled for display.
+fn failures_of<T: BulkRow>(outcomes: &[T], label_for: impl Fn(&str) -> String) -> Vec<BulkFailure> {
+    outcomes
+        .iter()
+        .filter_map(|o| {
+            o.error().map(|e| BulkFailure {
+                label: label_for(o.object_id()),
+                reason: e.message.clone(),
+                code: Some(e.code.clone()),
+            })
+        })
+        .collect()
+}
+
+/// The first failure that means the session died rather than the item failing.
+/// The backend already stops the run on one of these, so at most the tail of the
+/// selection is unprocessed — the UI's job is to offer re-auth instead of
+/// presenting it as N app-level failures.
+pub fn session_dead_error(failures: &[BulkFailure]) -> Option<azapptoolkit_dto::UiError> {
+    failures
+        .iter()
+        .find(|f| {
+            f.code
+                .as_deref()
+                .is_some_and(|c| azapptoolkit_dto::UiError::new(c, "", false).is_reauth_fatal())
+        })
+        .map(|f| {
+            azapptoolkit_dto::UiError::new(f.code.clone().unwrap_or_default(), &f.reason, false)
+        })
 }
 
 /// The bulk operations a bar can offer. Hosts pass the subset they support.
@@ -300,6 +366,15 @@ pub fn BulkActionBar(
             };
             match parsed {
                 Ok((s, f, clear_sel)) => {
+                    // A failure carrying a re-auth-fatal code means the session
+                    // died mid-run, not that these apps are broken. The backend
+                    // already halted the loop; surface the recovery action so
+                    // the operator re-authenticates in place (never a sign-out —
+                    // that drops every data cache) instead of reading a list of
+                    // failures with no obvious cause.
+                    if let Some(dead) = session_dead_error(&f) {
+                        session.report_if_session_dead(&dead);
+                    }
                     summary.set(Some(s));
                     failures.set(f);
                     armed.set(None);
@@ -675,16 +750,7 @@ fn parse_grant(
     r: bulk::BulkGrantResult,
     label_for: impl Fn(&str) -> String,
 ) -> (String, Vec<BulkFailure>) {
-    let fails: Vec<BulkFailure> = r
-        .outcomes
-        .iter()
-        .filter_map(|o| {
-            o.error.as_ref().map(|e| BulkFailure {
-                label: label_for(&o.object_id),
-                reason: e.clone(),
-            })
-        })
-        .collect();
+    let fails = failures_of(&r.outcomes, label_for);
     (
         format!(
             "Granted consent to {} app(s); {} with errors{}.",
@@ -701,19 +767,22 @@ fn parse_remove_expired(r: bulk::BulkRemoveExpiredResult) -> (String, Vec<BulkFa
         .summaries
         .iter()
         .filter_map(|s| {
-            let reason = if let Some(e) = &s.error {
-                Some(e.clone())
-            } else if !s.failed_key_ids.is_empty() {
-                Some(format!(
-                    "{} credential(s) could not be removed",
-                    s.failed_key_ids.len()
-                ))
-            } else {
-                None
+            let (reason, code) = match (&s.error, s.failed_key_ids.is_empty()) {
+                (Some(e), _) => (Some(e.message.clone()), Some(e.code.clone())),
+                // Synthesized from counts, so there is no wire code to carry.
+                (None, false) => (
+                    Some(format!(
+                        "{} credential(s) could not be removed",
+                        s.failed_key_ids.len()
+                    )),
+                    None,
+                ),
+                (None, true) => (None, None),
             };
             reason.map(|reason| BulkFailure {
                 label: s.display_name.clone(),
                 reason,
+                code,
             })
         })
         .collect();
@@ -737,16 +806,7 @@ fn parse_redundant(
     r: bulk::BulkRemoveRedundantResult,
     label_for: impl Fn(&str) -> String,
 ) -> (String, Vec<BulkFailure>) {
-    let fails: Vec<BulkFailure> = r
-        .outcomes
-        .iter()
-        .filter_map(|o| {
-            o.error.as_ref().map(|e| BulkFailure {
-                label: label_for(&o.object_id),
-                reason: e.clone(),
-            })
-        })
-        .collect();
+    let fails = failures_of(&r.outcomes, label_for);
     let removed_total: usize = r.outcomes.iter().map(|o| o.removed.len()).sum();
     let apps_changed = r.outcomes.iter().filter(|o| !o.removed.is_empty()).count();
     (
@@ -764,16 +824,7 @@ fn parse_scope(
     r: bulk::BulkScopeResult,
     label_for: impl Fn(&str) -> String,
 ) -> (String, Vec<BulkFailure>) {
-    let fails: Vec<BulkFailure> = r
-        .outcomes
-        .iter()
-        .filter_map(|o| {
-            o.error.as_ref().map(|e| BulkFailure {
-                label: label_for(&o.object_id),
-                reason: e.clone(),
-            })
-        })
-        .collect();
+    let fails = failures_of(&r.outcomes, label_for);
     let scoped = r.outcomes.len() - fails.len();
     (
         format!(
@@ -789,16 +840,7 @@ fn parse_add_owner(
     r: bulk::BulkAddOwnerResult,
     label_for: impl Fn(&str) -> String,
 ) -> (String, Vec<BulkFailure>) {
-    let fails: Vec<BulkFailure> = r
-        .outcomes
-        .iter()
-        .filter_map(|o| {
-            o.error.as_ref().map(|e| BulkFailure {
-                label: label_for(&o.object_id),
-                reason: e.clone(),
-            })
-        })
-        .collect();
+    let fails = failures_of(&r.outcomes, label_for);
     let added = r.outcomes.iter().filter(|o| o.added).count();
     let skipped = r.outcomes.iter().filter(|o| o.skipped).count();
     (
@@ -815,16 +857,7 @@ fn parse_disable(
     r: bulk::BulkDisableSignInResult,
     label_for: impl Fn(&str) -> String,
 ) -> (String, Vec<BulkFailure>) {
-    let fails: Vec<BulkFailure> = r
-        .outcomes
-        .iter()
-        .filter_map(|o| {
-            o.error.as_ref().map(|e| BulkFailure {
-                label: label_for(&o.object_id),
-                reason: e.clone(),
-            })
-        })
-        .collect();
+    let fails = failures_of(&r.outcomes, label_for);
     let disabled = r.outcomes.len() - fails.len();
     (
         format!(
@@ -846,6 +879,10 @@ fn parse_delete(
         .map(|f| BulkFailure {
             label: label_for(&f.object_id),
             reason: f.message.clone(),
+            // BulkDeleteFailure predates the structured error and carries only
+            // a message; delete failures are per-object (not-found, insufficient
+            // privileges), never session-level.
+            code: None,
         })
         .collect();
     (

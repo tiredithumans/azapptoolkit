@@ -25,6 +25,22 @@ the project adheres to
   policy now scopes `unmaintained` to direct workspace dependencies. Yanked
   crates and vulnerabilities are enforced for the whole graph, as intended.
 
+### Fixed (bulk actions)
+
+- **A bulk run kept going after the session died, turning one recoverable
+  prompt into a wall of failures.** Per-item errors were flattened to
+  `Some(e.message)`, discarding the `code` and `retryable` fields — so a mid-run
+  `refresh_missing` (a refresh token that cannot be re-minted silently) was
+  indistinguishable from "this one app failed", and the loop ground through
+  every remaining app against a dead session. Outcomes now carry a structured
+  `BulkError { code, message, retryable }`, the shared driver halts on a
+  session-fatal code, and the frontend surfaces the existing in-place re-auth
+  action instead of a list of unexplained failures.
+- The re-auth-fatal code set is now defined once, as
+  `UiError::is_reauth_fatal()` in the shared DTO crate. It was three
+  hand-maintained `matches!` arms — the footgun AGENTS.md called out ("a new
+  re-auth-fatal code must extend BOTH sets").
+
 ### Added
 
 - **`just verify-ui`** — `verify` plus the browser GUI tests, for a box with

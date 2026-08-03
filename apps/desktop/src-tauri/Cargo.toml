@@ -64,6 +64,11 @@ tokio = { workspace = true, features = ["test-util"] }
 # Mock Graph HTTP server for the backup degrade-path tests (same pattern the
 # graph crate's own tests use). Dev-only.
 wiremock = { workspace = true }
+# `test` enables `tauri::test::mock_app()`, which builds an AppHandle without a
+# webview — the one thing standing between `run_bulk_seq` (the shared driver
+# behind all ten bulk commands, including the destructive ones) and a unit test.
+# Dev-only, so the shipped binary never carries the mock runtime.
+tauri = { version = "2", features = ["test"] }
 
 [features]
 default = ["custom-protocol"]
