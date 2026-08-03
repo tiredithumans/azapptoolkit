@@ -21,8 +21,8 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_core::audit::{
-    AppPermissions, AuditItem, SpAuditInput, score_application, score_service_principal,
-    unused_app_advisory,
+    AppPermissions, AuditItem, ResourcePermission, SpAuditInput, score_application,
+    score_service_principal, unused_app_advisory,
 };
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
@@ -134,9 +134,10 @@ pub async fn run_audit(
         prefetch_graph_app_roles(&client),
         // ONE tenant-wide appRoleAssignedTo read on the legacy Office 365 Exchange
         // Online SP, for the EWS `full_access_as_app` grants the Graph matrix
-        // can't see. Kept SEPARATE from the Graph matrix on purpose: it feeds only
-        // score_one's reconciliation, so the SP-only phase's candidate rule
-        // ("holds a Graph application grant") is unchanged.
+        // can't see. Kept SEPARATE from the Graph matrix on purpose (the two
+        // resources' role values are not interchangeable), but it feeds BOTH
+        // score_one's reconciliation AND the SP-only phase: a principal holding
+        // only this scope has no Graph role at all, yet reaches every mailbox.
         prefetch_ews_full_access_grants(&client),
         // Sign-in activity report (needs AuditLog.Read.All + Entra ID P1/P2 + a
         // supported directory role). A *missing consent* (distinct from a
@@ -163,7 +164,12 @@ pub async fn run_audit(
     // application object (foreign enterprise apps, managed identities, orphaned
     // SPs) and that hold at least one Graph application-permission grant.
     let local_app_ids: HashSet<String> = apps.iter().map(|a| a.app_id.clone()).collect();
-    let sp_candidates = sp_audit_candidates(&sp_index, &local_app_ids, &graph_roles_by_sp);
+    let sp_candidates = sp_audit_candidates(
+        &sp_index,
+        &local_app_ids,
+        &graph_roles_by_sp,
+        &ews_full_access_sps,
+    );
     let total = apps.len() + sp_candidates.len();
 
     // Exchange circuit breaker: a genuine auth failure (401 / 403) from the
@@ -261,6 +267,7 @@ pub async fn run_audit(
                 &ctx,
                 &graph_roles_by_sp,
                 &delegated_scopes_by_client,
+                &ews_full_access_sps,
                 now,
             );
             done_count += 1;
@@ -759,10 +766,27 @@ fn score_sp_only(
     ctx: &ScoreCtx,
     graph_roles_by_sp: &HashMap<String, Vec<String>>,
     delegated_scopes_by_client: &HashMap<String, Vec<String>>,
+    ews_full_access_sps: &HashSet<String>,
     now: DateTime<Utc>,
 ) -> AuditItem {
+    // The Graph matrix holds Microsoft Graph roles by construction; the EWS
+    // blanket scope lives on the legacy Office 365 Exchange Online resource and
+    // is tracked separately, so it has to be re-attached here with its own
+    // resource or the scorer cannot see the tenant's broadest mailbox grant.
+    let mut app_role_grants: Vec<ResourcePermission> = graph_roles_by_sp
+        .get(&sp.id)
+        .map(|values| {
+            values
+                .iter()
+                .map(ResourcePermission::graph)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if ews_full_access_sps.contains(&sp.id) {
+        app_role_grants.push(ResourcePermission::exchange_online(EWS_FULL_ACCESS_AS_APP));
+    }
     let perms = AppPermissions {
-        app_role_values: graph_roles_by_sp.get(&sp.id).cloned().unwrap_or_default(),
+        app_role_grants,
         scope_values: delegated_scopes_by_client
             .get(&sp.id)
             .cloned()
@@ -798,17 +822,26 @@ fn score_sp_only(
 /// phase) AND that hold at least one Graph application-permission grant. The
 /// grant requirement is the noise filter: it drops the hundreds of grantless
 /// first-party Microsoft SPs every tenant carries. Disabled SPs stay in (Rule
-/// 4 flags them). Known limitation: roles held only on non-Graph resources
-/// aren't in the matrix, so such an SP is not scored.
+/// 4 flags them).
+///
+/// "Holds a grant" spans **both** mailbox resources: an SP holding only the EWS
+/// `full_access_as_app` scope has no Graph role at all, yet reaches every mailbox
+/// in the tenant — filtering on the Graph matrix alone dropped exactly the
+/// principal most worth scoring. Known limitation: roles held only on *other*
+/// non-Graph resources still aren't in any matrix, so such an SP is not scored.
 fn sp_audit_candidates(
     sp_index: &[ServicePrincipal],
     local_app_ids: &HashSet<String>,
     graph_roles_by_sp: &HashMap<String, Vec<String>>,
+    ews_full_access_sps: &HashSet<String>,
 ) -> Vec<ServicePrincipal> {
     sp_index
         .iter()
         .filter(|sp| !local_app_ids.contains(&sp.app_id))
-        .filter(|sp| graph_roles_by_sp.get(&sp.id).is_some_and(|v| !v.is_empty()))
+        .filter(|sp| {
+            graph_roles_by_sp.get(&sp.id).is_some_and(|v| !v.is_empty())
+                || ews_full_access_sps.contains(&sp.id)
+        })
         .cloned()
         .collect()
 }
@@ -897,7 +930,13 @@ async fn resolve_permissions(
                 None => continue,
             };
             match perm.r#type.as_str() {
-                "Role" => out.app_role_values.push(value),
+                // Carry the resource, don't drop it: two resources expose an
+                // identically named `Mail.Read`/`Mail.Send`/`Contacts.*` and only
+                // Microsoft Graph's are confinable by RBAC for Applications. The
+                // scorer gates every mailbox verdict on this id.
+                "Role" => out
+                    .app_role_grants
+                    .push(ResourcePermission::on(&resource.resource_app_id, value)),
                 "Scope" => out.scope_values.push(value),
                 _ => {}
             }
@@ -952,10 +991,10 @@ async fn score_one(
         // a scoped role coexisting with the org-wide grant still reaches every
         // mailbox. Only worth the extra read when the app declares a scopable mail
         // permission and its SP resolved.
+        let declared_values = perms.app_role_values();
         let orgwide = match &sp {
             Some(sp)
-                if perms
-                    .app_role_values
+                if declared_values
                     .iter()
                     .any(|p| is_scopable_exchange_permission(p)) =>
             {
@@ -981,7 +1020,7 @@ async fn score_one(
             &ctx.tenant_id,
             exo,
             &app.app_id,
-            &perms.app_role_values,
+            &declared_values,
             &orgwide,
         )
         .await
@@ -1111,9 +1150,9 @@ mod tests {
         assert!(derive_orgwide_mail_scopes(&graph_roles, &HashSet::new()).is_empty());
     }
 
-    // The SP-only candidate filter: no local application AND ≥1 Graph
-    // application grant. Managed identities and disabled SPs are candidates;
-    // paired and grantless SPs are not.
+    // The SP-only candidate filter: no local application AND ≥1 application
+    // grant on either mailbox-bearing resource. Managed identities and disabled
+    // SPs are candidates; paired and grantless SPs are not.
     #[test]
     fn sp_audit_candidates_filters_paired_and_grantless() {
         let local_app_ids: HashSet<String> = ["paired-app".to_string()].into();
@@ -1131,13 +1170,33 @@ mod tests {
             sp("sp-grantless", "gallery-app", Some("Application")),
             sp("sp-empty", "empty-app", Some("Application")),
         ];
-        let got: Vec<String> = sp_audit_candidates(&index, &local_app_ids, &roles)
+        let got: Vec<String> = sp_audit_candidates(&index, &local_app_ids, &roles, &HashSet::new())
             .into_iter()
             .map(|s| s.id)
             .collect();
         // Paired (has a local app), grantless (not in the matrix), and
         // empty-role-list SPs are all excluded; the foreign SP and the MI stay.
         assert_eq!(got, vec!["sp-foreign".to_string(), "sp-mi".to_string()]);
+    }
+
+    #[test]
+    fn sp_holding_only_the_ews_blanket_scope_is_still_a_candidate() {
+        // `full_access_as_app` lives on Office 365 Exchange Online, so such a
+        // principal has NO Graph role and was filtered out of the SP-only phase
+        // entirely — despite holding full access to every mailbox in the tenant,
+        // which is the single most audit-worthy grant there is.
+        let index = vec![sp("sp-ews", "ews-app", Some("Application"))];
+        let ews: HashSet<String> = ["sp-ews".to_string()].into();
+        let got: Vec<String> = sp_audit_candidates(
+            &index,
+            &HashSet::new(),
+            &HashMap::new(), // no Graph grants at all
+            &ews,
+        )
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+        assert_eq!(got, vec!["sp-ews".to_string()]);
     }
 
     #[test]

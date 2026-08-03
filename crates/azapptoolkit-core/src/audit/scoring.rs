@@ -48,18 +48,20 @@ impl RuleContribution {
 fn rule_app_permission_risk(perms: &AppPermissions) -> RuleContribution {
     let mut c = RuleContribution::default();
 
-    let high_hits: Vec<&String> = perms
-        .app_role_values
+    // Partitioned on the *grant*, not the value: `is_scoped` gates on the
+    // grant's own resource, so an unscopable legacy Exchange Online namesake
+    // keeps full weight even while the Graph permission of the same name is
+    // confirmed scoped.
+    let (high_scoped, high_full): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) = perms
+        .app_role_grants
         .iter()
-        .filter(|v| HIGH_RISK_APP_PERMISSIONS.contains(&v.as_str()))
-        .collect();
-    let (high_scoped, high_full): (Vec<&String>, Vec<&String>) =
-        high_hits.into_iter().partition(|v| perms.is_scoped(v));
+        .filter(|g| HIGH_RISK_APP_PERMISSIONS.contains(&g.value.as_str()))
+        .partition(|g| perms.is_scoped(g));
     if !high_full.is_empty() {
         c.score += PTS_HIGH_RISK_APP_PERM * high_full.len() as u32;
         c.issues.push(format!(
             "High-risk application permissions: {}",
-            join_refs(&high_full)
+            join_values(&high_full)
         ));
         c.recommendations.push(
             "Review necessity of high-risk permissions and consider principle of least privilege"
@@ -70,29 +72,27 @@ fn rule_app_permission_risk(perms: &AppPermissions) -> RuleContribution {
         c.score += PTS_SCOPED_HIGH_RISK_MAIL * high_scoped.len() as u32;
         c.issues.push(format!(
             "High-risk mailbox permissions scoped via RBAC for Applications (reduced risk): {}",
-            join_refs(&high_scoped)
+            join_values(&high_scoped)
         ));
     }
 
-    let medium_hits: Vec<&String> = perms
-        .app_role_values
+    let (medium_scoped, medium_full): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) = perms
+        .app_role_grants
         .iter()
-        .filter(|v| MEDIUM_RISK_APP_PERMISSIONS.contains(&v.as_str()))
-        .collect();
-    let (medium_scoped, medium_full): (Vec<&String>, Vec<&String>) =
-        medium_hits.into_iter().partition(|v| perms.is_scoped(v));
+        .filter(|g| MEDIUM_RISK_APP_PERMISSIONS.contains(&g.value.as_str()))
+        .partition(|g| perms.is_scoped(g));
     if !medium_full.is_empty() {
         c.score += PTS_MEDIUM_RISK_APP_PERM * medium_full.len() as u32;
         c.issues.push(format!(
             "Medium-risk application permissions: {}",
-            join_refs(&medium_full)
+            join_values(&medium_full)
         ));
     }
     if !medium_scoped.is_empty() {
         c.score += PTS_SCOPED_MEDIUM_RISK_MAIL * medium_scoped.len() as u32;
         c.issues.push(format!(
             "Medium-risk mailbox permissions scoped via RBAC for Applications (reduced risk): {}",
-            join_refs(&medium_scoped)
+            join_values(&medium_scoped)
         ));
     }
     c
@@ -201,32 +201,72 @@ fn rule_stale_app(days_since_created: Option<i64>) -> RuleContribution {
     c
 }
 
-/// Rule 11 (advisory, no score): organization-wide mailbox access — broad
-/// `Mail.*` reach every mailbox unless scoped via Exchange RBAC. Returns the
-/// org-wide (unscoped) set for the ScopeMailboxAccess remediation. Empty
-/// `mail_scopes` ⇒ every hit is org-wide ⇒ original behavior.
-fn rule_mailbox_advisory(perms: &AppPermissions) -> (RuleContribution, Vec<&String>) {
+/// Rule 11 (advisory, no score): organization-wide mailbox access. Splits the
+/// mailbox-reaching grants three ways, because the remedy differs per bucket:
+///
+/// - **confirmed scoped** via Exchange RBAC → informational only;
+/// - **org-wide and scopable** → the `ScopeMailboxAccess` remediation;
+/// - **org-wide on the legacy Office 365 Exchange Online resource** → its own
+///   finding and **no** remediation. RBAC for Applications covers Microsoft
+///   Graph and EWS only, so nothing can confine that resource's Outlook REST
+///   `Mail.*` roles — removing the grant is the only remedy, and a "Scope…"
+///   button there would promise a fix that cannot be honoured.
+///
+/// Membership comes from [`crate::scoping::is_mailbox_reaching_permission`],
+/// which is resource-aware — a bare `Mail.*` name test misses the EWS
+/// `full_access_as_app` scope entirely, and that grant reaches every mailbox in
+/// the tenant.
+///
+/// Returns the *scopable* org-wide set for the remediation. Empty `mail_scopes`
+/// ⇒ nothing is scoped ⇒ every scopable hit is org-wide (the original behavior).
+fn rule_mailbox_advisory(perms: &AppPermissions) -> (RuleContribution, Vec<&ResourcePermission>) {
     let mut c = RuleContribution::default();
-    let mailbox_hits: Vec<&String> = perms
-        .app_role_values
+    let mailbox_hits: Vec<&ResourcePermission> = perms
+        .app_role_grants
         .iter()
-        .filter(|v| v.starts_with("Mail.") || v.starts_with("MailboxSettings."))
+        .filter(|g| {
+            crate::scoping::is_mailbox_reaching_permission(g.resource_app_id.as_deref(), &g.value)
+        })
         .collect();
-    let (mailbox_scoped, mailbox_unscoped): (Vec<&String>, Vec<&String>) =
-        mailbox_hits.into_iter().partition(|v| perms.is_scoped(v));
+    let (mailbox_scoped, mailbox_orgwide): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) =
+        mailbox_hits.into_iter().partition(|g| perms.is_scoped(g));
+    let (unscopable_legacy, mailbox_unscoped): (
+        Vec<&ResourcePermission>,
+        Vec<&ResourcePermission>,
+    ) = mailbox_orgwide.into_iter().partition(|g| {
+        g.resource_app_id.as_deref().is_some_and(|resource| {
+            crate::scoping::is_unscopable_legacy_exchange_permission(resource, &g.value)
+        })
+    });
+
     if !mailbox_unscoped.is_empty() {
         c.issues.push(format!(
-            "Organization-wide mailbox access: {}",
-            join_refs(&mailbox_unscoped)
+            "{}: {}",
+            issue::ORG_WIDE_MAILBOX,
+            join_values(&mailbox_unscoped)
         ));
         c.recommendations.push(
             "Scope mailbox access to specific mailboxes using RBAC for Applications".to_string(),
         );
     }
+    if !unscopable_legacy.is_empty() {
+        c.issues.push(format!(
+            "{}: {}",
+            issue::UNSCOPABLE_LEGACY_MAILBOX,
+            join_values(&unscopable_legacy)
+        ));
+        c.recommendations.push(
+            "Remove these legacy Office 365 Exchange Online grants — they reach every mailbox, \
+             RBAC for Applications cannot confine them (it covers Microsoft Graph and EWS only), \
+             and the Outlook REST endpoints they authorized were decommissioned in March 2024. \
+             Use the identically named Microsoft Graph permission instead."
+                .to_string(),
+        );
+    }
     if !mailbox_scoped.is_empty() {
         c.issues.push(format!(
             "Mailbox access scoped via RBAC for Applications: {}",
-            join_refs(&mailbox_scoped)
+            join_values(&mailbox_scoped)
         ));
     }
     (c, mailbox_unscoped)
@@ -236,10 +276,11 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> (RuleContribution, Vec<&Stri
 /// scoping is encoded by the permission itself (`Sites.Selected` is scoped,
 /// every other `Sites.*` is org-wide), so no live lookup is needed. Returns the
 /// org-wide set for the ScopeSharePointAccess remediation.
-fn rule_sharepoint_advisory(perms: &AppPermissions) -> (RuleContribution, Vec<&String>) {
+/// Takes the resource-stripped values: SharePoint scoping is encoded by the
+/// permission name alone, so unlike the mailbox rule it needs no resource.
+fn rule_sharepoint_advisory(values: &[String]) -> (RuleContribution, Vec<&String>) {
     let mut c = RuleContribution::default();
-    let sharepoint_orgwide: Vec<&String> = perms
-        .app_role_values
+    let sharepoint_orgwide: Vec<&String> = values
         .iter()
         .filter(|v| crate::scoping::is_sharepoint_orgwide(v))
         .collect();
@@ -251,11 +292,7 @@ fn rule_sharepoint_advisory(perms: &AppPermissions) -> (RuleContribution, Vec<&S
         c.recommendations
             .push("Restrict SharePoint access to specific sites using Sites.Selected".to_string());
     }
-    if perms
-        .app_role_values
-        .iter()
-        .any(|v| v.as_str() == "Sites.Selected")
-    {
+    if values.iter().any(|v| v.as_str() == "Sites.Selected") {
         c.issues
             .push("SharePoint access scoped to selected sites: Sites.Selected".to_string());
     }
@@ -433,9 +470,14 @@ fn rule_external_exposure(
 /// redundancy list for the RemoveRedundantPermissions remediation.
 fn rule_redundant_permissions(
     perms: &AppPermissions,
+    values: &[String],
 ) -> (RuleContribution, Vec<(String, Vec<String>)>) {
     let mut c = RuleContribution::default();
-    let redundant = redundant_app_permissions(&perms.app_role_values, |b| perms.is_scoped(b));
+    // `value_fully_scoped`, not `is_scoped`: the broader permission only
+    // confines the narrower one if EVERY grant of that name is confined. A
+    // `Mail.ReadWrite` scoped on Graph while its unscopable legacy Exchange
+    // Online namesake survives still reaches every mailbox.
+    let redundant = redundant_app_permissions(values, |b| perms.value_fully_scoped(b));
     if !redundant.is_empty() {
         let listing = redundant
             .iter()
@@ -458,12 +500,11 @@ fn rule_redundant_permissions(
 /// score): names the concrete narrower alternative for each risk-flagged
 /// permission so the Rule-1/2 advice is actionable. Admin-judged, so never a
 /// one-click remediation.
-fn rule_downgrade_pointers(perms: &AppPermissions) -> RuleContribution {
+fn rule_downgrade_pointers(values: &[String]) -> RuleContribution {
     let mut c = RuleContribution::default();
     let downgrades: Vec<String> = {
         let mut seen = std::collections::HashSet::new();
-        perms
-            .app_role_values
+        values
             .iter()
             .filter(|v| {
                 (HIGH_RISK_APP_PERMISSIONS.contains(&v.as_str())
@@ -500,7 +541,7 @@ fn rule_downgrade_pointers(perms: &AppPermissions) -> RuleContribution {
 /// (`None` = owners not fetched — SP-only rows — so no AddOwner is attached).
 fn build_remediations(
     expired: &[&CredentialSummary],
-    mailbox_unscoped: &[&String],
+    mailbox_unscoped: &[&ResourcePermission],
     sharepoint_orgwide: &[&String],
     redundant: &[(String, Vec<String>)],
     owner_count: Option<usize>,
@@ -528,9 +569,9 @@ fn build_remediations(
             ),
             detail: format!(
                 "Confines via Exchange RBAC: {}",
-                join_refs(mailbox_unscoped)
+                join_values(mailbox_unscoped)
             ),
-            targets: mailbox_unscoped.iter().map(|v| v.to_string()).collect(),
+            targets: mailbox_unscoped.iter().map(|g| g.value.clone()).collect(),
         });
     }
     if !sharepoint_orgwide.is_empty() {
@@ -647,14 +688,20 @@ pub fn score_application(
     let days_since_created = app.created_date_time.map(|c| (now - c).num_days());
     acc.merge(rule_stale_app(days_since_created));
 
+    // Resource-stripped values, resolved once: the rules that classify by
+    // permission *name* alone (SharePoint, redundancy, downgrade pointers) take
+    // these, while the mailbox and risk rules read `app_role_grants` directly
+    // because they must gate on the grant's own resource.
+    let values = perms.app_role_values();
+
     // Rules 11, 12, 18 also return the sets the remediation block keys off.
     let (mail_contrib, mailbox_unscoped) = rule_mailbox_advisory(perms);
     acc.merge(mail_contrib);
-    let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(perms);
+    let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(&values);
     acc.merge(sharepoint_contrib);
     acc.merge(rule_high_risk_delegated(perms)); // Rule 13
 
-    let has_app_permissions = !perms.app_role_values.is_empty();
+    let has_app_permissions = !perms.app_role_grants.is_empty();
     let has_credentials = !all_creds.is_empty();
     acc.merge(rule_app_hygiene(
         app,
@@ -663,16 +710,16 @@ pub fn score_application(
         !secrets.is_empty(),
     )); // Rules 14-17
 
-    let (redundant_contrib, redundant) = rule_redundant_permissions(perms); // Rule 18
+    let (redundant_contrib, redundant) = rule_redundant_permissions(perms, &values); // Rule 18
     acc.merge(redundant_contrib);
     acc.merge(rule_external_exposure(
         app,
         has_app_permissions,
         has_credentials,
     )); // Rules 19 & 20
-    acc.merge(rule_downgrade_pointers(perms)); // least-privilege downgrade pointers
+    acc.merge(rule_downgrade_pointers(&values)); // least-privilege downgrade pointers
 
-    let permission_count = (perms.app_role_values.len() + perms.scope_values.len()) as u32;
+    let permission_count = (perms.app_role_grants.len() + perms.scope_values.len()) as u32;
 
     let remediations = build_remediations(
         &expired,
@@ -749,9 +796,10 @@ pub fn score_service_principal(
     acc.merge(rule_sp_disabled(sp.account_enabled)); // Rule 4
 
     // Rules 11 & 12 also return the sets the remediation block keys off.
+    let values = perms.app_role_values();
     let (mail_contrib, mailbox_unscoped) = rule_mailbox_advisory(perms);
     acc.merge(mail_contrib);
-    let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(perms);
+    let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(&values);
     acc.merge(sharepoint_contrib);
     acc.merge(rule_high_risk_delegated(perms)); // Rule 13
 
@@ -776,7 +824,7 @@ pub fn score_service_principal(
         // Credentials live on the application in its home tenant — unknowable
         // here, and deliberately never flagged.
         credential_status: CredentialStatus::Unknown,
-        permission_count: (perms.app_role_values.len() + perms.scope_values.len()) as u32,
+        permission_count: (perms.app_role_grants.len() + perms.scope_values.len()) as u32,
         service_principal_enabled: sp.account_enabled,
         days_since_created: sp.created_date_time.map(|c| (now - c).num_days()),
         certificates: Vec::new(),
@@ -792,10 +840,22 @@ pub fn score_service_principal(
     }
 }
 
-fn join_refs(items: &[&String]) -> String {
+fn join_refs<S: AsRef<str>>(items: &[S]) -> String {
     items
         .iter()
-        .map(|s| s.as_str())
+        .map(AsRef::as_ref)
+        .collect::<Vec<&str>>()
+        .join(", ")
+}
+
+/// `join_refs` over the *values* of a set of resource-qualified grants. The
+/// resource stays out of the operator-facing text: two identically named grants
+/// on different resources read as one name, which is exactly what the reader
+/// sees in the portal.
+fn join_values(items: &[&ResourcePermission]) -> String {
+    items
+        .iter()
+        .map(|g| g.value.as_str())
         .collect::<Vec<&str>>()
         .join(", ")
 }
@@ -847,7 +907,10 @@ mod tests {
 
     fn sp_perms(roles: &[&str]) -> AppPermissions {
         AppPermissions {
-            app_role_values: roles.iter().map(|s| s.to_string()).collect(),
+            app_role_grants: roles
+                .iter()
+                .map(|s| ResourcePermission::graph(*s))
+                .collect(),
             ..Default::default()
         }
     }
@@ -1030,7 +1093,7 @@ mod tests {
     #[test]
     fn one_high_risk_permission_adds_ten() {
         let perms = AppPermissions {
-            app_role_values: vec!["Directory.ReadWrite.All".into()],
+            app_role_grants: vec![ResourcePermission::graph("Directory.ReadWrite.All")],
             ..Default::default()
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
@@ -1041,7 +1104,10 @@ mod tests {
     #[test]
     fn two_high_risk_permissions_adds_twenty() {
         let perms = AppPermissions {
-            app_role_values: vec!["Directory.ReadWrite.All".into(), "Mail.Send".into()],
+            app_role_grants: vec![
+                ResourcePermission::graph("Directory.ReadWrite.All"),
+                ResourcePermission::graph("Mail.Send"),
+            ],
             ..Default::default()
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
@@ -1052,7 +1118,7 @@ mod tests {
     #[test]
     fn medium_risk_permission_adds_five() {
         let perms = AppPermissions {
-            app_role_values: vec!["User.Read.All".into()],
+            app_role_grants: vec![ResourcePermission::graph("User.Read.All")],
             ..Default::default()
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
@@ -1178,8 +1244,8 @@ mod tests {
                 }];
             }
             let perms = AppPermissions {
-                app_role_values: if case.app_perms {
-                    vec!["User.Read.All".into()]
+                app_role_grants: if case.app_perms {
+                    vec![ResourcePermission::graph("User.Read.All")]
                 } else {
                     Vec::new()
                 },
@@ -1203,7 +1269,7 @@ mod tests {
     #[test]
     fn unverified_publisher_is_scored_only_alongside_multitenant_reach() {
         let perms = AppPermissions {
-            app_role_values: vec!["User.Read.All".into()],
+            app_role_grants: vec![ResourcePermission::graph("User.Read.All")],
             ..Default::default()
         };
         let unverified = |audience: &str, publisher: Option<VerifiedPublisher>| {
@@ -1281,12 +1347,12 @@ mod tests {
         let mut app = base_app();
         app.owners = Some(Vec::new()); // ownerless → NO_OWNERS
         let perms = AppPermissions {
-            app_role_values: vec![
-                "Directory.ReadWrite.All".into(), // HIGH_RISK_APP_PERMS
-                "Directory.Read.All".into(),      // REDUNDANT_APP_PERMS (⊂ ReadWrite)
-                "Mail.Read".into(),               // ORG_WIDE_MAILBOX
-                "Sites.Read.All".into(),          // ORG_WIDE_SHAREPOINT
-                "Sites.Selected".into(),          // SCOPED_SHAREPOINT
+            app_role_grants: vec![
+                ResourcePermission::graph("Directory.ReadWrite.All"), // HIGH_RISK_APP_PERMS
+                ResourcePermission::graph("Directory.Read.All"), // REDUNDANT_APP_PERMS (⊂ ReadWrite)
+                ResourcePermission::graph("Mail.Read"),          // ORG_WIDE_MAILBOX
+                ResourcePermission::graph("Sites.Read.All"),     // ORG_WIDE_SHAREPOINT
+                ResourcePermission::graph("Sites.Selected"),     // SCOPED_SHAREPOINT
             ],
             scope_values: vec!["Directory.AccessAsUser.All".into()], // HIGH_RISK_DELEGATED_PERMS
             ..Default::default()
@@ -1331,7 +1397,7 @@ mod tests {
         let mut mail_scopes = HashMap::new();
         mail_scopes.insert("Mail.Read".to_string(), scoped());
         let scoped_perms = AppPermissions {
-            app_role_values: vec!["Mail.Read".into()],
+            app_role_grants: vec![ResourcePermission::graph("Mail.Read")],
             mail_scopes,
             ..Default::default()
         };
@@ -1472,7 +1538,7 @@ mod tests {
         let mut mail_scopes = HashMap::new();
         mail_scopes.insert("Mail.Send".to_string(), scoped());
         let perms = AppPermissions {
-            app_role_values: vec!["Mail.Send".into()],
+            app_role_grants: vec![ResourcePermission::graph("Mail.Send")],
             mail_scopes,
             ..Default::default()
         };
@@ -1498,12 +1564,123 @@ mod tests {
     }
 
     #[test]
+    fn ews_full_access_as_app_is_high_risk_org_wide_mailbox_reach() {
+        // `full_access_as_app` grants full access to EVERY mailbox in the tenant —
+        // strictly broader than Mail.ReadWrite. It scored ZERO before: it is named
+        // nothing like a mail permission, so Rule 11's `Mail.*`/`MailboxSettings.*`
+        // prefix filter never saw it, and the risk tables only listed Graph names.
+        // The result was the tenant's most dangerous mailbox grant raising no
+        // finding and offering no fix.
+        let perms = AppPermissions {
+            app_role_grants: vec![ResourcePermission::exchange_online(
+                crate::scoping::EWS_FULL_ACCESS_AS_APP,
+            )],
+            ..Default::default()
+        };
+        let item = score_application(&base_app(), Some(true), &perms, now());
+        assert_eq!(item.risk_score, PTS_HIGH_RISK_APP_PERM);
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with(issue::ORG_WIDE_MAILBOX)),
+            "must raise the org-wide mailbox finding: {:?}",
+            item.issues
+        );
+        // ...and it IS scopable (via `Application EWS.AccessAsApp`), so the
+        // one-click fix must be attached and must name it as the target.
+        let fix = item
+            .remediations
+            .iter()
+            .find(|r| r.kind == RemediationKind::ScopeMailboxAccess)
+            .expect("ScopeMailboxAccess remediation");
+        assert_eq!(fix.targets, vec![crate::scoping::EWS_FULL_ACCESS_AS_APP]);
+    }
+
+    #[test]
+    fn a_scoped_graph_mail_verdict_never_covers_its_legacy_exchange_namesake() {
+        // Both Microsoft Graph and the legacy Office 365 Exchange Online resource
+        // expose a `Mail.Read`. Only Graph's is confinable by RBAC for
+        // Applications. Keyed on the value alone, the Graph row's "scoped" verdict
+        // was borrowed by the legacy row — so a genuinely org-wide grant dropped
+        // out of the mailbox findings and scored at the reduced scoped weight.
+        let mut mail_scopes = HashMap::new();
+        mail_scopes.insert("Mail.Read".to_string(), scoped());
+        let perms = AppPermissions {
+            app_role_grants: vec![
+                ResourcePermission::graph("Mail.Read"),
+                ResourcePermission::exchange_online("Mail.Read"),
+            ],
+            mail_scopes,
+            ..Default::default()
+        };
+        let item = score_application(&base_app(), Some(true), &perms, now());
+
+        // The Graph one earns the reduced weight; the legacy one keeps full weight.
+        assert_eq!(
+            item.risk_score,
+            PTS_SCOPED_MEDIUM_RISK_MAIL + PTS_MEDIUM_RISK_APP_PERM
+        );
+        // The legacy grant is called out under its OWN finding — RBAC cannot
+        // confine it, so it must not appear under the scopable org-wide heading...
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with(issue::UNSCOPABLE_LEGACY_MAILBOX)),
+            "legacy grant must raise its own finding: {:?}",
+            item.issues
+        );
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::ORG_WIDE_MAILBOX)),
+            "nothing scopable is org-wide here: {:?}",
+            item.issues
+        );
+        // ...and must NOT get a "Scope…" button that could never be honoured.
+        assert!(
+            !item
+                .remediations
+                .iter()
+                .any(|r| r.kind == RemediationKind::ScopeMailboxAccess),
+            "an unscopable legacy grant must offer no scoping fix"
+        );
+    }
+
+    #[test]
+    fn a_surviving_legacy_namesake_keeps_the_narrower_permission_redundant() {
+        // Redundancy asks whether a broader held permission already covers a
+        // narrower one. `Mail.ReadWrite` scoped on Graph would normally stop
+        // covering `Mail.Read` — but an unscopable legacy `Mail.ReadWrite` still
+        // reaches every mailbox, so the coverage (and the redundancy) survives.
+        let mut mail_scopes = HashMap::new();
+        mail_scopes.insert("Mail.ReadWrite".to_string(), scoped());
+        let perms = AppPermissions {
+            app_role_grants: vec![
+                ResourcePermission::graph("Mail.ReadWrite"),
+                ResourcePermission::exchange_online("Mail.ReadWrite"),
+                ResourcePermission::graph("Mail.Read"),
+            ],
+            mail_scopes,
+            ..Default::default()
+        };
+        let item = score_application(&base_app(), Some(true), &perms, now());
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with(issue::REDUNDANT_APP_PERMS)),
+            "Mail.Read is still covered by the unconfined legacy Mail.ReadWrite: {:?}",
+            item.issues
+        );
+    }
+
+    #[test]
     fn medium_scoped_mail_permission_uses_reduced_weight() {
         // Mail.Read is medium-risk (+5 org-wide) → +2 when scoped.
         let mut mail_scopes = HashMap::new();
         mail_scopes.insert("Mail.Read".to_string(), scoped());
         let perms = AppPermissions {
-            app_role_values: vec!["Mail.Read".into()],
+            app_role_grants: vec![ResourcePermission::graph("Mail.Read")],
             mail_scopes,
             ..Default::default()
         };
@@ -1519,7 +1696,7 @@ mod tests {
             let mut mail_scopes = HashMap::new();
             mail_scopes.insert("Mail.Send".to_string(), verdict.clone());
             let perms = AppPermissions {
-                app_role_values: vec!["Mail.Send".into()],
+                app_role_grants: vec![ResourcePermission::graph("Mail.Send")],
                 mail_scopes,
                 ..Default::default()
             };
@@ -1544,7 +1721,10 @@ mod tests {
         let mut mail_scopes = HashMap::new();
         mail_scopes.insert("Mail.Send".to_string(), scoped());
         let perms = AppPermissions {
-            app_role_values: vec!["Mail.Send".into(), "Directory.ReadWrite.All".into()],
+            app_role_grants: vec![
+                ResourcePermission::graph("Mail.Send"),
+                ResourcePermission::graph("Directory.ReadWrite.All"),
+            ],
             mail_scopes,
             ..Default::default()
         };
@@ -1590,12 +1770,12 @@ mod tests {
 
     fn rich_perms() -> AppPermissions {
         AppPermissions {
-            app_role_values: vec![
-                "Directory.ReadWrite.All".into(), // high
-                "Mail.ReadWrite".into(),          // high + org-wide mailbox
-                "Mail.Read".into(), // medium + mailbox; redundant (covered by Mail.ReadWrite)
-                "Sites.ReadWrite.All".into(), // high + org-wide SharePoint
-                "User.Read.All".into(), // medium
+            app_role_grants: vec![
+                ResourcePermission::graph("Directory.ReadWrite.All"), // high
+                ResourcePermission::graph("Mail.ReadWrite"),          // high + org-wide mailbox
+                ResourcePermission::graph("Mail.Read"), // medium + mailbox; redundant (covered by Mail.ReadWrite)
+                ResourcePermission::graph("Sites.ReadWrite.All"), // high + org-wide SharePoint
+                ResourcePermission::graph("User.Read.All"), // medium
             ],
             scope_values: vec!["Directory.AccessAsUser.All".into()], // high-risk delegated
             has_admin_consent: true,
@@ -1642,7 +1822,10 @@ mod tests {
             },
         );
         AppPermissions {
-            app_role_values: vec!["Mail.ReadWrite".into(), "Sites.Selected".into()],
+            app_role_grants: vec![
+                ResourcePermission::graph("Mail.ReadWrite"),
+                ResourcePermission::graph("Sites.Selected"),
+            ],
             mail_scopes,
             ..Default::default()
         }
@@ -1753,7 +1936,7 @@ mod tests {
         // The default (scoping not resolved) must not change any score: Mail.Send
         // stays at the full high-risk weight with the org-wide advisory.
         let perms = AppPermissions {
-            app_role_values: vec!["Mail.Send".into()],
+            app_role_grants: vec![ResourcePermission::graph("Mail.Send")],
             ..Default::default()
         };
         assert!(perms.mail_scopes.is_empty());
@@ -1827,7 +2010,10 @@ mod tests {
         // ScopeMailboxAccess appears for org-wide mail perms; ScopeSharePointAccess
         // for org-wide Sites.* — keyed off the same Rule-11/12 sets as the issues.
         let perms = AppPermissions {
-            app_role_values: vec!["Mail.Send".into(), "Sites.ReadWrite.All".into()],
+            app_role_grants: vec![
+                ResourcePermission::graph("Mail.Send"),
+                ResourcePermission::graph("Sites.ReadWrite.All"),
+            ],
             ..Default::default()
         };
         let kinds: Vec<_> = score_application(&base_app(), Some(true), &perms, now())
@@ -1843,7 +2029,10 @@ mod tests {
         let mut mail_scopes = HashMap::new();
         mail_scopes.insert("Mail.Send".to_string(), scoped());
         let scoped_perms = AppPermissions {
-            app_role_values: vec!["Mail.Send".into(), "Sites.Selected".into()],
+            app_role_grants: vec![
+                ResourcePermission::graph("Mail.Send"),
+                ResourcePermission::graph("Sites.Selected"),
+            ],
             mail_scopes,
             ..Default::default()
         };
@@ -1862,7 +2051,10 @@ mod tests {
         // permissions already earn individually (Mail.ReadWrite high=10,
         // Mail.Read medium=5 — redundancy itself adds nothing).
         let perms = AppPermissions {
-            app_role_values: vec!["Mail.ReadWrite".into(), "Mail.Read".into()],
+            app_role_grants: vec![
+                ResourcePermission::graph("Mail.ReadWrite"),
+                ResourcePermission::graph("Mail.Read"),
+            ],
             ..Default::default()
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
@@ -1887,7 +2079,10 @@ mod tests {
         let mut mail_scopes = HashMap::new();
         mail_scopes.insert("Mail.ReadWrite".to_string(), scoped());
         let scoped_perms = AppPermissions {
-            app_role_values: vec!["Mail.ReadWrite".into(), "Mail.Read".into()],
+            app_role_grants: vec![
+                ResourcePermission::graph("Mail.ReadWrite"),
+                ResourcePermission::graph("Mail.Read"),
+            ],
             mail_scopes,
             ..Default::default()
         };
@@ -1911,7 +2106,7 @@ mod tests {
         // Risk-flagged permission with a narrower equivalent → recommendation
         // names the concrete swap. Recommendation only: no issue, no score change.
         let perms = AppPermissions {
-            app_role_values: vec!["Mail.ReadWrite".into()],
+            app_role_grants: vec![ResourcePermission::graph("Mail.ReadWrite")],
             ..Default::default()
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
@@ -1932,7 +2127,7 @@ mod tests {
 
         // A risk-flagged permission with no narrower equivalent suggests nothing.
         let perms = AppPermissions {
-            app_role_values: vec!["Mail.Send".into()],
+            app_role_grants: vec![ResourcePermission::graph("Mail.Send")],
             ..Default::default()
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
@@ -2062,7 +2257,7 @@ mod tests {
         // A benign (non-risky) permission keeps the score at 0 so the advisory's
         // "no score" property is observable.
         let perms = AppPermissions {
-            app_role_values: vec!["Benign.Read".into()],
+            app_role_grants: vec![ResourcePermission::graph("Benign.Read")],
             ..Default::default()
         };
         let item = score_application(&app, Some(true), &perms, now());
@@ -2108,7 +2303,7 @@ mod tests {
             token_encryption_key_id: None,
         });
         let perms = AppPermissions {
-            app_role_values: vec!["Benign.Read".into()],
+            app_role_grants: vec![ResourcePermission::graph("Benign.Read")],
             ..Default::default()
         };
         let item = score_application(&app, Some(true), &perms, now());
@@ -2198,7 +2393,10 @@ mod tests {
             ..Default::default()
         }];
         let perms = AppPermissions {
-            app_role_values: vec!["Directory.ReadWrite.All".into(), "Mail.Send".into()],
+            app_role_grants: vec![
+                ResourcePermission::graph("Directory.ReadWrite.All"),
+                ResourcePermission::graph("Mail.Send"),
+            ],
             scope_values: vec!["Directory.AccessAsUser.All".into()],
             has_admin_consent: true,
             ..Default::default()
@@ -2221,7 +2419,7 @@ mod tests {
         // adds an issue but no extra score.
         // Source: Resource-Analysis.ps1::Add-ExchangePermissionAnalysis.
         let perms = AppPermissions {
-            app_role_values: vec!["Mail.Send".into()],
+            app_role_grants: vec![ResourcePermission::graph("Mail.Send")],
             ..Default::default()
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
@@ -2244,7 +2442,7 @@ mod tests {
         // `Sites.ReadWrite.All` now scores as high-risk (+10), consistent with
         // `Sites.FullControl.All`, AND still raises the org-wide advisory.
         let perms = AppPermissions {
-            app_role_values: vec!["Sites.ReadWrite.All".into()],
+            app_role_grants: vec![ResourcePermission::graph("Sites.ReadWrite.All")],
             ..Default::default()
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
@@ -2262,7 +2460,7 @@ mod tests {
         // still raises the advisory with no score — confirms Rule 12 is
         // independent of the risk-list weighting.
         let perms = AppPermissions {
-            app_role_values: vec!["Sites.Manage.All".into()],
+            app_role_grants: vec![ResourcePermission::graph("Sites.Manage.All")],
             ..Default::default()
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
@@ -2280,7 +2478,7 @@ mod tests {
         // a positive "scoped to selected sites" note (parity with the mailbox
         // scoped note).
         let perms = AppPermissions {
-            app_role_values: vec!["Sites.Selected".into()],
+            app_role_grants: vec![ResourcePermission::graph("Sites.Selected")],
             ..Default::default()
         };
         let item = score_application(&base_app(), Some(true), &perms, now());

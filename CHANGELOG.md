@@ -7,6 +7,36 @@ the project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **The audit scored the EWS `full_access_as_app` grant at zero.** That scope —
+  full access to *every* mailbox in the tenant, strictly broader than
+  `Mail.ReadWrite` — is named nothing like a mail permission, so Rule 11's
+  `Mail.*` / `MailboxSettings.*` prefix filter never saw it, and the risk tables
+  only ever listed Microsoft Graph names. The tenant's single most dangerous
+  mailbox grant therefore raised no finding, contributed no risk score and
+  offered no fix. It is now high-risk, raises the org-wide mailbox finding, and
+  carries the `ScopeMailboxAccess` remediation (it *is* confinable, via
+  `Application EWS.AccessAsApp`). **This shifts risk ranking** for any app or
+  service principal holding it.
+- **A service principal holding *only* the EWS scope was never audited at all.**
+  The SP-only phase's candidate filter required a Microsoft Graph application
+  grant, and `full_access_as_app` lives on the legacy Office 365 Exchange Online
+  resource — so a principal with org-wide mailbox access and no Graph role was
+  dropped before scoring. The candidate rule now spans both mailbox-bearing
+  resources.
+- **A scoped Microsoft Graph mail permission lent its verdict to the identically
+  named legacy Exchange Online grant.** The audit's permission model carried bare
+  permission *values* with no resource id, and `mail_scopes` was keyed the same
+  way, so an app declaring `Mail.Read` on both resources had the unscopable
+  legacy grant read as "scoped" — dropping a genuinely org-wide grant out of the
+  mailbox findings and scoring it at the reduced scoped weight. Application
+  permissions now travel as `ResourcePermission { resource_app_id, value }`, and
+  every mailbox verdict is gated on the grant's own resource. Unscopable legacy
+  grants get their own finding (RBAC for Applications covers Microsoft Graph and
+  EWS only) and deliberately **no** "Scope…" button, since removing the grant is
+  the only remedy.
+
 ## [0.22.1] - 2026-07-29
 
 ### Fixed

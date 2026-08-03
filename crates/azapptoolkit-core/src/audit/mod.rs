@@ -32,5 +32,5 @@ pub use scoring::{
 pub use types::{
     AppPermissions, AuditItem, AuditPrincipalKind, CredentialKind, CredentialStatus,
     CredentialSummary, ListCredentialStatus, MailPermissionScope, RemediationAction,
-    RemediationKind, RiskLevel, ScopeMechanism, issue,
+    RemediationKind, ResourcePermission, RiskLevel, ScopeMechanism, issue,
 };
