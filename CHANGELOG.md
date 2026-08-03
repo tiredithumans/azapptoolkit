@@ -7,7 +7,46 @@ the project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **The WASM frontend now declares its own `unsafe_code = "deny"`.** The root
+  workspace calls that lint an explicit security boundary for a tool handling
+  delegated tokens, but `[workspace.lints]` reaches only workspace members — and
+  `web-rs` is excluded for build-target reasons. That silently carried the
+  largest tier in the repo, running inside the webview with full IPC access, out
+  from under the boundary. It is declared locally now; the exclusion is a
+  build-target decision and can no longer widen what the frontend may do.
+- **`cargo deny` actually runs the advisories check.** Both `just deny` and
+  `just web-deny` ran `check bans licenses sources`, so `deny.toml`'s
+  `[advisories]` block — `yanked = "deny"` plus three reviewed RUSTSEC ignores —
+  was configuration nothing executed. Enabling it surfaced 16 `unmaintained`
+  advisories, all transitive and none with an upgrade path from this repo (the
+  archived gtk-rs GTK3 stack, `proc-macro-error`, the `unic-*` family), so the
+  policy now scopes `unmaintained` to direct workspace dependencies. Yanked
+  crates and vulnerabilities are enforced for the whole graph, as intended.
+
+### Added
+
+- **`just verify-ui`** — `verify` plus the browser GUI tests, for a box with
+  Chrome. `just verify` now also prints what it did not run and why, instead of
+  omitting the frontend behavioral tests silently.
+- **`just web-itest-size`** — enforces the per-shard wasm ceiling the GUI test
+  strategy depends on (CI runs it after the GUI tests). The number lived only in
+  comments; a shard drifting past it fails as an opaque 60-second "Failed to
+  detect test as having been run" timeout that reads like a flaky browser.
+- Tests pinning three invariants that were previously prose only: the two
+  RUSTSEC ignore lists (`deny.toml` and `.cargo/audit.toml`) stay in sync, both
+  deny recipes run the advisories check, and every infallible `invoke()` in the
+  frontend bindings has a demo fixture registered — an unregistered one panics
+  the whole published demo page rather than failing one widget.
+
 ### Fixed
+
+- **`apply_tenant_defaults` could silently drop a new setting.** It hand-copied
+  five named fields to preserve the two vault fields, with nothing tying that
+  allowlist to `TenantDefaults`'s actual shape — so a field added and wired into
+  the Settings page would compile, appear to save, and never persist. It now
+  destructures exhaustively, making the compiler demand a decision per field.
 
 - **Exchange scoping silently failed for two permissions sharing one Exchange
   role, and the failure was permanent.** `assign_scoped_roles` snapshotted the
