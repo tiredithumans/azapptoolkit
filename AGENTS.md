@@ -155,11 +155,11 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Audit signals — structured, not text.** Facets/cards/finding groups key off `AuditItem` fields (`risk_level`, `credential_status`, `unused`, …), not free-text.
 
-- **Shared `audit_cancel` flag.** Security-audit and Bulk-actions both poll `AppState.audit_cancel`. New long-running commands must `reset()` at the top. Resource Access lookups poll `AppState.sweep_cancel` (independent); DR backup/restore uses `AppState.dr_cancel`. Tested in `state.rs`.
+- **Shared `audit_cancel` flag.** Security-audit and Bulk-actions both poll `AppState.audit_cancel`; new long-running commands must `reset()` at the top. Resource Access polls `sweep_cancel`; DR backup/restore uses `dr_cancel`. Tested in `state.rs`.
 
-- **Batched Graph fan-out + adaptive throttle.** Heavy per-object fan-outs (audit, DR backup) use Graph JSON batching (`client.batch_get_json[_with_headers]`, 20 GETs/POST) + the shared `ConcurrencyThrottle` via `ThrottleGuard::attach`. Reuse both; never hand-roll a tracker or a raw per-item loop. Whole-batch failures degrade to per-object reads. `$count`/`$orderby` belong to `$search` alone — `$expand` + advanced query fails *silently* (caps at 20 items, no `nextLink`). Details: [caching-and-search.md](docs/architecture/caching-and-search.md).
+- **Batched Graph fan-out + adaptive throttle.** Heavy fan-outs (audit, DR backup) use Graph JSON batching (`client.batch_get_json[_with_headers]`, 20 GETs/POST) + the shared `ConcurrencyThrottle` via `ThrottleGuard::attach`. Reuse both; never hand-roll a tracker or a per-item loop. Whole-batch failures degrade to per-object reads. `$count`/`$orderby` belong to `$search` alone — `$expand` + advanced query fails *silently* (caps at 20, no `nextLink`). Details: [caching-and-search.md](docs/architecture/caching-and-search.md).
 
-- **Every paged read sends `$top`.** Paging is serial, so Graph's default page size of 100 is a 10× round-trip multiplier — new paged reads (and their `$batch` sub-URLs) send `client::MAX_PAGE_SIZE`, `/applications` sends `DEFAULT_APP_PAGE_SIZE`. Over-asking is clamped silently; per-endpoint caps aren't reliably documented. Details: [caching-and-search.md](docs/architecture/caching-and-search.md).
+- **Every paged read sends `$top`.** Paging is serial, so Graph's default of 100 is a 10× round-trip multiplier — paged reads (and `$batch` sub-URLs) send `client::MAX_PAGE_SIZE`, `/applications` sends `DEFAULT_APP_PAGE_SIZE`. Over-asking is clamped silently. Details: [caching-and-search.md](docs/architecture/caching-and-search.md).
 
 - **Scope-aware audit risk.** `score_application` reads `AppPermissions.mail_scopes` (empty map = org-wide, so an unresolved probe never under-reports). SharePoint scoping is name-based, no live call. Badges: `web-rs/components/scope_badge.rs`.
 
@@ -191,7 +191,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **GitHub Pages demo = the WASM frontend with the Tauri backend mocked.** `just web-build-pages` builds `web-rs` with the `demo` feature (off in `web-build`/desktop, so the mock never ships); `pages.yml` deploys it. **Footgun:** any infallible `invoke()` must be in `demo::register_fixtures` or it **panics the whole page** — enforced by `web-rs/tests/demo_fixture_coverage.rs`. Details: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
 
-- **Auto-update is interactive (not silent).** The front-end checks once on launch and toasts a notification whose action opens `UpdateSplash` (explicit **Update & restart**). **Don't reintroduce a silent background `download_and_install` in `lib.rs` setup** — it was removed in favour of this flow and would race the prompt. Details: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
+- **Auto-update is interactive (not silent).** The front-end checks once on launch and toasts a notification whose action opens `UpdateSplash` (explicit **Update & restart**). **Don't reintroduce a silent background `download_and_install` in `lib.rs` setup** — it would race the prompt. Details: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
 
 - **Release is a 3-OS matrix → one aggregated `latest.json`.** `release.yml`: `guard` → `build` matrix (windows · macos aarch64 · linux) → `release` assembles one draft; a human publishes. CHANGELOG headers are `## [X.Y.Z] - YYYY-MM-DD` (**no `v` prefix, ASCII hyphen**) — the notes-extraction regex depends on it. It reads only `CHANGELOG.md` and only the released version's section, so releases ≤ 0.19.2 sit in `docs/CHANGELOG-archive.md`. Flow: the `release` skill; matrix: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
 
@@ -202,7 +202,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Full-collection PATCH for `appRoles` / `oauth2PermissionScopes`.** Graph **full-replaces** these not-nullable arrays — re-read live state, mutate, write the whole array back (never merge a cached payload). Deleting an enabled entry needs two PATCHes: disable, then remove (`commands/expose_api.rs`, `commands/app_roles.rs`). Exposed **app roles** edit the **paired application** when one exists (else the SP) and round-trip as **raw JSON** so the `value: null` SAML default (`msiam_access`) survives byte-for-byte. Bust with `invalidate_app_details` only.
 
-- **Crypto deps — no `rsa`; `rand`/`sha2` majors pinned on purpose.** `cert.rs` uses `rcgen` on the `aws_lc_rs` backend specifically to keep `rsa` (RUSTSEC-2023-0071) out of the graph — **don't reintroduce it**. The `rand = "0.8"` / `sha2 = "0.10"` pins match what `oauth2` 5 + Tauri 2 resolve; bumping only duplicates a crypto major. Evidence: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
+- **Crypto/encoding deps — no `rsa`; `rand`/`sha2`/`base64` majors pinned on purpose.** `cert.rs` uses `rcgen` on the `aws_lc_rs` backend specifically to keep `rsa` (RUSTSEC-2023-0071) out of the graph — **don't reintroduce it**. `rand = "0.8"` / `sha2 = "0.10"` / `base64 = "0.22"` match what `oauth2` 5 + Tauri 2 + the reqwest stack resolve; bumping a direct pin that nothing else follows only *adds* a duplicate major. Rationale + drop conditions live in `dependabot.yml`'s `ignore` blocks. Evidence: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
 
 ## Coding fundamentals
 

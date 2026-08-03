@@ -44,6 +44,26 @@ updates:
         versions: [">=0.9"]
       - dependency-name: sha2
         versions: [">=0.11"]
+      # base64 0.23 cannot be adopted yet, and taking it would make things worse
+      # rather than better. Our direct `base64 = "0.22"` currently UNIFIES with the
+      # copy the HTTP stack pulls (hyper-util / reqwest 0.12 + 0.13 all require
+      # ^0.22), so the graph carries two base64 majors. Moving our pin to 0.23
+      # un-unifies it and makes three — none of those crates would move with us:
+      #
+      #   oauth2 5.0.0    base64 >=0.21, <0.23   <- hard exclusion, and 5.0.0 is
+      #                                             the latest release (Jan 2025)
+      #   hyper-util      base64 ^0.22           (latest, 0.1.20)
+      #   reqwest 0.12/13 base64 ^0.22           (both latest)
+      #
+      # Same reasoning as the rand/sha2 pins above: bumping a direct pin that only
+      # duplicates a major is a cost with no benefit. There is also no security
+      # pressure — no advisory against 0.22.x — and 0.22 predates the `simd-unsafe`
+      # feature 0.23 turns on by default, so staying put keeps base64 free of
+      # `unsafe` in the JWT-claim / certificate / client-secret decode paths.
+      # Drop this ignore once oauth2 relaxes its `<0.23` bound AND the
+      # reqwest/hyper-util stack requires ^0.23.
+      - dependency-name: base64
+        versions: [">=0.23"]
     groups:
       # Batch low-risk semver-compatible bumps; majors stay as individual PRs so a
       # breaking upgrade gets its own review.
@@ -62,6 +82,11 @@ updates:
     commit-message:
       prefix: deps
     open-pull-requests-limit: 10
+    ignore:
+      # Mirrors the root entry's base64 hold — this tree has its own lockfile, so
+      # Dependabot proposes the bump here separately. See the rationale above.
+      - dependency-name: base64
+        versions: [">=0.23"]
     groups:
       cargo-minor-patch:
         update-types:
