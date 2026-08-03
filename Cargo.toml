@@ -45,7 +45,7 @@ tracing-appender = "0.2"
 url = "2"
 async-trait = "0.1"
 parking_lot = "0.12"
-base64 = "0.22"
+base64 = "0.23"
 zeroize = "1.8"
 # Testing
 wiremock = "0.6"
