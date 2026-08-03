@@ -10,6 +10,18 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+## [0.22.3] - 2026-08-03
+
+### Changed
+
+- **Dependency maintenance only — no application behavior changes.** `webbrowser`
+  1.2.1 → 1.2.2, the crate `azapptoolkit-auth` uses to open the sign-in URL in
+  your default browser during interactive authentication. Everything else in
+  this release is build and CI configuration that does not reach the shipped
+  binary: a GitHub Actions bump, and a documented hold keeping `base64` at 0.22
+  (0.23 would add a third copy of that crate to the dependency graph, since
+  `oauth2` excludes it outright and the HTTP stack still requires `^0.22`).
+
 ## [0.22.2] - 2026-08-03
 
 ### Added
