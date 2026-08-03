@@ -94,16 +94,35 @@ impl UserSettings {
     /// Settings page. This keeps a Settings save from clobbering a binding a
     /// concurrent rotation just recorded.
     pub fn apply_tenant_defaults(&mut self, tenant_id: &str, incoming: TenantDefaults) {
+        // Destructured WITHOUT `..` on purpose: this is an allowlist of the
+        // operator-editable fields, and an allowlist that silently ignores new
+        // members is the failure mode — a field added to `TenantDefaults` and
+        // wired into the Settings page would compile, save, and never persist.
+        // Exhaustive destructuring makes the compiler demand a decision here.
+        // Adding a field? Assign it below if the Settings page owns it, or bind
+        // it to `_` with a note naming the flow that does.
+        let TenantDefaults {
+            app_registration,
+            enterprise_application,
+            scope_name_pattern,
+            group_name_pattern,
+            secret_name_pattern,
+            // Owned by the credential-rotation flow (`set_app_vault_binding`),
+            // not the Settings page: preserved so a Settings save cannot clobber
+            // a binding a concurrent rotation just recorded.
+            default_vault: _,
+            app_vaults: _,
+        } = incoming;
+
         let entry = self
             .tenant_defaults
             .entry(tenant_id.to_string())
             .or_default();
-        entry.app_registration = incoming.app_registration;
-        entry.enterprise_application = incoming.enterprise_application;
-        entry.scope_name_pattern = incoming.scope_name_pattern;
-        entry.group_name_pattern = incoming.group_name_pattern;
-        entry.secret_name_pattern = incoming.secret_name_pattern;
-        // default_vault + app_vaults are intentionally preserved.
+        entry.app_registration = app_registration;
+        entry.enterprise_application = enterprise_application;
+        entry.scope_name_pattern = scope_name_pattern;
+        entry.group_name_pattern = group_name_pattern;
+        entry.secret_name_pattern = secret_name_pattern;
     }
 
     /// Records where an app registration's client secret was last rotated, keyed

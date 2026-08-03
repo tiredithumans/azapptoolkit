@@ -80,6 +80,14 @@ pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
     "Sites.ReadWrite.All",
     "User.ReadWrite.All",
     "Group.ReadWrite.All",
+    // Net-new (not in the PowerShell `Constants.ps1` source): the EWS
+    // `full_access_as_app` scope on the legacy Office 365 Exchange Online
+    // resource grants full access to *every* mailbox in the tenant — strictly
+    // broader than `Mail.ReadWrite`, which is already high-risk here. It scored
+    // zero before because the risk tables only ever listed Microsoft Graph
+    // names. Unambiguous as a bare value: no other resource exposes it (see
+    // `scoping::EWS_FULL_ACCESS_AS_APP`).
+    crate::scoping::EWS_FULL_ACCESS_AS_APP,
 ];
 
 /// Medium-risk application permissions (by `value` string). Mirrors

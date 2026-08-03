@@ -160,6 +160,35 @@ pub fn is_blanket_mailbox_grant(value: &str) -> bool {
     value == EWS_FULL_ACCESS_AS_APP
 }
 
+/// True when an application permission on `resource_app_id` reaches Exchange
+/// mailboxes **at all** — the superset the audit's mailbox advisory classifies
+/// before splitting it into scoped / org-wide-scopable / unscopable-legacy.
+///
+/// Resource-aware on purpose. A name-shaped `Mail.*` / `MailboxSettings.*` test
+/// alone misses the EWS [`EWS_FULL_ACCESS_AS_APP`] scope — full access to every
+/// mailbox in the tenant, and the single most dangerous mailbox grant there is —
+/// because it is named nothing like a mail permission. It also cannot tell the
+/// legacy resource's unscopable Outlook REST roles apart from Graph's confinable
+/// namesakes.
+///
+/// A `None` resource falls back to the name-shaped check, so a build that cannot
+/// resolve the resource still reports reach rather than silently dropping it.
+pub fn is_mailbox_reaching_permission(resource_app_id: Option<&str>, value: &str) -> bool {
+    fn mail_named(value: &str) -> bool {
+        value.starts_with("Mail.") || value.starts_with("MailboxSettings.")
+    }
+    match resource_app_id {
+        Some(MICROSOFT_GRAPH_APP_ID) => mail_named(value),
+        Some(OFFICE365_EXCHANGE_ONLINE_APP_ID) => {
+            is_blanket_mailbox_grant(value)
+                || is_unscopable_legacy_exchange_permission(OFFICE365_EXCHANGE_ONLINE_APP_ID, value)
+        }
+        // A resource this build doesn't map (or didn't resolve): only the
+        // name-shaped signal is available, and over-reporting is the safe side.
+        _ => mail_named(value),
+    }
+}
+
 /// True for an org-wide SharePoint permission — every `Sites.*` except
 /// `Sites.Selected` (the scoped model). Gates the per-permission "Scope…" action
 /// that converts a broad grant to `Sites.Selected` on chosen sites.
@@ -361,6 +390,44 @@ mod tests {
         assert!(!is_scopable_exchange_permission(
             "MailboxSettings.ReadBasic"
         ));
+    }
+
+    #[test]
+    fn mailbox_reach_is_resource_aware_and_includes_the_ews_blanket_scope() {
+        // The whole point of the resource-aware form: a bare `Mail.*` name test
+        // cannot see `full_access_as_app` (full access to every mailbox in the
+        // tenant), and cannot tell the legacy resource's unscopable Outlook REST
+        // roles from Graph's confinable namesakes.
+        let graph = Some(MICROSOFT_GRAPH_APP_ID);
+        let exo = Some(OFFICE365_EXCHANGE_ONLINE_APP_ID);
+
+        assert!(is_mailbox_reaching_permission(graph, "Mail.Read"));
+        assert!(is_mailbox_reaching_permission(
+            graph,
+            "MailboxSettings.ReadWrite"
+        ));
+        // Named nothing like a mail permission, but reaches every mailbox.
+        assert!(is_mailbox_reaching_permission(exo, EWS_FULL_ACCESS_AS_APP));
+        // Graph never exposes it, so it is not mail-reaching *there*.
+        assert!(!is_mailbox_reaching_permission(
+            graph,
+            EWS_FULL_ACCESS_AS_APP
+        ));
+        // The legacy Outlook REST family still reaches mailboxes (and defeats the
+        // Graph namesake's scope), so it must be classified in.
+        assert!(is_mailbox_reaching_permission(exo, "Mail.Read"));
+        // ...but the live-protocol roles on that resource are not mailbox reach.
+        for value in ["Exchange.ManageAsApp", "IMAP.AccessAsApp", "SMTP.SendAsApp"] {
+            assert!(
+                !is_mailbox_reaching_permission(exo, value),
+                "{value} backs a live protocol, not org-wide mailbox reach"
+            );
+        }
+        // Non-mail permissions are never mailbox reach.
+        assert!(!is_mailbox_reaching_permission(graph, "Directory.Read.All"));
+        // Unknown resource falls back to the name shape — over-report, never under.
+        assert!(is_mailbox_reaching_permission(None, "Mail.Read"));
+        assert!(!is_mailbox_reaching_permission(None, "Directory.Read.All"));
     }
 
     #[test]

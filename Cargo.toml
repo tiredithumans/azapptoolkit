@@ -57,6 +57,23 @@ wiremock = "0.6"
 # from the workspace and keeps its own lint posture.
 [workspace.lints.rust]
 unsafe_code = "deny"
+# `opt-level = "z"` is deliberate, and now measured rather than assumed.
+#
+# The worry was that a size-first build penalizes the app's heaviest work: the
+# security audit scores every application and service principal in a tenant. So
+# it was benchmarked (`cargo run --release --example score_bench -p
+# azapptoolkit-core`, and again with CARGO_PROFILE_RELEASE_OPT_LEVEL=3):
+#
+#   opt-level = "z"  ->  193 000 scored apps/sec, 352 784 B
+#   opt-level = 3    ->  313 000 scored apps/sec, 385 536 B   (1.62x faster, +9% size)
+#
+# 1.62x sounds decisive and is irrelevant here. Scoring is not the bottleneck —
+# a 10 000-app tenant spends ~50 ms in the scorer at "z" versus ~32 ms at 3, on
+# a run whose wall clock is minutes of throttled Graph round trips. The 18 ms is
+# invisible; the installer bytes ship to every user on every update.
+#
+# Revisit if a genuinely CPU-bound path appears (large local crypto, in-process
+# indexing/search over the whole tenant). Re-run the bench first.
 [profile.release]
 lto = "fat"
 codegen-units = 1

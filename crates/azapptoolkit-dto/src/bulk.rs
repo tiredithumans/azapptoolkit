@@ -2,6 +2,49 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::UiError;
+
+/// A per-item failure inside a bulk run.
+///
+/// Structured rather than a bare string. The handlers used to flatten a
+/// [`UiError`] into `Some(e.message)`, which threw away the two fields the UI
+/// needs to *act*: `code` and `retryable`. The consequence was specific and bad
+/// — a mid-run `refresh_missing` (the session died) became indistinguishable
+/// from "this one app failed", so the loop ground through every remaining app
+/// against a dead session and produced N identical opaque failures instead of
+/// one actionable re-auth prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkError {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl From<UiError> for BulkError {
+    fn from(err: UiError) -> Self {
+        BulkError {
+            code: err.code,
+            message: err.message,
+            retryable: err.retryable,
+        }
+    }
+}
+
+impl BulkError {
+    /// See [`UiError::is_reauth_fatal`] — the session is dead, so every
+    /// remaining item in the run would fail the same way. The bulk driver stops
+    /// on this rather than burning through the rest of the selection.
+    pub fn is_reauth_fatal(&self) -> bool {
+        UiError::new(self.code.clone(), String::new(), self.retryable).is_reauth_fatal()
+    }
+}
+
+impl std::fmt::Display for BulkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkProgress {
     pub done: usize,
@@ -24,7 +67,7 @@ pub struct AppRemovalSummary {
     pub display_name: String,
     pub removed_key_ids: Vec<String>,
     pub failed_key_ids: Vec<String>,
-    pub error: Option<String>,
+    pub error: Option<BulkError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,7 +98,7 @@ pub struct BulkGrantOutcome {
     pub granted: usize,
     pub skipped: usize,
     pub failed: usize,
-    pub error: Option<String>,
+    pub error: Option<BulkError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +125,15 @@ pub struct BulkCreateOutcome {
     /// a real run.
     pub status: String,
     pub app_id: Option<String>,
+    /// Human-readable detail for ANY non-success status, including the
+    /// validation ones (`invalid`) that never involve a backend call.
     pub message: Option<String>,
+    /// Set only when the failure came from a backend call, so the create path
+    /// can participate in the run-level fatal check like every other bulk
+    /// command. A validation rejection leaves this `None` — it carries no wire
+    /// code, and it says nothing about the health of the session.
+    #[serde(default)]
+    pub error: Option<BulkError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +153,7 @@ pub struct BulkRemoveRedundantOutcome {
     /// Permission values left in place because removing them would have lost a
     /// load-bearing grant (re-resolved live, per the single-app safety rules).
     pub skipped: Vec<String>,
-    pub error: Option<String>,
+    pub error: Option<BulkError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,7 +169,7 @@ pub struct BulkRemoveRedundantResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkScopeOutcome {
     pub object_id: String,
-    pub error: Option<String>,
+    pub error: Option<BulkError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,7 +187,7 @@ pub struct BulkOwnerOutcome {
     pub object_id: String,
     pub added: bool,
     pub skipped: bool,
-    pub error: Option<String>,
+    pub error: Option<BulkError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,7 +203,7 @@ pub struct BulkAddOwnerResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkDisableOutcome {
     pub object_id: String,
-    pub error: Option<String>,
+    pub error: Option<BulkError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

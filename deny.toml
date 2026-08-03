@@ -7,6 +7,17 @@
 # this section lets `cargo deny check advisories` do the same in one tool.
 version = 2
 yanked = "deny"
+# Flag `unmaintained` advisories for crates we depend on DIRECTLY, not for the
+# whole transitive graph. Every unmaintained hit here today is someone else's to
+# fix and has no upgrade path from this repo: the ten archived gtk-rs GTK3
+# bindings (Tauri's Linux webview stack — the same dead end the RUSTSEC-2024-0429
+# ignore below documents), `proc-macro-error` via a build-time macro crate, and
+# the `unic-*` family via a transitive text dep. Listing sixteen advisory ids
+# would be a churning allowlist that hides the signal we actually want: an
+# unmaintained crate WE chose. "workspace" keeps that signal loud and drops the
+# noise. Vulnerabilities (`RUSTSEC` informational=false) are unaffected — those
+# still fail on any crate, transitive or not.
+unmaintained = "workspace"
 ignore = [
     # glib unsound VariantStrIter — transitive GTK3 (Linux-only) dep with no
     # upgrade path until Tauri moves off GTK3; unreachable in the shipped

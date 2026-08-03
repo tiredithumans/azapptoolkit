@@ -78,6 +78,60 @@ web-build-pages BASE="/azapptoolkit/":
 web-itest *ARGS:
     wasm-pack test --headless --chrome {{ARGS}} -- --features test-support
 
+# Enforce the per-shard wasm size ceiling the whole GUI-test strategy rests on.
+#
+# A single merged test binary (~78 MB) exceeds what headless Chrome will
+# instantiate, so `tests/gui_N.rs` shards exist to stay under ~52 MB each. That
+# number lived ONLY in comments here and in Cargo.toml — nothing measured it. A
+# shard drifting past the ceiling does not fail with "too big"; it fails as an
+# opaque 60s `Failed to detect test as having been run` timeout, which reads like
+# a flaky browser and sends you looking in the wrong place. Measured, it is one
+# line of output naming the shard.
+#
+# Unix/CI only (bash shebang, like `setup`): this is a size gate on the Linux CI
+# runner, not something a Windows dev box needs to reproduce.
+[working-directory('apps/desktop/web-rs')]
+web-itest-size:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CEILING_MB=52
+    DEPS=target/wasm32-unknown-unknown/debug/deps
+    # Clear PRIOR shard artifacts first. cargo keeps every hash-suffixed build in
+    # deps/, so a stale binary from an older profile or feature set sits beside
+    # the current one — and those are enormous (a debug wasm with debuginfo is
+    # ~2 GB, vs ~7-21 MB once `[profile.test] strip = "debuginfo"` applies).
+    # Measuring the directory blind reports those as failures and buries the real
+    # numbers. Objects stay cached, so this costs a relink, not a rebuild.
+    shopt -s nullglob
+    rm -f "$DEPS"/gui_*.wasm
+    # Build the shard binaries without running them. Same profile + features as
+    # `web-itest`, so these are the artifacts the browser would load.
+    cargo test --locked --no-run --target wasm32-unknown-unknown --features test-support
+    files=("$DEPS"/gui_*.wasm)
+    if [ ${#files[@]} -eq 0 ]; then
+      echo "no gui_*.wasm shards found — the build layout changed, so this gate is measuring nothing" >&2
+      exit 1
+    fi
+    status=0
+    for f in "${files[@]}"; do
+      bytes=$(wc -c < "$f")
+      mb=$(( bytes / 1024 / 1024 ))
+      if [ "$mb" -gt "$CEILING_MB" ]; then
+        printf '  FAIL %4d MB  %s (ceiling %d MB)\n' "$mb" "$(basename "$f")" "$CEILING_MB"
+        status=1
+      else
+        printf '  ok   %4d MB  %s\n' "$mb" "$(basename "$f")"
+      fi
+    done
+    if [ "$status" -ne 0 ]; then
+      echo "" >&2
+      echo "A shard exceeds the ceiling headless Chrome can instantiate. Split it:" >&2
+      echo "move a '#[path] mod' out of that tests/gui_N.rs into another shard, grouping" >&2
+      echo "modules by the view subtree they mount (co-locating modules that mount the" >&2
+      echo "same pane costs barely more than one of them; splitting them duplicates it)." >&2
+      exit 1
+    fi
+
 # --- Housekeeping ------------------------------------------------------------
 
 # Delete every cargo build artifact to reclaim disk. There are TWO independent
@@ -157,6 +211,20 @@ web-test:
 # dependency audit/deny gates and the browser GUI tests are covered by
 # `verify-full` below; actionlint stays CI-side unless installed locally.
 verify: fmt-check clippy test web-fmt-check web-clippy web-test web-build
+    @echo ""
+    @echo "verify OK — NOT run (needs a browser / network): web-itest, audit, web-audit, deny, web-deny."
+    @echo "  just verify-ui    = verify + the browser GUI tests (real Leptos views)"
+    @echo "  just verify-full  = full CI parity (adds the dependency audit/deny gates)"
+    @echo "Frontend behavior is unproven until one of those runs: renaming a CSS class,"
+    @echo "aria-label, or on-screen text a GUI test references passes verify and fails CI."
+
+# verify + the browser GUI tests, for a box that HAS a browser. The gap this
+# closes: `verify` compiles the frontend but executes no frontend behavioral
+# test, so the only coverage of a real mounted Leptos view lived in CI. That is
+# a full CI round trip to learn a renamed CSS class broke a test. Kept separate
+# from `verify` (rather than folded into it) because `verify` must run on any
+# dev box, and this needs Chrome + a matching chromedriver.
+verify-ui: verify web-itest
 
 # Full CI parity: verify + both RustSec scans + both deny policies + the
 # browser GUI tests. web-itest runs LAST because it needs a local browser +
@@ -177,9 +245,14 @@ audit:
 web-audit:
     cargo audit -f apps/desktop/web-rs/Cargo.lock
 
-# License + crate-source + bans policy (config: deny.toml).
+# Advisory + license + crate-source + bans policy (config: deny.toml).
+# `advisories` IS in this list: deny.toml carries a fully documented
+# `[advisories]` block (yanked = "deny" plus three reviewed RUSTSEC ignores), and
+# omitting the check meant that block was config nobody executed — `yanked` was
+# never enforced by anything, and the ignores read as if they were load-bearing
+# here when only `.cargo/audit.toml` was actually consulted.
 deny:
-    cargo deny check bans licenses sources
+    cargo deny check advisories bans licenses sources
 
 # Same policy for the frontend tree (web-rs is its own workspace; the root
 # `deny` never reaches it). Reuses the root deny.toml so the two trees can't
@@ -188,7 +261,7 @@ deny:
 # CI pins the matching version in ci.yml).
 [working-directory('apps/desktop/web-rs')]
 web-deny:
-    cargo deny --config ../../../deny.toml check bans licenses sources
+    cargo deny --config ../../../deny.toml check advisories bans licenses sources
 
 # --- Release / packaging ----------------------------------------------------
 

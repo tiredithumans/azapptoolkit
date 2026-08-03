@@ -162,6 +162,13 @@ jobs:
       # copy that may mismatch and fail to start a session.
       - name: GUI tests (headless Chrome)
         run: just web-itest --chromedriver "$CHROMEWEBDRIVER/chromedriver"
+      # The shard layout above only works while each binary stays under what
+      # headless Chrome will instantiate. Nothing measured that ceiling, so a
+      # shard could drift past it and fail as an opaque 60s "Failed to detect
+      # test as having been run" timeout — indistinguishable from a flaky
+      # browser. Measured here, it names the shard and says how to split it.
+      - name: GUI test shard size ceiling
+        run: just web-itest-size
 
   actionlint:
     name: actionlint

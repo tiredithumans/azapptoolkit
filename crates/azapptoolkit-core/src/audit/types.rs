@@ -206,11 +206,62 @@ pub enum MailPermissionScope {
     Unknown,
 }
 
+/// One application permission **together with the resource that exposes it**.
+///
+/// The resource is load-bearing, not decoration: mailbox permissions live on
+/// *two* resources, and Microsoft Graph and the legacy Office 365 Exchange
+/// Online resource both expose an identically named `Mail.Read` /
+/// `Mail.ReadWrite` / `Mail.Send` / `Contacts.*`. Only Graph's are confinable by
+/// RBAC for Applications, so a permission carried as a bare value cannot be
+/// classified correctly — keying a scope verdict on the value alone lets a
+/// scoped Graph permission lend its verdict to an unscopable legacy namesake.
+///
+/// See [`crate::scoping`] for the resource-aware predicates this pairs with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourcePermission {
+    /// The resource's *application* id (the stable well-known GUID), or `None`
+    /// when the caller could not resolve it. `None` is scored conservatively —
+    /// never treated as scoped — so an unresolvable resource can only
+    /// *over*-report risk, never under-report it.
+    pub resource_app_id: Option<String>,
+    /// The permission value, e.g. `Mail.Read` or `full_access_as_app`.
+    pub value: String,
+}
+
+impl ResourcePermission {
+    /// A Microsoft Graph application permission — the common case.
+    pub fn graph(value: impl Into<String>) -> Self {
+        Self {
+            resource_app_id: Some(crate::scoping::MICROSOFT_GRAPH_APP_ID.to_string()),
+            value: value.into(),
+        }
+    }
+
+    /// A permission on the legacy **Office 365 Exchange Online** resource — the
+    /// EWS `full_access_as_app` scope and the retired Outlook REST `Mail.*`
+    /// family.
+    pub fn exchange_online(value: impl Into<String>) -> Self {
+        Self {
+            resource_app_id: Some(crate::scoping::OFFICE365_EXCHANGE_ONLINE_APP_ID.to_string()),
+            value: value.into(),
+        }
+    }
+
+    /// A permission on `resource_app_id`.
+    pub fn on(resource_app_id: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            resource_app_id: Some(resource_app_id.into()),
+            value: value.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppPermissions {
-    /// Values (e.g. `User.Read.All`) of Role-type entries on the app's
-    /// `requiredResourceAccess`. Resolved from the bundled catalog / Graph.
-    pub app_role_values: Vec<String>,
+    /// Role-type entries on the app's `requiredResourceAccess` (or, for an
+    /// SP-only row, the roles it has been *granted*), each paired with the
+    /// resource that exposes it. Resolved from the bundled catalog / Graph.
+    pub app_role_grants: Vec<ResourcePermission>,
     /// Values of Scope-type entries.
     pub scope_values: Vec<String>,
     /// True if at least one `oauth2PermissionGrants` row has
@@ -221,17 +272,66 @@ pub struct AppPermissions {
     /// permission is then scored at its full org-wide weight, i.e. exactly the
     /// behavior before scope-awareness was added (e.g. the signed-in user lacks
     /// the Exchange-admin rights the per-app RBAC probe needs).
+    ///
+    /// Keyed by value alone, which is unambiguous **only because** every read
+    /// goes through [`AppPermissions::is_scoped`], which gates on the grant's own
+    /// resource first: the two mailbox resources share no *scopable* value names
+    /// (`full_access_as_app` exists only on Office 365 Exchange Online, the mail
+    /// family maps only on Graph). Read this map directly and that guarantee is
+    /// gone.
     #[serde(default)]
     pub mail_scopes: HashMap<String, MailPermissionScope>,
 }
 
 impl AppPermissions {
-    /// True when `value` is a mail permission that has been *confirmed* scoped
+    /// The app-role permission *values*, resource stripped — for the rules that
+    /// classify by permission name alone (the risk tables, redundancy,
+    /// SharePoint). Resolved once per scoring pass and threaded through, rather
+    /// than re-derived per rule.
+    pub fn app_role_values(&self) -> Vec<String> {
+        self.app_role_grants
+            .iter()
+            .map(|g| g.value.clone())
+            .collect()
+    }
+
+    /// True when `grant` is a mail permission that has been *confirmed* scoped
     /// to specific mailboxes via Exchange RBAC, so it earns the reduced weight.
     /// `OrgWide`/`Unknown`/absent all return false (full weight).
-    pub(super) fn is_scoped(&self, value: &str) -> bool {
+    ///
+    /// **Gated on the grant's own resource first.** Office 365 Exchange Online
+    /// exposes its own `Mail.*` appRoles (retired Outlook REST) that RBAC for
+    /// Applications cannot confine; without this gate a scoped Graph `Mail.Read`
+    /// would lend its verdict to the unscopable legacy namesake, dropping a
+    /// genuinely org-wide grant out of the mailbox findings and scoring it at the
+    /// reduced scoped weight.
+    /// True when **every** grant carrying `value` is confirmed scoped.
+    ///
+    /// For the rules that reason about a permission by name (redundancy) but
+    /// whose answer must hold across both mailbox resources: a `Mail.ReadWrite`
+    /// scoped on Microsoft Graph while an unscopable legacy namesake survives is
+    /// *not* confined, so a narrower permission it would otherwise subsume is
+    /// still genuinely redundant. `false` for a value the app doesn't hold.
+    pub(super) fn value_fully_scoped(&self, value: &str) -> bool {
+        let mut held = false;
+        for grant in self.app_role_grants.iter().filter(|g| g.value == value) {
+            held = true;
+            if !self.is_scoped(grant) {
+                return false;
+            }
+        }
+        held
+    }
+
+    pub(super) fn is_scoped(&self, grant: &ResourcePermission) -> bool {
+        if !crate::scoping::is_scopable_exchange_resource_permission(
+            grant.resource_app_id.as_deref(),
+            &grant.value,
+        ) {
+            return false;
+        }
         matches!(
-            self.mail_scopes.get(value),
+            self.mail_scopes.get(&grant.value),
             Some(MailPermissionScope::Scoped { .. })
         )
     }
@@ -391,6 +491,13 @@ pub mod issue {
     pub const HIGH_RISK_APP_PERMS: &str = "High-risk application permissions:";
     pub const HIGH_RISK_DELEGATED_PERMS: &str = "High-risk delegated permissions:";
     pub const ORG_WIDE_MAILBOX: &str = "Organization-wide mailbox access";
+    /// Org-wide mailbox reach that RBAC for Applications **cannot** confine:
+    /// the legacy Office 365 Exchange Online `Mail.*` / `Calendars.*` /
+    /// `Contacts.*` / `MailboxSettings.*` appRoles (retired Outlook REST).
+    /// Distinct from [`ORG_WIDE_MAILBOX`] because the fix differs — these carry
+    /// no `ScopeMailboxAccess` remediation, since removing the grant is the only
+    /// remedy. See `is_unscopable_legacy_exchange_permission`.
+    pub const UNSCOPABLE_LEGACY_MAILBOX: &str = "Unscopable legacy Exchange mailbox access";
     /// Substring shared by every "…scoped via RBAC for Applications…" advisory.
     pub const SCOPED_VIA_RBAC: &str = "scoped via RBAC for Applications";
     pub const ORG_WIDE_SHAREPOINT: &str = "Organization-wide SharePoint access";

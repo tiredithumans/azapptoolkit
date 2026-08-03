@@ -87,6 +87,7 @@ pub async fn sleep_with_jitter(base_ms: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
 
     #[test]
     fn next_backoff_doubles_then_clamps() {
@@ -109,6 +110,58 @@ mod tests {
         assert_eq!(retry_after_millis(10_000), RETRY_AFTER_MAX_SECS * 1000);
         // No overflow on an absurd header value.
         assert_eq!(retry_after_millis(u64::MAX), RETRY_AFTER_MAX_SECS * 1000);
+    }
+
+    /// Virtual elapsed time across `f`. `start_paused` means sleeps resolve
+    /// instantly while `Instant` still reports the full duration, so these
+    /// assert the real wait without spending it.
+    async fn virtual_elapsed(f: impl Future<Output = ()>) -> u64 {
+        let start = tokio::time::Instant::now();
+        f.await;
+        start.elapsed().as_millis() as u64
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sleep_before_retry_honors_an_explicit_retry_after_exactly() {
+        // The branch that matters most: an explicit Retry-After must be waited
+        // verbatim — no jitter added, and NOT clamped to the 30s backoff bound.
+        // Retrying sooner than advertised just re-throttles, and Microsoft
+        // requires the exact wait. The pure helper was tested; that this is the
+        // branch actually taken was not.
+        assert_eq!(
+            virtual_elapsed(sleep_before_retry(Some(10), BASE_DELAY_MS)).await,
+            10_000
+        );
+        // A multi-minute write-quota wait survives intact, well past MAX_DELAY_MS.
+        let long = virtual_elapsed(sleep_before_retry(Some(120), BASE_DELAY_MS)).await;
+        assert_eq!(long, 120_000);
+        assert!(long > MAX_DELAY_MS);
+        // The fallback is ignored entirely when a header is present.
+        assert_eq!(
+            virtual_elapsed(sleep_before_retry(Some(5), 30_000)).await,
+            5_000
+        );
+        // A pathological header is bounded by the sanity ceiling, not honored.
+        assert_eq!(
+            virtual_elapsed(sleep_before_retry(Some(u64::MAX), BASE_DELAY_MS)).await,
+            RETRY_AFTER_MAX_SECS * 1000
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sleep_before_retry_falls_back_to_jittered_backoff() {
+        // No header ⇒ the jittered path: at least the base (never retry early)
+        // and at most base + 10%, so concurrent callers desynchronize without
+        // the delay drifting somewhere unrelated.
+        let waited = virtual_elapsed(sleep_before_retry(None, BASE_DELAY_MS)).await;
+        assert!(
+            (BASE_DELAY_MS..=BASE_DELAY_MS + BASE_DELAY_MS / 10).contains(&waited),
+            "expected {BASE_DELAY_MS}..={} ms, waited {waited}",
+            BASE_DELAY_MS + BASE_DELAY_MS / 10
+        );
+        // The jittered fallback IS bounded by MAX_DELAY_MS (unlike Retry-After).
+        let capped = virtual_elapsed(sleep_before_retry(None, MAX_DELAY_MS * 2)).await;
+        assert_eq!(capped, MAX_DELAY_MS);
     }
 
     #[test]

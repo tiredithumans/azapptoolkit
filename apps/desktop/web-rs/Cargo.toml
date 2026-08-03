@@ -10,6 +10,17 @@ publish = false
 # Excluded from the root workspace because it targets `wasm32-unknown-unknown`
 # only and depends on git-only crates (see `/Cargo.toml` `exclude`).
 
+# The workspace exclusion is a BUILD-target decision, not a security-posture one.
+# `[workspace.lints.rust] unsafe_code = "deny"` in `/Cargo.toml` is described
+# there as an explicit boundary for a tool that handles delegated tokens — but
+# `[workspace.lints]` reaches only workspace members, so the exclusion silently
+# carried this crate out from under it. That left the LARGEST body of code in the
+# repo, running inside the webview with full Tauri IPC access, as the one tier
+# with no such boundary. Declared locally so the exclusion cannot quietly widen
+# what the frontend is allowed to do; keep it in sync with the root block.
+[lints.rust]
+unsafe_code = "deny"
+
 [dependencies]
 azapptoolkit-core = { path = "../../../crates/azapptoolkit-core" }
 azapptoolkit-dto = { path = "../../../crates/azapptoolkit-dto" }

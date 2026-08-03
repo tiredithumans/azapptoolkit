@@ -16,6 +16,7 @@ pub mod enterprise_application;
 pub mod exchange;
 pub(crate) mod export;
 pub mod expose_api;
+pub mod gallery;
 pub(crate) mod graph_err;
 pub mod graph_roles;
 pub(crate) mod guid;

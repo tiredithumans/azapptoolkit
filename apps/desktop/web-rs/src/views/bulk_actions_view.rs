@@ -103,6 +103,10 @@ pub fn BulkActionsView() -> impl IntoView {
                         .map(|o| BulkFailure {
                             label: o.display_name.clone(),
                             reason: o.message.clone().unwrap_or_else(|| o.status.clone()),
+                            // `None` for a validation rejection (`invalid`),
+                            // which never reached the backend and so says
+                            // nothing about the session.
+                            code: o.error.as_ref().map(|e| e.code.clone()),
                         })
                         .collect();
                     let ok = r.outcomes.len() - fails.len();
