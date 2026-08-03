@@ -260,8 +260,14 @@ pub async fn bulk_remove_expired_credentials(
     })
 }
 
-/// Deletes every application in `object_ids` sequentially. Failures are
-/// collected rather than aborting — the UI shows a summary dialog.
+/// Deletes every application in `object_ids`, fanning out through
+/// [`dispatch_capped`] under a [`ConcurrencyThrottle`] that halves the in-flight
+/// cap on a 429 and recovers when quiet. (This ran sequentially once; the doc
+/// comment outlived the change.) Failures are collected rather than aborting —
+/// the UI shows a summary dialog.
+///
+/// Unlike the [`run_bulk_seq`] commands, the delete core is `Send`, so it *can*
+/// cross into a spawn — which is why this one fans out and those stay serial.
 #[tauri::command]
 pub async fn bulk_delete_applications(
     app_handle: AppHandle,
