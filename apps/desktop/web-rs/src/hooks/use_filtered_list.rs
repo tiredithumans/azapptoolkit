@@ -205,3 +205,195 @@ where
         facet_values,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, PartialEq, Debug)]
+    struct Row {
+        name: &'static str,
+        enabled: bool,
+        owned: bool,
+    }
+
+    fn rows() -> Vec<Row> {
+        vec![
+            Row {
+                name: "alpha",
+                enabled: true,
+                owned: true,
+            },
+            Row {
+                name: "beta",
+                enabled: false,
+                owned: true,
+            },
+            Row {
+                name: "gamma",
+                enabled: true,
+                owned: false,
+            },
+            Row {
+                name: "delta",
+                enabled: false,
+                owned: false,
+            },
+        ]
+    }
+
+    struct Harness {
+        list: FilteredList<Row>,
+        search: RwSignal<String>,
+        extra_active: RwSignal<bool>,
+        only_owned: RwSignal<bool>,
+        facet: RwSignal<String>,
+    }
+
+    fn harness() -> Harness {
+        let search = RwSignal::new(String::new());
+        let extra_active = RwSignal::new(false);
+        let only_owned = RwSignal::new(false);
+        let facet = RwSignal::new("any".to_string());
+        let list = use_filtered_list(FilteredListSpec {
+            items: rows(),
+            search: search.into(),
+            search_match: |row: &Row, needle: &str| row.name.contains(needle),
+            extra_active: extra_active.into(),
+            extra: move |row: &Row| !only_owned.get() || row.owned,
+            facet,
+            facet_any: "any",
+            facets: vec![
+                Facet::new("Enabled", "enabled", |r: &Row| r.enabled),
+                Facet::new("Disabled", "disabled", |r: &Row| !r.enabled),
+            ],
+            export_rows: None,
+        });
+        Harness {
+            list,
+            search,
+            extra_active,
+            only_owned,
+            facet,
+        }
+    }
+
+    fn names(rows: &[Row]) -> Vec<&'static str> {
+        rows.iter().map(|r| r.name).collect()
+    }
+
+    #[test]
+    fn an_unfiltered_base_is_a_pointer_copy_not_a_clone_of_every_row() {
+        // The short-circuit exists so an untouched 10 000-row list doesn't clone
+        // itself on every unrelated signal tick. Asserted by pointer identity —
+        // a correctness-preserving refactor that dropped it would still pass a
+        // value-equality test while quietly reintroducing the copy.
+        Owner::new().with(|| {
+            let h = harness();
+            let first = h.list.base.get();
+            let second = h.list.base.get();
+            assert!(Arc::ptr_eq(&first, &second));
+            assert_eq!(first.len(), 4);
+
+            // Once a filter is active the set is genuinely rebuilt.
+            h.search.set("a".into());
+            let filtered = h.list.base.get();
+            assert!(!Arc::ptr_eq(&first, &filtered));
+        });
+    }
+
+    #[test]
+    fn search_is_trimmed_and_lowercased_before_matching() {
+        Owner::new().with(|| {
+            let h = harness();
+            h.search.set("  GAMMA  ".into());
+            assert_eq!(names(&h.list.base.get()), vec!["gamma"]);
+            // Whitespace-only reads as "no search", not as a needle that
+            // matches nothing.
+            h.search.set("   ".into());
+            assert_eq!(h.list.base.get().len(), 4);
+        });
+    }
+
+    #[test]
+    fn the_extra_predicate_only_applies_while_extra_active_is_set() {
+        // `extra_active` is what tells `base` a non-search filter is live. If a
+        // view sets its filter signal but forgets the flag, the short-circuit
+        // silently returns every row — so pin both directions.
+        Owner::new().with(|| {
+            let h = harness();
+            h.only_owned.set(true);
+            assert_eq!(h.list.base.get().len(), 4, "flag off ⇒ short-circuited");
+
+            h.extra_active.set(true);
+            assert_eq!(names(&h.list.base.get()), vec!["alpha", "beta"]);
+        });
+    }
+
+    #[test]
+    fn facet_counts_are_over_base_not_over_the_full_set() {
+        // The chips must count what the search left behind, or they advertise
+        // rows the user cannot reach.
+        Owner::new().with(|| {
+            let h = harness();
+            let enabled = h.list.count_of("enabled");
+            let disabled = h.list.count_of("disabled");
+            assert_eq!((enabled.get(), disabled.get()), (2, 2));
+
+            h.search.set("a".into()); // alpha, beta, gamma, delta all contain "a"
+            assert_eq!((enabled.get(), disabled.get()), (2, 2));
+
+            h.search.set("lph".into()); // alpha only
+            assert_eq!((enabled.get(), disabled.get()), (1, 0));
+        });
+    }
+
+    #[test]
+    fn count_of_an_unknown_facet_is_zero_rather_than_a_panic() {
+        Owner::new().with(|| {
+            let h = harness();
+            assert_eq!(h.list.count_of("no-such-facet").get(), 0);
+        });
+    }
+
+    #[test]
+    fn shown_partitions_by_the_active_facet() {
+        Owner::new().with(|| {
+            let h = harness();
+            assert_eq!(h.list.shown.get().len(), 4, "the 'any' sentinel shows all");
+
+            h.facet.set("enabled".into());
+            assert_eq!(names(&h.list.shown.get()), vec!["alpha", "gamma"]);
+
+            h.facet.set("disabled".into());
+            assert_eq!(names(&h.list.shown.get()), vec!["beta", "delta"]);
+        });
+    }
+
+    #[test]
+    fn a_stale_saved_view_facet_shows_everything_instead_of_nothing() {
+        // A saved view can name a facet a later build removed. Partitioning on
+        // an unknown value would render an empty list with no explanation; the
+        // documented behavior is to fall back to the unpartitioned base.
+        Owner::new().with(|| {
+            let h = harness();
+            h.facet.set("facet-from-an-older-build".into());
+            assert_eq!(h.list.shown.get().len(), 4);
+        });
+    }
+
+    #[test]
+    fn shown_composes_with_search_and_the_extra_filter() {
+        Owner::new().with(|| {
+            let h = harness();
+            h.extra_active.set(true);
+            h.only_owned.set(true); // alpha, beta
+            h.facet.set("enabled".into()); // of those, alpha
+            assert_eq!(names(&h.list.shown.get()), vec!["alpha"]);
+            assert_eq!(h.list.base_total().get(), 2);
+            assert_eq!(h.list.shown_total().get(), 1);
+            // `total` stays the pre-filter denominator for "N of M".
+            assert_eq!(h.list.total, 4);
+        });
+    }
+}

@@ -24,3 +24,9 @@ url = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# `test-util` gives the paused clock (`start_paused`), which is what makes
+# `sleep_before_retry`'s BRANCH assertable: virtual time advances instantly, so
+# a test can prove a 120s Retry-After is honored verbatim without waiting 120s.
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }

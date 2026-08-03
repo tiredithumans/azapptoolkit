@@ -29,5 +29,7 @@ mod key_vault;
 mod reauth;
 #[path = "gui/settings.rs"]
 mod settings;
+#[path = "gui/shell.rs"]
+mod shell;
 #[path = "gui/shortcuts.rs"]
 mod shortcuts;

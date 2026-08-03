@@ -50,6 +50,13 @@ the project adheres to
   strategy depends on (CI runs it after the GUI tests). The number lived only in
   comments; a shard drifting past it fails as an opaque 60-second "Failed to
   detect test as having been run" timeout that reads like a flaky browser.
+- Tests for the paths that mutate a tenant and had none: `run_bulk_seq` (the
+  shared driver behind all ten bulk commands, including delete and
+  disable-sign-in), the `VALID_AUDIENCES` bulk-create rule, `sleep_before_retry`
+  (its pure helpers were tested but not which branch it takes — an explicit
+  `Retry-After` must be honored verbatim, never jittered or clamped),
+  `use_filtered_list` (207 lines of layered memo/facet logic), and `AppShell`,
+  which no GUI test had ever mounted.
 - Tests pinning three invariants that were previously prose only: the two
   RUSTSEC ignore lists (`deny.toml` and `.cargo/audit.toml`) stay in sync, both
   deny recipes run the advisories check, and every infallible `invoke()` in the
