@@ -9,6 +9,26 @@ the project adheres to
 
 ### Fixed
 
+- **Exchange scoping silently failed for two permissions sharing one Exchange
+  role, and the failure was permanent.** `assign_scoped_roles` snapshotted the
+  app's existing role assignments *once* before its loop, but the permission →
+  Exchange-role map is many-to-one: `Mail.ReadBasic` and `Mail.ReadBasic.All`
+  both map to `Application Mail.ReadBasic`. The second target re-read the stale
+  snapshot, issued a duplicate `New-RoleAssignment`, and its error marked the
+  target unsafe to strip — so `targets_safe_to_strip` excluded it and its
+  org-wide Entra grant survived, leaving the grant unioned with the scope. The
+  scoping never took effect, and every re-run reproduced the same failure. Roles
+  assigned inside the loop now count as in place.
+- **A failure to resolve the Office 365 Exchange Online service principal could
+  delete an Application Access Policy that was still confining a live
+  `full_access_as_app` grant** — widening the app to every mailbox in the tenant.
+  `mailbox_resource_roles` propagates the Microsoft Graph failure but resolves
+  the Exchange Online resource best-effort, so a transient failure yields zero
+  migration targets; `policies_safe_to_remove`'s "no targets ⇒ the policy governs
+  nothing" branch then read that as licence to delete. The empty-target branch
+  now **fails closed**: it is trusted only when both mailbox-bearing resources
+  actually resolved, and the migration report says so when it declines.
+
 - **The audit scored the EWS `full_access_as_app` grant at zero.** That scope —
   full access to *every* mailbox in the tenant, strictly broader than
   `Mail.ReadWrite` — is named nothing like a mail permission, so Rule 11's

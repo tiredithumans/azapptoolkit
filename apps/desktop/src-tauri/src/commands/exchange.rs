@@ -17,8 +17,13 @@ use tauri::State;
 use azapptoolkit_core::audit::{MailPermissionScope, ScopeMechanism};
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{AppRoleAssignment, Application};
-use azapptoolkit_core::scoping::{is_blanket_mailbox_grant, is_scopable_exchange_permission};
-use azapptoolkit_exchange::models::{ExoApplicationAccessPolicy, ExoAuthorizationResult};
+use azapptoolkit_core::scoping::{
+    MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID, is_blanket_mailbox_grant,
+    is_scopable_exchange_permission,
+};
+use azapptoolkit_exchange::models::{
+    ExoApplicationAccessPolicy, ExoAuthorizationResult, ExoRoleAssignment,
+};
 use azapptoolkit_exchange::{
     ExchangeClient, ExchangeError, exchange_role_for_permission,
     exchange_role_for_resource_permission, member_of_group_filter,
@@ -319,6 +324,21 @@ struct ApplyExchangeMailboxScopeParams<'a> {
     warnings: Vec<String>,
 }
 
+/// The Exchange roles already assigned to this app **and confined to
+/// `scope_name`**. Seeds the dedupe set in [`assign_scoped_roles`]; pure so the
+/// scope filter is unit-testable (an assignment on a *different* scope, or with
+/// no scope at all, must not count as in place).
+fn roles_already_scoped<'a>(
+    existing: &'a [ExoRoleAssignment],
+    scope_name: &str,
+) -> std::collections::HashSet<&'a str> {
+    existing
+        .iter()
+        .filter(|a| a.custom_resource_scope.as_deref() == Some(scope_name))
+        .filter_map(|a| a.role.as_deref())
+        .collect()
+}
+
 /// Assigns each target's Exchange role scoped to `scope_name` (idempotent),
 /// recording per-target whether the scoped role ended up in place — so the
 /// caller strips a target's org-wide Entra grant only once its scoped
@@ -335,15 +355,22 @@ async fn assign_scoped_roles(
     warnings: &mut Vec<String>,
 ) -> (Vec<String>, Vec<String>, Vec<(ExchangeTarget, bool)>) {
     let existing = exo.get_role_assignments(app_id).await.unwrap_or_default();
+    // Roles already scoped to THIS management scope. Seeded from the live
+    // snapshot and **extended as the loop assigns**, because several permission
+    // values legitimately map to ONE Exchange role — `Mail.ReadBasic` and
+    // `Mail.ReadBasic.All` both map to `Application Mail.ReadBasic`
+    // (`scoping::graph_mail_role`). Re-reading the pre-loop snapshot made the
+    // second such target's `New-RoleAssignment` a duplicate; its `Err` marked the
+    // target unsafe to strip, so `targets_safe_to_strip` excluded it and its
+    // org-wide Entra grant survived — leaving the grant unioned with the scope,
+    // i.e. the scoping silently did not take effect, permanently (every re-run
+    // repeated the same failure).
+    let mut in_place = roles_already_scoped(&existing, scope_name);
     let mut roles_assigned = Vec::new();
     let mut roles_skipped = Vec::new();
     let mut scoped: Vec<(ExchangeTarget, bool)> = Vec::new();
     for t in targets {
-        let already = existing.iter().any(|a| {
-            a.role.as_deref() == Some(t.exchange_role)
-                && a.custom_resource_scope.as_deref() == Some(scope_name)
-        });
-        let role_in_place = if already {
+        let role_in_place = if in_place.contains(t.exchange_role) {
             roles_skipped.push(t.exchange_role.to_string());
             true
         } else {
@@ -353,6 +380,7 @@ async fn assign_scoped_roles(
             {
                 Ok(_) => {
                     roles_assigned.push(t.exchange_role.to_string());
+                    in_place.insert(t.exchange_role);
                     true
                 }
                 Err(err) => {
@@ -1484,8 +1512,35 @@ pub async fn migrate_application_access_policies(
 ///   effective access;
 /// - some targets stripped, some not ⇒ **keep** every policy. The surviving
 ///   grants are still confined by it.
-fn policies_safe_to_remove(target_count: usize, removed_grant_count: usize) -> bool {
+///
+/// `resources_complete` makes the "no targets" branch **fail closed**. Targets
+/// are derived by matching grants against the resolved mailbox resources, and
+/// [`mailbox_resource_roles`] resolves Office 365 Exchange Online *best-effort*
+/// (`if let Ok(Some(sp))`) while propagating only the Graph failure. So a
+/// transient failure to resolve that one SP silently yields zero targets for an
+/// app whose `full_access_as_app` grant is very much live — and "no targets ⇒
+/// delete" would then remove the only thing confining it, widening the app to
+/// every mailbox in the tenant. An empty target set is trustworthy only when we
+/// know we looked at every resource an AAP can constrain.
+fn policies_safe_to_remove(
+    target_count: usize,
+    removed_grant_count: usize,
+    resources_complete: bool,
+) -> bool {
+    if !resources_complete {
+        return false;
+    }
     target_count == 0 || removed_grant_count == target_count
+}
+
+/// Whether [`mailbox_resource_roles`] resolved **both** mailbox-bearing
+/// resources. Gates the fail-closed branch of [`policies_safe_to_remove`]: an
+/// Application Access Policy can confine grants on either, so a partial view
+/// cannot prove a policy governs nothing.
+fn mailbox_resources_complete(resources: &[ResourceRoles]) -> bool {
+    [MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID]
+        .iter()
+        .all(|id| resources.iter().any(|r| r.app_id == *id))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1557,17 +1612,32 @@ async fn migrate_one(
         .await
         .map_err(|e| e.to_string())?;
     let targets = targets_from_grants(&assignments, resources);
+    // An empty target set only means "this policy governs nothing" if we
+    // actually looked at every resource an AAP can constrain. See
+    // `policies_safe_to_remove`.
+    let resources_complete = mailbox_resources_complete(resources);
     if targets.is_empty() {
-        warnings.push(
-            "app holds none of the permissions an Application Access Policy can constrain \
-             (Graph Mail/Calendars/Contacts, or the EWS full_access_as_app scope), so the policy \
-             governs no effective access"
-                .into(),
-        );
+        if resources_complete {
+            warnings.push(
+                "app holds none of the permissions an Application Access Policy can constrain \
+                 (Graph Mail/Calendars/Contacts, or the EWS full_access_as_app scope), so the \
+                 policy governs no effective access"
+                    .into(),
+            );
+        } else {
+            warnings.push(
+                "could not resolve the Office 365 Exchange Online service principal, so the \
+                 app's EWS grants could not be inspected. Treating the empty target set as \
+                 UNKNOWN rather than empty: the legacy policy is kept, because deleting it \
+                 while an unseen full_access_as_app grant survives would give this app access \
+                 to every mailbox in the tenant."
+                    .into(),
+            );
+        }
     }
 
     if dry_run {
-        let removable = policies_safe_to_remove(targets.len(), targets.len());
+        let removable = policies_safe_to_remove(targets.len(), targets.len(), resources_complete);
         if !removable {
             warnings.push(
                 "the legacy policy would be kept until every org-wide grant is re-scoped".into(),
@@ -1616,7 +1686,11 @@ async fn migrate_one(
     //    still granted org-wide (see `policies_safe_to_remove`).
     let mut removed_policies = Vec::new();
     let mut status = "migrated";
-    if policies_safe_to_remove(targets.len(), removed_entra_grants.len()) {
+    if policies_safe_to_remove(
+        targets.len(),
+        removed_entra_grants.len(),
+        resources_complete,
+    ) {
         for identity in &identities {
             match exo.remove_application_access_policy(identity).await {
                 Ok(()) => removed_policies.push(identity.clone()),
@@ -1632,13 +1706,21 @@ async fn migrate_one(
             .map(|t| t.graph_value.as_str())
             .filter(|v| !removed_entra_grants.iter().any(|r| r == v))
             .collect();
-        warnings.push(format!(
-            "KEPT the legacy policy: {} still granted organization-wide in Microsoft Entra ID. \
-             The policy is the only thing confining {} today, so removing it would give this app \
-             access to every mailbox. Re-run once the grant(s) are scoped.",
-            kept.join(", "),
-            if kept.len() == 1 { "it" } else { "them" }
-        ));
+        if kept.is_empty() {
+            warnings.push(
+                "KEPT the legacy policy: the mailbox resources could not be fully resolved, so \
+                 whether any grant still needs it is UNKNOWN. Re-run once Exchange is reachable."
+                    .into(),
+            );
+        } else {
+            warnings.push(format!(
+                "KEPT the legacy policy: {} still granted organization-wide in Microsoft Entra \
+                 ID. The policy is the only thing confining {} today, so removing it would give \
+                 this app access to every mailbox. Re-run once the grant(s) are scoped.",
+                kept.join(", "),
+                if kept.len() == 1 { "it" } else { "them" }
+            ));
+        }
         status = "partial";
     }
 
@@ -2171,17 +2253,91 @@ mod tests {
         // deleting it widens the app's reach to every mailbox — the regression that
         // shipped when an EWS-confining policy was deleted with nothing re-scoped.
         assert!(
-            !policies_safe_to_remove(2, 1),
+            !policies_safe_to_remove(2, 1, true),
             "one of two grants stripped ⇒ keep the policy"
         );
         assert!(
-            !policies_safe_to_remove(1, 0),
+            !policies_safe_to_remove(1, 0, true),
             "nothing stripped ⇒ keep the policy"
         );
         // Fully re-scoped ⇒ the documented step 5 runs.
-        assert!(policies_safe_to_remove(2, 2));
+        assert!(policies_safe_to_remove(2, 2, true));
         // No constrainable grant at all ⇒ the policy governs nothing.
-        assert!(policies_safe_to_remove(0, 0));
+        assert!(policies_safe_to_remove(0, 0, true));
+    }
+
+    #[test]
+    fn two_permission_values_can_share_one_exchange_role() {
+        // The precondition that made `assign_scoped_roles` strand a grant: the
+        // role map is many-to-one, so an app declaring BOTH of these emits two
+        // targets carrying the SAME Exchange role. The second assignment is then a
+        // duplicate, and before the in-loop dedupe its Err marked the target
+        // unsafe to strip — so its org-wide grant survived the scoping, forever.
+        assert_eq!(
+            exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, "Mail.ReadBasic"),
+            exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, "Mail.ReadBasic.All"),
+        );
+        assert!(
+            exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, "Mail.ReadBasic")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn roles_already_scoped_counts_only_this_scope() {
+        let assignment = |role: &str, scope: Option<&str>| ExoRoleAssignment {
+            name: None,
+            role: Some(role.into()),
+            role_assignee_name: None,
+            custom_resource_scope: scope.map(str::to_string),
+            identity: None,
+        };
+        let existing = vec![
+            assignment("Application Mail.Read", Some("app_scope_a")),
+            // A different app's scope, and an org-wide (unscoped) assignment:
+            // neither means this app's role is confined to `app_scope_a`, and
+            // counting them would skip an assignment that must actually happen.
+            assignment("Application Mail.Send", Some("app_scope_b")),
+            assignment("Application Calendars.Read", None),
+        ];
+        let got = roles_already_scoped(&existing, "app_scope_a");
+        assert_eq!(got.len(), 1);
+        assert!(got.contains("Application Mail.Read"));
+    }
+
+    #[test]
+    fn an_incomplete_resource_view_never_authorizes_deleting_a_policy() {
+        // `mailbox_resource_roles` resolves Office 365 Exchange Online
+        // best-effort, so a transient failure yields ZERO targets for an app whose
+        // full_access_as_app grant is live. The old "no targets ⇒ delete" branch
+        // then removed the only thing confining it — widening the app to every
+        // mailbox in the tenant, which is strictly worse than misreporting.
+        assert!(
+            !policies_safe_to_remove(0, 0, false),
+            "an unverifiable empty target set must never authorize deletion"
+        );
+        // ...and the guard is absolute: even a "fully re-scoped" count is not
+        // trustworthy when the target set it was derived from may be incomplete.
+        assert!(!policies_safe_to_remove(2, 2, false));
+    }
+
+    #[test]
+    fn resource_completeness_requires_both_mailbox_resources() {
+        let roles = |app_id: &'static str| ResourceRoles {
+            app_id,
+            sp_object_id: "sp".into(),
+            role_value_by_id: HashMap::new(),
+        };
+        assert!(mailbox_resources_complete(&[
+            roles(MICROSOFT_GRAPH_APP_ID),
+            roles(OFFICE365_EXCHANGE_ONLINE_APP_ID),
+        ]));
+        // Graph alone is the exact shape a swallowed Exchange Online lookup
+        // produces — the case that must read as incomplete.
+        assert!(!mailbox_resources_complete(&[roles(
+            MICROSOFT_GRAPH_APP_ID
+        )]));
+        assert!(!mailbox_resources_complete(&[]));
     }
 
     #[test]
