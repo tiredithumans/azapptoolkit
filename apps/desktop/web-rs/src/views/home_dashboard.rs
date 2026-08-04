@@ -525,6 +525,7 @@ fn posture_count_for(c: &PostureCounts, key: &str) -> Option<usize> {
     Some(match key {
         "expired" => c.expired,
         "orgwide_mailbox" => c.orgwide_mailbox,
+        "legacy_mailbox_scope" => c.legacy_mailbox_scope,
         "orgwide_sharepoint" => c.orgwide_sharepoint,
         "high_risk_perms" => c.over_privileged,
         "ownership" => c.unowned,

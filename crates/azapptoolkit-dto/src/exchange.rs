@@ -114,6 +114,33 @@ pub struct ExchangeAccessRemovalResult {
     pub warnings: Vec<String>,
 }
 
+/// A group a consolidation left behind: the scope no longer references it, so
+/// it is the operator's cleanup candidate.
+///
+/// **`still_referenced_by` being empty does NOT mean the group is unused.** It
+/// means the toolkit found no reference in the two places it can actually
+/// enumerate — other management scopes' recipient filters and legacy
+/// Application Access Policies. Exchange offers no reverse lookup for the rest:
+/// transport rules, DLP/retention policies, people and systems that simply mail
+/// the address, nesting inside other groups, or anything outside Exchange.
+/// Deleting a distribution group is not reversible, so the UI states that limit
+/// and the delete stays an explicit, separately confirmed action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetiredScopeGroupDto {
+    /// The group's `Name`, when it resolved.
+    pub display_name: Option<String>,
+    pub primary_smtp_address: Option<String>,
+    /// What the old scope filter referenced — always present, since that is how
+    /// the group was found in the first place.
+    pub distinguished_name: String,
+    /// Human-readable references the toolkit *did* find, e.g.
+    /// `management scope 'app_scope_other-app'`. Non-empty ⇒ do not delete.
+    pub still_referenced_by: Vec<String>,
+    /// `false` when a reference check itself failed (the answer is UNKNOWN, not
+    /// "clean") — the delete affordance is withheld either way.
+    pub reference_check_complete: bool,
+}
+
 /// Per-application result of migrating legacy Application Access Policies to
 /// RBAC for Applications.
 ///
@@ -144,6 +171,12 @@ pub struct AapMigrationItem {
     /// deliberately **kept** — they still confine the app's org-wide grants, so
     /// deleting one whose permissions weren't fully re-scoped would widen access.
     pub removed_policies: Vec<String>,
+    /// The legacy policy group(s) the new management scope no longer references
+    /// — named so the operator knows exactly what is left to clean up. Empty
+    /// unless the consolidation actually repointed the scope. Note a kept policy
+    /// still references its group, which shows up in `still_referenced_by`.
+    #[serde(default)]
+    pub retired_groups: Vec<RetiredScopeGroupDto>,
     /// `planned` for a dry run; `migrated` / `partial` / `failed` for a real run.
     pub status: String,
     pub warnings: Vec<String>,
@@ -167,6 +200,12 @@ pub struct ExchangeScopeConsolidationResult {
     pub members_unverified: Vec<String>,
     /// `true` only when the management scope now names the managed group.
     pub repointed: bool,
+    /// The group(s) the scope pointed at before the move — the cleanup
+    /// candidates, named rather than left as "the previous group". Empty unless
+    /// `repointed`: while the scope still references them they are in use by
+    /// definition.
+    #[serde(default)]
+    pub retired_groups: Vec<RetiredScopeGroupDto>,
     pub dry_run: bool,
     pub warnings: Vec<String>,
 }

@@ -277,6 +277,27 @@ fn register_fixtures() {
             .unwrap_or_else(|| f::application_detail(oid, oid, "Demo App"))
     });
 
+    // "Sites this app can reach": the per-app slice of the tenant site sweep.
+    // Keyed on appId (what a site grant records), and only the Sites.Selected
+    // apps get rows — an org-wide `Sites.*` holder reaches every site *without*
+    // a per-site grant, which is exactly the distinction the panel draws.
+    let site_access_by_app: HashMap<String, azapptoolkit_dto::sharepoint::AppSiteAccessDto> = apps
+        .iter()
+        .filter(|a| {
+            a.perms
+                .iter()
+                .any(|p| p.permission_value.as_deref() == Some("Sites.Selected"))
+        })
+        .map(|a| (app_id(a.name), f::app_site_access(&app_id(a.name))))
+        .collect();
+    mock_each("get_app_site_access", move |args| {
+        let app = args
+            .get("appId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        site_access_by_app.get(app).cloned()
+    });
+
     let scopes_by_id: HashMap<String, Vec<MailScopeEntry>> = apps
         .iter()
         .map(|a| (obj_id(a.name), a.mail_scopes.clone()))

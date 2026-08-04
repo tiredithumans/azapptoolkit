@@ -246,6 +246,36 @@ pub async fn move_exchange_scope_to_managed_group(
     .await
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteGroupArgs<'a> {
+    tenant_id: &'a str,
+    app_id: &'a str,
+    group_identity: &'a str,
+}
+
+/// Deletes a group a consolidation retired. **Not reversible** — the backend
+/// re-checks live that the group isn't this app's managed scope group and isn't
+/// referenced by any management scope or Application Access Policy it can see,
+/// and refuses otherwise (`managed_group` / `group_in_use`). Those checks cannot
+/// see mail flow, transport rules or non-Exchange consumers, so the caller must
+/// confirm explicitly first.
+pub async fn delete_exchange_scope_group(
+    tenant_id: &str,
+    app_id: &str,
+    group_identity: &str,
+) -> Result<(), UiError> {
+    invoke_result(
+        "delete_exchange_scope_group",
+        DeleteGroupArgs {
+            tenant_id,
+            app_id,
+            group_identity,
+        },
+    )
+    .await
+}
+
 /// `scope_name` overrides the management-scope name (default `app_scope_<AppId>`);
 /// pass `None` (or a blank string, which the backend treats as `None`) to use the
 /// default. The override applies only to single-app migrations.

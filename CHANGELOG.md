@@ -10,6 +10,80 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+### Added
+
+- **An app's Permissions tab now shows which SharePoint sites it can reach, and
+  with what access — no site URL required.** `Sites.Selected` grants live on the
+  *site*, and Microsoft Graph has no reverse app-to-sites lookup, so the only
+  way to see them was to already know a site's URL and list that one site. A new
+  **Sites this app can reach** panel answers it directly: every site the
+  principal is granted on, with the roles (read / write / fullcontrol / manage)
+  it holds on each, and a **Manage** action that loads a site into the existing
+  grant/revoke flow. It reads the same tenant-wide site index the Resource
+  Access → Sites tab builds — so when that scan has run in the last hour the
+  answer is free, and running one from here warms it for every other app. The
+  panel also appears on **managed identities**, which can hold `Sites.Selected`
+  (the Grant-access wizard grants it) but have no app registration to inspect.
+  Coverage is stated rather than implied: an empty list only reads as "no
+  per-site grants" when the underlying scan was complete, and the panel says so
+  when sites failed to read, when a scan was cancelled, and that personal
+  OneDrive sites are never enumerable.
+
+- **The Security tab now finds apps still scoped by a legacy Application Access
+  Policy, and migrates them to RBAC for Applications in one click.** The audit
+  resolves policies from **one** tenant-wide `Get-ApplicationAccessPolicy` read
+  per run (the per-app RBAC probe deliberately skips that lookup, which is why
+  these apps went unreported), so any principal a `RestrictAccess` policy
+  confines — app registration, foreign enterprise app, or managed identity —
+  now raises its own **Legacy Application Access Policy scoping** finding
+  instead of hiding among the org-wide rows. The finding's **Migrate to RBAC for
+  Applications** fix plans first: opening it runs the migration as a dry run and
+  shows the management scope it would build, the mailboxes it would copy into
+  the toolkit-managed group, the scoped Exchange roles, the org-wide Entra
+  grants it would remove and whether the policy itself can be deleted —
+  committing is a second, deliberate click. It reuses the existing guarded
+  migration wholesale, so every fail-closed rule still holds: `RestrictAccess`
+  policies only (a `DenyAccess` blocklist inverts into a management scope), one
+  scope per app spanning every policy's groups, and the policy is deleted only
+  once every grant it was confining has actually been re-scoped.
+
+- **Consolidating a scope now names the group it retired, and offers to delete
+  it.** "Move to managed group" (and the policy migration) ended with "the
+  previous group … can be cleaned up" — without saying *which* group, leaving
+  the operator to work it out from a recipient filter. Both flows now name it
+  (display name, address and DN) and report what still references it, checked
+  against every other management scope's filter and every legacy Application
+  Access Policy. When nothing does, a **Delete group** action appears behind a
+  type-the-name confirmation. It is deliberately never automatic: the delete is
+  irreversible, and the checks cover only what Exchange lets the toolkit
+  enumerate — transport rules, retention/DLP policies, group nesting, and the
+  people and systems that simply mail the address are invisible to it, which the
+  panel says on screen. The backend re-verifies every guard immediately before
+  deleting and refuses outright on this app's own managed group, on any live
+  reference, or when a check couldn't complete (an unknown is never treated as
+  clean).
+
+### Changed
+
+- **An app confined only by a legacy Application Access Policy no longer scores
+  as organization-wide.** Because the audit never read the policies, such an app
+  was reported "Organization-wide mailbox access" at full risk weight while the
+  app's own Permissions tab correctly showed it scoped. It now earns the same
+  reduced weight as any confirmed-scoped app and moves out of the org-wide
+  finding into the new legacy-scoping one — **so expect these apps' risk scores
+  to drop and the org-wide mailbox count to fall on the first run after
+  upgrading.** Ranking is otherwise unchanged; the new finding is advisory and
+  adds no score of its own.
+
+### Fixed
+
+- **Migrating Application Access Policies now refreshes the app caches.** The
+  migration removes org-wide Entra grants and assigns scoped Exchange roles, but
+  never invalidated anything — so the app lists, detail payloads, mailbox-scope
+  verdicts and the security audit all kept serving pre-migration state until
+  their TTLs expired. A real run (including a partial one, which still performed
+  the removals) now busts them; a dry run still changes nothing.
+
 ## [0.23.0] - 2026-08-04
 
 ### Added

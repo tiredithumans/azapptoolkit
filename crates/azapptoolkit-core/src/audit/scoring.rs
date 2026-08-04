@@ -70,10 +70,7 @@ fn rule_app_permission_risk(perms: &AppPermissions) -> RuleContribution {
     }
     if !high_scoped.is_empty() {
         c.score += PTS_SCOPED_HIGH_RISK_MAIL * high_scoped.len() as u32;
-        c.issues.push(format!(
-            "High-risk mailbox permissions scoped via RBAC for Applications (reduced risk): {}",
-            join_values(&high_scoped)
-        ));
+        push_scoped_risk_issue(&mut c, "High-risk", &high_scoped, perms);
     }
 
     let (medium_scoped, medium_full): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) = perms
@@ -90,12 +87,45 @@ fn rule_app_permission_risk(perms: &AppPermissions) -> RuleContribution {
     }
     if !medium_scoped.is_empty() {
         c.score += PTS_SCOPED_MEDIUM_RISK_MAIL * medium_scoped.len() as u32;
-        c.issues.push(format!(
-            "Medium-risk mailbox permissions scoped via RBAC for Applications (reduced risk): {}",
-            join_values(&medium_scoped)
-        ));
+        push_scoped_risk_issue(&mut c, "Medium-risk", &medium_scoped, perms);
     }
     c
+}
+
+/// The reduced-weight advisory for one risk tier's confirmed-scoped mailbox
+/// permissions, **split by the mechanism confining them**. The score is
+/// identical either way (both genuinely confine the access) — only the wording
+/// differs, and it has to: the RBAC line carries [`issue::SCOPED_VIA_RBAC`],
+/// which the UI matches mid-string to populate the *healthy* "Mailbox access
+/// scoped" group. Emitting it for a legacy Application Access Policy would file
+/// the row under a positive signal and bury the migration finding Rule 11
+/// raises for the very same permission.
+fn push_scoped_risk_issue(
+    c: &mut RuleContribution,
+    tier: &str,
+    scoped: &[&ResourcePermission],
+    perms: &AppPermissions,
+) {
+    let (legacy, rbac): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) =
+        scoped.iter().copied().partition(|g| {
+            matches!(
+                perms.scope_mechanism(g),
+                Some(ScopeMechanism::LegacyApplicationAccessPolicy)
+            )
+        });
+    if !rbac.is_empty() {
+        c.issues.push(format!(
+            "{tier} mailbox permissions scoped via RBAC for Applications (reduced risk): {}",
+            join_values(&rbac)
+        ));
+    }
+    if !legacy.is_empty() {
+        c.issues.push(format!(
+            "{tier} mailbox permissions confined by a legacy Application Access Policy \
+             (reduced risk): {}",
+            join_values(&legacy)
+        ));
+    }
 }
 
 /// Rules 5/6 (expired), 8/9 (expiring-soon, only when nothing is expired), and
@@ -202,9 +232,15 @@ fn rule_stale_app(days_since_created: Option<i64>) -> RuleContribution {
 }
 
 /// Rule 11 (advisory, no score): organization-wide mailbox access. Splits the
-/// mailbox-reaching grants four ways, because the remedy differs per bucket:
+/// mailbox-reaching grants five ways, because the remedy differs per bucket:
 ///
 /// - **confirmed scoped** via Exchange RBAC → informational only;
+/// - **confirmed scoped by a legacy Application Access Policy** → its own
+///   finding plus the `MigrateApplicationAccessPolicy` fix. The access really is
+///   confined (so it keeps the reduced scoped weight the risk rules give it —
+///   this is not an org-wide finding), but the mechanism is deprecated: AAPs are
+///   an all-or-nothing per-app gate that only constrains Entra grants, and
+///   Microsoft's replacement is RBAC for Applications;
 /// - **org-wide and scopable** → the `ScopeMailboxAccess` remediation. Decided
 ///   by [`crate::scoping::is_scopable_exchange_resource_permission`], the same
 ///   positive gate [`AppPermissions::is_scoped`] uses — never by the negation
@@ -225,9 +261,16 @@ fn rule_stale_app(days_since_created: Option<i64>) -> RuleContribution {
 /// `full_access_as_app` scope entirely, and that grant reaches every mailbox in
 /// the tenant.
 ///
-/// Returns the *scopable* org-wide set for the remediation. Empty `mail_scopes`
-/// ⇒ nothing is scoped ⇒ every scopable hit is org-wide (the original behavior).
-fn rule_mailbox_advisory(perms: &AppPermissions) -> (RuleContribution, Vec<&ResourcePermission>) {
+/// Returns the *scopable* org-wide set and the legacy-policy-scoped set, for
+/// their two remediations. Empty `mail_scopes` ⇒ nothing is scoped ⇒ every
+/// scopable hit is org-wide (the original behavior).
+type MailboxAdvisory<'a> = (
+    RuleContribution,
+    Vec<&'a ResourcePermission>,
+    Vec<&'a ResourcePermission>,
+);
+
+fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
     let mut c = RuleContribution::default();
     let mailbox_hits: Vec<&ResourcePermission> = perms
         .app_role_grants
@@ -304,13 +347,39 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> (RuleContribution, Vec<&Reso
                 .to_string(),
         );
     }
-    if !mailbox_scoped.is_empty() {
+    // Confined access, split by the mechanism doing the confining: RBAC for
+    // Applications is the end state, a legacy Application Access Policy is a
+    // deprecated one to migrate off. Both keep the reduced scoped weight the
+    // risk rules already applied — the policy really does confine the grant.
+    let (scoped_legacy, scoped_rbac): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) =
+        mailbox_scoped.into_iter().partition(|g| {
+            matches!(
+                perms.scope_mechanism(g),
+                Some(ScopeMechanism::LegacyApplicationAccessPolicy)
+            )
+        });
+    if !scoped_legacy.is_empty() {
+        c.issues.push(format!(
+            "{}: {}",
+            issue::LEGACY_MAILBOX_POLICY,
+            join_values(&scoped_legacy)
+        ));
+        c.recommendations.push(
+            "Migrate this app to RBAC for Applications. An Application Access Policy is a \
+             deprecated per-app gate that constrains only Microsoft Entra grants — it cannot \
+             confine access granted through Exchange RBAC, applies to every mailbox permission \
+             the app holds at once, and Microsoft's replacement is a management scope plus \
+             scoped role assignments."
+                .to_string(),
+        );
+    }
+    if !scoped_rbac.is_empty() {
         c.issues.push(format!(
             "Mailbox access scoped via RBAC for Applications: {}",
-            join_values(&mailbox_scoped)
+            join_values(&scoped_rbac)
         ));
     }
-    (c, mailbox_unscoped)
+    (c, mailbox_unscoped, scoped_legacy)
 }
 
 /// Rule 12 (advisory, no score): organization-wide SharePoint access. SharePoint
@@ -577,12 +646,14 @@ fn rule_downgrade_pointers(values: &[String]) -> RuleContribution {
 /// that raised the corresponding issues — so a "Fix" button appears exactly
 /// when its finding does. The backend re-resolves live state before acting;
 /// `targets`/`detail` are the advisory preview. Emitted in a fixed order:
-/// remove-expired, scope-mailbox, scope-SharePoint, remove-redundant,
-/// add-owner. `owner_count` is the same `app.owners` data Rule 14 keys off
-/// (`None` = owners not fetched — SP-only rows — so no AddOwner is attached).
+/// remove-expired, scope-mailbox, migrate-legacy-policy, scope-SharePoint,
+/// remove-redundant, add-owner. `owner_count` is the same `app.owners` data
+/// Rule 14 keys off (`None` = owners not fetched — SP-only rows — so no
+/// AddOwner is attached).
 fn build_remediations(
     expired: &[&CredentialSummary],
     mailbox_unscoped: &[&ResourcePermission],
+    mailbox_legacy: &[&ResourcePermission],
     sharepoint_orgwide: &[&String],
     redundant: &[(String, Vec<String>)],
     owner_count: Option<usize>,
@@ -613,6 +684,23 @@ fn build_remediations(
                 join_values(mailbox_unscoped)
             ),
             targets: mailbox_unscoped.iter().map(|g| g.value.clone()).collect(),
+        });
+    }
+    if !mailbox_legacy.is_empty() {
+        let n = mailbox_legacy.len();
+        remediations.push(RemediationAction {
+            kind: RemediationKind::MigrateApplicationAccessPolicy,
+            label: "Migrate to RBAC for Applications".to_string(),
+            detail: format!(
+                "Replaces the legacy policy confining {n} permission{}: {}",
+                if n == 1 { "" } else { "s" },
+                join_values(mailbox_legacy)
+            ),
+            // The migration is keyed on the application, not per permission —
+            // one Application Access Policy gates every mailbox permission the
+            // app holds — but the values ride along as the in-row preview of
+            // what the new management scope will carry.
+            targets: mailbox_legacy.iter().map(|g| g.value.clone()).collect(),
         });
     }
     if !sharepoint_orgwide.is_empty() {
@@ -736,7 +824,7 @@ pub fn score_application(
     let values = perms.app_role_values();
 
     // Rules 11, 12, 18 also return the sets the remediation block keys off.
-    let (mail_contrib, mailbox_unscoped) = rule_mailbox_advisory(perms);
+    let (mail_contrib, mailbox_unscoped, mailbox_legacy) = rule_mailbox_advisory(perms);
     acc.merge(mail_contrib);
     let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(&values);
     acc.merge(sharepoint_contrib);
@@ -765,6 +853,7 @@ pub fn score_application(
     let remediations = build_remediations(
         &expired,
         &mailbox_unscoped,
+        &mailbox_legacy,
         &sharepoint_orgwide,
         &redundant,
         app.owners.as_ref().map(Vec::len),
@@ -838,7 +927,7 @@ pub fn score_service_principal(
 
     // Rules 11 & 12 also return the sets the remediation block keys off.
     let values = perms.app_role_values();
-    let (mail_contrib, mailbox_unscoped) = rule_mailbox_advisory(perms);
+    let (mail_contrib, mailbox_unscoped, mailbox_legacy) = rule_mailbox_advisory(perms);
     acc.merge(mail_contrib);
     let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(&values);
     acc.merge(sharepoint_contrib);
@@ -846,9 +935,17 @@ pub fn score_service_principal(
 
     // No expired credentials (unknowable), no redundant-permission removal
     // (its remediation edits the application manifest), and no add-owner
-    // (`None`: SP owners aren't audited) — only the two scope remediations,
-    // whose SP-only command cores exist.
-    let remediations = build_remediations(&[], &mailbox_unscoped, &sharepoint_orgwide, &[], None);
+    // (`None`: SP owners aren't audited) — only the scope remediations, whose
+    // SP-only command cores exist. The legacy-policy migration is keyed on the
+    // appId and works from *granted* roles, so it applies to a bare SP too.
+    let remediations = build_remediations(
+        &[],
+        &mailbox_unscoped,
+        &mailbox_legacy,
+        &sharepoint_orgwide,
+        &[],
+        None,
+    );
 
     AuditItem {
         application_name: sp.display_name.clone(),
@@ -1450,6 +1547,24 @@ mod tests {
             "scorer no longer emits {:?}: {scoped_issues:?}",
             issue::SCOPED_VIA_RBAC
         );
+
+        // ...and the same permission confined by a legacy policy emits
+        // LEGACY_MAILBOX_POLICY instead.
+        let mut legacy_scopes = HashMap::new();
+        legacy_scopes.insert("Mail.Read".to_string(), legacy_scoped());
+        let legacy_perms = AppPermissions {
+            app_role_grants: vec![ResourcePermission::graph("Mail.Read")],
+            mail_scopes: legacy_scopes,
+            ..Default::default()
+        };
+        let legacy_issues = score_application(&base_app(), Some(true), &legacy_perms, now()).issues;
+        assert!(
+            legacy_issues
+                .iter()
+                .any(|i| i.starts_with(issue::LEGACY_MAILBOX_POLICY)),
+            "scorer no longer emits {:?}: {legacy_issues:?}",
+            issue::LEGACY_MAILBOX_POLICY
+        );
     }
 
     #[test]
@@ -1569,6 +1684,136 @@ mod tests {
             group_count: Some(1),
             mechanism: ScopeMechanism::Rbac,
         }
+    }
+
+    /// The same confinement, via the deprecated Application Access Policy — the
+    /// verdict `aap_verdict_for` produces for a `RestrictAccess` policy.
+    fn legacy_scoped() -> MailPermissionScope {
+        MailPermissionScope::Scoped {
+            scope_name: Some("Sales Mailboxes".into()),
+            recipient_filter: None,
+            group_count: None,
+            mechanism: ScopeMechanism::LegacyApplicationAccessPolicy,
+        }
+    }
+
+    #[test]
+    fn legacy_policy_scoping_is_its_own_finding_with_a_migrate_fix() {
+        // A `RestrictAccess` Application Access Policy really does confine the
+        // grant, so the permission keeps the REDUCED scoped weight — this is not
+        // an org-wide finding and must not be reported as one. What it is, is a
+        // deprecated mechanism: its own advisory + the migration fix.
+        let mut mail_scopes = HashMap::new();
+        mail_scopes.insert("Mail.Send".to_string(), legacy_scoped());
+        let perms = AppPermissions {
+            app_role_grants: vec![ResourcePermission::graph("Mail.Send")],
+            mail_scopes,
+            ..Default::default()
+        };
+        let item = score_application(&base_app(), Some(true), &perms, now());
+
+        assert_eq!(item.risk_score, PTS_SCOPED_HIGH_RISK_MAIL);
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with(issue::LEGACY_MAILBOX_POLICY)),
+            "legacy-policy scoping must raise its own finding: {:?}",
+            item.issues
+        );
+        // It is confined, so neither the org-wide finding nor the healthy
+        // "scoped via RBAC" positive applies — the latter would demote the row
+        // into the collapsed Healthy section and hide the migration.
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::ORG_WIDE_MAILBOX)),
+            "legacy-scoped access is not org-wide: {:?}",
+            item.issues
+        );
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|i| i.contains(issue::SCOPED_VIA_RBAC)),
+            "the legacy advisory must not carry the RBAC marker: {:?}",
+            item.issues
+        );
+
+        let fix = item
+            .remediations
+            .iter()
+            .find(|r| r.kind == RemediationKind::MigrateApplicationAccessPolicy)
+            .expect("legacy-policy scoping gets the migrate fix");
+        assert_eq!(fix.targets, vec!["Mail.Send".to_string()]);
+        // Scoping it again is not the remedy — the policy already confines it.
+        assert!(
+            !item
+                .remediations
+                .iter()
+                .any(|r| r.kind == RemediationKind::ScopeMailboxAccess)
+        );
+    }
+
+    #[test]
+    fn rbac_and_legacy_scopes_on_one_app_split_into_both_findings() {
+        // Migration is per app, but an app can hold one permission already
+        // migrated to RBAC and another still on the policy (a partial migration
+        // that kept the policy). Each permission must land under its own
+        // mechanism's finding, and only the legacy values ride the fix.
+        let mut mail_scopes = HashMap::new();
+        mail_scopes.insert("Mail.Send".to_string(), scoped());
+        mail_scopes.insert("Mail.Read".to_string(), legacy_scoped());
+        let perms = AppPermissions {
+            app_role_grants: vec![
+                ResourcePermission::graph("Mail.Send"),
+                ResourcePermission::graph("Mail.Read"),
+            ],
+            mail_scopes,
+            ..Default::default()
+        };
+        let item = score_application(&base_app(), Some(true), &perms, now());
+
+        let issue_with = |m: &str| {
+            item.issues
+                .iter()
+                .find(|i| i.starts_with(m))
+                .unwrap_or_else(|| panic!("no issue {m:?}: {:?}", item.issues))
+        };
+        assert!(issue_with(issue::LEGACY_MAILBOX_POLICY).contains("Mail.Read"));
+        assert!(!issue_with(issue::LEGACY_MAILBOX_POLICY).contains("Mail.Send"));
+        assert!(
+            issue_with("Mailbox access scoped via RBAC for Applications:").contains("Mail.Send")
+        );
+
+        let fix = item
+            .remediations
+            .iter()
+            .find(|r| r.kind == RemediationKind::MigrateApplicationAccessPolicy)
+            .expect("migrate fix");
+        assert_eq!(fix.targets, vec!["Mail.Read".to_string()]);
+    }
+
+    #[test]
+    fn legacy_policy_scoping_applies_to_sp_only_principals_too() {
+        // A foreign enterprise app / managed identity confined by a policy is
+        // the same finding with the same fix: the migration is keyed on appId
+        // and works from granted roles, so it needs no local application.
+        let mut perms = sp_perms(&["Mail.ReadWrite"]);
+        perms
+            .mail_scopes
+            .insert("Mail.ReadWrite".into(), legacy_scoped());
+        let item = score_service_principal(&base_sp(), &perms, now());
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with(issue::LEGACY_MAILBOX_POLICY))
+        );
+        assert!(
+            item.remediations
+                .iter()
+                .any(|r| r.kind == RemediationKind::MigrateApplicationAccessPolicy)
+        );
     }
 
     #[test]

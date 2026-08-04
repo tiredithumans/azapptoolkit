@@ -14,6 +14,8 @@ use azapptoolkit_core::audit::MailPermissionScope;
 use crate::bindings::TenantContext;
 use crate::bindings::auth as auth_bindings;
 use crate::bindings::managed_identity::{self, AppRoleGrantDto, ManagedIdentityDto};
+use crate::components::app_site_access_panel::AppSiteAccessPanel;
+use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
 use crate::components::detail_header::DetailHeader;
 use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
@@ -82,6 +84,9 @@ pub fn ManagedIdentityDetailPane(
     // permission (`wizard_preseed`); the header button opens it blank.
     let wizard_open = RwSignal::new(false);
     let wizard_preseed: RwSignal<Option<PickerSelection>> = RwSignal::new(None);
+    // Disclosure state for the SharePoint sites section, owned here so its body
+    // (and the tenant-sweep read behind it) stays unmounted until expanded.
+    let sharepoint_open = RwSignal::new(false);
     let wiz_sp = mi.id.clone();
     let wiz_name = mi.display_name.clone();
     let wiz_app = mi.app_id.clone();
@@ -176,6 +181,7 @@ pub fn ManagedIdentityDetailPane(
                 {move || {
                     let mi_sp_id = mi_id_for_table.clone();
                     let mi_app_id_row = mi_app_id_for_scope.clone();
+                    let mi_app_id_sites = mi_app_id_for_scope.clone();
                     let mi_name_row = mi_name_for_scope.clone();
                     Suspend::new(async move {
                     match permissions.await {
@@ -258,6 +264,32 @@ pub fn ManagedIdentityDetailPane(
                                         />
                                     }
                                 });
+                            // Which SharePoint sites this MI reaches under
+                            // Sites.Selected. A managed identity CAN hold that
+                            // grant (the Grant-access wizard's SharePoint arm
+                            // takes an MI), and it has no app registration to
+                            // read them from — so without this the sites it was
+                            // scoped to are invisible from its own detail pane.
+                            // Read-only: no `on_pick`, since the per-site
+                            // grant/revoke flow lives on the app-registration
+                            // and enterprise surfaces.
+                            let sharepoint_section = list
+                                .iter()
+                                .any(|p| p.app_role_value.as_deref() == Some("Sites.Selected"))
+                                .then(|| {
+                                    view! {
+                                        <CollapsibleScopingSection
+                                            title="SharePoint site access"
+                                            capability_key="sharepoint_sites_selected"
+                                            open=sharepoint_open
+                                        >
+                                            <AppSiteAccessPanel app_id=Signal::derive({
+                                                let app_id = mi_app_id_sites.clone();
+                                                move || app_id.clone()
+                                            }) />
+                                        </CollapsibleScopingSection>
+                                    }
+                                });
                             view! {
                                 {scope_banner}
                                 // Org-wide discoverability callout — same shared
@@ -277,6 +309,7 @@ pub fn ManagedIdentityDetailPane(
                                     busy=Signal::derive(move || busy.get())
                                 />
                                 {exchange_section}
+                                {sharepoint_section}
                             }
                                 .into_any()
                         }

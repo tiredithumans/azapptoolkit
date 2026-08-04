@@ -21,6 +21,7 @@ pub struct PostureCounts {
     pub high_risk_delegated: usize,
     pub orgwide_mailbox: usize,
     pub scoped_mailbox: usize,
+    pub legacy_mailbox_scope: usize,
     pub orgwide_sharepoint: usize,
     pub scoped_sites: usize,
     pub unowned: usize,
@@ -49,6 +50,7 @@ pub fn posture_counts(items: &[AuditItem]) -> PostureCounts {
             .iter()
             .filter(|i| i.issues.iter().any(|x| x.contains(issue::SCOPED_VIA_RBAC)))
             .count(),
+        legacy_mailbox_scope: count_issue_prefix(items, issue::LEGACY_MAILBOX_POLICY),
         orgwide_sharepoint: count_issue_prefix(items, issue::ORG_WIDE_SHAREPOINT),
         scoped_sites: count_issue_prefix(items, issue::SCOPED_SHAREPOINT),
         // NO_OWNERS and SINGLE_OWNER are disjoint per app, so the sum is exact.

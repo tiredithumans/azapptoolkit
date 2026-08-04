@@ -445,12 +445,27 @@ pub fn audit_run_result() -> AuditRunResult {
         &["SharePoint access scoped to selected sites: Sites.Selected".to_string()],
     );
 
+    // Confined — but by the deprecated Application Access Policy, so it lands in
+    // the legacy-scoping finding (NOT the healthy scoped group) and carries the
+    // migrate-to-RBAC fix.
+    let mut legacy_scoped = audit_item(
+        "Coho Winery Mailer",
+        RiskLevel::Medium,
+        &[format!("{}: Mail.Read", issue::LEGACY_MAILBOX_POLICY)],
+    );
+    legacy_scoped.remediations = vec![RemediationAction {
+        kind: RemediationKind::MigrateApplicationAccessPolicy,
+        label: "Migrate to RBAC for Applications".to_string(),
+        detail: "Replaces the legacy policy confining 1 permission: Mail.Read".to_string(),
+        targets: vec!["Mail.Read".to_string()],
+    }];
+
     let clean_a = audit_item("Proseware Sync", RiskLevel::Low, &[]);
     let clean_b = audit_item("Litware Analytics", RiskLevel::Low, &[]);
 
     AuditRunResult {
         tenant_id: "demo-tenant".to_string(),
-        total_apps: 13,
+        total_apps: 14,
         items: vec![
             over_privileged,
             mailbox,
@@ -461,6 +476,7 @@ pub fn audit_run_result() -> AuditRunResult {
             no_owners,
             single_owner,
             second_over,
+            legacy_scoped,
             scoped_mailbox,
             scoped_sharepoint,
             clean_a,
@@ -598,6 +614,30 @@ pub fn backup_progress(done: usize, total: usize, in_flight_cap: usize) -> BulkP
         current_app: None,
         cancelled: false,
         in_flight_cap: Some(in_flight_cap),
+    }
+}
+
+/// One app's slice of the site-permission sweep: two `Sites.Selected` grants
+/// with different roles, from a complete scan — so the panel can show the
+/// answer Graph itself can't give (which sites, and with what access) and a
+/// coverage line that doesn't have to hedge.
+pub fn app_site_access(app_id: &str) -> azapptoolkit_dto::sharepoint::AppSiteAccessDto {
+    use azapptoolkit_dto::sharepoint::{AppSiteAccessDto, SiteAppGrantRow};
+    let row = |site: &str, roles: &[&str]| SiteAppGrantRow {
+        site_id: format!("contoso.sharepoint.com,{}", guid(site)),
+        site_display_name: Some(site.to_string()),
+        site_url: Some(format!("https://contoso.sharepoint.com/sites/{site}")),
+        permission_id: guid(&format!("{app_id}:{site}")),
+        roles: roles.iter().map(|r| r.to_string()).collect(),
+        app_id: Some(app_id.to_string()),
+        app_display_name: Some("Demo app".to_string()),
+    };
+    AppSiteAccessDto {
+        sites: vec![row("Marketing", &["read"]), row("Projects", &["write"])],
+        total_sites: 42,
+        sites_scanned: 42,
+        sites_failed: 0,
+        cancelled: false,
     }
 }
 

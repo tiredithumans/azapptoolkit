@@ -85,6 +85,16 @@ pub(super) fn matches_finding(i: &AuditItem, finding: &str) -> bool {
         // so this must stay `.contains` — a "normalize to starts_with" sweep would
         // silently empty the Scoped-mailbox finding (pinned by the tests below).
         "scoped_mailbox" => i.issues.iter().any(|x| x.contains(issue::SCOPED_VIA_RBAC)),
+        // Confined, but by the deprecated per-app Application Access Policy
+        // rather than RBAC for Applications. Its own finding, not a variant of
+        // `orgwide_mailbox` (the access IS confined) and not of `scoped_mailbox`
+        // (that group is the healthy end state this one migrates toward) — the
+        // scorer keeps `SCOPED_VIA_RBAC` off these advisories so the two can't
+        // both match.
+        "legacy_mailbox_scope" => i
+            .issues
+            .iter()
+            .any(|x| x.starts_with(issue::LEGACY_MAILBOX_POLICY)),
         "orgwide_sharepoint" => i
             .issues
             .iter()
@@ -328,6 +338,10 @@ mod tests {
                 "orgwide_mailbox",
             ),
             (
+                format!("{} something", issue::LEGACY_MAILBOX_POLICY),
+                "legacy_mailbox_scope",
+            ),
+            (
                 format!("{} something", issue::ORG_WIDE_SHAREPOINT),
                 "orgwide_sharepoint",
             ),
@@ -346,6 +360,7 @@ mod tests {
             "high_risk_delegated",
             "orgwide_mailbox",
             "scoped_mailbox",
+            "legacy_mailbox_scope",
             "orgwide_sharepoint",
             "scoped_sites",
             "ownership",
@@ -394,6 +409,20 @@ mod tests {
         // empty the Scoped-mailbox finding.
         let item = with_issue(format!("Mail.Read {} (Sales Team)", issue::SCOPED_VIA_RBAC));
         assert!(matches_finding(&item, "scoped_mailbox"));
+        assert!(!matches_finding(&item, "orgwide_mailbox"));
+    }
+
+    #[test]
+    fn legacy_policy_scoping_is_neither_org_wide_nor_healthy_scoped() {
+        // The three mailbox findings are mutually exclusive by construction:
+        // legacy-policy scoping is confined (so not org-wide) but deprecated (so
+        // not the healthy RBAC group). The separation rests on the scorer
+        // keeping SCOPED_VIA_RBAC out of this advisory — if that leaks back in,
+        // `scoped_mailbox`'s `.contains` would swallow the row and the
+        // migration finding would look empty.
+        let item = with_issue(format!("{}: Mail.Read", issue::LEGACY_MAILBOX_POLICY));
+        assert!(matches_finding(&item, "legacy_mailbox_scope"));
+        assert!(!matches_finding(&item, "scoped_mailbox"));
         assert!(!matches_finding(&item, "orgwide_mailbox"));
     }
 }

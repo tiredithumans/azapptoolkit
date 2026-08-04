@@ -9,12 +9,15 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
-use azapptoolkit_core::audit::{AuditPrincipalKind, CredentialStatus, RiskLevel, issue};
+use azapptoolkit_core::audit::{
+    AuditPrincipalKind, CredentialStatus, RemediationAction, RemediationKind, RiskLevel, issue,
+};
 use azapptoolkit_core::models::DirectoryObject;
 use azapptoolkit_dto::audit::AuditRunResult;
 use azapptoolkit_dto::bulk::{
     BulkAddOwnerResult, BulkDisableOutcome, BulkDisableSignInResult, BulkOwnerOutcome,
 };
+use azapptoolkit_dto::exchange::{AapMigrationItem, AapMigrationReport};
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::security_view::SecurityView;
 
@@ -69,12 +72,25 @@ fn cached_run() -> AuditRunResult {
         RiskLevel::Low,
         &[format!("{} Mail.ReadWrite", issue::HIGH_RISK_APP_PERMS)],
     );
+    // Confined by the deprecated policy: its own group, with the plan-first
+    // migration Fix attached.
+    let mut legacy = fixtures::audit_item(
+        "Legacy Policy App",
+        RiskLevel::Low,
+        &[format!("{}: Mail.Read", issue::LEGACY_MAILBOX_POLICY)],
+    );
+    legacy.remediations = vec![RemediationAction {
+        kind: RemediationKind::MigrateApplicationAccessPolicy,
+        label: "Migrate to RBAC for Applications".to_string(),
+        detail: "Replaces the legacy policy confining 1 permission: Mail.Read".to_string(),
+        targets: vec!["Mail.Read".to_string()],
+    }];
 
     AuditRunResult {
         tenant_id: "tenant-1".to_string(),
-        total_apps: 8,
+        total_apps: 9,
         items: vec![
-            owner_a, owner_b, expired, unused, mail_app, foreign_sp, redundant, over,
+            owner_a, owner_b, expired, unused, mail_app, foreign_sp, redundant, over, legacy,
         ],
         cancelled: false,
         sign_in_report_available: true,
@@ -322,6 +338,67 @@ async fn bulk_disable_sign_in_flow_runs_on_the_unused_group() {
             .and_then(|a| a.first())
             .and_then(|v| v.as_str()),
         Some("obj-Idle App")
+    );
+}
+
+/// The legacy-policy migration Fix is plan-first: opening it must run a **dry
+/// run** and refuse to commit until that plan has come back. A modal that
+/// committed on the first click would perform an Exchange scope build + Entra
+/// grant strip before the operator ever saw which mailboxes it covers.
+#[wasm_bindgen_test]
+async fn legacy_policy_fix_plans_before_it_migrates() {
+    let m = mount_security().await;
+    ts::mock_ok(
+        "migrate_application_access_policies",
+        &AapMigrationReport {
+            dry_run: true,
+            items: vec![AapMigrationItem {
+                app_id: "Legacy Policy App-appid".to_string(),
+                source_policy_identities: vec!["policy-1".to_string()],
+                scope_name: Some("app_scope_Legacy Policy App-appid".to_string()),
+                scope_filter: Some("MemberOfGroup -eq 'CN=Sales'".to_string()),
+                managed_group_name: Some("app_scope_group_Legacy Policy App-appid".to_string()),
+                members_copied: vec!["ada@contoso.com".to_string()],
+                members_unverified: Vec::new(),
+                roles_assigned: vec!["Application Mail.Read".to_string()],
+                removed_entra_grants: vec!["Mail.Read".to_string()],
+                removed_policies: vec!["policy-1".to_string()],
+                retired_groups: Vec::new(),
+                status: "planned".to_string(),
+                warnings: Vec::new(),
+            }],
+            failures: Vec::new(),
+        },
+    );
+
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("legacy_mailbox_scope".to_string()));
+    ts::wait_for(|| has_button("Migrate to RBAC for Applications")).await;
+    click_button("Migrate to RBAC for Applications");
+
+    // Opening the modal plans; nothing is committed yet.
+    ts::wait_for(|| ts::call_count("migrate_application_access_policies") == 1).await;
+    let plan = ts::last_call("migrate_application_access_policies").unwrap();
+    assert_eq!(
+        plan.args.get("dryRun").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    // Keyed on the appId (what a policy names), not the audit row's object id.
+    assert_eq!(
+        plan.arg_str("appId").as_deref(),
+        Some("Legacy Policy App-appid")
+    );
+    ts::wait_for(|| ts::body_contains("Nothing has changed yet")).await;
+
+    // Committing sends the same call with dry_run cleared.
+    click_button("Migrate");
+    ts::wait_for(|| ts::call_count("migrate_application_access_policies") == 2).await;
+    let commit = ts::last_call("migrate_application_access_policies").unwrap();
+    assert_eq!(
+        commit.args.get("dryRun").and_then(|v| v.as_bool()),
+        Some(false)
     );
 }
 

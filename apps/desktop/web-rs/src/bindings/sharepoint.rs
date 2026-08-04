@@ -58,6 +58,29 @@ pub async fn get_cached_site_sweep(tenant_id: &str) -> Result<Option<SiteSweepRe
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AppSiteAccessArgs<'a> {
+    tenant_id: &'a str,
+    app_id: &'a str,
+}
+
+/// The sites this principal can reach under `Sites.Selected`, with the roles it
+/// holds on each — projected backend-side out of the cached tenant sweep, so
+/// this stays a small payload. `None` = no completed sweep is cached; the caller
+/// offers to run one (`sweep_site_permissions`) and projects the fresh result
+/// with `AppSiteAccessDto::from_sweep` instead.
+pub async fn get_app_site_access(
+    tenant_id: &str,
+    app_id: &str,
+) -> Result<Option<AppSiteAccessDto>, UiError> {
+    invoke_result(
+        "get_app_site_access",
+        AppSiteAccessArgs { tenant_id, app_id },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ListArgs<'a> {
     tenant_id: &'a str,
     site_url: &'a str,
