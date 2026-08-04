@@ -202,15 +202,23 @@ fn rule_stale_app(days_since_created: Option<i64>) -> RuleContribution {
 }
 
 /// Rule 11 (advisory, no score): organization-wide mailbox access. Splits the
-/// mailbox-reaching grants three ways, because the remedy differs per bucket:
+/// mailbox-reaching grants four ways, because the remedy differs per bucket:
 ///
 /// - **confirmed scoped** via Exchange RBAC → informational only;
-/// - **org-wide and scopable** → the `ScopeMailboxAccess` remediation;
+/// - **org-wide and scopable** → the `ScopeMailboxAccess` remediation. Decided
+///   by [`crate::scoping::is_scopable_exchange_resource_permission`], the same
+///   positive gate [`AppPermissions::is_scoped`] uses — never by the negation
+///   of the legacy test below, which admits three unscopable shapes;
 /// - **org-wide on the legacy Office 365 Exchange Online resource** → its own
 ///   finding and **no** remediation. RBAC for Applications covers Microsoft
 ///   Graph and EWS only, so nothing can confine that resource's Outlook REST
 ///   `Mail.*` roles — removing the grant is the only remedy, and a "Scope…"
-///   button there would promise a fix that cannot be honoured.
+///   button there would promise a fix that cannot be honoured;
+/// - **org-wide but unconfinable for any other reason** — a `Mail.*` /
+///   `MailboxSettings.*` name outside the mapped role set, a resource this
+///   build doesn't map, or a resource that failed to resolve at all → its own
+///   finding and **no** remediation, because "remove the legacy grant" is the
+///   wrong advice for access that may be entirely legitimate.
 ///
 /// Membership comes from [`crate::scoping::is_mailbox_reaching_permission`],
 /// which is resource-aware — a bare `Mail.*` name test misses the EWS
@@ -230,10 +238,29 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> (RuleContribution, Vec<&Reso
         .collect();
     let (mailbox_scoped, mailbox_orgwide): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) =
         mailbox_hits.into_iter().partition(|g| perms.is_scoped(g));
-    let (unscopable_legacy, mailbox_unscoped): (
+    // Positive test, deliberately: only a permission RBAC for Applications can
+    // actually confine may carry the ScopeMailboxAccess remediation. Asking the
+    // negative question ("is it *not* the legacy Outlook-REST case?") let three
+    // other shapes through into the fix — a `None` resource, a resource this
+    // build doesn't map, and a `Mail.*`/`MailboxSettings.*` name on Microsoft
+    // Graph outside the mapped role set — every one of which
+    // `is_scopable_exchange_resource_permission` declares unscopable, so the
+    // handler could only fail on (or worse, mis-apply) the Fix it was offered.
+    // This mirrors the gate `AppPermissions::is_scoped` already uses.
+    let (mailbox_unscoped, unconfinable): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) =
+        mailbox_orgwide.into_iter().partition(|g| {
+            crate::scoping::is_scopable_exchange_resource_permission(
+                g.resource_app_id.as_deref(),
+                &g.value,
+            )
+        });
+    // Split what cannot be confined by *why*, because the advice differs:
+    // removing the grant is the only remedy for the legacy Outlook-REST roles,
+    // but plain wrong for a permission whose resource merely failed to resolve.
+    let (unscopable_legacy, unconfinable_other): (
         Vec<&ResourcePermission>,
         Vec<&ResourcePermission>,
-    ) = mailbox_orgwide.into_iter().partition(|g| {
+    ) = unconfinable.into_iter().partition(|g| {
         g.resource_app_id.as_deref().is_some_and(|resource| {
             crate::scoping::is_unscopable_legacy_exchange_permission(resource, &g.value)
         })
@@ -260,6 +287,20 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> (RuleContribution, Vec<&Reso
              RBAC for Applications cannot confine them (it covers Microsoft Graph and EWS only), \
              and the Outlook REST endpoints they authorized were decommissioned in March 2024. \
              Use the identically named Microsoft Graph permission instead."
+                .to_string(),
+        );
+    }
+    if !unconfinable_other.is_empty() {
+        c.issues.push(format!(
+            "{}: {}",
+            issue::UNCONFINABLE_MAILBOX,
+            join_values(&unconfinable_other)
+        ));
+        c.recommendations.push(
+            "These grants reach every mailbox, but RBAC for Applications exposes no supported \
+             application role for them (or their resource could not be resolved), so the toolkit \
+             cannot confine them. Review whether the access is needed, and prefer a Microsoft \
+             Graph mail permission that RBAC can scope."
                 .to_string(),
         );
     }
@@ -1644,6 +1685,102 @@ mod tests {
                 .iter()
                 .any(|r| r.kind == RemediationKind::ScopeMailboxAccess),
             "an unscopable legacy grant must offer no scoping fix"
+        );
+    }
+
+    #[test]
+    fn scope_mailbox_fix_is_offered_only_where_rbac_can_actually_confine() {
+        // The remediation gate is the POSITIVE `is_scopable_exchange_resource_permission`
+        // test. The negation of the legacy test used to stand in for it, which
+        // let three unscopable shapes through into a Fix the handler could never
+        // apply: a `None` resource, a resource this build doesn't map, and a
+        // mail-named Graph permission outside the mapped role set.
+        let unresolved = |value: &str| ResourcePermission {
+            resource_app_id: None,
+            value: value.to_string(),
+        };
+        // (grant, expects_scope_fix, expected issue prefix)
+        let cases: Vec<(ResourcePermission, bool, &str)> = vec![
+            (
+                ResourcePermission::graph("Mail.Read"),
+                true,
+                issue::ORG_WIDE_MAILBOX,
+            ),
+            (
+                ResourcePermission::exchange_online(crate::scoping::EWS_FULL_ACCESS_AS_APP),
+                true,
+                issue::ORG_WIDE_MAILBOX,
+            ),
+            (
+                ResourcePermission::exchange_online("Mail.Read"),
+                false,
+                issue::UNSCOPABLE_LEGACY_MAILBOX,
+            ),
+            (unresolved("Mail.Read"), false, issue::UNCONFINABLE_MAILBOX),
+            (
+                ResourcePermission::on("11111111-2222-3333-4444-555555555555", "Mail.Read"),
+                false,
+                issue::UNCONFINABLE_MAILBOX,
+            ),
+            (
+                ResourcePermission::graph("Mail.ReadWrite.Shared"),
+                false,
+                issue::UNCONFINABLE_MAILBOX,
+            ),
+        ];
+
+        for (grant, expects_fix, expected_issue) in cases {
+            let label = format!("{:?}/{}", grant.resource_app_id, grant.value);
+            let perms = AppPermissions {
+                app_role_grants: vec![grant],
+                ..Default::default()
+            };
+            let item = score_application(&base_app(), Some(true), &perms, now());
+            let has_fix = item
+                .remediations
+                .iter()
+                .any(|r| r.kind == RemediationKind::ScopeMailboxAccess);
+            assert_eq!(
+                has_fix, expects_fix,
+                "ScopeMailboxAccess offered={has_fix} for {label}, expected {expects_fix}: {:?}",
+                item.remediations
+            );
+            assert!(
+                item.issues.iter().any(|i| i.starts_with(expected_issue)),
+                "{label} must raise {expected_issue:?}: {:?}",
+                item.issues
+            );
+        }
+    }
+
+    #[test]
+    fn unconfinable_mailbox_reach_is_not_reported_as_a_legacy_grant() {
+        // "Remove these legacy Office 365 Exchange Online grants" is actively
+        // wrong advice for a permission whose resource merely failed to resolve,
+        // so the two unconfinable buckets must stay distinct findings.
+        let perms = AppPermissions {
+            app_role_grants: vec![ResourcePermission {
+                resource_app_id: None,
+                value: "Mail.Read".to_string(),
+            }],
+            ..Default::default()
+        };
+        let item = score_application(&base_app(), Some(true), &perms, now());
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::UNSCOPABLE_LEGACY_MAILBOX)),
+            "an unresolved resource is not a legacy Office 365 grant: {:?}",
+            item.issues
+        );
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::ORG_WIDE_MAILBOX)),
+            "and it must not join the scopable org-wide bucket either: {:?}",
+            item.issues
         );
     }
 
