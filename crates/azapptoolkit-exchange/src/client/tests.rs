@@ -264,6 +264,53 @@ async fn ensure_security_group_reuses_existing() {
 }
 
 #[tokio::test]
+async fn set_management_scope_filter_rereads_when_the_cmdlet_returns_nothing() {
+    // `Set-ManagementScope` emits no object on success, so the client re-reads
+    // the scope — that read is what proves the new filter actually landed.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .and(body_json(json!({
+            "CmdletInput": {
+                "CmdletName": "Set-ManagementScope",
+                "Parameters": {
+                    "Identity": "app_scope_app-1",
+                    "RecipientRestrictionFilter": "MemberOfGroup -eq 'CN=Managed,DC=prod'",
+                    "Confirm": false
+                }
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [] })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .and(body_json(json!({
+            "CmdletInput": {
+                "CmdletName": "Get-ManagementScope",
+                "Parameters": { "Identity": "app_scope_app-1" }
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [{
+                "Name": "app_scope_app-1",
+                "RecipientFilter": "MemberOfGroup -eq 'CN=Managed,DC=prod'"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let scope = client
+        .set_management_scope_filter("app_scope_app-1", "MemberOfGroup -eq 'CN=Managed,DC=prod'")
+        .await
+        .unwrap();
+    assert_eq!(
+        scope.recipient_filter.as_deref(),
+        Some("MemberOfGroup -eq 'CN=Managed,DC=prod'")
+    );
+}
+
+#[tokio::test]
 async fn add_group_member_swallows_already_member() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

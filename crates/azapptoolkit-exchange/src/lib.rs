@@ -29,5 +29,6 @@ pub use targets::{
     ExchangeTarget, NoScopablePermission, ResourceRoles, count_member_of_group, exchange_target,
     filter_targets_by_value, group_dns_in_filter, mailbox_resources_complete,
     policies_safe_to_remove, require_scopable_targets, resolve_grant, resolve_value,
-    targets_from_declared, targets_from_grants, targets_safe_to_strip,
+    scope_dns_after_consolidation, targets_from_declared, targets_from_grants,
+    targets_safe_to_strip,
 };
