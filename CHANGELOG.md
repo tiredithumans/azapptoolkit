@@ -10,6 +10,77 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+### Fixed
+
+- **A "Scope mailbox access" fix is no longer offered where Exchange RBAC cannot
+  honour it.** The security audit decided which org-wide mailbox grants got the
+  one-click scoping fix by asking whether a permission was *not* the legacy
+  Outlook-REST case. That negative test let three unscopable shapes through — a
+  grant whose resource could not be resolved, a resource this build does not
+  map, and a `Mail.*` / `MailboxSettings.*` permission on Microsoft Graph
+  outside the supported role set — each of which got a Fix button the handler
+  could never apply. The gate is now the positive
+  `is_scopable_exchange_resource_permission`, the same one `AppPermissions::is_scoped`
+  already used. Grants that reach mailboxes but cannot be confined now raise
+  their own finding ("Org-wide mailbox access that RBAC cannot confine") and no
+  fix, kept distinct from the legacy-grant finding because "remove this legacy
+  Office 365 grant" is the wrong advice for access that may be legitimate.
+  Risk scores are unchanged — this rule is advisory and adds no points.
+- **Scoping an application's mailbox access now fails closed when nothing is
+  scopable.** `grant_exchange_mailbox_access` logged "nothing to scope" and
+  carried on, which still created the app's single Exchange management scope
+  pinned to the requested groups while assigning no roles at all. Because
+  Exchange keeps an existing scope rather than rewriting its filter, every later
+  *correct* scoping request for that app could then only warn that its groups
+  were not applied — an unrecoverable mis-scope produced by a request that
+  scoped nothing. It now returns `no_scopable_permission`, exactly as the
+  managed-identity path already did; both share one guard so they cannot drift
+  apart again.
+- **A security audit interrupted by a dead session is no longer cached as a
+  finished one.** `run_audit` collapsed every per-app failure to a log warning,
+  so a session whose refresh token died mid-run produced a report silently
+  missing applications, stored under the audit cache and served to the dashboard
+  as authoritative — a partial risk report that reads as clean. It now stops on
+  the shared `UiError::is_reauth_fatal` codes (as bulk actions already did),
+  skips the cache write, and surfaces the code so the shell re-authenticates in
+  place.
+- **Cache lifecycle gaps.** Lowering the cache size limit now evicts immediately
+  instead of converging one write at a time (and never at all once writes to
+  that kind stopped); an entry that no longer deserializes is dropped rather
+  than re-read, re-warned, and kept alive by its own LRU touch until its TTL
+  expired; and the `Lists` bucket is sized for the per-object entries it
+  actually holds, which had been silently truncating bulk seeding at the
+  aggregate-sized cap.
+
+### Changed
+
+- **Cold-tenant directory scans are de-duplicated.** The tenant-wide
+  service-principal and app-registration indexes are read by six surfaces (both
+  lists, global search, the security audit, the consent audit, DR backup). On a
+  cold tenant they each ran their own full directory scan and then raced to
+  overwrite the same cache entry; they now share one fetch through the existing
+  single-flight gate.
+- **`just verify` runs the frontend GUI tests when it can.** The largest tier in
+  the repo had its only behavioural gate living in CI, so a renamed CSS class or
+  aria-label passed locally and failed a full round trip later. `verify` now
+  runs `web-itest` when Chrome and a matching chromedriver are present and
+  prints a loud, unmissable skip when they are not; `just verify-ui` keeps it
+  mandatory.
+
+### Internal
+
+- Exchange scoping's target derivation — resolving an application's declared or
+  granted permissions into concrete RBAC targets, and the fail-closed guard
+  above — moved out of the Tauri command layer into
+  `azapptoolkit-exchange::targets`, where it is pure and directly unit-testable
+  rather than reachable only through a signed-in session.
+- Two repo invariants that were previously prose in `AGENTS.md` are now tests:
+  the frontend's `[lints.rust]` block must match the workspace one (web-rs is
+  outside the workspace and cannot inherit it), and every long-running fan-out
+  must honour `UiError::is_reauth_fatal`.
+- Per-tenant API client construction and the shell's tool dialogs each collapse
+  onto one shared helper instead of five and four hand-rolled copies.
+
 ## [0.22.3] - 2026-08-03
 
 ### Changed
