@@ -10,6 +10,8 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+## [0.22.4] - 2026-08-04
+
 ### Fixed
 
 - **A "Scope mailbox access" fix is no longer offered where Exchange RBAC cannot
