@@ -65,3 +65,60 @@ async fn the_open_items_dock_mounts_exactly_once() {
         "the dock must mount at most once"
     );
 }
+
+/// The version line's "What's new" is the ONLY way back to this build's release
+/// notes once the update splash has been dismissed — and the notes it shows are
+/// baked in at compile time, so a broken `build.rs` or an unfinalized changelog
+/// surfaces here as an empty dialog rather than at the next release.
+#[wasm_bindgen_test]
+async fn the_account_menu_reopens_this_versions_release_notes() {
+    ts::reset();
+    let _m = ts::mount_view(|| view! { <AppShell><div /></AppShell> });
+    ts::wait_for(|| ts::query(".shell__tenant-chip").is_some()).await;
+
+    ts::click(".shell__tenant-chip");
+    ts::wait_for(|| ts::query(".shell__account-version").is_some()).await;
+    assert!(
+        ts::body_contains("What's new"),
+        "the account menu's version line must offer a way back to the release notes"
+    );
+
+    ts::click(".shell__account-version .link-btn");
+    ts::wait_for(|| ts::query(".changelog").is_some()).await;
+    assert!(
+        ts::body_contains(&format!("What's new in v{}", env!("CARGO_PKG_VERSION"))),
+        "the dialog must name the version it is showing notes for"
+    );
+    assert!(
+        !ts::text(".changelog").is_empty(),
+        "release notes for this build must be baked in, not an empty box"
+    );
+}
+
+/// Summary-first is the contract: the splash and this dialog show what changed
+/// for the operator, with the implementation detail behind the toggle. A
+/// regression that renders the raw section shows the detail immediately.
+#[wasm_bindgen_test]
+async fn release_notes_render_condensed_with_the_detail_behind_a_toggle() {
+    ts::reset();
+    let _m = ts::mount_view(|| view! { <AppShell><div /></AppShell> });
+    ts::wait_for(|| ts::query(".shell__tenant-chip").is_some()).await;
+    ts::click(".shell__tenant-chip");
+    ts::wait_for(|| ts::query(".shell__account-version").is_some()).await;
+    ts::click(".shell__account-version .link-btn");
+    ts::wait_for(|| ts::query(".changelog").is_some()).await;
+
+    // Our changelog always carries entries whose lede is followed by rationale,
+    // so the condensed and full renders must differ for any real release.
+    let condensed = ts::text(".changelog").len();
+    assert!(
+        ts::query(".changelog__toggle").is_some(),
+        "notes with technical detail must offer the toggle that reveals it"
+    );
+    ts::click(".changelog__toggle");
+    ts::wait_for(|| ts::text(".changelog").len() > condensed).await;
+    assert!(
+        ts::body_contains("Hide technical details"),
+        "the toggle must flip to hiding detail once expanded"
+    );
+}

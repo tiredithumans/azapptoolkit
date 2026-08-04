@@ -10,6 +10,28 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+### Added
+
+- **"What's new" reopens the current version's release notes at any time.** The
+  update splash was the only place release notes existed: it appeared once,
+  before installing, and after the restart there was no way back to what had
+  changed. The account menu's version line now carries a **What's new** link
+  that opens this build's own notes — baked in at compile time, so it works
+  offline and on first launch — alongside a link to the full changelog on
+  GitHub.
+
+### Changed
+
+- **Release notes now show what changed for you, with the engineering detail
+  behind a toggle.** The changelog is written for operators and contributors at
+  once — each entry leads with a sentence of what changed, then several
+  paragraphs of why and how, plus whole sections about tests and refactors —
+  and the update splash rendered all of it verbatim. It now shows the lede of
+  each entry and drops internal sections; **Show technical details** renders the
+  release verbatim, exactly as before, and only appears when there is more to
+  see. Nothing is removed from the changelog itself, and past releases summarise
+  the same way.
+
 ## [0.22.4] - 2026-08-04
 
 ### Fixed

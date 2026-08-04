@@ -71,6 +71,7 @@ apps/desktop/
     ├── bindings/                    # typed Tauri IPC stubs — mirror backend commands
     ├── ipc_mock/                    # shared mock Tauri IPC bridge + fixtures (test-support + demo)
     ├── demo/                        # GitHub Pages demo: mock IPC + curated sample data (feature `demo`)
+    ├── build.rs                     # bakes this version's CHANGELOG section (in-app "What's new")
     └── Trunk.toml                   # WASM build/serve (127.0.0.1:5173)
 
 docs/DEVELOPMENT.md                  # build, test, package, release, updater keys
@@ -194,7 +195,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Auto-update is interactive (not silent).** The front-end checks once on launch and toasts a notification whose action opens `UpdateSplash` (explicit **Update & restart**). **Don't reintroduce a silent background `download_and_install` in `lib.rs` setup** — it would race the prompt. Details: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
 
-- **Release is a 3-OS matrix → one aggregated `latest.json`.** `release.yml`: `guard` → `build` matrix (windows · macos aarch64 · linux) → `release` assembles one draft; a human publishes. CHANGELOG headers are `## [X.Y.Z] - YYYY-MM-DD` (**no `v` prefix, ASCII hyphen**) — the notes-extraction regex depends on it. It reads only `CHANGELOG.md` and only the released version's section, so releases ≤ 0.19.2 sit in `docs/CHANGELOG-archive.md`. Flow: the `release` skill; matrix: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
+- **Release is a 3-OS matrix → one aggregated `latest.json`.** `release.yml`: `guard` → `build` matrix (windows · macos aarch64 · linux) → `release` assembles one draft; a human publishes. CHANGELOG headers are `## [X.Y.Z] - YYYY-MM-DD` (**no `v` prefix, ASCII hyphen**) — **two** parsers depend on it: `release.yml`'s notes extraction and `web-rs/build.rs`, which bakes the running version's section in for the in-app "What's new". Both read only `CHANGELOG.md` and only that version's section, so releases ≤ 0.19.2 sit in `docs/CHANGELOG-archive.md`. Flow: the `release` skill; matrix: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
 
 - **CSP governs the *webview*, not backend egress.** `connect-src` in `tauri.conf.json` restricts only WASM frontend fetches; backend reqwest calls to new hosts need no CSP change.
 

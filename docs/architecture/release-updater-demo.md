@@ -33,6 +33,12 @@ between this version's header and the next `## [` header to populate the updater
 "see the release notes" line. Keep the format in lockstep with the existing CHANGELOG entries
 and that regex.
 
+**Two parsers now depend on that header**, and they must agree: `release.yml` (above) and
+`web-rs/build.rs`, which slices the *running* version's section the same way and bakes it into
+the wasm bundle for the in-app "What's new" (below). `web-rs`'s
+`the_running_versions_changelog_section_is_baked_in` test fails the build when the manifest
+version has no finalized section — the same mistake that would otherwise ship blank in-app notes.
+
 ## Auto-update is interactive, never silent
 
 The front-end checks once on launch (`commands::updater::check_for_update`, swallowed silently
@@ -47,6 +53,39 @@ so it only lights up for releases from **v0.8.0 onward** — v0.7.0's `latest.js
 
 **Do not reintroduce a silent background `download_and_install` in `lib.rs` setup** — it was
 removed in favour of this flow and would race the prompt.
+
+### Release notes are rendered summary-first
+
+`CHANGELOG.md` serves operators *and* contributors: every entry is a one-sentence lede followed
+by paragraphs of rationale and implementation detail, plus whole `### Internal` sections about
+tests and refactors. Rendered verbatim, an update splash answers "what does this change for me?"
+with several screens of backend detail.
+
+`components/changelog_notes.rs` therefore condenses by default — internal sections dropped, every
+bullet cut to its first sentence, nested bullets (always elaboration) dropped — with a **Show
+technical details** toggle that renders the section verbatim. The toggle only appears when the two
+differ, and a release that condenses to nothing says so rather than rendering an empty box. Two
+consequences worth knowing:
+
+- **The transform is at render time, not in `release.yml`'s extraction.** The manifest keeps the
+  full section, so the toggle has something to show and already-published releases summarise too.
+- **The lede sentence is the whole user-facing summary.** `first_sentence` treats a `.`/`!`/`?` as
+  a sentence end only when what follows can start one (uppercase, `**`, backtick, quote, `[`), so
+  `e.g.`, `v0.22.4` and `1.2.1 → 1.2.2` survive. Writing an entry whose first sentence is *not* a
+  self-contained statement of what changed is what makes these notes read badly — the renderer
+  cannot recover it.
+
+### "What's new" for the version already installed
+
+The splash is a one-shot: once the update installs, the notes it showed are gone. `web-rs/build.rs`
+bakes the running version's `CHANGELOG.md` section into the bundle at compile time and
+`components/release_notes.rs` renders it — through the same `ChangelogNotes` component — in a
+dialog opened from **What's new** on the version line of the account menu (`shell.rs`).
+
+Compile-time, not an IPC call, deliberately: it works offline, on first launch, and in the Pages
+demo, where an unfixtured infallible `invoke()` takes down the whole page. A version with no
+CHANGELOG section bakes an empty string and the dialog degrades to its "Full changelog on GitHub"
+link — but the web-rs test above fails first, so that state should never ship.
 
 ## GitHub Pages demo: the WASM frontend with the backend mocked
 
