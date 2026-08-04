@@ -311,30 +311,55 @@ impl Cache {
         if let Some(m) = max_size {
             c.max_size = m;
         }
+        let new_max = c.max_size;
+        // Release the config lock before taking any bucket lock: every other
+        // path (`cap_if_enabled` → `put_inner`) reads the config and drops it
+        // before locking a bucket, so never holding both keeps that ordering.
+        drop(c);
+
+        // Lowering `max_size` has to shrink the live buckets too. `evict_lru`
+        // only ever runs from `put_inner`, so without this an oversized bucket
+        // converges one `put` at a time — and not at all if writes to that kind
+        // stop, which is exactly the case `evict_lru`'s own comment calls out.
+        if max_size.is_some() {
+            for kind in CacheKind::ALL {
+                let cap = Self::cap_for(kind, new_max);
+                self.buckets[kind.idx()].lock().evict_lru(cap);
+            }
+        }
     }
 
     pub fn stats(&self) -> CacheStats {
         *self.stats.lock()
     }
 
-    /// Entry cap for `kind`, derived from the configured `max_size`.
-    ///
-    /// `max_size` is sized for kinds holding a handful of tenant-wide aggregates.
-    /// [`CacheKind::ServicePrincipal`] instead holds **one small entry per app
-    /// registration** (the audit's `|lean` seeding), so it is capped at the same
-    /// ceiling the tenant enumerations use — see [`MAX_PER_OBJECT_CACHE_SIZE`].
-    /// A caller that raises `max_size` past that ceiling gets the larger value
-    /// for every kind.
     /// Effective entry cap for `kind` under the current configuration. Callers
     /// that pre-seed a bucket in bulk use this to bound the pass, so seeding
     /// can't evict its own earlier entries.
+    ///
+    /// `max_size` is sized for kinds holding a handful of tenant-wide aggregates.
+    /// Two kinds instead hold **one entry per directory object** and so are
+    /// capped at the ceiling the tenant enumerations use
+    /// ([`MAX_PER_OBJECT_CACHE_SIZE`]):
+    ///
+    /// - [`CacheKind::ServicePrincipal`] — the audit's `|lean` seeding;
+    /// - [`CacheKind::Lists`] — despite the name it carries the per-app
+    ///   `app_detail|` and `mail_scopes|` entries alongside the tenant
+    ///   aggregates and pinned indexes, so the aggregate-sized cap let per-app
+    ///   churn thrash the bucket and silently truncated any bulk seeding bounded
+    ///   by `capacity_for(Lists)`.
+    ///
+    /// A caller that raises `max_size` past that ceiling gets the larger value
+    /// for every kind.
     pub fn capacity_for(&self, kind: CacheKind) -> usize {
         Self::cap_for(kind, self.config.lock().max_size)
     }
 
     fn cap_for(kind: CacheKind, max_size: usize) -> usize {
         match kind {
-            CacheKind::ServicePrincipal => max_size.max(MAX_PER_OBJECT_CACHE_SIZE),
+            CacheKind::ServicePrincipal | CacheKind::Lists => {
+                max_size.max(MAX_PER_OBJECT_CACHE_SIZE)
+            }
             _ => max_size,
         }
     }
@@ -399,7 +424,13 @@ impl Cache {
                 Some(value)
             }
             Err(err) => {
-                tracing::warn!(?err, "cache value failed to deserialize; treating as miss");
+                tracing::warn!(?err, "cache value failed to deserialize; dropping entry");
+                // Drop it rather than leaving it to re-fail on every read. The
+                // `lookup` above already called `touch`, so a retained poisoned
+                // entry would also keep refreshing its own LRU position and
+                // survive until TTL expiry (60 min for `Lists`) while never
+                // once serving a hit.
+                self.buckets[kind.idx()].lock().remove(key);
                 self.record(kind, false);
                 None
             }
@@ -567,6 +598,70 @@ mod tests {
 
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
     struct Sample(String);
+
+    /// Live entry count for a bucket — the tests live inside the module, so
+    /// they can look straight at what eviction actually did.
+    fn entry_count(cache: &Cache, kind: CacheKind) -> usize {
+        cache.buckets[kind.idx()].lock().entries.len()
+    }
+
+    #[test]
+    fn lowering_max_size_shrinks_live_buckets_without_further_writes() {
+        // Regression: `configure` only mutated the config, and `evict_lru` runs
+        // solely from `put_inner` — so an oversized bucket converged one write
+        // at a time, and not at all once writes to that kind stopped.
+        let cache = Cache::new();
+        for i in 0..20 {
+            cache.put(
+                CacheKind::Audit,
+                format!("t1|audit|{i}"),
+                &Sample(i.to_string()),
+            );
+        }
+        assert_eq!(entry_count(&cache, CacheKind::Audit), 20);
+        cache.configure(None, None, None, None, None, Some(5));
+        assert_eq!(
+            entry_count(&cache, CacheKind::Audit),
+            5,
+            "lowering max_size must evict immediately, with no further puts"
+        );
+    }
+
+    #[test]
+    fn a_poisoned_entry_is_dropped_rather_than_re_read_forever() {
+        // Regression: a value that no longer deserializes into T was warned about
+        // and left in place — and `lookup` had already touched it, so it kept
+        // refreshing its own LRU position and re-failing on every read until TTL.
+        let cache = Cache::new();
+        cache.put(CacheKind::Lists, "t1|thing".into(), &Sample("x".into()));
+        // Read it back as an incompatible type: a miss, and the entry must go.
+        assert!(cache.get::<u64>(CacheKind::Lists, "t1|thing").is_none());
+        assert_eq!(
+            entry_count(&cache, CacheKind::Lists),
+            0,
+            "the undeserializable entry must be evicted, not retained"
+        );
+        // And the correctly-typed read now misses too, rather than hitting a
+        // value that could never be decoded.
+        assert!(cache.get::<Sample>(CacheKind::Lists, "t1|thing").is_none());
+    }
+
+    #[test]
+    fn lists_is_capped_for_per_object_entries_not_aggregates() {
+        // `Lists` carries the per-app `app_detail|` / `mail_scopes|` entries as
+        // well as the tenant aggregates, so the aggregate-sized cap let per-app
+        // churn thrash it and silently truncated bulk seeding bounded by
+        // `capacity_for(Lists)`.
+        let cache = Cache::new();
+        assert_eq!(
+            cache.capacity_for(CacheKind::Lists),
+            cache.capacity_for(CacheKind::ServicePrincipal),
+            "both per-object kinds share the per-object ceiling"
+        );
+        assert!(cache.capacity_for(CacheKind::Lists) >= MAX_PER_OBJECT_CACHE_SIZE);
+        // Aggregate-only kinds keep the smaller configured cap.
+        assert_eq!(cache.capacity_for(CacheKind::Audit), MAX_CACHE_SIZE);
+    }
 
     #[test]
     fn put_typed_get_typed_returns_the_same_arc_without_deserialize() {
