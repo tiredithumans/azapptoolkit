@@ -12,6 +12,25 @@ Older releases (**0.19.2 and earlier**) live in
 
 ### Added
 
+- **Legacy Application Access Policy migration now consolidates onto the
+  toolkit-managed group, and an already-scoped app can be moved onto it.**
+  Migration built the app's management scope over the *policy's own* group, so a
+  migrated app stayed pinned to a legacy group the toolkit doesn't manage —
+  correct, but off the naming standard, and adjusting its mailboxes meant
+  editing a group the app's own scoping panel doesn't show. Migration now copies
+  that group's mailboxes into `app_scope_group_<appId>` and scopes to *that*, so
+  the legacy group can be retired. For apps that already migrated (their policy
+  is gone, so migration finds nothing) the Exchange scoping section gains **Move
+  to managed group**, which does the same consolidation from the scope's current
+  groups: it plans first — listing the mailboxes it would copy — and commits
+  only when you confirm. Both paths fail closed: unless every mailbox is
+  *verified present* in the managed group afterwards, the scope keeps its
+  existing filter rather than narrowing to an incomplete copy. An empty source
+  group counts as unreadable for this, because `Get-DistributionGroupMember`
+  also returns nothing for a Microsoft 365 group — consolidating that would have
+  cut the app off from every mailbox at once. Exchange takes 30 min–2 h to
+  apply a repointed scope; the permission tester bypasses that cache.
+
 - **"What's new" reopens the current version's release notes at any time.** The
   update splash was the only place release notes existed: it appeared once,
   before installing, and after the restart there was no way back to what had
@@ -19,6 +38,17 @@ Older releases (**0.19.2 and earlier**) live in
   that opens this build's own notes — baked in at compile time, so it works
   offline and on first launch — alongside a link to the full changelog on
   GitHub.
+
+### Fixed
+
+- **A scoped grant that changed nothing no longer reports as a success.** When
+  an app already had a management scope, granting scoped access with a different
+  group left the scope untouched — Exchange keeps an existing scope — and the
+  toolkit reported this as "…1 warning(s)." in a toast that auto-dismissed
+  without ever showing the warning. The groups you asked for silently didn't
+  apply. Grant outcomes carrying warnings now stay on screen with the warning
+  text, the filter actually in effect, and a button to refresh once you've read
+  them; a clean grant still toasts and reloads as before.
 
 ### Changed
 

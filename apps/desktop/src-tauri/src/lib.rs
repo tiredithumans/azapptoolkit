@@ -132,6 +132,7 @@ pub fn run() {
             commands::exchange::add_exchange_scope_group_members,
             commands::exchange::remove_exchange_scope_group_members,
             commands::exchange::migrate_application_access_policies,
+            commands::exchange::move_exchange_scope_to_managed_group,
             commands::managed_identity::list_managed_identities,
             commands::managed_identity::save_managed_identities_to_file,
             commands::managed_identity::grant_managed_identity_permission,
