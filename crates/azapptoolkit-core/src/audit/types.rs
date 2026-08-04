@@ -188,8 +188,9 @@ pub enum MailPermissionScope {
     /// (RBAC for Applications) or a legacy Application Access Policy (the
     /// `mechanism` field distinguishes the two).
     Scoped {
-        /// The Exchange management scope name (e.g. `azapptoolkit_<app-id>`),
-        /// or the legacy policy's scope group.
+        /// The Exchange management scope name (by default `app_scope_<app-id>`
+        /// — see `TenantDefaults::scope_name_for`), or the legacy policy's
+        /// scope group.
         scope_name: Option<String>,
         /// The scope's OPATH recipient filter, when resolved (display only).
         recipient_filter: Option<String>,
