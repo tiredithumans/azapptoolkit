@@ -498,6 +498,17 @@ pub mod issue {
     /// no `ScopeMailboxAccess` remediation, since removing the grant is the only
     /// remedy. See `is_unscopable_legacy_exchange_permission`.
     pub const UNSCOPABLE_LEGACY_MAILBOX: &str = "Unscopable legacy Exchange mailbox access";
+    /// Org-wide mailbox reach that RBAC for Applications cannot confine for a
+    /// reason *other* than the legacy-resource one: the permission has no
+    /// supported Exchange application role (a `Mail.*` / `MailboxSettings.*`
+    /// name outside the mapped set), or its resource could not be resolved at
+    /// all. Distinct from [`ORG_WIDE_MAILBOX`] because it carries **no**
+    /// `ScopeMailboxAccess` remediation — offering one would hand the operator
+    /// a Fix that `is_scopable_exchange_resource_permission` guarantees the
+    /// handler can never apply — and distinct from
+    /// [`UNSCOPABLE_LEGACY_MAILBOX`] because "remove the legacy grant" is the
+    /// wrong advice for a permission that may be entirely legitimate.
+    pub const UNCONFINABLE_MAILBOX: &str = "Org-wide mailbox access that RBAC cannot confine";
     /// Substring shared by every "…scoped via RBAC for Applications…" advisory.
     pub const SCOPED_VIA_RBAC: &str = "scoped via RBAC for Applications";
     pub const ORG_WIDE_SHAREPOINT: &str = "Organization-wide SharePoint access";

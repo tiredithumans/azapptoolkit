@@ -16,6 +16,7 @@ pub mod client;
 pub mod error;
 pub mod models;
 pub mod roles;
+pub mod targets;
 
 pub use client::{EXCHANGE_BASE, ExchangeClient, member_of_group_filter};
 pub use error::{ExchangeError, Result};
@@ -23,4 +24,10 @@ pub use roles::{
     EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
     exchange_role_for_permission, exchange_role_for_resource_permission, is_blanket_mailbox_grant,
     is_scopable_exchange_permission,
+};
+pub use targets::{
+    ExchangeTarget, NoScopablePermission, ResourceRoles, count_member_of_group, exchange_target,
+    filter_targets_by_value, group_dns_in_filter, mailbox_resources_complete,
+    policies_safe_to_remove, require_scopable_targets, resolve_grant, resolve_value,
+    targets_from_declared, targets_from_grants, targets_safe_to_strip,
 };

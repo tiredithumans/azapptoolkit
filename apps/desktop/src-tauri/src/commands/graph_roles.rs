@@ -70,26 +70,11 @@ pub(crate) async fn graph_role_index(
     Ok((sp.id, map))
 }
 
-/// One resource's appRole index: its service-principal object id (what an
-/// `appRoleAssignment.resourceId` points at) and `appRoleId -> value`.
-pub(crate) struct ResourceRoles {
-    /// The resource's *application* id — the stable well-known GUID, which is
-    /// what `azapptoolkit_core::scoping` keys its role map on.
-    pub app_id: &'static str,
-    /// The resource service principal's object id in *this* tenant.
-    pub sp_object_id: String,
-    pub role_value_by_id: HashMap<String, String>,
-}
-
-impl ResourceRoles {
-    /// The appRole id for `value` on this resource, if it exposes one.
-    fn role_id_for(&self, value: &str) -> Option<&str> {
-        self.role_value_by_id
-            .iter()
-            .find(|(_, v)| v.as_str() == value)
-            .map(|(id, _)| id.as_str())
-    }
-}
+// `ResourceRoles` and the two resolvers now live in `azapptoolkit-exchange`
+// (crate `targets` module) — they are pure, State-free domain logic and had no
+// business only being reachable through a Tauri command. Re-exported here so
+// this module stays the one place the command layer asks about resource roles.
+pub(crate) use azapptoolkit_exchange::targets::{ResourceRoles, resolve_grant, resolve_value};
 
 /// The appRole indexes for **every resource that carries mailbox permissions**:
 /// Microsoft Graph (mail/calendar/contacts) and the legacy Office 365 Exchange
@@ -130,39 +115,6 @@ pub(crate) async fn mailbox_resource_roles(
         });
     }
     Ok(out)
-}
-
-/// Looks up which mailbox resource an `appRoleAssignment` was granted on, and
-/// the permission value it names: `(resource_app_id, resource_sp_object_id, value)`.
-/// `None` when the grant is on some other resource, or names a role this tenant's
-/// resource SP doesn't expose.
-pub(crate) fn resolve_grant<'a>(
-    resources: &'a [ResourceRoles],
-    resource_sp_id: &str,
-    app_role_id: &str,
-) -> Option<(&'a str, &'a str, &'a str)> {
-    let r = resources
-        .iter()
-        .find(|r| r.sp_object_id == resource_sp_id)?;
-    let value = r.role_value_by_id.get(app_role_id)?;
-    Some((r.app_id, r.sp_object_id.as_str(), value.as_str()))
-}
-
-/// Resolves a bare permission `value` to the mailbox resource that exposes it:
-/// `(resource_app_id, resource_sp_object_id, app_role_id)`. For callers handed a
-/// permission list with no resource context (a managed-identity grant form, a
-/// caller-supplied value set). Resources are searched in order, so Microsoft
-/// Graph wins a name it shares with Office 365 Exchange Online — which is the
-/// right precedence: the Graph permission is the one RBAC for Applications can
-/// scope.
-pub(crate) fn resolve_value<'a>(
-    resources: &'a [ResourceRoles],
-    value: &str,
-) -> Option<(&'a str, &'a str, &'a str)> {
-    resources.iter().find_map(|r| {
-        let role_id = r.role_id_for(value)?;
-        Some((r.app_id, r.sp_object_id.as_str(), role_id))
-    })
 }
 
 /// Resolves a service principal's **held** app-role assignments

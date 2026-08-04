@@ -78,6 +78,47 @@ web-build-pages BASE="/azapptoolkit/":
 web-itest *ARGS:
     wasm-pack test --headless --chrome {{ARGS}} -- --features test-support
 
+# `web-itest` when this box can actually run it; a LOUD skip when it cannot.
+#
+# The gap this closes: `verify` compiled the frontend but executed no frontend
+# behavioural test, so the largest tier in the repo (web-rs/src, ~41k lines) had
+# its ONLY behavioural gate living in CI. Renaming a CSS class, aria-label, or
+# on-screen text a GUI test references passed `verify` and failed CI a full round
+# trip later.
+#
+# Auto-detecting rather than mandatory, because the reason `web-itest` was kept
+# out of `verify` still holds — that gate must run on a box with no browser. The
+# skip is deliberately noisy so it can never be mistaken for a pass.
+[unix]
+web-itest-auto:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    driver=""
+    if [ -n "${CHROMEWEBDRIVER:-}" ] && [ -x "${CHROMEWEBDRIVER}/chromedriver" ]; then
+      driver="--chromedriver ${CHROMEWEBDRIVER}/chromedriver"
+    elif command -v chromedriver >/dev/null 2>&1; then
+      driver="--chromedriver $(command -v chromedriver)"
+    fi
+    if ! command -v wasm-pack >/dev/null 2>&1 || [ -z "$driver" ]; then
+      echo ""
+      echo "  !! SKIPPED: web-itest — no wasm-pack and/or chromedriver on this box."
+      echo "  !! The frontend's only behavioural gate did NOT run. A renamed CSS class,"
+      echo "  !! aria-label, or on-screen text a GUI test references will fail in CI."
+      echo "  !! Install chromedriver (matching your Chrome) to close this locally."
+      echo ""
+      exit 0
+    fi
+    just web-itest $driver
+
+# On Windows the GUI tests stay a CI/Unix gate (matching web-itest-size), so
+# `verify` still completes — loudly, never silently.
+[windows]
+web-itest-auto:
+    @echo ""
+    @echo "  !! SKIPPED: web-itest — Windows runs this gate in CI only."
+    @echo "  !! Frontend behaviour is unproven locally until CI runs."
+    @echo ""
+
 # Enforce the per-shard wasm size ceiling the whole GUI-test strategy rests on.
 #
 # A single merged test binary (~78 MB) exceeds what headless Chrome will
@@ -205,32 +246,36 @@ web-clippy:
 web-test:
     cargo test --locked
 
+# The machine-independent gates, shared by `verify` / `verify-ui` /
+# `verify-full` so the browser suite is named exactly once per entry point and
+# can never run twice in one invocation. Frontend tests run before the (slower)
+# web build, matching the CI web job and failing fast on a logic regression.
+_verify-core: fmt-check clippy test web-fmt-check web-clippy web-test web-build
+
 # Run the core CI gates locally, in order. Run this before declaring a change
-# done. Frontend tests run before the (slower) web build, matching the CI web
-# job and failing fast on a logic regression. NOT the whole of CI: the
-# dependency audit/deny gates and the browser GUI tests are covered by
-# `verify-full` below; actionlint stays CI-side unless installed locally.
-verify: fmt-check clippy test web-fmt-check web-clippy web-test web-build
+# done. The browser GUI tests run too WHEN this box can (see `web-itest-auto`)
+# and announce loudly when they cannot. Still not the whole of CI: the
+# dependency audit/deny gates are covered by `verify-full`; actionlint stays
+# CI-side unless installed locally.
+verify: _verify-core web-itest-auto
     @echo ""
-    @echo "verify OK — NOT run (needs a browser / network): web-itest, audit, web-audit, deny, web-deny."
-    @echo "  just verify-ui    = verify + the browser GUI tests (real Leptos views)"
+    @echo "verify OK — NOT run (needs network): audit, web-audit, deny, web-deny."
+    @echo "  just verify-ui    = verify with the GUI tests REQUIRED (fails without a browser)"
     @echo "  just verify-full  = full CI parity (adds the dependency audit/deny gates)"
-    @echo "Frontend behavior is unproven until one of those runs: renaming a CSS class,"
-    @echo "aria-label, or on-screen text a GUI test references passes verify and fails CI."
+    @echo "If web-itest reported SKIPPED above, frontend behavior is still unproven:"
+    @echo "renaming a CSS class, aria-label, or on-screen text a GUI test references"
+    @echo "passes verify and fails CI."
 
-# verify + the browser GUI tests, for a box that HAS a browser. The gap this
-# closes: `verify` compiles the frontend but executes no frontend behavioral
-# test, so the only coverage of a real mounted Leptos view lived in CI. That is
-# a full CI round trip to learn a renamed CSS class broke a test. Kept separate
-# from `verify` (rather than folded into it) because `verify` must run on any
-# dev box, and this needs Chrome + a matching chromedriver.
-verify-ui: verify web-itest
+# verify with the browser GUI tests MANDATORY rather than best-effort — use it
+# when you have Chrome + a matching chromedriver and want the frontend actually
+# proven, not skipped.
+verify-ui: _verify-core web-itest
 
-# Full CI parity: verify + both RustSec scans + both deny policies + the
+# Full CI parity: the core gates + both RustSec scans + both deny policies + the
 # browser GUI tests. web-itest runs LAST because it needs a local browser +
 # matching WebDriver (see its recipe) — the machine-independent gates fail
 # first on a box without one.
-verify-full: verify audit web-audit deny web-deny web-itest
+verify-full: _verify-core audit web-audit deny web-deny web-itest
 
 # --- Dependency policy (CI audit/deny jobs) ---------------------------------
 

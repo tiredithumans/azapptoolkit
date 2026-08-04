@@ -44,6 +44,32 @@ use crate::dto::UiError;
 use crate::dto::audit::{AuditProgress, AuditRunResult};
 use crate::state::AppState;
 
+/// What the audit's per-app collector should do with one failed scoring task.
+///
+/// Extracted from the `dispatch_capped` collector so the rule "a dead session
+/// stops the run" is unit-testable — the collector itself closes over `State`,
+/// a Graph client and a tenant, and so is only reachable from a live session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditFailure {
+    /// The user cancelled; the run already accounts for this separately.
+    Cancelled,
+    /// The session is dead — every remaining app would fail identically, so the
+    /// run must stop and must not cache what it managed to score.
+    SessionDead,
+    /// This one app failed. Warn, keep the rest of the run.
+    Transient,
+}
+
+fn classify_audit_failure(err: &UiError) -> AuditFailure {
+    if err.code == "cancelled" {
+        AuditFailure::Cancelled
+    } else if err.is_reauth_fatal() {
+        AuditFailure::SessionDead
+    } else {
+        AuditFailure::Transient
+    }
+}
+
 /// Upper bound on in-flight per-app lookups when the tenant is healthy.
 const INITIAL_CONCURRENCY: usize = 8;
 /// Page size — the shared `/applications` maximum.
@@ -209,12 +235,19 @@ pub async fn run_audit(
     let cancel = state.audit_cancel.clone();
 
     let mut items: Vec<AuditItem> = Vec::with_capacity(total);
+    // A dead session makes every remaining app fail identically, so the run must
+    // stop rather than warn its way to a truncated report. Two halves because
+    // `dispatch_capped` holds both closures at once: the flag is what the spawn
+    // side can read, the error itself is only ever touched by the collect side.
+    let reauth_fatal = Arc::new(AtomicBool::new(false));
+    let reauth_fatal_spawn = reauth_fatal.clone();
+    let mut fatal_err: Option<UiError> = None;
     // Dynamic in-flight cap: the tracker shrinks it on 429s mid-run.
     let cancelled_before_all_dispatched = dispatch_capped(
         apps,
         || tracker.current_limit(),
         |app| {
-            if cancel.is_cancelled() {
+            if cancel.is_cancelled() || reauth_fatal_spawn.load(Ordering::Relaxed) {
                 return None;
             }
             let ctx = ctx.clone();
@@ -244,12 +277,32 @@ pub async fn run_audit(
         },
         |joined| match joined {
             Ok(Ok(item)) => items.push(item),
-            Ok(Err(err)) if err.code == "cancelled" => {}
-            Ok(Err(err)) => tracing::warn!(?err, "audit scoring failed for one app"),
+            Ok(Err(err)) => match classify_audit_failure(&err) {
+                AuditFailure::Cancelled => {}
+                // Latch the first one, stop dispatching, and let the caller
+                // surface the code so the shell can re-auth in place.
+                AuditFailure::SessionDead => {
+                    reauth_fatal.store(true, Ordering::Relaxed);
+                    if fatal_err.is_none() {
+                        tracing::warn!(?err, "audit stopped: session is dead");
+                        fatal_err = Some(err);
+                    }
+                }
+                AuditFailure::Transient => {
+                    tracing::warn!(?err, "audit scoring failed for one app")
+                }
+            },
             Err(err) => tracing::warn!(?err, "audit join error"),
         },
     )
     .await;
+
+    // Before phase 2 and before any cache write: a partial audit served as
+    // authoritative is worse than a failed one, because a risk report silently
+    // missing apps reads as clean.
+    if let Some(err) = fatal_err {
+        return Err(err);
+    }
 
     // Phase 2: score the SP-only candidates (foreign enterprise apps, managed
     // identities, orphaned SPs) sequentially. Every input is already resolved
@@ -1070,6 +1123,42 @@ async fn score_one(
 mod tests {
     use super::*;
     use azapptoolkit_core::audit::{AuditPrincipalKind, CredentialStatus, RiskLevel};
+
+    #[test]
+    fn a_dead_session_stops_the_audit_but_one_bad_app_does_not() {
+        // Regression: every non-cancelled failure used to collapse to a warning,
+        // so a session that died mid-run produced a report silently missing apps
+        // — and then cached it under CacheKind::Audit as authoritative.
+        let cases = [
+            ("cancelled", AuditFailure::Cancelled),
+            ("refresh_missing", AuditFailure::SessionDead),
+            ("not_signed_in", AuditFailure::SessionDead),
+            ("forbidden", AuditFailure::Transient),
+            ("throttled", AuditFailure::Transient),
+            ("graph", AuditFailure::Transient),
+        ];
+        for (code, expected) in cases {
+            let err = UiError::new(code, "boom", false);
+            assert_eq!(
+                classify_audit_failure(&err),
+                expected,
+                "{code} should classify as {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_dead_classification_tracks_the_shared_definition() {
+        // `UiError::is_reauth_fatal` is the single definition (azapptoolkit-dto,
+        // shared by both tiers). Adding a code there must extend the audit's stop
+        // condition automatically — this asserts the coupling rather than a list.
+        for code in ["refresh_missing", "not_signed_in", "forbidden", "cancelled"] {
+            let err = UiError::new(code, "boom", false);
+            let expected_stop = err.is_reauth_fatal();
+            let stops = classify_audit_failure(&err) == AuditFailure::SessionDead;
+            assert_eq!(stops, expected_stop, "{code} diverged from is_reauth_fatal");
+        }
+    }
 
     fn sample(name: &str) -> AuditItem {
         AuditItem {

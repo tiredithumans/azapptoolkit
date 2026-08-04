@@ -95,6 +95,49 @@ fn resolve(
         .unwrap_or_else(|| default.to_string())
 }
 
+/// Lock → check → build → insert: the shape every per-tenant client cache here
+/// repeats. Factored so the memoization contract lives in one place and each
+/// getter is left holding only the thing that actually differs — its token
+/// scopes and constructor.
+///
+/// `build` deliberately runs while the map lock is held, exactly as the
+/// hand-rolled versions did: every builder is pure construction (a token
+/// adapter plus a client struct), with no I/O and no second lock, so the hold is
+/// short and cannot deadlock. Two concurrent first-callers therefore get the
+/// same client rather than one of them being discarded.
+fn try_get_or_build<K, V, E>(
+    map: &Mutex<HashMap<K, Arc<V>>>,
+    key: K,
+    build: impl FnOnce() -> Result<Arc<V>, E>,
+) -> Result<Arc<V>, E>
+where
+    K: Eq + std::hash::Hash,
+{
+    let mut clients = map.lock();
+    if let Some(existing) = clients.get(&key) {
+        return Ok(Arc::clone(existing));
+    }
+    let built = build()?;
+    clients.insert(key, Arc::clone(&built));
+    Ok(built)
+}
+
+/// [`try_get_or_build`] for the builders that cannot fail.
+fn get_or_build<K, V>(
+    map: &Mutex<HashMap<K, Arc<V>>>,
+    key: K,
+    build: impl FnOnce() -> Arc<V>,
+) -> Arc<V>
+where
+    K: Eq + std::hash::Hash,
+{
+    match try_get_or_build::<K, V, std::convert::Infallible>(map, key, || Ok(build())) {
+        Ok(client) => client,
+        // `Infallible` has no values, so this arm is unreachable by construction.
+        Err(never) => match never {},
+    }
+}
+
 pub struct AppState {
     pub auth: Arc<EntraAuthService>,
     /// The resolved client/tenant IDs the auth service signs in with, kept so
@@ -227,80 +270,76 @@ impl AppState {
     }
 
     pub fn graph_for(&self, tenant_id: &str) -> Arc<GraphClient> {
-        let mut clients = self.graph_clients.lock();
-        if let Some(existing) = clients.get(tenant_id) {
-            return existing.clone();
-        }
-        let read_token = ScopedTokenAdapter::new_cae(
-            self.auth.clone(),
-            tenant_id.to_string(),
-            self.auth.default_graph_read_scopes(),
-        );
-        let write_token = ScopedTokenAdapter::new_cae(
-            self.auth.clone(),
-            tenant_id.to_string(),
-            self.auth.default_graph_write_scopes(),
-        );
-        let sync_token = ScopedTokenAdapter::new_cae(
-            self.auth.clone(),
-            tenant_id.to_string(),
-            self.auth.default_graph_sync_scopes(),
-        );
-        // AuditLog.Read.All for the directory activity / change log — on demand
-        // (incremental consent), graceful degradation when un-consented/unlicensed.
-        let audit_log_token = ScopedTokenAdapter::new_cae(
-            self.auth.clone(),
-            tenant_id.to_string(),
-            self.auth.default_graph_audit_log_scopes(),
-        );
-        // Policy.Read.All for Conditional Access visibility — same on-demand,
-        // gracefully-degrading contract.
-        let policy_token = ScopedTokenAdapter::new_cae(
-            self.auth.clone(),
-            tenant_id.to_string(),
-            self.auth.default_graph_policy_scopes(),
-        );
-        // Policy.ReadWrite.ApplicationConfiguration for claims-mapping policies
-        // (SAML claim customization). Same on-demand, incremental-consent
-        // contract — never part of the sign-in bundle.
-        let policy_write_token = ScopedTokenAdapter::new_cae(
-            self.auth.clone(),
-            tenant_id.to_string(),
-            self.auth.default_graph_policy_write_scopes(),
-        );
-        // Sites.FullControl.All for the SharePoint Sites.Selected tab — on demand
-        // (incremental consent), never at sign-in; the site-permission reads as
-        // well as writes require it, so the SharePoint calls ride this token.
-        let sharepoint_token = ScopedTokenAdapter::new_cae(
-            self.auth.clone(),
-            tenant_id.to_string(),
-            self.auth.default_graph_sharepoint_scopes(),
-        );
-        // GroupMember.ReadWrite.All for adding/removing a service principal as
-        // a security-group member (group-gated APIs like Power BI / Fabric).
-        // Same on-demand, incremental-consent contract — never at sign-in.
-        let group_member_token = ScopedTokenAdapter::new_cae(
-            self.auth.clone(),
-            tenant_id.to_string(),
-            self.auth.default_graph_group_member_scopes(),
-        );
-        let client = Arc::new(
-            GraphClient::with_base_url(
+        get_or_build(&self.graph_clients, tenant_id.to_string(), || {
+            let read_token = ScopedTokenAdapter::new_cae(
+                self.auth.clone(),
                 tenant_id.to_string(),
-                read_token,
-                write_token,
-                self.cache.clone(),
-                self.auth.cloud().graph_base(),
+                self.auth.default_graph_read_scopes(),
+            );
+            let write_token = ScopedTokenAdapter::new_cae(
+                self.auth.clone(),
+                tenant_id.to_string(),
+                self.auth.default_graph_write_scopes(),
+            );
+            let sync_token = ScopedTokenAdapter::new_cae(
+                self.auth.clone(),
+                tenant_id.to_string(),
+                self.auth.default_graph_sync_scopes(),
+            );
+            // AuditLog.Read.All for the directory activity / change log — on demand
+            // (incremental consent), graceful degradation when un-consented/unlicensed.
+            let audit_log_token = ScopedTokenAdapter::new_cae(
+                self.auth.clone(),
+                tenant_id.to_string(),
+                self.auth.default_graph_audit_log_scopes(),
+            );
+            // Policy.Read.All for Conditional Access visibility — same on-demand,
+            // gracefully-degrading contract.
+            let policy_token = ScopedTokenAdapter::new_cae(
+                self.auth.clone(),
+                tenant_id.to_string(),
+                self.auth.default_graph_policy_scopes(),
+            );
+            // Policy.ReadWrite.ApplicationConfiguration for claims-mapping policies
+            // (SAML claim customization). Same on-demand, incremental-consent
+            // contract — never part of the sign-in bundle.
+            let policy_write_token = ScopedTokenAdapter::new_cae(
+                self.auth.clone(),
+                tenant_id.to_string(),
+                self.auth.default_graph_policy_write_scopes(),
+            );
+            // Sites.FullControl.All for the SharePoint Sites.Selected tab — on demand
+            // (incremental consent), never at sign-in; the site-permission reads as
+            // well as writes require it, so the SharePoint calls ride this token.
+            let sharepoint_token = ScopedTokenAdapter::new_cae(
+                self.auth.clone(),
+                tenant_id.to_string(),
+                self.auth.default_graph_sharepoint_scopes(),
+            );
+            // GroupMember.ReadWrite.All for adding/removing a service principal as
+            // a security-group member (group-gated APIs like Power BI / Fabric).
+            // Same on-demand, incremental-consent contract — never at sign-in.
+            let group_member_token = ScopedTokenAdapter::new_cae(
+                self.auth.clone(),
+                tenant_id.to_string(),
+                self.auth.default_graph_group_member_scopes(),
+            );
+            Arc::new(
+                GraphClient::with_base_url(
+                    tenant_id.to_string(),
+                    read_token,
+                    write_token,
+                    self.cache.clone(),
+                    self.auth.cloud().graph_base(),
+                )
+                .with_sync_token(sync_token)
+                .with_audit_log_token(audit_log_token)
+                .with_policy_token(policy_token)
+                .with_policy_write_token(policy_write_token)
+                .with_sharepoint_token(sharepoint_token)
+                .with_group_member_token(group_member_token),
             )
-            .with_sync_token(sync_token)
-            .with_audit_log_token(audit_log_token)
-            .with_policy_token(policy_token)
-            .with_policy_write_token(policy_write_token)
-            .with_sharepoint_token(sharepoint_token)
-            .with_group_member_token(group_member_token),
-        );
-        clients.insert(tenant_id.to_string(), client.clone());
-        client
+        })
     }
 
     /// Returns a cached Exchange Online Admin API client for `tenant_id`,
@@ -308,23 +347,19 @@ impl AppState {
     /// UPN, used as the mandatory `X-AnchorMailbox` routing hint; it is stable
     /// for the tenant session, so the cached client reuses it.
     pub fn exchange_for(&self, tenant_id: &str, admin_upn: &str) -> Arc<ExchangeClient> {
-        let mut clients = self.exchange_clients.lock();
-        if let Some(existing) = clients.get(tenant_id) {
-            return existing.clone();
-        }
-        let token = ScopedTokenAdapter::new(
-            self.auth.clone(),
-            tenant_id.to_string(),
-            self.auth.default_exchange_scopes(),
-        );
-        let client = Arc::new(ExchangeClient::with_base_url(
-            token,
-            tenant_id.to_string(),
-            admin_upn,
-            self.auth.cloud().exchange_resource(),
-        ));
-        clients.insert(tenant_id.to_string(), client.clone());
-        client
+        get_or_build(&self.exchange_clients, tenant_id.to_string(), || {
+            let token = ScopedTokenAdapter::new(
+                self.auth.clone(),
+                tenant_id.to_string(),
+                self.auth.default_exchange_scopes(),
+            );
+            Arc::new(ExchangeClient::with_base_url(
+                token,
+                tenant_id.to_string(),
+                admin_upn,
+                self.auth.cloud().exchange_resource(),
+            ))
+        })
     }
 
     /// Returns a cached Key Vault client for `(tenant_id, vault_name)`, building
@@ -336,20 +371,16 @@ impl AppState {
         vault_name: &str,
     ) -> azapptoolkit_keyvault::Result<Arc<KeyVaultClient>> {
         let key = (tenant_id.to_string(), vault_name.to_string());
-        let mut clients = self.kv_clients.lock();
-        if let Some(existing) = clients.get(&key) {
-            return Ok(existing.clone());
-        }
-        let scopes =
-            EntraAuthService::resource_default_scopes(&self.auth.cloud().keyvault_resource());
-        let token = ScopedTokenAdapter::new(self.auth.clone(), tenant_id.to_string(), scopes);
-        let client = Arc::new(KeyVaultClient::new_with_dns_suffix(
-            token,
-            vault_name,
-            self.auth.cloud().keyvault_dns_suffix(),
-        )?);
-        clients.insert(key, client.clone());
-        Ok(client)
+        try_get_or_build(&self.kv_clients, key, || {
+            let scopes =
+                EntraAuthService::resource_default_scopes(&self.auth.cloud().keyvault_resource());
+            let token = ScopedTokenAdapter::new(self.auth.clone(), tenant_id.to_string(), scopes);
+            Ok(Arc::new(KeyVaultClient::new_with_dns_suffix(
+                token,
+                vault_name,
+                self.auth.cloud().keyvault_dns_suffix(),
+            )?))
+        })
     }
 
     /// Scopes requested for interactive incremental consent for `feature`, or
@@ -507,16 +538,12 @@ impl AppState {
     /// building one on first use (mirrors [`Self::arm_for`] — same lazy
     /// incremental-consent model, different host + token audience).
     pub fn log_analytics_for(&self, tenant_id: &str) -> Arc<LogAnalyticsClient> {
-        let mut clients = self.la_clients.lock();
-        if let Some(existing) = clients.get(tenant_id) {
-            return existing.clone();
-        }
-        let resource = self.auth.cloud().log_analytics_resource();
-        let scopes = EntraAuthService::resource_default_scopes(resource);
-        let token = ScopedTokenAdapter::new(self.auth.clone(), tenant_id.to_string(), scopes);
-        let client = Arc::new(LogAnalyticsClient::new(token, resource));
-        clients.insert(tenant_id.to_string(), client.clone());
-        client
+        get_or_build(&self.la_clients, tenant_id.to_string(), || {
+            let resource = self.auth.cloud().log_analytics_resource();
+            let scopes = EntraAuthService::resource_default_scopes(resource);
+            let token = ScopedTokenAdapter::new(self.auth.clone(), tenant_id.to_string(), scopes);
+            Arc::new(LogAnalyticsClient::new(token, resource))
+        })
     }
 
     /// Returns a cached ARM client for `tenant_id`, building one on first use.
@@ -524,18 +551,15 @@ impl AppState {
     /// (incremental consent); a tenant without ARM consent simply fails the call
     /// and the managed-identity Azure-RBAC view degrades gracefully.
     pub fn arm_for(&self, tenant_id: &str) -> Arc<ArmClient> {
-        let mut clients = self.arm_clients.lock();
-        if let Some(existing) = clients.get(tenant_id) {
-            return existing.clone();
-        }
-        let scopes = EntraAuthService::resource_default_scopes(self.auth.cloud().arm_resource());
-        let token = ScopedTokenAdapter::new(self.auth.clone(), tenant_id.to_string(), scopes);
-        let client = Arc::new(ArmClient::with_base_url(
-            token,
-            self.auth.cloud().arm_resource(),
-        ));
-        clients.insert(tenant_id.to_string(), client.clone());
-        client
+        get_or_build(&self.arm_clients, tenant_id.to_string(), || {
+            let scopes =
+                EntraAuthService::resource_default_scopes(self.auth.cloud().arm_resource());
+            let token = ScopedTokenAdapter::new(self.auth.clone(), tenant_id.to_string(), scopes);
+            Arc::new(ArmClient::with_base_url(
+                token,
+                self.auth.cloud().arm_resource(),
+            ))
+        })
     }
 }
 

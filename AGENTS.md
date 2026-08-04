@@ -14,7 +14,7 @@ warns past 28 000 bytes. **Read the linked doc before editing that subsystem.**
 |---|---|
 | **Task runner** | `just` — recipes in `/justfile`; Tauri hooks call them too, so flags never drift. |
 | **Setup / Dev** | `just setup` (OS-aware bootstrap) · `just dev` (`cargo tauri dev`) |
-| **Verify** | `just verify` (fmt → clippy → test → web-fmt-check → web-clippy → web-test → web-build). `just verify-full` adds the CI-only gates (audit/deny both trees + web-itest). |
+| **Verify** | `just verify` (fmt → clippy → test → web-fmt-check → web-clippy → web-test → web-build → web-itest *if a browser*). `just verify-full` adds the CI-only gates (audit/deny both trees). |
 | **Workspace** | 9 crates (8 in `crates/` + `src-tauri`); frontend (`web-rs`) excluded, builds via Trunk. |
 
 ## Skills
@@ -101,12 +101,13 @@ just setup          # one-time (idempotent OS-aware bootstrap)
 just dev            # daily loop (= cargo tauri dev)
 
 # CI gates:
-just verify          # fmt-check → clippy → test → web-fmt-check → web-clippy → web-test → web-build
-just verify-ui       # verify + web-itest (needs a browser) — the frontend's only behavioral gate
-just verify-full     # verify + audit + web-audit + deny + web-deny + web-itest (full CI parity; web-itest needs a browser)
+just verify          # core gates, then web-itest via `web-itest-auto`: runs it given Chrome +
+                     # chromedriver, LOUD skip when absent (never a silent pass)
+just verify-ui       # same gates, web-itest MANDATORY (fails without a browser)
+just verify-full     # core gates + audit + web-audit + deny + web-deny + web-itest (CI parity)
 just fmt-check | clippy | test | web-fmt-check | web-clippy | web-test | web-build  # individual gates
 
-# Browser-gated (NOT in `verify`; CI uses Chrome):
+# Browser-gated (best-effort in `verify`, mandatory in verify-ui/-full):
 just web-itest       # real Leptos views in a headless browser, Tauri IPC mocked
 just web-itest-size  # per-shard wasm ceiling the sharding strategy depends on
 
@@ -149,7 +150,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Re-auth-fatal codes have ONE definition: `UiError::is_reauth_fatal()`** (`azapptoolkit-dto`, shared by both tiers). Adding a code = editing that fn. Long-running loops must stop on it (`run_bulk_seq` does) — a dead session makes every remaining item fail identically.
 
-- **Force re-auth in place when the session is dead — don't sign the user out.** A dead refresh token (`InvalidGrant`/`RefreshTokenMissing` → **`refresh_missing`**; `NotSignedIn` → **`not_signed_in`**) can't be re-minted silently; `reauthenticate` runs ONE interactive round trip and restores the session **without** dropping data caches. A new re-auth-fatal code must extend BOTH `matches!` sets (`state.rs` + `shell.rs`). Details: [auth-and-consent.md](docs/architecture/auth-and-consent.md).
+- **Force re-auth in place when the session is dead — don't sign the user out.** A dead refresh token (`InvalidGrant`/`RefreshTokenMissing` → **`refresh_missing`**; `NotSignedIn` → **`not_signed_in`**) can't be re-minted silently; `reauthenticate` runs ONE interactive round trip and restores the session **without** dropping data caches. A new re-auth-fatal code must extend BOTH `matches!` sets (`state.rs` + `shell.rs`). Every long-running fan-out must stop on it — pinned by `src-tauri/tests/repo_invariants.rs`, which also diffs web-rs's `[lints.rust]` against the workspace one. Details: [auth-and-consent.md](docs/architecture/auth-and-consent.md).
 
 - **Role/scope catalog.** Three auth planes (Entra, Azure RBAC, Exchange) share one capabilities catalog. Adding a privileged feature → add a catalog entry instead of hardcoding role strings. Access Readiness enumerates the user's **direct** Azure role assignments for the Azure-RBAC plane (`core::azure_roles`, conservative supersets — control-plane roles don't grant KV data-plane — and never a false "Missing" since group-inherited roles aren't visible). Details: [auth-and-consent.md](docs/architecture/auth-and-consent.md).
 
@@ -163,7 +164,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Scope-aware audit risk.** `score_application` reads `AppPermissions.mail_scopes` (empty map = org-wide, so an unresolved probe never under-reports). SharePoint scoping is name-based, no live call. Badges: `web-rs/components/scope_badge.rs`.
 
-- **Mailbox permissions live on TWO resources — carry the resource, never the bare value.** Graph and legacy **Office 365 Exchange Online** both expose `Mail.Read`/`Mail.Send`/`Contacts.*`; only Graph's are RBAC-confinable, and EWS `full_access_as_app` (all mailboxes) is legacy-only. Permissions travel as `audit::ResourcePermission { resource_app_id, value }`; `AppPermissions::is_scoped` gates on the row's **own** resource; mailbox membership comes from `scoping::is_mailbox_reaching_permission` (a `Mail.*` name test cannot see `full_access_as_app`); targets resolve via `graph_roles::mailbox_resource_roles`, never `graph_role_index`. Unscopable legacy grants get their own finding and **no** scope fix. Value-keyed shortcuts here have silently widened access. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
+- **Mailbox permissions live on TWO resources — carry the resource, never the bare value.** Graph and legacy **Office 365 Exchange Online** both expose `Mail.Read`/`Mail.Send`/`Contacts.*`; only Graph's are RBAC-confinable, and EWS `full_access_as_app` (all mailboxes) is legacy-only. Permissions travel as `audit::ResourcePermission { resource_app_id, value }`; `AppPermissions::is_scoped` gates on the row's **own** resource; mailbox membership comes from `scoping::is_mailbox_reaching_permission` (a `Mail.*` name test cannot see `full_access_as_app`); targets resolve via `graph_roles::mailbox_resource_roles`, never `graph_role_index`. Unscopable legacy grants get their own finding and **no** scope fix; a `ScopeMailboxAccess` fix is gated on the POSITIVE `is_scopable_exchange_resource_permission`, never the legacy test's negation. Target derivation is pure, in `azapptoolkit-exchange::targets`, incl. the shared fail-closed `require_scopable_targets`. Value-keyed shortcuts here have silently widened access. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
 - **AAP migration is guarded, not mechanical.** `RestrictAccess` only (a `DenyAccess` blocklist inverts), one batch per **app**, and policies are deleted only once every grant they confined is re-scoped **and** both mailbox resources actually resolved — `mailbox_resource_roles` resolves Exchange Online best-effort, so an unverifiable empty target set must fail closed rather than read as "governs nothing". Roles assigned inside `assign_scoped_roles`' loop count as in place (several values map to one Exchange role). Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
@@ -220,9 +221,9 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 Run the same gates CI runs before declaring a change done. `just verify` is the machine-independent core; `just verify-full` adds full CI parity. Use recipe flags from `/justfile`, don't hand-type raw `cargo` invocations.
 
-Steps 1–4 are `just verify` (fmt-check → clippy → test → web-fmt-check → web-clippy → web-test → web-build; see **Canonical commands**). The CI-only additions below carry the non-obvious detail:
+Steps 1–4 are `just verify` (see **Canonical commands**); it also attempts web-itest. The CI-only additions below:
 
-5. **Frontend GUI tests** *(browser-gated)* — `just web-itest`: real Leptos views in a headless browser, Tauri IPC mocked. Tests are `tests/gui/<view>.rs` **modules** grouped into shard binaries (`tests/gui_N.rs`) via `#[path] mod`; harness in `web-rs/src/test_support/`. Shards exist because one merged binary exceeds what headless Chrome will instantiate; `just web-itest-size` enforces the per-shard ceiling (CI runs it) and says how to split. Group modules by the **view subtree they mount**, not by count — the linker keeps only referenced views. `[profile.test] strip = "debuginfo"` + `opt-level = 1` are what make that ceiling reachable; never `strip = true` (kills the `name` section → anonymous panic traces). **Do NOT make `test_support::reset()` clear `document.body`** — the runner scrapes results from the page DOM, so wiping it makes the shard report nothing. Renaming a CSS class / aria-label / on-screen text a test references passes local `verify` but fails CI — `web-test-strings-check.sh` warns at edit time, and `just verify-ui` catches it locally.
+5. **Frontend GUI tests** *(browser-gated)* — `just web-itest`: real Leptos views in a headless browser, Tauri IPC mocked. Tests are `tests/gui/<view>.rs` **modules** grouped into shard binaries (`tests/gui_N.rs`) via `#[path] mod`; harness in `web-rs/src/test_support/`. Shards exist because one merged binary exceeds what headless Chrome will instantiate; `just web-itest-size` enforces the per-shard ceiling (CI runs it) and says how to split. Group modules by the **view subtree they mount**, not by count — the linker keeps only referenced views. `[profile.test] strip = "debuginfo"` + `opt-level = 1` are what make that ceiling reachable; never `strip = true` (kills the `name` section → anonymous panic traces). **Do NOT make `test_support::reset()` clear `document.body`** — the runner scrapes results from the page DOM, so wiping it makes the shard report nothing. Renaming a CSS class / aria-label / on-screen text a test references fails CI — `web-test-strings-check.sh` warns at edit time; `verify` catches it locally given a browser, `verify-ui` always.
 6. **Dependency audit + deny** *(required CI checks)* — `audit`/`web-audit` (RustSec) + `deny`/`web-deny`; all four merge-blocking, all in `verify-full`.
 7. **actionlint** *(required CI check)* — lints the workflow YAML; runs CI-side (install locally to pre-check).
 8. **CodeQL** *(GitHub-side)* — security queries, build-mode `none`. Known limitation: CodeQL 2.25.6 doesn't expand macros here (~39% calls-with-call-target); expected, non-failing. Config: `.github/codeql/codeql-config.yml`.
