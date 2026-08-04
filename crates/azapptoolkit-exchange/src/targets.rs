@@ -311,6 +311,32 @@ pub fn count_member_of_group(filter: &str) -> usize {
     filter.to_ascii_lowercase().matches("memberofgroup").count()
 }
 
+/// Which group DNs a management scope's filter should reference after an
+/// attempted consolidation onto the toolkit-managed group.
+///
+/// **Fail closed.** The managed group only becomes the filter once its DN is
+/// resolved AND every member of the source groups is *verified present* in it.
+/// Otherwise the source groups are kept: repointing a scope at a
+/// partially-populated group silently drops the missing mailboxes out of the
+/// app's reach, and a mailbox an integration can no longer read fails as
+/// "not found" rather than "denied" — the hardest kind of outage to trace back
+/// to a permission change. Widening is not the risk here (the managed group is
+/// freshly built from the source membership); narrowing is.
+///
+/// `unverified` counts source members that are missing from the managed group
+/// after the copy — from an add that failed, or one that reported success but
+/// didn't land (EXO silently ignores some recipient types).
+pub fn scope_dns_after_consolidation(
+    source_dns: &[String],
+    managed_dn: Option<&str>,
+    unverified: usize,
+) -> Vec<String> {
+    match managed_dn {
+        Some(dn) if unverified == 0 => vec![dn.to_string()],
+        _ => source_dns.to_vec(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,5 +539,44 @@ mod tests {
         let got = group_dns_in_filter(f);
         assert!(got.contains("CN=a,DC=x") && got.contains("CN=b,DC=x"));
         assert_eq!(count_member_of_group(f), 1);
+    }
+
+    #[test]
+    fn consolidation_repoints_only_on_a_fully_verified_copy() {
+        let legacy = vec!["CN=Legacy,DC=x".to_string()];
+        assert_eq!(
+            scope_dns_after_consolidation(&legacy, Some("CN=Managed,DC=x"), 0),
+            vec!["CN=Managed,DC=x".to_string()],
+        );
+    }
+
+    #[test]
+    fn consolidation_keeps_the_source_groups_when_a_member_is_unverified() {
+        // Fail closed: one mailbox that didn't make it into the managed group
+        // means repointing would cut it out of the app's reach.
+        let legacy = vec!["CN=Legacy,DC=x".to_string()];
+        assert_eq!(
+            scope_dns_after_consolidation(&legacy, Some("CN=Managed,DC=x"), 1),
+            legacy,
+            "an unverified member must keep the scope on the source groups"
+        );
+        assert_eq!(
+            scope_dns_after_consolidation(&legacy, None, 0),
+            legacy,
+            "an unresolved managed-group DN must keep the scope on the source groups"
+        );
+    }
+
+    #[test]
+    fn consolidation_folds_several_source_groups_into_one() {
+        // Several RestrictAccess policies migrate as a union; consolidating that
+        // union onto the managed group collapses the filter to a single clause.
+        let legacy = vec!["CN=A,DC=x".to_string(), "CN=B,DC=x".to_string()];
+        let got = scope_dns_after_consolidation(&legacy, Some("CN=Managed,DC=x"), 0);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            count_member_of_group(&crate::client::member_of_group_filter(&got)),
+            1
+        );
     }
 }

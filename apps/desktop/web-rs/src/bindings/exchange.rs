@@ -113,8 +113,8 @@ struct MemberArgs<'a> {
     mailboxes: &'a [String],
 }
 
-/// State of the toolkit-managed scope group (`azapptoolkit_<appId>`): whether it
-/// exists, how to reference it, and its current members. Degrades to a
+/// State of the toolkit-managed scope group (default `app_scope_group_<appId>`):
+/// whether it exists, how to reference it, and its current members. Degrades to a
 /// `consent_required` / 403 error when the caller isn't an Exchange admin.
 pub async fn list_exchange_scope_group(
     tenant_id: &str,
@@ -215,6 +215,35 @@ struct MigrateArgs<'a> {
     app_id: Option<&'a str>,
     scope_name: Option<&'a str>,
     dry_run: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConsolidateArgs<'a> {
+    tenant_id: &'a str,
+    app_id: &'a str,
+    dry_run: bool,
+}
+
+/// Moves an already-scoped app onto the toolkit-managed group: copies the
+/// mailboxes its management scope covers today into `app_scope_group_<appId>`
+/// and repoints the scope at it. `dry_run = true` reports what it would copy
+/// and changes nothing. Fails closed — the scope keeps its current filter
+/// unless every mailbox is verified present in the managed group.
+pub async fn move_exchange_scope_to_managed_group(
+    tenant_id: &str,
+    app_id: &str,
+    dry_run: bool,
+) -> Result<ExchangeScopeConsolidationResult, UiError> {
+    invoke_result(
+        "move_exchange_scope_to_managed_group",
+        ConsolidateArgs {
+            tenant_id,
+            app_id,
+            dry_run,
+        },
+    )
+    .await
 }
 
 /// `scope_name` overrides the management-scope name (default `app_scope_<AppId>`);

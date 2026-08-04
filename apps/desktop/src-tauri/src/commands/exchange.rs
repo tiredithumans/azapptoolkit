@@ -23,14 +23,15 @@ use azapptoolkit_exchange::models::{
 use azapptoolkit_exchange::targets::{
     ExchangeTarget, count_member_of_group, exchange_target, filter_targets_by_value,
     group_dns_in_filter, mailbox_resources_complete, policies_safe_to_remove,
-    require_scopable_targets, targets_from_declared, targets_from_grants, targets_safe_to_strip,
+    require_scopable_targets, scope_dns_after_consolidation, targets_from_declared,
+    targets_from_grants, targets_safe_to_strip,
 };
 use azapptoolkit_exchange::{
     ExchangeClient, ExchangeError, exchange_role_for_permission, member_of_group_filter,
 };
 use azapptoolkit_graph::GraphClient;
 
-use crate::commands::applications::invalidate_app_lists;
+use crate::commands::applications::{invalidate_app_detail_state, invalidate_app_lists};
 use crate::commands::graph_roles::{
     ResourceRoles, mailbox_resource_roles, resolve_grant, resolve_value,
 };
@@ -38,7 +39,8 @@ use crate::dto::UiError;
 use crate::dto::exchange::{
     AapMigrationItem, AapMigrationReport, ExchangeAccessRemovalResult, ExchangeAccessResult,
     ExchangeGroupMemberDto, ExchangeGroupRef, ExchangeMemberFailure, ExchangeMemberMutationResult,
-    ExchangeRoleAssignmentDto, ExchangeScopeGroupDto, MailScopeEntry,
+    ExchangeRoleAssignmentDto, ExchangeScopeConsolidationResult, ExchangeScopeGroupDto,
+    MailScopeEntry,
 };
 use crate::state::AppState;
 use azapptoolkit_core::defaults::TenantDefaults;
@@ -310,7 +312,9 @@ async fn apply_exchange_mailbox_scope(
             warnings.push(format!(
                     "a management scope “{scope_name}” already exists for this app with a different group set — \
                      Exchange keeps the existing scope, so the groups requested here were NOT applied to it. \
-                     Edit or remove the scope in Exchange to change which mailboxes this app can reach."
+                     Repointing a scope changes what every role assignment using it reaches, so it is a \
+                     deliberate action, not a side effect of granting: use “Move to managed group” to \
+                     consolidate onto the toolkit-managed group, or edit the scope in Exchange."
                 ));
         }
     }
@@ -1066,8 +1070,10 @@ pub async fn remove_exchange_mailbox_access(
 
 // ---------------- Managed scope group (create + membership) ----------------
 //
-// The toolkit-managed mail-enabled security group `azapptoolkit_<app_id>` is
-// the recommended scope source: a scoped grant points its management scope at
+// The toolkit-managed mail-enabled security group (the tenant's
+// `group_name_pattern`, default `app_scope_group_<app_id>` — resolved via
+// `TenantDefaults::group_name_for`, never hardcoded) is the recommended scope
+// source: a scoped grant points its management scope at
 // this group's stable DN, so callers adjust *who* is in scope by editing the
 // group's membership here — never by rewriting the (immutable) management-scope
 // filter. These three commands create the group on first use, list its members,
@@ -1192,6 +1198,403 @@ pub async fn remove_exchange_scope_group_members(
         group_created: false,
         succeeded,
         failed,
+    })
+}
+
+// ---------------- Consolidate a scope source onto the managed group ---------
+//
+// One core, two callers: the legacy-AAP migration (source = the policies'
+// groups) and `move_exchange_scope_to_managed_group` (source = the groups the
+// app's existing management scope already references). Both end at the same
+// place — the scope's `MemberOfGroup` filter naming the toolkit-managed group
+// alone — so an operator adjusts reach by editing ONE group's membership.
+//
+// The whole design point is fail-closed. Everything here exists so a
+// consolidation that can't be *proved* complete leaves the scope on its
+// original groups instead of narrowing what the app can reach: an integration
+// that silently stops seeing a mailbox reports "not found", not "denied", which
+// is the hardest kind of outage to trace back to a permission change.
+
+/// A member of a source group, as identified for copy + verification.
+/// `identity` is what `Add-DistributionGroupMember` is given; `key` is the
+/// case-folded value the post-copy membership check compares on.
+struct SourceMember {
+    identity: String,
+    key: String,
+}
+
+fn source_member(m: &azapptoolkit_exchange::models::ExoGroupMember) -> Option<SourceMember> {
+    // Primary SMTP first (stable and what the members list shows), GUID as the
+    // fallback for a mail-less recipient. A member with neither can't be copied
+    // *or* verified, so it isn't one — the caller counts it as unverifiable.
+    let identity = m
+        .primary_smtp_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            m.guid
+                .as_deref()
+                .map(str::trim)
+                .filter(|s: &&str| !s.is_empty())
+        })?;
+    Some(SourceMember {
+        identity: identity.to_string(),
+        key: identity.to_ascii_lowercase(),
+    })
+}
+
+/// Outcome of consolidating `source_dns`' membership onto the managed group.
+struct ScopeGroupConsolidation {
+    group_name: String,
+    /// Mailboxes copied in (dry run: that *would* be copied).
+    copied: Vec<String>,
+    /// Source members that could not be verified present in the managed group.
+    /// Non-empty ⇒ the scope stays on its source groups.
+    unverified: Vec<String>,
+    /// The group DNs the scope filter should reference — the managed group's DN
+    /// alone on a fully-verified copy, else `source_dns` unchanged.
+    scope_dns: Vec<String>,
+    /// `true` when `scope_dns` is the managed group (i.e. the move is on).
+    consolidated: bool,
+}
+
+/// Copies every member of `source_dns`' groups into the toolkit-managed group
+/// and decides — fail-closed — which DNs the scope filter should name.
+/// `dry_run` reads only: it enumerates and reports, and creates/copies nothing.
+async fn consolidate_scope_group(
+    exo: &ExchangeClient,
+    app_id: &str,
+    source_dns: &[String],
+    tenant_defaults: &TenantDefaults,
+    dry_run: bool,
+    warnings: &mut Vec<String>,
+) -> ScopeGroupConsolidation {
+    let group_name = tenant_defaults.group_name_for(app_id);
+    let keep_source = |warnings: &mut Vec<String>, why: String| {
+        warnings.push(format!(
+            "{why} — the management scope was left pointing at its current group(s); \
+             nothing this app can reach has changed."
+        ));
+    };
+
+    // 1. Enumerate the source membership. An EMPTY source group is treated as
+    //    unreadable, not as "no mailboxes": `Get-DistributionGroupMember` also
+    //    returns nothing for a Microsoft 365 group (its members need
+    //    `Get-UnifiedGroupLinks`), and consolidating that onto an empty managed
+    //    group would cut the app off from every mailbox at once.
+    let mut members: Vec<SourceMember> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut unreadable = Vec::new();
+    for dn in source_dns {
+        match exo.list_group_members(dn).await {
+            Ok(list) if !list.is_empty() => {
+                let mut unidentifiable = 0_usize;
+                for m in &list {
+                    match source_member(m) {
+                        Some(sm) if seen.insert(sm.key.clone()) => members.push(sm),
+                        Some(_) => {}
+                        None => unidentifiable += 1,
+                    }
+                }
+                if unidentifiable > 0 {
+                    unreadable.push(format!(
+                        "{dn} ({unidentifiable} member(s) with no address or GUID to copy)"
+                    ));
+                }
+            }
+            Ok(_) => unreadable.push(format!("{dn} (no readable members)")),
+            Err(err) => unreadable.push(format!("{dn} ({err})")),
+        }
+    }
+    if !unreadable.is_empty() {
+        keep_source(
+            warnings,
+            format!(
+                "could not read the full membership of {}",
+                unreadable.join("; ")
+            ),
+        );
+        return ScopeGroupConsolidation {
+            group_name,
+            copied: Vec::new(),
+            unverified: Vec::new(),
+            scope_dns: source_dns.to_vec(),
+            consolidated: false,
+        };
+    }
+
+    let copied: Vec<String> = members.iter().map(|m| m.identity.clone()).collect();
+    if dry_run {
+        return ScopeGroupConsolidation {
+            group_name,
+            copied,
+            unverified: Vec::new(),
+            // A plan mutates nothing, so the live filter is still the source's.
+            scope_dns: source_dns.to_vec(),
+            consolidated: false,
+        };
+    }
+
+    // 2. Create the managed group if needed and copy the membership in.
+    //    Individual failures are collected, not fatal — step 3 is what decides.
+    let managed_dn = match exo
+        .ensure_security_group(&group_name, &sanitize_alias(&group_name))
+        .await
+    {
+        Ok(g) => g.distinguished_name,
+        Err(err) => {
+            keep_source(warnings, format!("could not create '{group_name}' ({err})"));
+            return ScopeGroupConsolidation {
+                group_name,
+                copied: Vec::new(),
+                unverified: copied,
+                scope_dns: source_dns.to_vec(),
+                consolidated: false,
+            };
+        }
+    };
+    for m in &members {
+        if let Err(err) = exo.add_group_member(&group_name, &m.identity).await {
+            warnings.push(format!(
+                "could not add {} to {group_name}: {err}",
+                m.identity
+            ));
+        }
+    }
+
+    // 3. Verify against the group's ACTUAL membership rather than trusting the
+    //    adds: EXO accepts some recipient types and then doesn't list them.
+    let present: HashSet<String> = match exo.list_group_members(&group_name).await {
+        Ok(list) => list
+            .iter()
+            .filter_map(source_member)
+            .map(|m| m.key)
+            .collect(),
+        Err(err) => {
+            keep_source(
+                warnings,
+                format!("could not re-read '{group_name}' to verify the copy ({err})"),
+            );
+            return ScopeGroupConsolidation {
+                group_name,
+                copied: Vec::new(),
+                unverified: copied,
+                scope_dns: source_dns.to_vec(),
+                consolidated: false,
+            };
+        }
+    };
+    let unverified: Vec<String> = members
+        .iter()
+        .filter(|m| !present.contains(&m.key))
+        .map(|m| m.identity.clone())
+        .collect();
+
+    let scope_dns =
+        scope_dns_after_consolidation(source_dns, managed_dn.as_deref(), unverified.len());
+    let consolidated = managed_dn.is_some_and(|dn| scope_dns == vec![dn]);
+    if !consolidated {
+        keep_source(
+            warnings,
+            if unverified.is_empty() {
+                format!("'{group_name}' has no distinguished name to build a filter from")
+            } else {
+                format!(
+                    "{} of {} mailbox(es) could not be verified in '{group_name}' ({})",
+                    unverified.len(),
+                    members.len(),
+                    unverified.join(", ")
+                )
+            },
+        );
+    }
+    ScopeGroupConsolidation {
+        group_name,
+        copied: members
+            .iter()
+            .filter(|m| present.contains(&m.key))
+            .map(|m| m.identity.clone())
+            .collect(),
+        unverified,
+        scope_dns,
+        consolidated,
+    }
+}
+
+/// Points an existing management scope at `wanted_filter` when its current
+/// filter names a different group set. A no-op when the scope is already right
+/// (or doesn't exist yet — the caller's `ensure_management_scope` just made it
+/// with this filter). Never fatal: a failed repoint leaves the scope as it was,
+/// which is the wider-or-equal side, so it warns rather than erroring out
+/// mid-flow.
+async fn repoint_scope_if_stale(
+    exo: &ExchangeClient,
+    scope_name: &str,
+    wanted_filter: &str,
+    warnings: &mut Vec<String>,
+) {
+    let existing = match exo.get_management_scope(scope_name).await {
+        Ok(Some(scope)) => scope,
+        Ok(None) => return,
+        Err(err) => {
+            warnings.push(format!(
+                "could not read management scope '{scope_name}' to check its filter ({err})"
+            ));
+            return;
+        }
+    };
+    let Some(current) = existing.recipient_filter.as_deref() else {
+        return;
+    };
+    if group_dns_in_filter(current) == group_dns_in_filter(wanted_filter) {
+        return;
+    }
+    match exo
+        .set_management_scope_filter(scope_name, wanted_filter)
+        .await
+    {
+        Ok(_) => warnings.push(format!(
+            "management scope '{scope_name}' already existed and pointed at a different group set; \
+             it now points at the toolkit-managed group. Exchange applies this to every role \
+             assignment using the scope, and can take 30 min–2 h to propagate."
+        )),
+        Err(err) => warnings.push(format!(
+            "management scope '{scope_name}' still points at its previous group set — the repoint \
+             failed ({err}). Nothing this app can reach has changed."
+        )),
+    }
+}
+
+/// Moves an already-scoped app onto the toolkit-managed group: copies the
+/// mailboxes its management scope reaches today into `app_scope_group_<appId>`
+/// and repoints the scope at that group.
+///
+/// The counterpart to the legacy-AAP migration for apps that have already
+/// migrated (their policy is gone, so the migration has nothing to find) or
+/// that were scoped to a hand-made group. Same fail-closed core: unless every
+/// mailbox is verified present in the managed group, the scope keeps its
+/// current filter.
+///
+/// `dry_run` reads only — it reports the mailboxes it would copy and changes
+/// nothing.
+#[tauri::command]
+pub async fn move_exchange_scope_to_managed_group(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    app_id: String,
+    dry_run: bool,
+) -> Result<ExchangeScopeConsolidationResult, UiError> {
+    let exo = exchange_client_checked(&state, &tenant_id).await?;
+    let defaults = load_tenant_defaults(&tenant_id);
+    let scope_name = defaults.scope_name_for(&app_id);
+    let group_name = defaults.group_name_for(&app_id);
+    let mut warnings = Vec::new();
+
+    let Some(scope) = exo.get_management_scope(&scope_name).await? else {
+        return Err(UiError::validation(
+            "no_management_scope",
+            format!(
+                "no management scope named '{scope_name}' exists for this app, so there is \
+                 nothing to move. Use “Grant scoped access” to scope it to the managed group."
+            ),
+        ));
+    };
+    let previous_filter = scope.recipient_filter.clone();
+    let Some(current_filter) = previous_filter.as_deref() else {
+        return Err(UiError::validation(
+            "no_scope_filter",
+            format!(
+                "management scope '{scope_name}' has no recipient filter to read, so the \
+                 mailboxes it covers can't be determined."
+            ),
+        ));
+    };
+    let source_dns: Vec<String> = group_dns_in_filter(current_filter)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if source_dns.is_empty() {
+        return Err(UiError::validation(
+            "no_scope_group",
+            format!(
+                "management scope '{scope_name}' isn't built from group membership \
+                 (filter: {current_filter}), so its mailboxes can't be copied into a group."
+            ),
+        ));
+    }
+
+    // Already on the managed group: nothing to do. Resolving the group by name
+    // (rather than trusting the filter's DN) keeps this honest if the group was
+    // recreated and its DN changed.
+    if let Ok(Some(managed)) = exo.get_distribution_group(&group_name).await
+        && let Some(dn) = managed.distinguished_name.as_deref()
+        && source_dns.len() == 1
+        && source_dns[0] == dn
+    {
+        return Ok(ExchangeScopeConsolidationResult {
+            app_id,
+            scope_name,
+            group_name,
+            previous_filter: previous_filter.clone(),
+            scope_filter: previous_filter,
+            members_copied: Vec::new(),
+            members_unverified: Vec::new(),
+            repointed: false,
+            dry_run,
+            warnings: vec!["already scoped to the toolkit-managed group".into()],
+        });
+    }
+
+    let consolidation = consolidate_scope_group(
+        &exo,
+        &app_id,
+        &source_dns,
+        &defaults,
+        dry_run,
+        &mut warnings,
+    )
+    .await;
+
+    if dry_run || !consolidation.consolidated {
+        return Ok(ExchangeScopeConsolidationResult {
+            app_id,
+            scope_name,
+            group_name: consolidation.group_name,
+            previous_filter: previous_filter.clone(),
+            scope_filter: previous_filter,
+            members_copied: consolidation.copied,
+            members_unverified: consolidation.unverified,
+            repointed: false,
+            dry_run,
+            warnings,
+        });
+    }
+
+    let wanted_filter = member_of_group_filter(&consolidation.scope_dns);
+    exo.set_management_scope_filter(&scope_name, &wanted_filter)
+        .await?;
+    warnings.push(
+        "the previous group is no longer referenced by this app's scope and can be cleaned up. \
+         Exchange can take 30 min–2 h to apply the change (the permission tester bypasses that \
+         cache)."
+            .into(),
+    );
+    // The scope's group set (and so the resolved verdict, its filter and its
+    // group count) really changed — detail + audit state, not the app/SP set.
+    invalidate_app_detail_state(&state.cache, &tenant_id);
+
+    Ok(ExchangeScopeConsolidationResult {
+        app_id,
+        scope_name,
+        group_name: consolidation.group_name,
+        previous_filter,
+        scope_filter: Some(wanted_filter),
+        members_copied: consolidation.copied,
+        members_unverified: consolidation.unverified,
+        repointed: true,
+        dry_run,
+        warnings,
     })
 }
 
@@ -1386,7 +1789,16 @@ async fn migrate_one(
     let scope_name = scope_override
         .map(str::to_string)
         .unwrap_or_else(|| tenant_defaults.scope_name_for(app_id));
-    let scope_filter = member_of_group_filter(&dns);
+
+    // Consolidate onto the toolkit-managed group: copy the legacy group(s)'
+    // membership into `app_scope_group_<appId>` and scope to THAT, so the old
+    // group can be retired and every app's reach is edited in one predictable
+    // place. Fail-closed — a copy that can't be verified leaves the filter on
+    // the legacy groups (see `consolidate_scope_group`), which is exactly the
+    // pre-consolidation behavior, never a narrower one.
+    let consolidation =
+        consolidate_scope_group(exo, app_id, &dns, tenant_defaults, dry_run, &mut warnings).await;
+    let scope_filter = member_of_group_filter(&consolidation.scope_dns);
 
     // Roles come from what the app actually holds today — across Microsoft Graph
     // AND Office 365 Exchange Online, so a policy confining the EWS
@@ -1432,7 +1844,11 @@ async fn migrate_one(
             app_id: app_id.to_string(),
             source_policy_identities: identities.clone(),
             scope_name: Some(scope_name),
+            // A plan mutates nothing, so this is the filter as it stands today.
             scope_filter: Some(scope_filter),
+            managed_group_name: Some(consolidation.group_name),
+            members_copied: consolidation.copied,
+            members_unverified: consolidation.unverified,
             roles_assigned: targets
                 .iter()
                 .map(|t| t.exchange_role.to_string())
@@ -1448,6 +1864,14 @@ async fn migrate_one(
     exo.ensure_management_scope(&scope_name, &scope_filter)
         .await
         .map_err(|e| e.to_string())?;
+    // `ensure_management_scope` is create-only, so a RE-RUN (or a scope left by
+    // an earlier partial migration) would keep an old filter and silently drop
+    // the consolidation. Repoint it — but only a scope this tenant's pattern
+    // names for THIS app: an operator-supplied `scope_override` may be shared
+    // with other apps, and rewriting that would change their reach too.
+    if consolidation.consolidated && scope_override.is_none() {
+        repoint_scope_if_stale(exo, &scope_name, &scope_filter, &mut warnings).await;
+    }
     exo.ensure_service_principal(app_id, &entra_sp.id, &entra_sp.display_name)
         .await
         .map_err(|e| e.to_string())?;
@@ -1514,6 +1938,9 @@ async fn migrate_one(
         source_policy_identities: identities,
         scope_name: Some(scope_name),
         scope_filter: Some(scope_filter),
+        managed_group_name: Some(consolidation.group_name),
+        members_copied: consolidation.copied,
+        members_unverified: consolidation.unverified,
         roles_assigned,
         removed_entra_grants,
         removed_policies,
@@ -1866,6 +2293,40 @@ mod tests {
             group_dns_in_filter("MemberOfGroup -eq 'CN=a,DC=x'"),
             group_dns_in_filter("MemberOfGroup -eq 'CN=b,DC=y'"),
         );
+    }
+
+    fn exo_member(
+        smtp: Option<&str>,
+        guid: Option<&str>,
+    ) -> azapptoolkit_exchange::models::ExoGroupMember {
+        azapptoolkit_exchange::models::ExoGroupMember {
+            display_name: Some("Someone".into()),
+            primary_smtp_address: smtp.map(str::to_string),
+            recipient_type: Some("UserMailbox".into()),
+            guid: guid.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn source_member_prefers_smtp_and_folds_case_for_verification() {
+        // The verification key must match regardless of how EXO cases the
+        // address on the way back out, or a copied mailbox reads as missing and
+        // the consolidation fails closed for no reason.
+        let m = source_member(&exo_member(Some("Sales@Contoso.com"), Some("guid-1"))).unwrap();
+        assert_eq!(m.identity, "Sales@Contoso.com");
+        assert_eq!(m.key, "sales@contoso.com");
+    }
+
+    #[test]
+    fn source_member_falls_back_to_guid_then_gives_up() {
+        // A mail-less recipient is still copyable by GUID...
+        let by_guid = source_member(&exo_member(None, Some("guid-1"))).unwrap();
+        assert_eq!(by_guid.identity, "guid-1");
+        // ...but one with neither can be neither copied nor verified, so it must
+        // NOT silently drop out of the count — `None` makes the caller treat the
+        // whole source group as unreadable and keep the existing scope.
+        assert!(source_member(&exo_member(None, None)).is_none());
+        assert!(source_member(&exo_member(Some("  "), None)).is_none());
     }
 
     fn auth_row(

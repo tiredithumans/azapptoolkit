@@ -1,7 +1,8 @@
 //! Recipient groups as scope sources: resolving any group to its
-//! `DistinguishedName`, managing the toolkit's `azapptoolkit_<AppId>`
-//! mail-enabled security group (create + membership), and building the OPATH
-//! `MemberOfGroup` recipient filter those DNs feed.
+//! `DistinguishedName`, managing the toolkit's mail-enabled security group
+//! (create + membership; named by `TenantDefaults::group_name_for`, default
+//! `app_scope_group_<AppId>`), and building the OPATH `MemberOfGroup` recipient
+//! filter those DNs feed.
 
 use serde_json::json;
 

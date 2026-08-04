@@ -91,6 +91,12 @@ org-wide grant never removed".
 Entra consent → remove policy), with three guards that the doc's happy path doesn't mention and whose
 absence each caused a real widening of access:
 
+Before the scope is built, the policy's groups are **consolidated onto the toolkit-managed group**
+(see below) so a migrated app lands on the naming standard rather than pinned to a legacy group.
+`ensure_management_scope` is create-only, so a re-run repoints via `repoint_scope_if_stale` — but
+**only** when the scope name came from the tenant pattern, never from a `scope_name` override, which
+may be shared with other apps whose reach must not change as a side effect.
+
 - **`RestrictAccess` only** (`group_policies_for_migration`, pure + tested). A `DenyAccess` policy is
   a *blocklist* — every mailbox except its group — and a management scope is an allow-list, so
   converting one inverts it: the app gains exactly what it was denied and loses the rest. `DenyAccess`
@@ -218,6 +224,34 @@ scopes can't clash). Three commands manage the group, all in `commands::exchange
   "already a member" 400).
 - `remove_exchange_scope_group_members` — `Remove-DistributionGroupMember`
   `-BypassSecurityGroupManagerCheck` (removing a non-member is a no-op).
+
+#### Consolidating an existing scope onto the managed group
+
+`consolidate_scope_group` (`commands::exchange`) is the shared core behind two callers: the AAP
+migration (source = the policies' groups) and the `move_exchange_scope_to_managed_group` command
+(source = the groups the app's live management scope already references — the path for an app that
+already migrated, whose policy is gone, or one scoped to a hand-made group). Both end with the
+scope's `MemberOfGroup` filter naming the managed group alone, so reach is edited in one place.
+Invariants, each of which exists because its absence *narrows* access silently:
+
+- **Fail closed on anything unproved.** The pure `scope_dns_after_consolidation`
+  (`azapptoolkit-exchange::targets`) returns the managed group's DN only when its DN resolved AND
+  zero source members are unverified; otherwise it returns the source DNs unchanged. Narrowing is
+  the risk here, not widening — the managed group is built from the source membership — and a
+  mailbox an integration can no longer read fails as "not found", not "denied".
+- **Verification re-reads the group; it does not trust the adds.** EXO accepts some recipient types
+  and then doesn't list them. Comparison is on `source_member`'s case-folded key (primary SMTP,
+  else GUID); a member with neither is unidentifiable, so its source group counts as unreadable.
+- **An empty source group is unreadable, not empty.** `Get-DistributionGroupMember` returns nothing
+  for a Microsoft 365 group (its members need `Get-UnifiedGroupLinks`), so treating "no members" as
+  "no mailboxes" would repoint the scope at an empty group and cut the app off from everything.
+- **Repointing is never a side effect.** `set_management_scope_filter` (`Set-ManagementScope`) is the
+  only mutator of an existing scope's filter, and Exchange applies it to **every** role assignment
+  using that scope. `apply_exchange_mailbox_scope` therefore still only *warns* on a group-set
+  mismatch — a grant must not rewrite a scope other permissions depend on; the operator chooses the
+  move explicitly, from a dry-run plan listing the mailboxes.
+- **Invalidation:** the repoint changes the resolved verdict's filter and group count but not the
+  app/SP set ⇒ `invalidate_app_detail_state`, not `invalidate_app_lists`.
 
 The grant flow is **unchanged**: the UI passes the managed group's identifier in the existing
 `groups` list, so `apply_exchange_mailbox_scope` resolves its DN and builds the `MemberOfGroup`

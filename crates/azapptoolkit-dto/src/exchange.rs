@@ -48,12 +48,14 @@ pub struct ExchangeGroupMemberDto {
     pub recipient_type: Option<String>,
 }
 
-/// State of the toolkit-managed scope group (`azapptoolkit_<appId>`) for one
-/// principal: whether it exists yet, how to reference it (its SMTP / DN), and
-/// its current direct members. Returned by `list_exchange_scope_group`.
+/// State of the toolkit-managed scope group (by default
+/// `app_scope_group_<appId>`) for one principal: whether it exists yet, how to
+/// reference it (its SMTP / DN), and its current direct members. Returned by
+/// `list_exchange_scope_group`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExchangeScopeGroupDto {
-    /// The toolkit naming-convention name, `azapptoolkit_<appId>`.
+    /// The resolved toolkit naming-convention name (the tenant's
+    /// `group_name_pattern`, default `app_scope_group_<appId>`).
     pub group_name: String,
     /// `false` until the group has been created (e.g. by adding the first
     /// mailbox).
@@ -124,7 +126,18 @@ pub struct AapMigrationItem {
     /// Identities of every policy folded into this app's migration.
     pub source_policy_identities: Vec<String>,
     pub scope_name: Option<String>,
+    /// The scope's filter as it stands after the run (a dry run changes
+    /// nothing, so it reports the filter in effect today).
     pub scope_filter: Option<String>,
+    /// The toolkit-managed group the legacy group's mailboxes are consolidated
+    /// onto, so the old group can be retired.
+    pub managed_group_name: Option<String>,
+    /// Mailboxes copied into the managed group (dry run: that would be copied).
+    pub members_copied: Vec<String>,
+    /// Mailboxes that could NOT be verified in the managed group. Non-empty
+    /// means the scope was deliberately left on its legacy group(s) rather than
+    /// narrowed to an incomplete copy — see `scope_dns_after_consolidation`.
+    pub members_unverified: Vec<String>,
     pub roles_assigned: Vec<String>,
     pub removed_entra_grants: Vec<String>,
     /// Identities of the policies actually deleted. Empty when the policies were
@@ -133,6 +146,28 @@ pub struct AapMigrationItem {
     pub removed_policies: Vec<String>,
     /// `planned` for a dry run; `migrated` / `partial` / `failed` for a real run.
     pub status: String,
+    pub warnings: Vec<String>,
+}
+
+/// Outcome of `move_exchange_scope_to_managed_group` — consolidating an
+/// already-scoped app onto the toolkit-managed group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExchangeScopeConsolidationResult {
+    pub app_id: String,
+    pub scope_name: String,
+    pub group_name: String,
+    /// The scope's filter before the move.
+    pub previous_filter: Option<String>,
+    /// The filter after it — equal to `previous_filter` unless `repointed`.
+    pub scope_filter: Option<String>,
+    /// Mailboxes copied into the managed group (dry run: that would be copied).
+    pub members_copied: Vec<String>,
+    /// Mailboxes that couldn't be verified in the managed group. Non-empty
+    /// means the scope kept its previous filter rather than narrowing.
+    pub members_unverified: Vec<String>,
+    /// `true` only when the management scope now names the managed group.
+    pub repointed: bool,
+    pub dry_run: bool,
     pub warnings: Vec<String>,
 }
 

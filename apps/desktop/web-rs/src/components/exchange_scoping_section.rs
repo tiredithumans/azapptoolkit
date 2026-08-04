@@ -16,11 +16,13 @@
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
 
-use crate::bindings::auth;
+use azapptoolkit_core::defaults::TenantDefaults;
+
 use crate::bindings::exchange::{self, AapMigrationReport};
+use crate::bindings::{auth, defaults};
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
-use crate::components::ui::DataTable;
+use crate::components::ui::{Callout, DataTable};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::parse_lines;
@@ -101,8 +103,8 @@ pub fn ExchangeScopingSection(
     // Drives the shared-core grant flow (`run_grant`).
     let grant_cmd = use_command();
 
-    // Resolved managed scope group (`azapptoolkit_<appId>`) state — owned here,
-    // populated by the embedded `ManagedScopeGroupPanel`, and read by
+    // Resolved managed scope group (`app_scope_group_<appId>`) state — owned
+    // here, populated by the embedded `ManagedScopeGroupPanel`, and read by
     // `do_grant_managed` to pull the group's SMTP for the recommended grant.
     #[allow(clippy::type_complexity)]
     let group_state: RwSignal<
@@ -117,10 +119,50 @@ pub fn ExchangeScopingSection(
     let remove_cmd = use_command();
     let confirm_remove = RwSignal::new(false);
     let mig_result: RwSignal<Option<AapMigrationReport>> = RwSignal::new(None);
-    // Optional override for the management-scope name. Blank => backend default
-    // (`app_scope_<appId>`). The concrete default is surfaced as helper text.
+    // A grant outcome that carries warnings, kept inline until it's been read.
+    // A clean grant toasts and reloads the caller (which rebuilds this whole
+    // section), but a warned one must survive that: the backend reports
+    // "a management scope already exists for this app with a different group
+    // set" as a warning, and it means the groups just requested were NOT
+    // applied — counting the warnings in the toast made a no-op read as a
+    // success. Same tradeoff `do_migrate` makes for a partial run; the
+    // callout's own button runs the caller's reload once the notes are read.
+    let grant_result: RwSignal<Option<exchange::ExchangeAccessResult>> = RwSignal::new(None);
+    // Consolidating an EXISTING scope onto the managed group (copy the
+    // mailboxes it covers today into the managed group, then repoint it). Runs
+    // as a plan first — it rewrites what every role assignment on that scope
+    // reaches, so the operator sees the mailbox list before committing.
+    let move_cmd = use_command();
+    let move_result: RwSignal<Option<exchange::ExchangeScopeConsolidationResult>> =
+        RwSignal::new(None);
+    // Optional override for the management-scope name. Blank => backend default.
+    // The concrete default is surfaced as helper text — resolved from THIS
+    // tenant's `scope_name_pattern` rather than assuming the built-in
+    // `app_scope_<appId>`, or the hint would name a scope the backend never
+    // creates for a tenant that configured a pattern. Not yet loaded ⇒
+    // `TenantDefaults::default()`, whose answer *is* the built-in default.
     let scope_name_override = RwSignal::new(String::new());
-    let default_scope_name = Signal::derive(move || format!("app_scope_{}", app_id.get()));
+    let tenant_defaults: RwSignal<Option<TenantDefaults>> = RwSignal::new(None);
+    Effect::new(move |_| {
+        // Gated on `open` like the assignments read, and re-runs on a tenant
+        // switch (patterns are per-tenant). Nothing here reads `tenant_defaults`
+        // reactively, so setting it can't re-trigger this.
+        let Some(t) = session.active_tenant.get() else {
+            return;
+        };
+        if !open.get() {
+            return;
+        }
+        leptos::task::spawn_local(async move {
+            tenant_defaults.set(Some(defaults::get_tenant_defaults(&t.tenant_id).await));
+        });
+    });
+    let default_scope_name = Signal::derive(move || {
+        tenant_defaults
+            .get()
+            .unwrap_or_default()
+            .scope_name_for(&app_id.get())
+    });
 
     // Bumped to refresh the assignments list (consent retry / manual refresh).
     let reload = RwSignal::new(0_u32);
@@ -173,20 +215,24 @@ pub fn ExchangeScopingSection(
         }
         let target = target.get();
         let app = app_id.get();
+        grant_result.set(None);
         grant_cmd.run(
             move |r: exchange::ExchangeAccessResult| {
-                let mut summary = format!(
-                    "Scope “{}”: assigned {} role(s), skipped {}, removed {} org-wide grant(s).",
-                    r.scope_name,
-                    r.roles_assigned.len(),
-                    r.roles_skipped.len(),
-                    r.removed_entra_grants.len(),
-                );
-                if !r.warnings.is_empty() {
-                    summary.push_str(&format!(" {} warning(s).", r.warnings.len()));
+                if r.warnings.is_empty() {
+                    session.toast_success(format!(
+                        "Scope “{}”: assigned {} role(s), skipped {}, removed {} org-wide grant(s).",
+                        r.scope_name,
+                        r.roles_assigned.len(),
+                        r.roles_skipped.len(),
+                        r.removed_entra_grants.len(),
+                    ));
+                    on_changed.run(());
+                } else {
+                    // Hold the reload so the notes survive to be read; refresh
+                    // the assignments list in place (a local signal, unaffected).
+                    grant_result.set(Some(r));
+                    reload.update(|n| *n += 1);
                 }
-                session.toast_success(summary);
-                on_changed.run(());
             },
             move |tenant_id| async move {
                 match &target {
@@ -239,6 +285,34 @@ pub fn ExchangeScopingSection(
         _ => grant_cmd.error.set(Some(
             "Add at least one mailbox first — that creates the managed group to scope to.".into(),
         )),
+    };
+
+    // Plan (dry_run) then commit. The plan is what makes this safe to offer as
+    // a button: Exchange applies a repointed scope to every role assignment
+    // using it, so the operator reads the mailbox list first.
+    let do_move = move |dry_run: bool| {
+        if move_cmd.busy.get_untracked() {
+            return;
+        }
+        move_result.set(None);
+        let app = app_id.get();
+        move_cmd.run(
+            move |r: exchange::ExchangeScopeConsolidationResult| {
+                if r.repointed && r.warnings.is_empty() {
+                    session.toast_success(format!("Scope now points at “{}”.", r.group_name));
+                    on_changed.run(());
+                } else {
+                    // A plan, a fail-closed no-op, or a repoint with notes: all
+                    // three have to be readable, so they stay inline (the same
+                    // reason `grant_result` does).
+                    move_result.set(Some(r));
+                    reload.update(|n| *n += 1);
+                }
+            },
+            move |tenant_id| async move {
+                exchange::move_exchange_scope_to_managed_group(&tenant_id, &app, dry_run).await
+            },
+        );
     };
 
     let do_migrate = move |dry_run: bool| {
@@ -325,6 +399,48 @@ pub fn ExchangeScopingSection(
                 }}
             </Body1>
 
+            // Warned grant outcome (either grant path — this sits above both).
+            {move || {
+                grant_result
+                    .get()
+                    .map(|r| {
+                        let summary = format!(
+                            "Scope “{}”: assigned {} role(s), skipped {}, removed {} org-wide grant(s). Some of what you asked for may not have been applied — read the notes below.",
+                            r.scope_name,
+                            r.roles_assigned.len(),
+                            r.roles_skipped.len(),
+                            r.removed_entra_grants.len(),
+                        );
+                        let filter = r.scope_filter.clone();
+                        let warnings = r.warnings.clone();
+                        view! {
+                            <Callout tone="warn" role="status">
+                                <Body1>{summary}</Body1>
+                                <ul class="warnings">
+                                    {warnings
+                                        .into_iter()
+                                        .map(|w| view! { <li>{w}</li> })
+                                        .collect_view()}
+                                </ul>
+                                <Body1 class="hint">
+                                    {format!("Scope filter in effect: {filter}")}
+                                </Body1>
+                                <div class="actions-row">
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                        on_click=Box::new(move |_| {
+                                            grant_result.set(None);
+                                            on_changed.run(());
+                                        })
+                                    >
+                                        "Dismiss & refresh"
+                                    </Button>
+                                </div>
+                            </Callout>
+                        }
+                    })
+            }}
+
                             <hr />
                             <strong>"Advanced: scope to existing groups"</strong>
                             <Field label="Existing group identifiers (one per line)">
@@ -361,6 +477,13 @@ pub fn ExchangeScopingSection(
                                 <strong>"Current Exchange role assignments"</strong>
                                 <span class="row-actions">
                                     <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                        on_click=Box::new(move |_| do_move(true))
+                                        disabled=Signal::derive(move || move_cmd.busy.get())
+                                    >
+                                        "Move to managed group…"
+                                    </Button>
+                                    <Button
                                         class="button--danger"
                                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                         on_click=Box::new(move |_| confirm_remove.set(true))
@@ -376,6 +499,107 @@ pub fn ExchangeScopingSection(
                                     </Button>
                                 </span>
                             </header>
+                            {move || {
+                                move_cmd
+                                    .error
+                                    .get()
+                                    .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                            }}
+                            {move || {
+                                move_result
+                                    .get()
+                                    .map(|r| {
+                                        let tone = if r.repointed { "ok" } else { "warn" };
+                                        let headline = match (r.dry_run, r.repointed) {
+                                            (true, _) => {
+                                                format!(
+                                                    "Plan: copy {} mailbox(es) into “{}”, then point scope “{}” at it. Nothing has changed yet.",
+                                                    r.members_copied.len(),
+                                                    r.group_name,
+                                                    r.scope_name,
+                                                )
+                                            }
+                                            (false, true) => {
+                                                format!(
+                                                    "Scope “{}” now points at “{}” ({} mailbox(es)).",
+                                                    r.scope_name,
+                                                    r.group_name,
+                                                    r.members_copied.len(),
+                                                )
+                                            }
+                                            (false, false) => {
+                                                format!(
+                                                    "Scope “{}” was left unchanged — the move could not be completed safely.",
+                                                    r.scope_name,
+                                                )
+                                            }
+                                        };
+                                        let mailboxes = r.members_copied.clone();
+                                        let unverified = r.members_unverified.clone();
+                                        let warnings = r.warnings.clone();
+                                        let is_plan = r.dry_run;
+                                        view! {
+                                            <Callout tone=tone role="status">
+                                                <Body1>{headline}</Body1>
+                                                {(!mailboxes.is_empty())
+                                                    .then(|| {
+                                                        view! {
+                                                            <Body1 class="hint">
+                                                                {format!("Mailboxes: {}", mailboxes.join(", "))}
+                                                            </Body1>
+                                                        }
+                                                    })}
+                                                {(!unverified.is_empty())
+                                                    .then(|| {
+                                                        view! {
+                                                            <Body1 class="form-error">
+                                                                {format!(
+                                                                    "Not verified in the managed group: {}",
+                                                                    unverified.join(", "),
+                                                                )}
+                                                            </Body1>
+                                                        }
+                                                    })}
+                                                {(!warnings.is_empty())
+                                                    .then(|| {
+                                                        view! {
+                                                            <ul class="warnings">
+                                                                {warnings
+                                                                    .into_iter()
+                                                                    .map(|w| view! { <li>{w}</li> })
+                                                                    .collect_view()}
+                                                            </ul>
+                                                        }
+                                                    })}
+                                                <div class="actions-row">
+                                                    {is_plan
+                                                        .then(|| {
+                                                            view! {
+                                                                <Button
+                                                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                                                    on_click=Box::new(move |_| do_move(false))
+                                                                    disabled=Signal::derive(move || move_cmd.busy.get())
+                                                                >
+                                                                    "Move now"
+                                                                </Button>
+                                                            }
+                                                        })}
+                                                    <Button
+                                                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                                        on_click=Box::new(move |_| {
+                                                            move_result.set(None);
+                                                            if !is_plan {
+                                                                on_changed.run(());
+                                                            }
+                                                        })
+                                                    >
+                                                        {if is_plan { "Cancel" } else { "Dismiss & refresh" }}
+                                                    </Button>
+                                                </div>
+                                            </Callout>
+                                        }
+                                    })
+                            }}
                             {move || {
                                 remove_cmd
                                     .error
@@ -481,12 +705,12 @@ pub fn ExchangeScopingSection(
                                 <strong>"Migrate legacy Application Access Policy"</strong>
                             </header>
                             <Body1>
-                                "If this app is still scoped by a legacy Application Access Policy, migrate it to RBAC: a management scope is built from the policy's group (all of them, if the app has several), the scoped roles are assigned, and the matching org-wide Entra grants are removed — Microsoft Graph mail permissions and the Exchange Web Services full_access_as_app scope alike. The legacy policy is deleted only once every grant it was confining has been re-scoped; anything left org-wide keeps its policy, because that policy is the only thing still restricting it. Only RestrictAccess policies are migrated: a DenyAccess policy is a blocklist and has no equivalent management scope. Preview first to see the plan."
+                                "If this app is still scoped by a legacy Application Access Policy, migrate it to RBAC: the policy group's mailboxes (all the groups', if the app has several policies) are copied into the toolkit-managed group, a management scope is built over that group, the scoped roles are assigned, and the matching org-wide Entra grants are removed — Microsoft Graph mail permissions and the Exchange Web Services full_access_as_app scope alike. The legacy group is left in place for you to clean up. If any mailbox can't be verified in the managed group, the scope is built over the legacy group instead, so the app never loses reach. The legacy policy is deleted only once every grant it was confining has been re-scoped; anything left org-wide keeps its policy, because that policy is the only thing still restricting it. Only RestrictAccess policies are migrated: a DenyAccess policy is a blocklist and has no equivalent management scope. Preview first to see the plan."
                             </Body1>
                             <Field label="Management scope name (optional)">
                                 <Input
                                     value=scope_name_override
-                                    placeholder="app_scope_<appId>"
+                                    placeholder=Signal::derive(move || default_scope_name.get())
                                 />
                             </Field>
                             <Body1 class="hint">

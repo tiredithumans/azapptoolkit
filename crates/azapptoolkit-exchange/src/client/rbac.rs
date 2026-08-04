@@ -87,6 +87,44 @@ impl ExchangeClient {
         first_as(values, "New-ManagementScope")
     }
 
+    /// Repoints an EXISTING management scope at a new OPATH recipient filter.
+    ///
+    /// The counterpart to [`ensure_management_scope`], which is create-only and
+    /// keeps an existing scope's filter untouched. Exchange applies the updated
+    /// filter to **every** role assignment already using the scope, so this
+    /// changes what all of them reach in one step — never call it to satisfy an
+    /// incidental group mismatch, only from a path the operator chose knowing
+    /// that.
+    ///
+    /// [`ensure_management_scope`]: Self::ensure_management_scope
+    pub async fn set_management_scope_filter(
+        &self,
+        name: &str,
+        recipient_restriction_filter: &str,
+    ) -> Result<ExoManagementScope> {
+        let values = self
+            .invoke_command(
+                "Set-ManagementScope",
+                json!({
+                    "Identity": name,
+                    "RecipientRestrictionFilter": recipient_restriction_filter,
+                    "Confirm": false,
+                }),
+            )
+            .await?;
+        // `Set-ManagementScope` returns nothing on success, so re-read to hand
+        // the caller the scope as Exchange now has it (and to prove it landed).
+        match first_optional_as::<ExoManagementScope>(values)? {
+            Some(updated) => Ok(updated),
+            None => match self.get_management_scope(name).await? {
+                Some(scope) => Ok(scope),
+                None => Err(crate::error::ExchangeError::Protocol(format!(
+                    "management scope '{name}' disappeared after Set-ManagementScope"
+                ))),
+            },
+        }
+    }
+
     pub async fn get_management_scope(&self, name: &str) -> Result<Option<ExoManagementScope>> {
         let values = self
             .invoke_optional("Get-ManagementScope", json!({ "Identity": name }))
