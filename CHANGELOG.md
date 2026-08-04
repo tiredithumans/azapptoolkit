@@ -10,6 +10,8 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-08-04
+
 ### Added
 
 - **Legacy Application Access Policy migration now consolidates onto the
