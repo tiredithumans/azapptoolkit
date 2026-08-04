@@ -484,111 +484,98 @@ pub fn AppShell(children: Children) -> impl IntoView {
             />
             <UpdateSplash open=update_open info=update_info />
             <ToastHost />
-            // Lifted out of ApplicationsView so the dialog state survives view
-            // switches (create_open is a signal here, not local to Apps).
-            <Show when=move || view.get() == ActiveView::Apps>
-                {move || {
-                    let open = session.tenant_ui.create_open.get();
-                    if !open {
-                        return ().into_any();
-                    }
-                    // Capture session by move into each closure so they stay 'static.
-                    let on_close = Callback::new({
-                        let session = session;
-                        move |()| session.tenant_ui.create_open.set(false)
-                    });
-                    let on_created_cb = Callback::new({
-                        let session = session;
-                        move |()| session.bump_apps_reload()
-                    });
-                    view! {
-                        <CreateAppDialog
-                            open=Signal::derive(move || session.tenant_ui.create_open.get())
-                            on_close=on_close
-                            on_created=on_created_cb
-                        />
-                    }
-                    .into_any()
-                }}
-            </Show>
-            // SSO wizard — lifted to the shell (like the create-app dialog) so its
-            // multi-step state survives view switches. Mounted under the
-            // Enterprise Apps view, where it's launched.
-            <Show when=move || view.get() == ActiveView::EnterpriseApps>
-                {move || {
-                    if !session.tenant_ui.sso_wizard_open.get() {
-                        return ().into_any();
-                    }
-                    let on_close = Callback::new({
-                        let session = session;
-                        move |()| session.tenant_ui.sso_wizard_open.set(false)
-                    });
-                    let on_created_cb = Callback::new({
-                        let session = session;
-                        move |()| {
-                            session.enterprise_apps_reload.update(|n| *n = n.wrapping_add(1))
-                        }
-                    });
-                    view! {
-                        <SsoWizardDialog
-                            open=Signal::derive(move || session.tenant_ui.sso_wizard_open.get())
-                            on_close=on_close
-                            on_created=on_created_cb
-                        />
-                    }
-                        .into_any()
-                }}
-            </Show>
-            // "New application" chooser + the gallery-browse modal it routes to —
-            // shell-mounted alongside the SSO wizard (same Enterprise Apps view),
-            // so their state survives view switches and both are launchable from
-            // Home or the Enterprise Apps header.
-            <Show when=move || view.get() == ActiveView::EnterpriseApps>
-                {move || {
-                    if !session.tenant_ui.new_app_chooser_open.get() {
-                        return ().into_any();
-                    }
-                    let on_close = Callback::new({
-                        let session = session;
-                        move |()| session.tenant_ui.new_app_chooser_open.set(false)
-                    });
-                    view! {
-                        <NewAppChooserDialog
-                            open=Signal::derive(move || {
-                                session.tenant_ui.new_app_chooser_open.get()
-                            })
-                            on_close=on_close
-                        />
-                    }
-                        .into_any()
-                }}
-            </Show>
-            <Show when=move || view.get() == ActiveView::EnterpriseApps>
-                {move || {
-                    if !session.tenant_ui.gallery_open.get() {
-                        return ().into_any();
-                    }
-                    let on_close = Callback::new({
-                        let session = session;
-                        move |()| session.tenant_ui.gallery_open.set(false)
-                    });
-                    let on_created_cb = Callback::new({
-                        let session = session;
-                        move |()| {
-                            session.enterprise_apps_reload.update(|n| *n = n.wrapping_add(1))
-                        }
-                    });
-                    view! {
-                        <GalleryDialog
-                            open=Signal::derive(move || session.tenant_ui.gallery_open.get())
-                            on_close=on_close
-                            on_created=on_created_cb
-                        />
-                    }
-                        .into_any()
-                }}
-            </Show>
+            <ToolDialogs />
         </div>
+    }
+}
+
+/// One shell-mounted tool dialog: gated on the active view AND on its own open
+/// flag, with the `open` signal and the `on_close` callback both derived from
+/// that single flag.
+///
+/// Four dialogs repeated this ~20-line shape verbatim inside `AppShell`. The
+/// only things that genuinely differ are the view a dialog mounts under, the
+/// flag that opens it, and the element itself — so those are the only things
+/// left at the call site.
+fn tool_dialog<V>(
+    mount_on: ActiveView,
+    flag: RwSignal<bool>,
+    render: impl Fn(Signal<bool>, Callback<()>) -> V + Copy + Send + Sync + 'static,
+) -> impl IntoView
+where
+    V: IntoView + 'static,
+{
+    let view = use_session().view;
+    view! {
+        <Show when=move || view.get() == mount_on>
+            {move || {
+                if !flag.get() {
+                    return ().into_any();
+                }
+                render(Signal::derive(move || flag.get()), Callback::new(move |()| flag.set(false)))
+                    .into_any()
+            }}
+        </Show>
+    }
+}
+
+/// The shell-mounted dialogs, lifted out of the views that launch them so their
+/// (often multi-step) state survives a view switch. Mounted exactly once, in
+/// [`AppShell`].
+#[component]
+fn ToolDialogs() -> impl IntoView {
+    let session = use_session();
+    let ui = session.tenant_ui;
+    let bump_enterprise_apps = move || {
+        session
+            .enterprise_apps_reload
+            .update(|n| *n = n.wrapping_add(1))
+    };
+    view! {
+        {tool_dialog(
+            ActiveView::Apps,
+            ui.create_open,
+            move |open, on_close| {
+                view! {
+                    <CreateAppDialog
+                        open=open
+                        on_close=on_close
+                        on_created=Callback::new(move |()| session.bump_apps_reload())
+                    />
+                }
+            },
+        )}
+        {tool_dialog(
+            ActiveView::EnterpriseApps,
+            ui.sso_wizard_open,
+            move |open, on_close| {
+                view! {
+                    <SsoWizardDialog
+                        open=open
+                        on_close=on_close
+                        on_created=Callback::new(move |()| bump_enterprise_apps())
+                    />
+                }
+            },
+        )}
+        {tool_dialog(
+            ActiveView::EnterpriseApps,
+            ui.new_app_chooser_open,
+            move |open, on_close| view! { <NewAppChooserDialog open=open on_close=on_close /> },
+        )}
+        {tool_dialog(
+            ActiveView::EnterpriseApps,
+            ui.gallery_open,
+            move |open, on_close| {
+                view! {
+                    <GalleryDialog
+                        open=open
+                        on_close=on_close
+                        on_created=Callback::new(move |()| bump_enterprise_apps())
+                    />
+                }
+            },
+        )}
     }
 }
 
