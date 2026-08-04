@@ -205,6 +205,18 @@ pub(crate) async fn sp_index_cached(
     if let Some(cached) = sp_index_hit(&state.cache, tenant_id) {
         return Ok(cached);
     }
+    // Single-flight. Six surfaces read this index (both lists, global search,
+    // the audit, the consent audit, DR backup); on a cold tenant they fire
+    // together, and a bare check-then-fetch had every one of them pay the same
+    // multi-second `/servicePrincipals` scan and then race to overwrite the same
+    // pinned key.
+    let key = sp_index_key(tenant_id);
+    let gate = state.single_flight(&key);
+    let _held = gate.lock().await;
+    // Re-check: the fetch we queued behind has already populated the cache.
+    if let Some(cached) = sp_index_hit(&state.cache, tenant_id) {
+        return Ok(cached);
+    }
     let sps = client.list_service_principals_index().await?;
     Ok(sp_index_store(&state.cache, tenant_id, sps))
 }
@@ -257,6 +269,15 @@ pub(crate) async fn app_name_index_cached(
     if let Some(cached) = app_name_index_hit(&state.cache, tenant_id) {
         return Ok(cached);
     }
+    // Single-flight, for the same reason as [`sp_index_cached`] — four surfaces
+    // read this one, and a cold tenant would otherwise buy a full
+    // `/applications` scan per concurrent reader.
+    let key = app_name_index_key(tenant_id);
+    let gate = state.single_flight(&key);
+    let _held = gate.lock().await;
+    if let Some(cached) = app_name_index_hit(&state.cache, tenant_id) {
+        return Ok(cached);
+    }
     let apps = client
         .list_application_index_named(Some(super::APPS_MAX))
         .await?;
@@ -271,25 +292,20 @@ pub(crate) async fn indexes_cached(
     client: &GraphClient,
     tenant_id: &str,
 ) -> Result<(Arc<Vec<ServicePrincipal>>, Arc<Vec<Application>>), GraphError> {
-    match (
-        sp_index_hit(&state.cache, tenant_id),
-        app_name_index_hit(&state.cache, tenant_id),
-    ) {
-        (Some(sps), Some(apps)) => Ok((sps, apps)),
-        (Some(sps), None) => Ok((sps, app_name_index_cached(state, client, tenant_id).await?)),
-        (None, Some(apps)) => Ok((sp_index_cached(state, client, tenant_id).await?, apps)),
-        (None, None) => {
-            let (sps, apps) = futures::future::try_join(
-                client.list_service_principals_index(),
-                client.list_application_index_named(Some(super::APPS_MAX)),
-            )
-            .await?;
-            Ok((
-                sp_index_store(&state.cache, tenant_id, sps),
-                app_name_index_store(&state.cache, tenant_id, apps),
-            ))
-        }
-    }
+    // Each side already hit-checks before fetching, so this covers all four
+    // cases on its own: both warm returns immediately, one cold fetches one, and
+    // both cold still fetches concurrently — the two gates are distinct keys, so
+    // single-flight never serializes them against each other.
+    //
+    // Deliberately routed through the gated helpers rather than calling the
+    // client directly: the previous `(None, None)` arm reached past both gates,
+    // which is precisely the concurrent-cold-reader case single-flight exists to
+    // collapse.
+    futures::future::try_join(
+        sp_index_cached(state, client, tenant_id),
+        app_name_index_cached(state, client, tenant_id),
+    )
+    .await
 }
 
 /// The `/applications` index carries the same three contracts the SP index
