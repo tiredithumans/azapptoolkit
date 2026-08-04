@@ -21,8 +21,8 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_core::audit::{
-    AppPermissions, AuditItem, ResourcePermission, SpAuditInput, score_application,
-    score_service_principal, unused_app_advisory,
+    AppPermissions, AuditItem, MailPermissionScope, ResourcePermission, SpAuditInput,
+    score_application, score_service_principal, unused_app_advisory,
 };
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
@@ -35,7 +35,9 @@ use azapptoolkit_graph::client::AppListQuery;
 use chrono::{DateTime, Utc};
 
 use crate::commands::dispatch::dispatch_capped;
-use crate::commands::exchange::{exchange_client, resolve_mail_scopes_audit_cached};
+use crate::commands::exchange::{
+    aap_verdict_for, apply_legacy_policy_verdict, exchange_client, resolve_mail_scopes_audit_cached,
+};
 use crate::commands::export::{csv_field, write_via_dialog};
 use crate::commands::graph_roles::graph_role_index;
 use crate::commands::progress::emit_progress;
@@ -109,19 +111,27 @@ pub async fn run_audit(
     // permission confined to specific mailboxes scores below an org-wide one.
     let exo = audit_exchange_client(&state, &tenant_id);
 
-    // These five tenant-wide reads are INDEPENDENT — every join between them
+    // These six tenant-wide reads are INDEPENDENT — every join between them
     // (`seed_lean_sps_from_index`, `derive_orgwide_mail_scopes`,
-    // `sp_audit_candidates`) is synchronous and runs below, after all five land.
+    // `sp_audit_candidates`) is synchronous and runs below, after all six land.
     // Awaiting them serially made a large tenant wait out five full page-walks
     // before the progress bar left 0/N; overlapped, that is one wait instead of
-    // the sum. Four of the five are best-effort (they swallow errors and return
+    // the sum. Five of the six are best-effort (they swallow errors and return
     // empty), so overlapping changes no failure semantics, and the
     // `ThrottleGuard` attached above plus the transport's Retry-After handling
     // already absorb the extra concurrent 429 pressure.
     //
     // Keep this a `join!`, not a `try_join!`: only the app listing is fallible,
-    // and short-circuiting it would abandon the other four mid-flight.
-    let (apps, sp_index, consent_grants, graph_roles_by_sp, ews_full_access_sps, sign_in) = futures::join!(
+    // and short-circuiting it would abandon the other five mid-flight.
+    let (
+        apps,
+        sp_index,
+        consent_grants,
+        graph_roles_by_sp,
+        ews_full_access_sps,
+        sign_in,
+        legacy_policies,
+    ) = futures::join!(
         client.list_applications_all(
             // `$expand=owners` brings owner ids inline so the ownership audit
             // rules need no per-app round trip.
@@ -171,6 +181,11 @@ pub async fn run_audit(
         // surfacing a "Grant consent" button; either failure disables unused-app
         // detection.
         prefetch_sign_in_activity(&state, &client, &tenant_id),
+        // ONE tenant-wide `Get-ApplicationAccessPolicy` read → the legacy-policy
+        // verdict per appId. The per-app RBAC probe deliberately skips the AAP
+        // lookup on this path (it would be an extra admin-API call per app), so
+        // without this an app confined ONLY by a policy read as org-wide.
+        prefetch_legacy_access_policies(exo.as_deref()),
     );
 
     let apps = apps?;
@@ -181,6 +196,7 @@ pub async fn run_audit(
     client.seed_lean_sps_from_index(&app_ids, &sp_index);
 
     let admin_consent_clients = Arc::new(admin_consent_clients);
+    let legacy_policies = Arc::new(legacy_policies);
     let orgwide_mail_by_sp = Arc::new(derive_orgwide_mail_scopes(
         &graph_roles_by_sp,
         &ews_full_access_sps,
@@ -227,6 +243,7 @@ pub async fn run_audit(
         exo,
         admin_consent_clients,
         orgwide_mail_by_sp,
+        legacy_policies,
         exo_tripped,
         sign_in_available,
         sign_in_map,
@@ -549,6 +566,11 @@ struct ScoreCtx {
     exo: Option<Arc<ExchangeClient>>,
     admin_consent_clients: Arc<HashSet<String>>,
     orgwide_mail_by_sp: Arc<HashMap<String, HashSet<String>>>,
+    /// `appId -> Scoped { LegacyApplicationAccessPolicy }` for every app a
+    /// `RestrictAccess` Application Access Policy confines, from the run's one
+    /// tenant-wide policy read. Empty when Exchange is unavailable — every mail
+    /// permission then scores at its full org-wide weight, exactly as before.
+    legacy_policies: Arc<HashMap<String, MailPermissionScope>>,
     /// Exchange circuit breaker — flipped once an auth failure recurs, skipping
     /// the doomed cmdlet probes for the rest of the run.
     exo_tripped: Arc<AtomicBool>,
@@ -703,6 +725,47 @@ async fn prefetch_ews_full_access_grants(client: &GraphClient) -> HashSet<String
     out
 }
 
+/// ONE tenant-wide `Get-ApplicationAccessPolicy` read → the legacy scoping
+/// verdict per **appId**: `Scoped { LegacyApplicationAccessPolicy }` for every
+/// app a `RestrictAccess` policy confines (`DenyAccess` is a blocklist — still
+/// effectively org-wide — so [`aap_verdict_for`] leaves it out).
+///
+/// A policy gates the whole application, so one cmdlet answers for every app in
+/// the tenant. The per-app RBAC probe skips this lookup on the audit path (it
+/// would be an extra admin-API call per app), which is why an app confined only
+/// by a policy used to read org-wide here while the Permissions tab reported it
+/// scoped.
+///
+/// Best-effort: no Exchange client, no Exchange-admin rights, or a failed read
+/// all yield an empty map — every mail permission then scores at its full
+/// org-wide weight, the same never-under-report degradation the rest of the
+/// Exchange path takes.
+async fn prefetch_legacy_access_policies(
+    exo: Option<&ExchangeClient>,
+) -> HashMap<String, MailPermissionScope> {
+    let mut out = HashMap::new();
+    let Some(exo) = exo else { return out };
+    let policies = match exo.get_application_access_policies().await {
+        Ok(policies) => policies,
+        Err(err) => {
+            tracing::info!(
+                code = err.ui_code(),
+                "audit: legacy Application Access Policy read failed; legacy-scoping findings unavailable"
+            );
+            return out;
+        }
+    };
+    for app_id in policies.iter().filter_map(|p| p.app_id.clone()) {
+        if out.contains_key(&app_id) {
+            continue;
+        }
+        if let Some(verdict) = aap_verdict_for(&policies, &app_id) {
+            out.insert(app_id, verdict);
+        }
+    }
+    out
+}
+
 /// The org-wide-granted mailbox permissions `score_one` reconciles against a
 /// scoped RBAC verdict: the mail-scopable subset of each SP's granted Graph roles,
 /// **plus** the EWS `full_access_as_app` scope for the principals in
@@ -807,13 +870,18 @@ async fn prefetch_sign_in_activity(
 
 /// Scores one SP-only candidate (foreign enterprise app, managed identity,
 /// orphaned SP). Pure scoring — every input was resolved tenant-wide, so there's
-/// no per-item Graph traffic. `mail_scopes` stays empty ON PURPOSE: a held mail
-/// value here IS an un-stripped org-wide Entra grant (it comes from the grant
-/// matrix), and grant ∪ RBAC reach is always org-wide, so the reconciliation
-/// score_one applies would force OrgWide regardless of any RBAC verdict — an
-/// empty map scores identically without the 1-5s Exchange probe per SP. A
+/// no per-item Graph traffic. No **RBAC** verdict is resolved ON PURPOSE: a held
+/// mail value here IS an un-stripped org-wide Entra grant (it comes from the
+/// grant matrix), and grant ∪ RBAC reach is always org-wide, so the
+/// reconciliation score_one applies would force OrgWide regardless of any RBAC
+/// verdict — skipping the 1-5s Exchange probe per SP scores identically. A
 /// principal whose grant the scoping flow stripped no longer holds the value and
 /// drops out of the candidate set entirely.
+///
+/// A legacy Application Access Policy is the one exception, and it comes free
+/// from the run's tenant-wide policy read: unlike an RBAC scope, a policy DOES
+/// constrain the org-wide Entra grant these rows are scored from, so a confined
+/// foreign app / managed identity would otherwise be reported org-wide.
 fn score_sp_only(
     sp: &ServicePrincipal,
     ctx: &ScoreCtx,
@@ -838,7 +906,7 @@ fn score_sp_only(
     if ews_full_access_sps.contains(&sp.id) {
         app_role_grants.push(ResourcePermission::exchange_online(EWS_FULL_ACCESS_AS_APP));
     }
-    let perms = AppPermissions {
+    let mut perms = AppPermissions {
         app_role_grants,
         scope_values: delegated_scopes_by_client
             .get(&sp.id)
@@ -847,6 +915,12 @@ fn score_sp_only(
         has_admin_consent: ctx.admin_consent_clients.contains(&sp.id),
         mail_scopes: HashMap::new(),
     };
+    let granted_values = perms.app_role_values();
+    apply_legacy_policy_verdict(
+        &mut perms.mail_scopes,
+        &granted_values,
+        ctx.legacy_policies.get(&sp.app_id),
+    );
     let input = SpAuditInput {
         display_name: sp.display_name.clone(),
         app_id: sp.app_id.clone(),
@@ -1038,13 +1112,13 @@ async fn score_one(
     } else {
         ctx.exo.as_deref()
     };
+    let declared_values = perms.app_role_values();
     if let Some(exo) = exo {
         // Reconcile a scoped RBAC verdict against an un-stripped org-wide Entra
         // grant — `Test-ServicePrincipalAuthorization` can't see Entra grants, so
         // a scoped role coexisting with the org-wide grant still reaches every
         // mailbox. Only worth the extra read when the app declares a scopable mail
         // permission and its SP resolved.
-        let declared_values = perms.app_role_values();
         let orgwide = match &sp {
             Some(sp)
                 if declared_values
@@ -1094,6 +1168,16 @@ async fn score_one(
             }
         };
     }
+
+    // Fold in the run's tenant-wide legacy-policy verdict. Outside the Exchange
+    // block on purpose: the policy read already happened (before the breaker
+    // could trip), and a `RestrictAccess` policy confines the app whether or not
+    // this app's RBAC probe ran, failed, or was skipped.
+    apply_legacy_policy_verdict(
+        &mut perms.mail_scopes,
+        &declared_values,
+        ctx.legacy_policies.get(&app.app_id),
+    );
 
     let sp_enabled = sp.as_ref().and_then(|s| s.account_enabled);
     let now = chrono::Utc::now();

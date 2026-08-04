@@ -20,8 +20,10 @@ use azapptoolkit_core::defaults::TenantDefaults;
 
 use crate::bindings::exchange::{self, AapMigrationReport};
 use crate::bindings::{auth, defaults};
+use crate::components::aap_migration_report::AapMigrationReportView;
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
+use crate::components::retired_scope_groups::RetiredScopeGroups;
 use crate::components::ui::{Callout, DataTable};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -538,6 +540,8 @@ pub fn ExchangeScopingSection(
                                         let unverified = r.members_unverified.clone();
                                         let warnings = r.warnings.clone();
                                         let is_plan = r.dry_run;
+                                        let retired = r.retired_groups.clone();
+                                        let retired_app_id = r.app_id.clone();
                                         view! {
                                             <Callout tone=tone role="status">
                                                 <Body1>{headline}</Body1>
@@ -571,6 +575,16 @@ pub fn ExchangeScopingSection(
                                                             </ul>
                                                         }
                                                     })}
+                                                // Names the group the scope no longer points at,
+                                                // with its guarded cleanup. Empty (so absent)
+                                                // unless the repoint actually happened.
+                                                <RetiredScopeGroups
+                                                    app_id=retired_app_id
+                                                    groups=retired
+                                                    on_deleted=Callback::new(move |()| {
+                                                        reload.update(|n| *n += 1)
+                                                    })
+                                                />
                                                 <div class="actions-row">
                                                     {is_plan
                                                         .then(|| {
@@ -752,99 +766,7 @@ pub fn ExchangeScopingSection(
                             {move || {
                                 mig_result
                                     .get()
-                                    .map(|r| {
-                                        // "partial" means the run did real work but
-                                        // deliberately stopped short — almost always
-                                        // "kept the legacy policy because a grant is
-                                        // still org-wide". That has to read as
-                                        // needs-attention, not as a plain success, or
-                                        // an operator walks away believing the
-                                        // migration finished.
-                                        let needs_attention = !r.dry_run
-                                            && r.items.iter().any(|i| i.status != "migrated");
-                                        let header = match (r.dry_run, needs_attention) {
-                                            (true, _) => {
-                                                format!("Plan: {} app(s) would be migrated. Nothing has changed yet.", r.items.len())
-                                            }
-                                            (false, false) => format!("Migrated {} app(s).", r.items.len()),
-                                            (false, true) => {
-                                                format!(
-                                                    "Migrated {} app(s), but some need attention — see the notes below.",
-                                                    r.items.len(),
-                                                )
-                                            }
-                                        };
-                                        let header_class = if needs_attention || !r.failures.is_empty() {
-                                            "alert alert--warn"
-                                        } else {
-                                            "alert alert--ok"
-                                        };
-                                        let items = r.items.clone();
-                                        let failures = r.failures.clone();
-                                        view! {
-                                            <div class=header_class>{header}</div>
-                                            <ul class="warnings">
-                                                {items
-                                                    .into_iter()
-                                                    .map(|i| {
-                                                        let scoped = if i.roles_assigned.is_empty() {
-                                                            "none".to_string()
-                                                        } else {
-                                                            i.roles_assigned.join(", ")
-                                                        };
-                                                        let stripped = if i.removed_entra_grants.is_empty() {
-                                                            "none".to_string()
-                                                        } else {
-                                                            i.removed_entra_grants.join(", ")
-                                                        };
-                                                        let policies = match (
-                                                            i.removed_policies.len(),
-                                                            i.source_policy_identities.len(),
-                                                        ) {
-                                                            (0, n) => format!("{n} kept"),
-                                                            (removed, n) if removed == n => {
-                                                                format!("{removed} removed")
-                                                            }
-                                                            (removed, n) => {
-                                                                format!("{removed} of {n} removed")
-                                                            }
-                                                        };
-                                                        let line = format!(
-                                                            "{} — {}. Scoped roles: {scoped}. Org-wide grants removed: {stripped}. Legacy policies: {policies}.",
-                                                            i.app_id,
-                                                            i.status,
-                                                        );
-                                                        let warnings = i.warnings.clone();
-                                                        let row_class = if i.status == "migrated" {
-                                                            ""
-                                                        } else {
-                                                            "form-error"
-                                                        };
-                                                        view! {
-                                                            <li class=row_class>
-                                                                {line}
-                                                                {(!warnings.is_empty())
-                                                                    .then(|| {
-                                                                        view! {
-                                                                            <ul>
-                                                                                {warnings
-                                                                                    .into_iter()
-                                                                                    .map(|w| view! { <li class="hint">{w}</li> })
-                                                                                    .collect_view()}
-                                                                            </ul>
-                                                                        }
-                                                                    })}
-                                                            </li>
-                                                        }
-                                                    })
-                                                    .collect_view()}
-                                                {failures
-                                                    .into_iter()
-                                                    .map(|f| view! { <li class="form-error">{f}</li> })
-                                                    .collect_view()}
-                                            </ul>
-                                        }
-                                    })
+                                    .map(|r| view! { <AapMigrationReportView report=r /> })
                             }}
                             })}
         </CollapsibleScopingSection>

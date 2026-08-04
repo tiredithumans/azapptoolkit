@@ -13,6 +13,8 @@
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
+#[path = "gui/app_site_access.rs"]
+mod app_site_access;
 #[path = "gui/gallery.rs"]
 mod gallery;
 #[path = "gui/managed_identities.rs"]

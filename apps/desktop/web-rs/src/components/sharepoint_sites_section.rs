@@ -15,6 +15,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 
 use crate::bindings::sharepoint::GrantSiteAccessResult;
 use crate::bindings::{auth, sharepoint};
+use crate::components::app_site_access_panel::AppSiteAccessPanel;
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
 use crate::components::ui::DataTable;
 use crate::hooks::use_command::use_command;
@@ -161,6 +162,21 @@ pub fn SharePointSitesSection(
             <Body1>
                 "Grant this application access to a specific SharePoint site instead of the whole tenant (the Sites.Selected model). Enter the site URL (e.g. https://contoso.sharepoint.com/sites/Marketing). Requires the app to hold the Sites.Selected permission, and you to be a SharePoint administrator or site owner."
             </Body1>
+
+            <hr />
+            // Which sites this app already reaches, and with what roles —
+            // answered from the tenant sweep index, since Graph offers no
+            // reverse app→sites lookup. "Manage" loads a row into the per-site
+            // flow below rather than duplicating its grant/revoke mutations.
+            <AppSiteAccessPanel
+                app_id=app_id
+                on_pick=Callback::new(move |url: String| {
+                    site_url.set(url.clone());
+                    listed_url.set(url);
+                    reload.update(|n| *n += 1);
+                })
+            />
+            <hr />
                             <Field label="Site URL">
                                 <Input
                                     value=site_url

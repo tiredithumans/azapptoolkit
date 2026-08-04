@@ -1,5 +1,7 @@
 //! Shared UI components used across multiple views.
 
+pub mod aap_migration_report;
+pub mod app_site_access_panel;
 pub mod audit_dashboard;
 pub mod bulk_action_bar;
 pub mod changelog_notes;
@@ -28,6 +30,7 @@ pub mod owner_picker;
 pub mod permission_picker;
 pub mod release_notes;
 pub mod requires_role;
+pub mod retired_scope_groups;
 pub mod saved_views;
 pub mod scope_badge;
 pub mod scope_unavailable_banner;

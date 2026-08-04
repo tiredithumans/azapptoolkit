@@ -22,8 +22,8 @@ use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
 use crate::dto::sharepoint::{
-    GrantSiteAccessResult, SiteAppGrantRow, SiteGrantDto, SitePermissionDto, SiteScopeResult,
-    SiteSweepProgress, SiteSweepResult,
+    AppSiteAccessDto, GrantSiteAccessResult, SiteAppGrantRow, SiteGrantDto, SitePermissionDto,
+    SiteScopeResult, SiteSweepProgress, SiteSweepResult,
 };
 use crate::state::AppState;
 
@@ -546,6 +546,33 @@ pub fn get_cached_site_sweep(
     state
         .cache
         .get(CacheKind::Audit, &sweep_cache_key(&tenant_id))
+}
+
+/// The sites one principal can reach under `Sites.Selected`, and the roles it
+/// holds on each — read from the cached tenant sweep, `None` when no completed
+/// sweep is cached (the caller then offers to run one).
+///
+/// This is the per-app read of the same index the Resource Access Sites tab
+/// builds, and it exists because Graph has **no reverse `appId → sites`
+/// lookup**: the only way to answer "which sites is this app scoped to?" is to
+/// read every site's permissions once. That scan is tenant-wide, so it is shared
+/// — one sweep serves every app's panel for the cache TTL.
+///
+/// Filters **backend-side** on purpose. A tenant sweep holds up to
+/// [`MAX_SITES_PER_SWEEP`] sites' grants; shipping all of them across the IPC
+/// bridge so one collapsible panel could keep a handful would put a multi-MB
+/// payload on the Permissions tab of every app that declares a `Sites.*`
+/// permission.
+#[tauri::command]
+pub fn get_app_site_access(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    app_id: String,
+) -> Option<AppSiteAccessDto> {
+    let sweep: SiteSweepResult = state
+        .cache
+        .get(CacheKind::Audit, &sweep_cache_key(&tenant_id))?;
+    Some(AppSiteAccessDto::from_sweep(&sweep, &app_id))
 }
 
 #[cfg(test)]

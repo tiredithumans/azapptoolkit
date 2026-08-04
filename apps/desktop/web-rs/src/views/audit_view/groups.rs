@@ -50,6 +50,12 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         section: GroupSection::Actionable,
     },
     GroupSpec {
+        key: "legacy_mailbox_scope",
+        title: "Legacy Application Access Policy scoping",
+        blurb: "Mailbox access confined by an Application Access Policy — deprecated, per-app, and blind to anything granted through Exchange RBAC. Migrate each app to a management scope with scoped role assignments; the fix plans the change before applying it.",
+        section: GroupSection::Actionable,
+    },
+    GroupSpec {
         key: "orgwide_sharepoint",
         title: "Org-wide SharePoint access",
         blurb: "Sites.* permissions that reach every site collection. Convert them to the Sites.Selected model on the sites the app actually needs.",
@@ -365,6 +371,10 @@ mod tests {
         // RemoveRedundant (Rule 18) — it's advisory now.
         assert!(group_bulk_actions("high_risk_perms").is_empty());
         assert!(group_bulk_actions("high_risk_delegated").is_empty());
+        // Migrating a legacy policy is per-app and plan-first (the operator
+        // reads which mailboxes the new scope will cover before committing), so
+        // it stays a per-row Fix — a uniform bulk form has nothing to show.
+        assert!(group_bulk_actions("legacy_mailbox_scope").is_empty());
         assert!(group_bulk_actions("no_local_app").is_empty());
         assert!(group_bulk_actions("scoped_mailbox").is_empty());
     }

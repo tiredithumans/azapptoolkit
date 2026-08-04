@@ -11,6 +11,7 @@ use crate::bindings::remediation;
 use crate::state::use_session;
 use crate::views::dialogs::add_owner::AddOwnerButton;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
+use crate::views::dialogs::migrate_legacy_scope::MigrateLegacyScopeButton;
 use crate::views::dialogs::scope_remediation::{
     ScopeFixTarget, ScopeMailboxButton, ScopeSharePointButton,
 };
@@ -31,6 +32,10 @@ fn target_tab(item: &AuditItem) -> &'static str {
             .issues
             .iter()
             .any(|x| x.contains(issue::SCOPED_VIA_RBAC))
+        // The Permissions tab hosts the Exchange scoping section, which is where
+        // a legacy policy is managed by hand once the operator wants more than
+        // the one-click migration.
+        || has(issue::LEGACY_MAILBOX_POLICY)
         || has(issue::ORG_WIDE_SHAREPOINT)
         || has(issue::SCOPED_SHAREPOINT)
         || has(issue::HIGH_RISK_APP_PERMS)
@@ -68,6 +73,7 @@ pub(super) fn AuditRowActions(
     let expired = find(RemediationKind::RemoveExpiredCredentials);
     let redundant = find(RemediationKind::RemoveRedundantPermissions);
     let mailbox = find(RemediationKind::ScopeMailboxAccess);
+    let migrate = find(RemediationKind::MigrateApplicationAccessPolicy);
     let sharepoint = find(RemediationKind::ScopeSharePointAccess);
     let add_owner = find(RemediationKind::AddOwner);
     let disable = find(RemediationKind::DisableSignIn);
@@ -93,6 +99,13 @@ pub(super) fn AuditRowActions(
     let oid_r = object_id.clone();
     let oid_owner = object_id.clone();
     let oid_disable = object_id.clone();
+    // The legacy-policy migration is keyed on the **appId** (a policy names the
+    // application, not a directory object), and works from granted roles — so it
+    // needs no `ScopeFixTarget` split: one call serves an app registration, a
+    // foreign enterprise app and a managed identity alike. `row_id` stays the
+    // audit row's object id so `on_done` clears the right row.
+    let app_id_migrate = item.app_id.clone();
+    let oid_migrate = object_id.clone();
     let target_m = scope_target.clone();
     let target_s = scope_target;
     view! {
@@ -128,6 +141,17 @@ pub(super) fn AuditRowActions(
             {mailbox
                 .map(|action| {
                     view! { <ScopeMailboxButton target=target_m.clone() action=action on_done=on_done /> }
+                })}
+            {migrate
+                .map(|action| {
+                    view! {
+                        <MigrateLegacyScopeButton
+                            app_id=app_id_migrate.clone()
+                            row_id=oid_migrate.clone()
+                            action=action
+                            on_done=on_done
+                        />
+                    }
                 })}
             {sharepoint
                 .map(|action| {

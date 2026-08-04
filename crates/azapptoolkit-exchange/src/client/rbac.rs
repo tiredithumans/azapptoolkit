@@ -132,6 +132,17 @@ impl ExchangeClient {
         first_optional_as(values)
     }
 
+    /// Every custom management scope in the organization (`Get-ManagementScope`
+    /// with no `Identity`). Exchange offers no reverse "which scopes reference
+    /// this group?" lookup, so answering that means reading them all and
+    /// matching their `RecipientFilter` — the reason this exists.
+    pub async fn list_management_scopes(&self) -> Result<Vec<ExoManagementScope>> {
+        let values = self
+            .invoke_optional("Get-ManagementScope", json!({}))
+            .await?;
+        all_as(values)
+    }
+
     // ---------------- Role assignments ----------------
 
     /// Assigns an Exchange application `role` to the service principal `app`

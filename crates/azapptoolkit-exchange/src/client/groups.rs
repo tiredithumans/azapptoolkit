@@ -110,6 +110,30 @@ impl ExchangeClient {
         }
     }
 
+    /// Deletes a distribution / mail-enabled security group outright.
+    ///
+    /// **Not reversible.** `Remove-DistributionGroup` has no recycle bin for
+    /// these recipients: the group, its address and its membership are gone, and
+    /// mail sent to its address starts bouncing. Every caller must therefore
+    /// re-verify that nothing still depends on the group *immediately* before
+    /// invoking this, and gate it behind an explicit operator confirmation —
+    /// see `commands::exchange::delete_exchange_scope_group`, the only caller.
+    ///
+    /// `BypassSecurityGroupManagerCheck` lets an admin who isn't listed as the
+    /// group's manager delete it, matching the membership mutators above.
+    pub async fn remove_distribution_group(&self, identity: &str) -> Result<()> {
+        self.invoke_command(
+            "Remove-DistributionGroup",
+            json!({
+                "Identity": identity,
+                "Confirm": false,
+                "BypassSecurityGroupManagerCheck": true,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Lists the direct members of `group`. Returns an empty list when the group
     /// doesn't exist (via [`invoke_optional`]).
     ///

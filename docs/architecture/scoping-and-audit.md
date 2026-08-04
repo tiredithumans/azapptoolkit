@@ -114,7 +114,7 @@ may be shared with other apps whose reach must not change as a side effect.
   `partial` naming the blockers — the policy is the only thing still confining them.
 
 **Legacy Application Access Policies (AAP).** The detail path resolves the legacy AAP up front
-(`enrich`-gated, so the bulk audit never pays the extra call) — keyed only on appId via an
+(`enrich`-gated, so the *per-app probe* never pays the extra call) — keyed only on appId via an
 independent cmdlet, so it overrides an org-wide RBAC verdict **and** answers when the probe itself
 errors (the MI case, where the old code propagated before the AAP was ever read). A
 `RestrictAccess` AAP yields `Scoped { mechanism: LegacyApplicationAccessPolicy }` (`DenyAccess` is
@@ -123,6 +123,34 @@ a blocklist → still org-wide). The missing-principal→`OrgWide` vs. propagate
 modes. `MailPermissionScope::Scoped` carries a `ScopeMechanism`
 (`Rbac` | `LegacyApplicationAccessPolicy`) so the badge can label legacy scopes and nudge
 migration.
+
+**The audit gets the same verdict from ONE tenant-wide read, not N per-app ones.** A policy gates a
+whole application, so `Get-ApplicationAccessPolicy` answers for every app in the tenant at once:
+`run_audit` fetches it alongside its other tenant-wide reads (`prefetch_legacy_access_policies`,
+best-effort — Exchange unavailable ⇒ empty map ⇒ today's org-wide scoring) and folds it in with the
+pure `apply_legacy_policy_verdict`. Three invariants:
+
+- **It is applied by the caller, after `resolve_mail_scopes_audit_cached`**, so that cache keeps
+  holding the *pure RBAC* verdict and the audit's cache warmth still can't leak into the Permissions
+  tab's (the reason the two use separate keys in the first place).
+- **It fills `OrgWide` and *missing* verdicts, never a `Scoped { Rbac }` one** — an app that already
+  migrated keeps its RBAC verdict. Filling a missing verdict is the same call `scope_from_rbac_error`
+  makes: a policy keyed on this exact appId is stronger evidence than a probe that failed or never ran
+  (breaker open, Exchange down, MI absent from the Exchange SP store), which is why it is applied
+  *outside* the per-app Exchange block.
+- **Phase 2 (SP-only rows) gets it too, and only it.** Their RBAC verdict is deliberately never
+  resolved (a held mail value there IS an un-stripped org-wide grant, and grant ∪ RBAC is always
+  org-wide), but an AAP *does* constrain that Entra grant — so a confined foreign app / managed
+  identity would otherwise be reported org-wide.
+
+Rule 11 then splits its scoped bucket by mechanism (`AppPermissions::scope_mechanism`, the single
+read of `mail_scopes`): RBAC keeps the positive `SCOPED_VIA_RBAC` advisory, legacy gets
+`issue::LEGACY_MAILBOX_POLICY` plus the `MigrateApplicationAccessPolicy` remediation. **Rules 1 & 2
+split the same way** (`push_scoped_risk_issue`) — the score is identical (both mechanisms genuinely
+confine, so both earn the reduced weight), but the *wording* must differ: that advisory also carries
+`SCOPED_VIA_RBAC`, and the UI matches it mid-string to fill the **healthy** "Mailbox access scoped"
+group. Emitting it for a legacy policy files the row under a positive signal and buries the
+migration finding raised for the very same permission.
 
 **Surfaces.** The per-app detail uses the resolver via the `get_mail_permission_scopes` command
 (the Permissions-tab "Scope" column). **Managed identities** are
@@ -253,6 +281,38 @@ Invariants, each of which exists because its absence *narrows* access silently:
 - **Invalidation:** the repoint changes the resolved verdict's filter and group count but not the
   app/SP set ⇒ `invalidate_app_detail_state`, not `invalidate_app_lists`.
 
+#### Retiring the group the scope left behind
+
+A consolidation ends with a group nothing points at, so both callers report it (`retired_groups` on
+`ExchangeScopeConsolidationResult` / `AapMigrationItem`, rendered by
+`components::retired_scope_groups`) instead of the old anonymous "the previous group can be cleaned
+up". `retired_scope_groups` resolves each source DN to its name/SMTP and runs the pure
+`references_to_group` over **two enumerable authorities** — management scopes' `MemberOfGroup`
+filters (matched on DN) and legacy AAPs (matched on `ScopeName`/`ScopeIdentity`, which carry the
+group *name*, so a DN-only match misses them). Populated **only when the repoint actually happened**:
+while the consolidation is a plan or fails closed, the scope still points at the group and nothing is
+retired. A kept policy still names its group and so shows up as a live reference — exactly right, and
+it stops the group being deleted out from under it.
+
+**The app's own scope is deliberately NOT excluded from the check.** It is read after the repoint,
+so normally it no longer names the group — but the AAP migration skips its repoint when an
+operator-supplied `scope_name` override may be shared with other apps, and `ensure_management_scope`
+is create-only, so a pre-existing scope can still point at the legacy group. Excluding it by name
+reported that group as unreferenced and offered to delete a group the app was still scoped to;
+reporting a scope that hasn't caught up only *withholds* the delete, which is the safe direction.
+`retired_groups_note` follows the same rule — it claims "can be cleaned up" only when every group
+came back with no reference **and** a completed check.
+
+`delete_exchange_scope_group` is the cleanup, and it is **offered, never automatic**:
+`Remove-DistributionGroup` has no undo (the address starts bouncing), and the checks above cannot see
+transport rules, DLP/retention, nesting, or anyone who simply mails the group. So the UI states that
+limit and takes a typed confirmation, and the command re-verifies every guard against live state
+before acting: the group must still resolve *as a distribution/mail-enabled security group*, must not
+be this app's managed scope group (deleting that removes the app's access entirely), and must have
+**zero** references from a check that **completed** — `reference_check_complete: false` is an unknown
+and is refused, never read as clean. No invalidation: a distribution group is absent from the app/SP
+and name indexes, and both the group listing and the scope verdict are read live.
+
 The grant flow is **unchanged**: the UI passes the managed group's identifier in the existing
 `groups` list, so `apply_exchange_mailbox_scope` resolves its DN and builds the `MemberOfGroup`
 filter as it does for any group. The win is that the group's DN is **stable**, so scoping is
@@ -337,6 +397,19 @@ Two kinds vary the pattern:
   busts the detail + audit caches. Safe because it's purely additive. `build_remediations` takes
   the owner count (`app.owners.as_ref().map(Vec::len)` — the same data Rule 14 keys off); `None`
   (owners not fetched, incl. every SP-only row) attaches nothing.
+- **`MigrateApplicationAccessPolicy`** (Rule 11's legacy bucket) also has **no dedicated handler**:
+  the modal (`views/dialogs/migrate_legacy_scope.rs`) drives the existing
+  `migrate_application_access_policies` command scoped to one app, which already re-resolves every
+  input live and carries the three guards above. Two consequences to preserve: it is keyed on the
+  **appId** (a policy names an application, not a directory object) and works from *granted* roles,
+  so it needs **no `ScopeFixTarget` split** — one call serves an app registration, a foreign
+  enterprise app and an MI alike; and it is **plan-first** — opening the modal runs the dry run and
+  the commit stays disabled until that plan returns, because the fail-closed outcomes (scope left on
+  the legacy group, policy kept) are only visible there. Both surfaces render the report through
+  `components::aap_migration_report::AapMigrationReportView`, whose one job is that a `partial`
+  status never reads as success. The command now busts `invalidate_app_lists` on a **non-dry** run
+  that produced any item (partial included — the grants really were removed); a dry run busts
+  nothing.
 - **`DisableSignIn`** (unused app) is attached by the **audit runner's sign-in post-pass**, not
   `score_application` — `unused` is a post-pass flag (the sign-in report is fetched after scoring),
   and it's skipped when the SP is already disabled. Safe because it's reversible: the handler
@@ -424,6 +497,12 @@ collapsed disclosure.
 
 - **`expired` matches only `CredentialStatus::Expired`** — expiring-soon lives in the
   Credential-expiry lens, not this finding.
+- **The three mailbox findings are mutually exclusive by construction.** `legacy_mailbox_scope` is
+  neither `orgwide_mailbox` (the access IS confined) nor `scoped_mailbox` (that group is the healthy
+  end state it migrates toward); the separation rests entirely on the scorer keeping
+  `SCOPED_VIA_RBAC` out of *both* legacy advisories. It is Actionable with **no bulk action**: the
+  migration is per-app and plan-first, so a uniform bulk form would have nothing to show (the same
+  shape as `high_risk_perms` / `no_local_app`).
 - **Load-bearing asymmetry:** `scoped_mailbox` matches with `.contains(SCOPED_VIA_RBAC)` while
   every sibling finding uses `.starts_with` — the marker sits mid-issue, not at the front. The
   `filter.rs` tests pin this; a "normalize everything to `starts_with`" sweep silently empties
@@ -473,11 +552,14 @@ foreign-tenant (OIDC/multi-tenant) enterprise apps, managed identities, orphaned
 - **Applicable rules only**: permission risk (1 & 2), admin consent (3), disabled SP (4),
   mailbox/SharePoint advisories (11, 12), high-risk delegated (13), plus the sign-in post-pass.
   Credential rules (5–9) and manifest rules (10, 14–18, downgrades) are deliberately absent —
-  those objects live in the app's home tenant. `mail_scopes` stays **empty on purpose**: a held
-  mail value here IS an un-stripped org-wide Entra grant, so the reconciliation would force
-  `OrgWide` regardless of any RBAC probe — empty scores identically without the 1–5s Exchange
+  those objects live in the app's home tenant. No **RBAC** verdict is resolved, **on purpose**: a
+  held mail value here IS an un-stripped org-wide Entra grant, so the reconciliation would force
+  `OrgWide` regardless of any RBAC probe — skipping it scores identically without the 1–5s Exchange
   probe per SP. (A properly scoped principal no longer holds the grant and drops out of the
   candidate set; its RBAC-only access is not surfaced — under-reporting an advisory, never risk.)
+  The **legacy AAP verdict is the one exception**, and it costs nothing extra (see
+  `apply_legacy_policy_verdict` above): unlike an RBAC scope, a policy *does* constrain the org-wide
+  Entra grant these rows are scored from.
 - **Wire shape**: one additive field, `AuditItem.principal_kind`
   (`application` | `service_principal` | `managed_identity`, `#[serde(default)]` so pre-field
   cached runs deserialize as `Application`). For SP rows `object_id` is the **SP object id**.
@@ -523,6 +605,17 @@ apps that can touch it. Invariants:
 - **Org-wide holders don't appear.** Only `Sites.Selected`-model grants create per-site rows; an
   app holding org-wide `Sites.*` reaches every site without appearing here — the view says so and
   points at the audit (Rule 12), which owns that finding.
+- **The index has a second consumer: the per-app panel.** `components::app_site_access_panel`
+  ("Sites this app can reach", on the app-reg + enterprise Permissions tabs and the MI pane) answers
+  the `Sites.Selected` blind spot *per principal*, so an operator never has to know a site URL to see
+  what an app reaches. `get_app_site_access` projects one app's rows out of the **cached** sweep
+  backend-side — a tenant sweep holds up to 5000 sites' grants, and shipping all of them so one
+  collapsible panel could keep a handful would put a multi-MB payload on every Permissions tab. When
+  nothing is cached the panel runs the same sweep and projects the result **client-side**, because a
+  partial or cancelled sweep is deliberately never cached and re-reading would discard it. Both paths
+  call the one pure `AppSiteAccessDto::from_sweep`, so they cannot disagree about what "this app's
+  sites" means, and `is_complete()` gates the empty state: "no per-site grants" is only claimed when
+  every enumerable site was actually read.
 - The completed result is cached under the tenant-prefixed `{tenant}|site_sweep` key
   (`CacheKind::Audit`, 60-minute TTL) so revisiting the view rehydrates without re-scanning.
 

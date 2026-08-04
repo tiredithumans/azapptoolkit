@@ -18,7 +18,7 @@ use azapptoolkit_core::audit::{MailPermissionScope, ScopeMechanism};
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::scoping::{is_blanket_mailbox_grant, is_scopable_exchange_permission};
 use azapptoolkit_exchange::models::{
-    ExoApplicationAccessPolicy, ExoAuthorizationResult, ExoRoleAssignment,
+    ExoApplicationAccessPolicy, ExoAuthorizationResult, ExoManagementScope, ExoRoleAssignment,
 };
 use azapptoolkit_exchange::targets::{
     ExchangeTarget, count_member_of_group, exchange_target, filter_targets_by_value,
@@ -40,7 +40,7 @@ use crate::dto::exchange::{
     AapMigrationItem, AapMigrationReport, ExchangeAccessRemovalResult, ExchangeAccessResult,
     ExchangeGroupMemberDto, ExchangeGroupRef, ExchangeMemberFailure, ExchangeMemberMutationResult,
     ExchangeRoleAssignmentDto, ExchangeScopeConsolidationResult, ExchangeScopeGroupDto,
-    MailScopeEntry,
+    MailScopeEntry, RetiredScopeGroupDto,
 };
 use crate::state::AppState;
 use azapptoolkit_core::defaults::TenantDefaults;
@@ -605,6 +605,43 @@ pub(crate) fn aap_verdict_for(
         group_count: None,
         mechanism: ScopeMechanism::LegacyApplicationAccessPolicy,
     })
+}
+
+/// Folds a legacy Application Access Policy verdict over the lean (audit-path)
+/// RBAC verdicts for one principal — the bulk-run equivalent of the per-app
+/// `aap_override` [`resolve_mail_scopes`] applies on the enriched detail path.
+///
+/// Applied by the caller, **after** the cached probe, so
+/// `resolve_mail_scopes_audit_cached` keeps caching the pure RBAC verdict and
+/// the two surfaces' cache warmth stays independent (see its doc comment).
+///
+/// Two shapes get the override, matching the detail path's two rules:
+/// - a permission RBAC reports `OrgWide` — a `RestrictAccess` policy genuinely
+///   confines the org-wide Entra grant, which is why `reconcile_orgwide_grant`
+///   exempts it;
+/// - a permission with **no** verdict at all — the probe failed or never ran
+///   (Exchange unavailable, breaker open, managed identity absent from the
+///   Exchange SP store). A policy keyed on this exact appId is stronger
+///   evidence than a failed probe, the same call `scope_from_rbac_error` makes.
+///
+/// A `Scoped` RBAC verdict is never overwritten: that app already migrated.
+pub(crate) fn apply_legacy_policy_verdict(
+    scopes: &mut HashMap<String, MailPermissionScope>,
+    values: &[String],
+    verdict: Option<&MailPermissionScope>,
+) {
+    let Some(verdict) = verdict else { return };
+    for value in values {
+        if !is_scopable_exchange_permission(value) {
+            continue;
+        }
+        match scopes.get(value) {
+            Some(MailPermissionScope::Scoped { .. }) => {}
+            _ => {
+                scopes.insert(value.clone(), verdict.clone());
+            }
+        }
+    }
 }
 
 /// Per-app mailbox-scope fallback when `Test-ServicePrincipalAuthorization`
@@ -1422,6 +1459,232 @@ async fn consolidate_scope_group(
     }
 }
 
+/// The identifiers one group answers to, for reference matching: Exchange
+/// records a group's DN in a management-scope filter but its *name* (or a
+/// canonical identity) in an Application Access Policy, so a single key can't
+/// match both.
+#[derive(Debug, Default)]
+pub(crate) struct GroupIdentity {
+    pub distinguished_name: String,
+    pub name: Option<String>,
+    pub primary_smtp_address: Option<String>,
+}
+
+impl GroupIdentity {
+    /// Case-insensitive match against any identifier this group answers to.
+    fn matches(&self, candidate: &str) -> bool {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            return false;
+        }
+        [
+            Some(self.distinguished_name.as_str()),
+            self.name.as_deref(),
+            self.primary_smtp_address.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|id| id.eq_ignore_ascii_case(candidate))
+    }
+}
+
+/// Everything that still references `group`, as far as Exchange lets us ask —
+/// pure, so the matching rules are unit-testable without a live tenant.
+///
+/// Two enumerable authorities: **management scopes** (matched on the group DN in
+/// their `MemberOfGroup` filter) and **legacy Application Access Policies**
+/// (matched on `ScopeName`/`ScopeIdentity`, which carry the group *name*).
+///
+/// **The calling app's own scope is NOT excluded**, deliberately. It is read
+/// after the repoint, so normally it no longer names the group — but the
+/// migration skips its repoint when an operator-supplied `scope_name` override
+/// may be shared with other apps, and `ensure_management_scope` is create-only,
+/// so a pre-existing scope can still point at the legacy group. Excluding it by
+/// name reported that group as unreferenced and offered to delete a group the
+/// app was still scoped to. Reporting a scope that hasn't caught up yet only
+/// *withholds* the delete, which is the safe direction.
+///
+/// What this can NOT see is the important part, and the UI says so: transport
+/// rules, DLP/retention policies, nesting inside other groups, anything outside
+/// Exchange, and — the common case — humans and systems that simply send mail to
+/// the address. An empty result is "no reference the toolkit can enumerate",
+/// never "safe to delete".
+pub(crate) fn references_to_group(
+    group: &GroupIdentity,
+    scopes: &[ExoManagementScope],
+    policies: &[ExoApplicationAccessPolicy],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for scope in scopes {
+        let scope_name = scope
+            .name
+            .as_deref()
+            .or(scope.identity.as_deref())
+            .unwrap_or("(unnamed)");
+        let Some(filter) = scope.recipient_filter.as_deref() else {
+            continue;
+        };
+        if group_dns_in_filter(filter)
+            .into_iter()
+            .any(|dn| group.matches(dn))
+        {
+            out.push(format!("management scope '{scope_name}'"));
+        }
+    }
+    for policy in policies {
+        let scope_ref = policy
+            .scope_name
+            .as_deref()
+            .filter(|s| group.matches(s))
+            .or_else(|| {
+                policy
+                    .scope_identity
+                    .as_deref()
+                    .filter(|s| group.matches(s))
+            });
+        if scope_ref.is_some() {
+            out.push(format!(
+                "Application Access Policy '{}' (app {})",
+                policy.identity.as_deref().unwrap_or("(unnamed)"),
+                policy.app_id.as_deref().unwrap_or("unknown"),
+            ));
+        }
+    }
+    out
+}
+
+/// Resolves the groups a repoint left behind and reports what still references
+/// them, so the result can name the cleanup candidate instead of saying "the
+/// previous group".
+///
+/// Best-effort by design: a group that no longer resolves, or a reference read
+/// that fails, yields `reference_check_complete: false` — the operator still
+/// sees the DN (which is what they need to find it), but no delete affordance
+/// is offered on an unknown.
+async fn retired_scope_groups(
+    exo: &ExchangeClient,
+    source_dns: &[String],
+) -> Vec<RetiredScopeGroupDto> {
+    if source_dns.is_empty() {
+        return Vec::new();
+    }
+    // Both reads are org-wide and independent of the per-group loop below.
+    let (scopes, policies) = futures::join!(
+        exo.list_management_scopes(),
+        exo.get_application_access_policies(),
+    );
+    let readable = scopes.is_ok() && policies.is_ok();
+    let scopes = scopes.unwrap_or_default();
+    let policies = policies.unwrap_or_default();
+
+    let mut out = Vec::new();
+    for dn in source_dns {
+        let resolved = exo.get_group(dn).await.ok().flatten();
+        let group = GroupIdentity {
+            distinguished_name: dn.clone(),
+            name: resolved.as_ref().and_then(|g| g.name.clone()),
+            primary_smtp_address: resolved
+                .as_ref()
+                .and_then(|g| g.primary_smtp_address.clone()),
+        };
+        let still_referenced_by = references_to_group(&group, &scopes, &policies);
+        out.push(RetiredScopeGroupDto {
+            display_name: group.name.clone(),
+            primary_smtp_address: group.primary_smtp_address.clone(),
+            distinguished_name: group.distinguished_name,
+            still_referenced_by,
+            // A group we couldn't resolve can't be matched by name either, so
+            // its policy check is unreliable — report the whole check as
+            // incomplete rather than a clean bill of health.
+            reference_check_complete: readable && resolved.is_some(),
+        });
+    }
+    out
+}
+
+/// Deletes a group a consolidation retired — the explicit, separately confirmed
+/// cleanup step, never a side effect of the move.
+///
+/// **`Remove-DistributionGroup` is not reversible**, so every guard is re-checked
+/// against live state here rather than trusted from the caller's snapshot:
+///
+/// 1. the group must still exist *as a distribution / mail-enabled security
+///    group* (so a mistyped identity can't match something else);
+/// 2. it must not be this app's toolkit-managed scope group — that is the group
+///    the scope was just repointed *onto*, and deleting it would cut the app off
+///    from every mailbox;
+/// 3. nothing the toolkit can enumerate may still reference it, and that check
+///    must have completed — an unknown is refused, not assumed clean.
+///
+/// The residual risk the toolkit cannot check for (mail flow, transport rules,
+/// nesting, non-Exchange consumers) is stated in the UI; this command is the
+/// last gate, not the only one.
+#[tauri::command]
+pub async fn delete_exchange_scope_group(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    app_id: String,
+    group_identity: String,
+) -> Result<(), UiError> {
+    let exo = exchange_client_checked(&state, &tenant_id).await?;
+    let defaults = load_tenant_defaults(&tenant_id);
+
+    let Some(group) = exo.get_distribution_group(&group_identity).await? else {
+        return Err(UiError::not_found(
+            "group_not_found",
+            format!(
+                "no distribution or mail-enabled security group matches '{group_identity}' — it \
+                 may already have been deleted."
+            ),
+        ));
+    };
+    let identity = GroupIdentity {
+        distinguished_name: group
+            .distinguished_name
+            .clone()
+            .unwrap_or_else(|| group_identity.clone()),
+        name: group.name.clone(),
+        primary_smtp_address: group.primary_smtp_address.clone(),
+    };
+
+    let managed = defaults.group_name_for(&app_id);
+    if identity.matches(&managed) {
+        return Err(UiError::validation(
+            "managed_group",
+            format!(
+                "'{managed}' is the toolkit-managed scope group this app's management scope now \
+                 points at. Deleting it would remove the app's mailbox access entirely."
+            ),
+        ));
+    }
+
+    // Re-check references live; the caller's snapshot is advisory.
+    let scopes = exo.list_management_scopes().await?;
+    let policies = exo.get_application_access_policies().await?;
+    let references = references_to_group(&identity, &scopes, &policies);
+    if !references.is_empty() {
+        return Err(UiError::validation(
+            "group_in_use",
+            format!(
+                "'{}' is still referenced by {}. Repoint or remove those first.",
+                identity
+                    .name
+                    .as_deref()
+                    .unwrap_or(&identity.distinguished_name),
+                references.join(", ")
+            ),
+        ));
+    }
+
+    exo.remove_distribution_group(&identity.distinguished_name)
+        .await?;
+    // Nothing to invalidate: a distribution group is absent from the app/SP
+    // pairing + name indexes, and both the scope-group listing and the scope
+    // verdict are read live (the verdict keys off the scope's own filter, which
+    // this doesn't touch) — the same reasoning as the membership mutators.
+    Ok(())
+}
+
 /// Points an existing management scope at `wanted_filter` when its current
 /// filter names a different group set. A no-op when the scope is already right
 /// (or doesn't exist yet — the caller's `ensure_management_scope` just made it
@@ -1541,6 +1804,7 @@ pub async fn move_exchange_scope_to_managed_group(
             members_copied: Vec::new(),
             members_unverified: Vec::new(),
             repointed: false,
+            retired_groups: Vec::new(),
             dry_run,
             warnings: vec!["already scoped to the toolkit-managed group".into()],
         });
@@ -1566,6 +1830,10 @@ pub async fn move_exchange_scope_to_managed_group(
             members_copied: consolidation.copied,
             members_unverified: consolidation.unverified,
             repointed: false,
+            // The scope still points at these groups, so nothing is retired —
+            // reporting a cleanup candidate here would invite deleting a group
+            // the app is still scoped to.
+            retired_groups: Vec::new(),
             dry_run,
             warnings,
         });
@@ -1574,12 +1842,14 @@ pub async fn move_exchange_scope_to_managed_group(
     let wanted_filter = member_of_group_filter(&consolidation.scope_dns);
     exo.set_management_scope_filter(&scope_name, &wanted_filter)
         .await?;
-    warnings.push(
-        "the previous group is no longer referenced by this app's scope and can be cleaned up. \
-         Exchange can take 30 min–2 h to apply the change (the permission tester bypasses that \
-         cache)."
-            .into(),
-    );
+    // Resolved AFTER the repoint, so this app's own scope is read in its new
+    // state rather than assumed to have moved.
+    let retired_groups = retired_scope_groups(&exo, &source_dns).await;
+    warnings.push(format!(
+        "{} Exchange can take 30 min–2 h to apply the change (the permission tester bypasses \
+         that cache).",
+        retired_groups_note(&retired_groups),
+    ));
     // The scope's group set (and so the resolved verdict, its filter and its
     // group count) really changed — detail + audit state, not the app/SP set.
     invalidate_app_detail_state(&state.cache, &tenant_id);
@@ -1593,9 +1863,49 @@ pub async fn move_exchange_scope_to_managed_group(
         members_copied: consolidation.copied,
         members_unverified: consolidation.unverified,
         repointed: true,
+        retired_groups,
         dry_run,
         warnings,
     })
+}
+
+/// The warning line for the group(s) a repoint retired — **named**, because "the
+/// previous group can be cleaned up" left operators hunting through Exchange for
+/// which one it meant. Falls back to the DN when a group no longer resolves by
+/// name, since that is still enough to find it.
+///
+/// The claim tracks the check: "can be cleaned up" only when every group came
+/// back with no reference *and* a completed check. Anything else says review,
+/// because a scope the migration deliberately did not repoint (an operator-set
+/// `scope_name` override that other apps may share) still points here.
+pub(crate) fn retired_groups_note(groups: &[RetiredScopeGroupDto]) -> String {
+    if groups.is_empty() {
+        return "The previous group(s) are no longer this app's scope source.".to_string();
+    }
+    let names: Vec<&str> = groups
+        .iter()
+        .map(|g| {
+            g.display_name
+                .as_deref()
+                .or(g.primary_smtp_address.as_deref())
+                .unwrap_or(&g.distinguished_name)
+        })
+        .collect();
+    let list = format!("'{}'", names.join("', '"));
+    let verb = if names.len() == 1 { "is" } else { "are" };
+    let clean = groups
+        .iter()
+        .all(|g| g.reference_check_complete && g.still_referenced_by.is_empty());
+    if clean {
+        format!(
+            "{list} {verb} no longer referenced by any management scope or Application Access \
+             Policy the toolkit can see, and can be cleaned up."
+        )
+    } else {
+        format!(
+            "{list} {verb} this app's previous scope source — review the notes before deleting."
+        )
+    }
 }
 
 // ---------------- Migrate legacy Application Access Policies ----------------
@@ -1722,6 +2032,17 @@ pub async fn migrate_application_access_policies(
             Ok(item) => items.push(item),
             Err(msg) => failures.push(format!("{policy_app_id}: {msg}")),
         }
+    }
+
+    // A real run assigns Exchange roles and removes org-wide Entra grants, which
+    // changes the app/SP lists, every detail payload, the mailbox-scope verdicts
+    // AND the audit's scoping findings — `invalidate_app_lists` reaches all four.
+    // A dry run mutated nothing, so it must not bust anything. Same exception the
+    // credential remediation makes: a **partial** migration is still a real write,
+    // so invalidate whenever any app produced an item rather than only on a clean
+    // sweep (`migrate_one` reports its own failures inside the item's warnings).
+    if !dry_run && !items.is_empty() {
+        invalidate_app_lists(&state.cache, &tenant_id);
     }
 
     Ok(AapMigrationReport {
@@ -1855,6 +2176,8 @@ async fn migrate_one(
                 .collect(),
             removed_entra_grants: targets.iter().map(|t| t.graph_value.clone()).collect(),
             removed_policies: if removable { identities } else { Vec::new() },
+            // A plan repoints nothing, so no group is retired yet.
+            retired_groups: Vec::new(),
             status: "planned".into(),
             warnings,
         });
@@ -1933,6 +2256,25 @@ async fn migrate_one(
         status = "partial";
     }
 
+    // 6. Name the legacy group(s) the new scope no longer points at, so "the
+    //    policy group is left in place for you to clean up" says WHICH one. Only
+    //    when the consolidation actually repointed: otherwise the scope still
+    //    references them and they are in use by definition. A KEPT policy still
+    //    names its group, so it shows up as a live reference — which is exactly
+    //    right, and stops the operator deleting the group out from under it.
+    let retired_groups = if consolidation.consolidated {
+        retired_scope_groups(exo, &dns).await
+    } else {
+        Vec::new()
+    };
+    if !retired_groups.is_empty() {
+        warnings.push(format!(
+            "{} The toolkit can only check Exchange management scopes and policies — not mail \
+             flow, transport rules, or anything outside Exchange.",
+            retired_groups_note(&retired_groups),
+        ));
+    }
+
     Ok(AapMigrationItem {
         app_id: app_id.to_string(),
         source_policy_identities: identities,
@@ -1944,6 +2286,7 @@ async fn migrate_one(
         roles_assigned,
         removed_entra_grants,
         removed_policies,
+        retired_groups,
         status: status.into(),
         warnings,
     })
@@ -2450,6 +2793,153 @@ mod tests {
     fn aap_ignores_policies_for_other_apps() {
         let policies = [aap("other-app", "RestrictAccess", Some("Sales"))];
         assert!(aap_verdict_for(&policies, "app-1").is_none());
+    }
+
+    fn scope(name: &str, filter: &str) -> ExoManagementScope {
+        ExoManagementScope {
+            name: Some(name.into()),
+            identity: Some(name.into()),
+            recipient_filter: Some(filter.into()),
+        }
+    }
+
+    fn retired(dn: &str, name: &str) -> GroupIdentity {
+        GroupIdentity {
+            distinguished_name: dn.into(),
+            name: Some(name.into()),
+            primary_smtp_address: Some(format!("{}@contoso.com", name.to_ascii_lowercase())),
+        }
+    }
+
+    #[test]
+    fn group_references_span_both_authorities_including_this_apps_own_scope() {
+        let group = retired("CN=Sales,DC=x", "Sales");
+        let scopes = [
+            // THIS app's scope, still naming the group: the migration skips its
+            // repoint when an operator-set scope name may be shared with other
+            // apps, so this really happens — and excluding it by name is what
+            // used to offer a delete on a group the app was still scoped to.
+            scope("app_scope_app-1", "MemberOfGroup -eq 'CN=Sales,DC=x'"),
+            // Another app's scope (case-folded DN match).
+            scope("app_scope_app-2", "MemberOfGroup -eq 'cn=sales,dc=x'"),
+            scope("app_scope_app-3", "MemberOfGroup -eq 'CN=Other,DC=x'"),
+        ];
+        // A policy names the group by NAME, not DN — matching on one key alone
+        // would miss one of the two authorities entirely.
+        let policies = [aap("app-9", "RestrictAccess", Some("Sales"))];
+
+        let refs = references_to_group(&group, &scopes, &policies);
+        assert_eq!(refs.len(), 3, "{refs:?}");
+        assert!(refs.iter().any(|r| r.contains("app_scope_app-1")));
+        assert!(refs.iter().any(|r| r.contains("app_scope_app-2")));
+        assert!(refs.iter().any(|r| r.contains("Application Access Policy")));
+        assert!(!refs.iter().any(|r| r.contains("app_scope_app-3")));
+    }
+
+    #[test]
+    fn a_group_nothing_references_reports_clean() {
+        // The normal post-repoint shape: this app's scope now names the managed
+        // group, and no policy names the retired one.
+        let group = retired("CN=Retired,DC=x", "Retired");
+        let refs = references_to_group(
+            &group,
+            &[scope(
+                "app_scope_app-1",
+                "MemberOfGroup -eq 'CN=Managed,DC=x'",
+            )],
+            &[aap("app-9", "RestrictAccess", Some("Something Else"))],
+        );
+        assert!(refs.is_empty(), "{refs:?}");
+    }
+
+    #[test]
+    fn retired_groups_note_names_them_and_only_claims_clean_when_it_is() {
+        let clean = RetiredScopeGroupDto {
+            display_name: Some("Sales Mailboxes".into()),
+            primary_smtp_address: None,
+            distinguished_name: "CN=Sales,DC=x".into(),
+            still_referenced_by: Vec::new(),
+            reference_check_complete: true,
+        };
+        let note = retired_groups_note(std::slice::from_ref(&clean));
+        assert!(note.starts_with("'Sales Mailboxes' is"), "{note}");
+        assert!(note.contains("can be cleaned up"), "{note}");
+
+        // A live reference must NOT read as cleanable.
+        let referenced = RetiredScopeGroupDto {
+            still_referenced_by: vec!["management scope 'app_scope_other'".into()],
+            ..clean.clone()
+        };
+        let note = retired_groups_note(&[referenced]);
+        assert!(!note.contains("can be cleaned up"), "{note}");
+        assert!(note.contains("review the notes"), "{note}");
+
+        // Nor may an INCOMPLETE check — an unknown is not a clean bill of
+        // health. The name falls back to the DN, still enough to find it.
+        let unchecked = RetiredScopeGroupDto {
+            display_name: None,
+            primary_smtp_address: None,
+            distinguished_name: "CN=Ghost,DC=x".into(),
+            still_referenced_by: Vec::new(),
+            reference_check_complete: false,
+        };
+        let note = retired_groups_note(&[unchecked]);
+        assert!(note.starts_with("'CN=Ghost,DC=x' is"), "{note}");
+        assert!(!note.contains("can be cleaned up"), "{note}");
+
+        assert!(
+            !retired_groups_note(&[]).is_empty(),
+            "no resolved group must still read as a sentence"
+        );
+    }
+
+    #[test]
+    fn legacy_policy_verdict_fills_org_wide_and_missing_but_never_an_rbac_scope() {
+        let legacy = aap_verdict_for(&[aap("app-1", "RestrictAccess", Some("Sales"))], "app-1")
+            .expect("legacy verdict");
+        let rbac = MailPermissionScope::Scoped {
+            scope_name: Some("app_scope_app-1".into()),
+            recipient_filter: None,
+            group_count: Some(1),
+            mechanism: ScopeMechanism::Rbac,
+        };
+        let mut scopes = HashMap::from([
+            ("Mail.Read".to_string(), MailPermissionScope::OrgWide),
+            ("Mail.Send".to_string(), rbac.clone()),
+        ]);
+        let values = [
+            "Mail.Read".to_string(),
+            "Mail.Send".to_string(),
+            // No verdict at all (probe failed / never ran) — the policy answers.
+            "Calendars.Read".to_string(),
+            // Not Exchange-scopable: a policy can't confine it, so it must not
+            // gain a scoped verdict (that would under-report its reach).
+            "Directory.Read.All".to_string(),
+        ];
+
+        apply_legacy_policy_verdict(&mut scopes, &values, Some(&legacy));
+
+        assert_eq!(scopes.get("Mail.Read"), Some(&legacy), "org-wide → legacy");
+        assert_eq!(
+            scopes.get("Calendars.Read"),
+            Some(&legacy),
+            "no verdict → legacy"
+        );
+        assert_eq!(
+            scopes.get("Mail.Send"),
+            Some(&rbac),
+            "an app that already migrated keeps its RBAC verdict"
+        );
+        assert!(!scopes.contains_key("Directory.Read.All"));
+
+        // No policy for this app ⇒ untouched (today's behavior).
+        let mut untouched =
+            HashMap::from([("Mail.Read".to_string(), MailPermissionScope::OrgWide)]);
+        apply_legacy_policy_verdict(&mut untouched, &values, None);
+        assert_eq!(
+            untouched.get("Mail.Read"),
+            Some(&MailPermissionScope::OrgWide)
+        );
     }
 
     #[test]

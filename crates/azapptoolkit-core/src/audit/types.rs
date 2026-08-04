@@ -325,16 +325,28 @@ impl AppPermissions {
     }
 
     pub(super) fn is_scoped(&self, grant: &ResourcePermission) -> bool {
+        self.scope_mechanism(grant).is_some()
+    }
+
+    /// **Which** mechanism confines `grant`, or `None` when it isn't confirmed
+    /// scoped at all — the single read of `mail_scopes`, so the resource gate
+    /// above can't be bypassed by a caller that only wants the mechanism.
+    ///
+    /// Rule 11 splits its scoped bucket on this: RBAC for Applications is the
+    /// healthy end state, while a legacy Application Access Policy genuinely
+    /// confines the access *today* (so it keeps the reduced scoped weight) but
+    /// is a deprecated mechanism the audit surfaces for migration.
+    pub(super) fn scope_mechanism(&self, grant: &ResourcePermission) -> Option<ScopeMechanism> {
         if !crate::scoping::is_scopable_exchange_resource_permission(
             grant.resource_app_id.as_deref(),
             &grant.value,
         ) {
-            return false;
+            return None;
         }
-        matches!(
-            self.mail_scopes.get(&grant.value),
-            Some(MailPermissionScope::Scoped { .. })
-        )
+        match self.mail_scopes.get(&grant.value) {
+            Some(MailPermissionScope::Scoped { mechanism, .. }) => Some(*mechanism),
+            _ => None,
+        }
     }
 }
 
@@ -374,6 +386,21 @@ pub enum RemediationKind {
     /// working sign-in or revoke access. The "Fix" opens a guided user picker;
     /// the existing add-owner mutation does the write.
     AddOwner,
+    /// Migrate mailbox access confined by a **legacy Application Access
+    /// Policy** to Exchange RBAC for Applications. Safe because the migration
+    /// itself is guarded and fail-closed: it re-reads the live policies, folds
+    /// every `RestrictAccess` policy on the app into ONE management scope over
+    /// the union of their groups, grants the scoped Exchange roles *before*
+    /// stripping the org-wide Entra consent, and deletes a policy only once
+    /// every grant it was confining has actually been re-scoped — so an
+    /// interrupted or partial run never widens the app's reach.
+    ///
+    /// The only remediation with **no dedicated `commands/remediation.rs`
+    /// handler** besides [`Self::AddOwner`]: the modal drives the existing
+    /// `migrate_application_access_policies` command (scoped to this one app),
+    /// which already re-resolves every input live. A wrapper would add a second
+    /// entry point to the same guarded flow and nothing else.
+    MigrateApplicationAccessPolicy,
     /// Disable sign-in for an *unused* app (no sign-in past [`UNUSED_APP_DAYS`])
     /// by setting `accountEnabled: false` on its service principal. Safe because
     /// it is reversible — re-enable any time from the enterprise app's Overview.
@@ -512,6 +539,15 @@ pub mod issue {
     pub const UNCONFINABLE_MAILBOX: &str = "Org-wide mailbox access that RBAC cannot confine";
     /// Substring shared by every "…scoped via RBAC for Applications…" advisory.
     pub const SCOPED_VIA_RBAC: &str = "scoped via RBAC for Applications";
+    /// Mailbox access that IS confined today, but by a deprecated legacy
+    /// Application Access Policy rather than RBAC for Applications. A prefix
+    /// marker like its siblings, and deliberately worded so it does **not**
+    /// contain [`SCOPED_VIA_RBAC`] — that substring would also pull the row
+    /// into the healthy "Mailbox access scoped" group, hiding the finding
+    /// behind a positive signal. Carries the
+    /// [`super::RemediationKind::MigrateApplicationAccessPolicy`] fix.
+    pub const LEGACY_MAILBOX_POLICY: &str =
+        "Mailbox access confined by a legacy Application Access Policy";
     pub const ORG_WIDE_SHAREPOINT: &str = "Organization-wide SharePoint access";
     pub const SCOPED_SHAREPOINT: &str = "SharePoint access scoped to selected sites";
     pub const NO_OWNERS: &str = "No owners assigned";
