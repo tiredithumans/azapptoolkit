@@ -10,6 +10,8 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-08-04
+
 ### Added
 
 - **An app's Permissions tab now shows which SharePoint sites it can reach, and
