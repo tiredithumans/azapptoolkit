@@ -26,6 +26,7 @@ pub mod open_items_workspace;
 pub mod orgwide_scope_callout;
 pub mod owner_picker;
 pub mod permission_picker;
+pub mod release_notes;
 pub mod requires_role;
 pub mod saved_views;
 pub mod scope_badge;

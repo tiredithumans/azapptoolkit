@@ -14,6 +14,7 @@ use crate::components::global_search::GlobalSearch;
 use crate::components::icon::{Icon, IconName};
 use crate::components::open_items_dock::OpenItemsDock;
 use crate::components::open_items_workspace::OpenItemsWorkspace;
+use crate::components::release_notes::ReleaseNotesDialog;
 use crate::components::shortcuts_help::ShortcutsHelp;
 use crate::components::toast::{ToastHost, ToastKind};
 use crate::components::update_splash::UpdateSplash;
@@ -130,6 +131,9 @@ pub fn AppShell(children: Children) -> impl IntoView {
     // the splash; the nav "Check for updates" button opens it directly.
     let update_info: RwSignal<Option<updater::UpdateInfo>> = RwSignal::new(None);
     let update_open = RwSignal::new(false);
+    // "What's new" for the version already installed — the notes baked into
+    // this build, reachable from the account menu after the splash is gone.
+    let release_notes_open = RwSignal::new(false);
     Effect::new(move |_| {
         // Runs once (no tracked reads). A check failure — e.g. a dev build with
         // no updater, or GitHub being unreachable — is swallowed silently; the
@@ -432,9 +436,27 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                     </button>
                                     // App version, baked at compile time — the release
                                     // bumps web-rs in lockstep, so CARGO_PKG_VERSION is
-                                    // the shipped one.
+                                    // the shipped one. "What's new" re-opens this
+                                    // version's release notes, which otherwise existed
+                                    // only in the update splash the user already
+                                    // dismissed.
                                     <div class="shell__account-version">
-                                        {concat!("Version ", env!("CARGO_PKG_VERSION"))}
+                                        <span>{concat!("Version ", env!("CARGO_PKG_VERSION"))}</span>
+                                        // `role="menuitem"` like its siblings: the
+                                        // container is `role="menu"`, where an
+                                        // interactive child with no role is invisible
+                                        // to a screen reader walking the menu.
+                                        <button
+                                            class="link-btn"
+                                            type="button"
+                                            role="menuitem"
+                                            on:click=move |_| {
+                                                release_notes_open.set(true);
+                                                menu_open.set(false);
+                                            }
+                                        >
+                                            "What's new"
+                                        </button>
                                     </div>
                                 </div>
                             </Show>
@@ -483,6 +505,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                 on_close=Callback::new(move |()| session.tenant_ui.cache_open.set(false))
             />
             <UpdateSplash open=update_open info=update_info />
+            <ReleaseNotesDialog open=release_notes_open />
             <ToastHost />
             <ToolDialogs />
         </div>
