@@ -16,7 +16,8 @@ use azapptoolkit_core::models::{Site, SitePermission};
 use azapptoolkit_core::scoping::is_sharepoint_orgwide;
 
 use crate::commands::applications::invalidate_app_lists;
-use crate::commands::dispatch::dispatch_capped;
+use crate::commands::dispatch::{SessionDead, dispatch_capped};
+use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::graph_roles::graph_role_index;
 use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
@@ -60,10 +61,8 @@ async fn sharepoint_client_checked(
 /// lives in the capability catalog.
 fn sharepoint_err(err: azapptoolkit_graph::GraphError) -> UiError {
     let mut ui = UiError::from(err);
-    if ui.code == "forbidden"
-        && let Some(cap) = azapptoolkit_core::capabilities::capability("sharepoint_sites_selected")
-    {
-        ui.message = cap.remediation.to_string();
+    if let Some(remediation) = forbidden_remediation(&ui, "sharepoint_sites_selected") {
+        ui.message = remediation.to_string();
     }
     ui
 }
@@ -430,6 +429,7 @@ pub async fn sweep_site_permissions(
     // number nothing consulted, so the adaptive back-off the comment advertises
     // did not exist and the walk was fully serial besides.
     let chunks: Vec<Vec<Site>> = sites.chunks(SWEEP_BATCH).map(<[Site]>::to_vec).collect();
+    let session = SessionDead::new();
     let stopped_early = dispatch_capped(
         chunks,
         {
@@ -437,7 +437,10 @@ pub async fn sweep_site_permissions(
             move || tracker.current_limit()
         },
         |chunk| {
-            if cancel.is_cancelled() {
+            // A dead session fails every remaining chunk identically — an
+            // incomplete sweep must not be reported as the tenant's full
+            // Sites.Selected picture.
+            if cancel.is_cancelled() || session.is_dead() {
                 return None;
             }
             let client = client.clone();
@@ -467,6 +470,9 @@ pub async fn sweep_site_permissions(
                 tracing::warn!("site sweep: chunk task failed to join");
                 return;
             };
+            for err in results.iter().filter_map(|r| r.as_ref().err()) {
+                session.note_code(err.ui_code());
+            }
             // A degraded chunk cut short by cancellation yields fewer results
             // than sites; `zip` folds only the pairs that exist.
             for (site, result) in chunk.iter().zip(results) {
@@ -494,6 +500,12 @@ pub async fn sweep_site_permissions(
         },
     )
     .await;
+    if session.is_dead() {
+        // Never cache or return a truncated sweep: `AppSiteAccessDto::from_sweep`
+        // reads an empty site list as "no grants" whenever the sweep claims to
+        // be complete, so a partial run understates an app's reach.
+        return Err(session.err("the SharePoint site sweep"));
+    }
     cancelled = cancelled || stopped_early;
 
     cancelled = cancelled || cancel.is_cancelled();

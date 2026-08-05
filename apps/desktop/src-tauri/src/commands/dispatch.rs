@@ -11,6 +11,80 @@
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::task::{JoinError, JoinHandle};
 
+use crate::dto::UiError;
+
+/// Latches "the session is dead" across a [`dispatch_capped`] run.
+///
+/// A re-auth-fatal failure means every remaining item would fail identically,
+/// so the run must stop rather than return a silently partial result the UI
+/// presents as complete — in a DR backup or a `Sites.Selected` sweep that is a
+/// wrong answer, not a slow one. `UiError::is_reauth_fatal` is the single
+/// definition of the codes (azapptoolkit-dto, shared by both tiers).
+///
+/// An `Arc<AtomicBool>` rather than a `Cell`: the enclosing `#[tauri::command]`
+/// future must be `Send` (a `Cell` held across an await is not), and cloning it
+/// into a spawned task lets a fan-out whose per-item errors never reach the
+/// collector — a DR backup chunk, say — report the dead session itself.
+#[derive(Clone, Default)]
+pub(crate) struct SessionDead(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl SessionDead {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Gate `dispatch_capped`'s `spawn` on this: returning `None` stops
+    /// dispatch while letting in-flight tasks drain into `collect`.
+    pub(crate) fn is_dead(&self) -> bool {
+        self.get()
+    }
+
+    /// Records a per-item failure. Returns `true` when it ended the session.
+    pub(crate) fn note(&self, err: impl Into<UiError>) -> bool {
+        let fatal = err.into().is_reauth_fatal();
+        if fatal {
+            self.set();
+        }
+        fatal
+    }
+
+    /// Records a failure held only by reference, via its stable `ui_code()`.
+    /// Routed through [`Self::note`] so `UiError::is_reauth_fatal` stays the
+    /// single definition of which codes are fatal.
+    pub(crate) fn note_code(&self, code: &str) -> bool {
+        self.note(UiError::new(code, String::new(), false))
+    }
+
+    /// Records an already-classified verdict, for a task that could only send
+    /// the boolean back (its error type didn't survive the task boundary).
+    pub(crate) fn note_fatal(&self, fatal: bool) -> bool {
+        if fatal {
+            self.set();
+        }
+        fatal
+    }
+
+    /// The error a command should return instead of a partial result.
+    pub(crate) fn err(&self, what: &str) -> UiError {
+        UiError::new(
+            "refresh_missing",
+            format!(
+                "the session ended partway through {what}, so the result would be incomplete. \
+                 Sign in again and re-run it."
+            ),
+            false,
+        )
+    }
+}
+
 /// Spawns one task per item with at most `cap()` in flight, feeding **every**
 /// completed task to `collect` — including the ones awaited just to enforce
 /// the cap. `cap` is re-read between completions so an adaptive limit (the

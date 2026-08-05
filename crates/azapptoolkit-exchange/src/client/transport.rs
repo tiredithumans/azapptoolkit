@@ -2,6 +2,7 @@
 //! envelope POST, the retry loop with its diagnostics-header capture (the
 //! bodyless-403 semantics live here), and the shared result projections.
 
+use azapptoolkit_core::token::TokenError;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -72,7 +73,7 @@ impl ExchangeClient {
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {bearer}"))
-                .map_err(|e| ExchangeError::Token(e.to_string()))?,
+                .map_err(|e| ExchangeError::Token(TokenError::opaque(e.to_string())))?,
         );
         headers.insert(
             X_ANCHOR_MAILBOX,

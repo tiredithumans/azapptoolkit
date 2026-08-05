@@ -15,6 +15,7 @@ use azapptoolkit_core::models::{ServicePrincipal, SynchronizationJob};
 use azapptoolkit_graph::GraphError;
 
 use crate::commands::applications::{enterprise_key, invalidate_app_lists};
+use crate::commands::graph_err::forbidden_remediation;
 use crate::dto::UiError;
 use crate::dto::enterprise_application::{
     AppAssignmentDto, EnterpriseApplicationDetail, EnterpriseApplicationDto, GroupMembershipDto,
@@ -301,11 +302,9 @@ pub async fn remove_sp_from_group(
 /// capability catalog's remediation to a 403 (mechanism 1 of the role-feedback
 /// catalog — a membership 403 is unambiguous enough to name the role).
 fn group_membership_err(e: GraphError) -> UiError {
-    let forbidden = matches!(e, GraphError::Forbidden(_));
     let mut err = UiError::from(e);
-    if forbidden && let Some(cap) = azapptoolkit_core::capabilities::capability("group_membership")
-    {
-        err.message = format!("{} {}", err.message, cap.remediation);
+    if let Some(remediation) = forbidden_remediation(&err, "group_membership") {
+        err.message = format!("{} {remediation}", err.message);
     }
     err
 }

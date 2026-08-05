@@ -41,7 +41,7 @@ pub enum ExchangeError {
     Deserialize(String),
 
     #[error("token: {0}")]
-    Token(String),
+    Token(azapptoolkit_core::token::TokenError),
 
     #[error("protocol: {0}")]
     Protocol(String),
@@ -54,13 +54,11 @@ impl From<serde_json::Error> for ExchangeError {
 }
 
 impl ExchangeError {
+    /// Delegates to the shared policy — see
+    /// [`azapptoolkit_core::http_retry::is_retryable_code`]. `ui_code` below is
+    /// this crate's only variant-to-class table.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            ExchangeError::Throttled { .. }
-                | ExchangeError::Server { .. }
-                | ExchangeError::Network(_)
-        )
+        azapptoolkit_core::http_retry::is_retryable_code(self.ui_code())
     }
 
     pub fn ui_code(&self) -> &'static str {
@@ -73,7 +71,13 @@ impl ExchangeError {
             ExchangeError::Api { .. } => "exchange_error",
             ExchangeError::Network(_) => "network_error",
             ExchangeError::Deserialize(_) => "deserialize_error",
-            ExchangeError::Token(_) => "token_error",
+            // Pass an auth classification through instead of flattening it:
+            // `is_reauth_fatal` is what stops a long-running fan-out.
+            ExchangeError::Token(t) => match t.code.as_str() {
+                "refresh_missing" => "refresh_missing",
+                "not_signed_in" => "not_signed_in",
+                _ => "token_error",
+            },
             ExchangeError::Protocol(_) => "protocol_error",
         }
     }

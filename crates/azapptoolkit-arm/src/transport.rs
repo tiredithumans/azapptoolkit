@@ -12,7 +12,7 @@ use azapptoolkit_core::http_retry::{
     BASE_DELAY_MS, MAX_RETRIES, next_backoff_ms, parse_retry_after_seconds, sleep_before_retry,
     sleep_with_jitter,
 };
-use azapptoolkit_core::token::BearerProvider;
+use azapptoolkit_core::token::{BearerProvider, TokenError};
 
 use crate::error::{ArmError, Result};
 
@@ -36,7 +36,7 @@ pub(crate) async fn send_with_retry(
     headers.insert(
         AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {bearer}"))
-            .map_err(|e| ArmError::Token(e.to_string()))?,
+            .map_err(|e| ArmError::Token(TokenError::opaque(e.to_string())))?,
     );
 
     let mut attempt = 0u32;

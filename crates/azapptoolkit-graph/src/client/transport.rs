@@ -6,6 +6,7 @@
 //! are unchanged and pinned by `tests/transport.rs`.
 
 use super::*;
+use azapptoolkit_core::token::TokenError;
 
 const CONSISTENCY_LEVEL: HeaderName = HeaderName::from_static("consistencylevel");
 const PREFER: HeaderName = HeaderName::from_static("prefer");
@@ -420,7 +421,7 @@ impl GraphClient {
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {bearer}"))
-                .map_err(|e| GraphError::Token(e.to_string()))?,
+                .map_err(|e| GraphError::Token(TokenError::opaque(e.to_string())))?,
         );
         if consistency_eventual {
             headers.insert(CONSISTENCY_LEVEL, HeaderValue::from_static("eventual"));
@@ -519,8 +520,9 @@ impl GraphClient {
                         Ok(bearer) => {
                             headers.insert(
                                 AUTHORIZATION,
-                                HeaderValue::from_str(&format!("Bearer {bearer}"))
-                                    .map_err(|e| GraphError::Token(e.to_string()))?,
+                                HeaderValue::from_str(&format!("Bearer {bearer}")).map_err(
+                                    |e| GraphError::Token(TokenError::opaque(e.to_string())),
+                                )?,
                             );
                             cae_retried = true;
                             continue;

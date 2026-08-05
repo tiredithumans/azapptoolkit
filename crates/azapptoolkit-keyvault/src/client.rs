@@ -18,7 +18,7 @@ use azapptoolkit_core::http_retry::{
     sleep_with_jitter,
 };
 use azapptoolkit_core::net::{redacted_host, same_origin};
-use azapptoolkit_core::token::BearerProvider;
+use azapptoolkit_core::token::{BearerProvider, TokenError};
 
 use crate::error::{KeyVaultError, Result};
 use crate::models::{Paged, SecretItem, SecretSetRequest, SecretValue};
@@ -165,7 +165,7 @@ impl KeyVaultClient {
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {bearer}"))
-                .map_err(|e| KeyVaultError::Token(e.to_string()))?,
+                .map_err(|e| KeyVaultError::Token(TokenError::opaque(e.to_string())))?,
         );
         if body.is_some() {
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));

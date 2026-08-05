@@ -12,6 +12,23 @@ use azapptoolkit_graph::GraphError;
 
 use crate::dto::UiError;
 
+/// The capabilities catalog's remediation for `capability_key`, but **only**
+/// when `err` is a 403.
+///
+/// Five command modules re-derived this same pair of conditions — "is this
+/// forbidden" plus the catalog lookup — before splicing the remediation into
+/// their message, each with its own spelling of the test. Composing the final
+/// message stays with the caller, because the shapes genuinely differ (replace
+/// the body, append to it, or append a concrete scope); only the decision is
+/// shared. Adding a privileged feature means adding a catalog entry, never a
+/// hardcoded role string.
+pub(crate) fn forbidden_remediation(err: &UiError, capability_key: &str) -> Option<&'static str> {
+    if err.code != "forbidden" {
+        return None;
+    }
+    azapptoolkit_core::capabilities::capability(capability_key).map(|c| c.remediation)
+}
+
 /// True when a 403 body looks like a missing-license rejection rather than a
 /// missing-consent one. Graph encodes the body as JSON, so `error.code` and
 /// `error.message` are both present in the raw string — a lowercased substring

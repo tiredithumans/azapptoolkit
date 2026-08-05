@@ -20,7 +20,8 @@ use tokio::sync::Mutex;
 use azapptoolkit_arm::{KeyVaultResource, RoleAssignment};
 use azapptoolkit_core::cache::CacheKind;
 
-use crate::commands::dispatch::dispatch_capped;
+use crate::commands::dispatch::{SessionDead, dispatch_capped};
+use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::progress::emit_progress;
 use crate::dto::UiError;
 use crate::dto::keyvault::{KeyVaultAccessRow, KeyVaultSweepProgress, KeyVaultSweepResult};
@@ -61,10 +62,8 @@ fn kv_sweep_cache_key(tenant_id: &str) -> String {
 /// text lives in the capability catalog.
 fn keyvault_rbac_err(err: azapptoolkit_arm::ArmError) -> UiError {
     let mut ui = UiError::from(err);
-    if ui.code == "forbidden"
-        && let Some(cap) = azapptoolkit_core::capabilities::capability("keyvault_rbac_reads")
-    {
-        ui.message = cap.remediation.to_string();
+    if let Some(remediation) = forbidden_remediation(&ui, "keyvault_rbac_reads") {
+        ui.message = remediation.to_string();
     }
     ui
 }
@@ -149,11 +148,14 @@ pub async fn sweep_key_vault_access(
     let mut pairs: Vec<(KeyVaultResource, Vec<RoleAssignment>)> = Vec::new();
     let mut vaults_scanned = 0usize;
     let mut vaults_failed = 0usize;
+    let session = SessionDead::new();
     let mut cancelled = dispatch_capped(
         scoped_vaults,
         || ARM_CONCURRENCY,
         |(scope, vault)| {
-            if cancel.is_cancelled() {
+            // A dead session fails every remaining vault identically — stop
+            // rather than report a sweep that only looks complete.
+            if cancel.is_cancelled() || session.is_dead() {
                 return None;
             }
             let arm = arm.clone();
@@ -182,6 +184,7 @@ pub async fn sweep_key_vault_access(
             }
             Ok((vault, Err(err))) => {
                 vaults_failed += 1;
+                session.note_code(err.ui_code());
                 tracing::warn!(vault = ?vault.id, ?err, "kv sweep: role-assignment read failed");
             }
             Err(err) => {
@@ -191,6 +194,9 @@ pub async fn sweep_key_vault_access(
         },
     )
     .await;
+    if session.is_dead() {
+        return Err(session.err("the Key Vault access sweep"));
+    }
     cancelled = cancelled || cancel.is_cancelled();
 
     // Flatten to (vault, assignment) pairs.

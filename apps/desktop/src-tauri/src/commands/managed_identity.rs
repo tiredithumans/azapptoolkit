@@ -15,6 +15,7 @@ use tauri::{AppHandle, State};
 use azapptoolkit_arm::RoleAssignment;
 use azapptoolkit_core::cache::CacheKind;
 
+use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::guid::new_v4_guid;
 use crate::dto::UiError;
 use crate::dto::managed_identity::{
@@ -387,10 +388,9 @@ pub async fn assign_managed_identity_azure_role(
     .map_err(|err| {
         let mut ui = UiError::from(err);
         if ui.code == "forbidden" {
-            // Single copy of the role guidance lives in the capability catalog;
-            // append the concrete scope so the user knows *where* it's needed.
-            let base = azapptoolkit_core::capabilities::capability("azure_role_assign")
-                .map(|c| c.remediation)
+            // Append the concrete scope so the user knows *where* the role is
+            // needed; the guidance itself comes from the capability catalog.
+            let base = forbidden_remediation(&ui, "azure_role_assign")
                 .unwrap_or("Not authorized to create role assignments at this scope.");
             ui.message = format!("{base} (scope: {scope})");
         }
