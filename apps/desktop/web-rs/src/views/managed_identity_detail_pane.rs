@@ -26,7 +26,7 @@ use crate::components::scope_badge::is_exchange_scopable_on;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::ui::{
-    CopyableId, DataTable, DetailLoadError, SkeletonList, TabBar, TabBarItem,
+    Badge, CopyableId, DataTable, DetailLoadError, SkeletonList, TabBar, TabBarItem,
 };
 use crate::state::use_session;
 use crate::util::keep_alive;
@@ -443,7 +443,7 @@ pub fn ManagedIdentityDetailPane(
                                             .high_privilege
                                             .then(|| {
                                                 view! {
-                                                    <span class="badge badge--danger">"High"</span>
+                                                    <Badge label="High" tone="danger" />
                                                 }
                                             });
                                         view! {

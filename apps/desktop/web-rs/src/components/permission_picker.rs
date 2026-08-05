@@ -20,7 +20,7 @@ use crate::bindings::permissions::{
 };
 use crate::components::scope_badge::app_permission_risk_badge;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{Card, TabBar, TabBarItem};
+use crate::components::ui::{Badge, Card, TabBar, TabBarItem};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 
@@ -301,12 +301,11 @@ fn downgrade_hint(value: &str) -> AnyView {
 fn delegated_risk_badge(value: &str) -> AnyView {
     if is_risky_delegated_scope(value) {
         view! {
-            <span
-                class="badge badge--warning"
+            <Badge
+                label="Broad scope"
+                tone="warning"
                 title="Broad delegated scope — prefer the narrowest scope and user consent where possible"
-            >
-                "Broad scope"
-            </span>
+            />
         }
         .into_any()
     } else {

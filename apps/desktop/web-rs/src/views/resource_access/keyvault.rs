@@ -13,6 +13,7 @@ use crate::bindings::keyvault_rbac::{
     self, KeyVaultAccessRow, KeyVaultSweepProgress, KeyVaultSweepResult,
 };
 use crate::bindings::sharepoint;
+use crate::components::ui::Badge;
 use crate::components::ui::SearchInput;
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
@@ -377,9 +378,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                                                 {high
                                                     .then(|| {
                                                         view! {
-                                                            <span class="badge badge--warning">
-                                                                "High-privilege"
-                                                            </span>
+                                                            <Badge label="High-privilege" tone="warning" />
                                                         }
                                                     })}
                                             </td>

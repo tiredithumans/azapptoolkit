@@ -15,6 +15,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Spinner, SpinnerSize, Textare
 
 use crate::bindings::auth;
 use crate::bindings::exchange;
+use crate::components::ui::Badge;
 use crate::components::ui::Callout;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -182,7 +183,7 @@ pub fn ManagedScopeGroupPanel(
                                 <div>
                                     <strong>"Mailboxes in scope"</strong>
                                     " "
-                                    <span class="badge">"Will be created"</span>
+                                    <Badge label="Will be created" />
                                 </div>
                                 <Callout tone="info" role="status">
                                     "The managed scope group " <span class="mono">{name}</span>
@@ -203,7 +204,7 @@ pub fn ManagedScopeGroupPanel(
                                 <div>
                                     <strong>{format!("Mailboxes in scope — managed group “{name}”")}</strong>
                                     " "
-                                    <span class="badge badge--ok">"Exists"</span>
+                                    <Badge label="Exists" tone="ok" />
                                 </div>
                                 <Body1 class="hint">
                                     {format!(
