@@ -268,41 +268,112 @@ pub fn policies_safe_to_remove(
     target_count == 0 || removed_grant_count == target_count
 }
 
-/// Extracts the set of group DistinguishedNames quoted in a `MemberOfGroup`
-/// OPATH filter (`… -eq 'CN=a,DC=x' -or …`). Lets a caller compare a stored
-/// scope filter to a freshly-built one by group *set*, without depending on
-/// Exchange's exact whitespace/paren formatting. Handles OPATH's doubled-quote
-/// escaping (`''` → `'`).
-pub fn group_dns_in_filter(filter: &str) -> HashSet<&str> {
-    let mut out = HashSet::new();
-    let bytes = filter.as_bytes();
-    let mut i = 0;
+/// One `MemberOfGroup -eq '…'` comparison located in an OPATH filter: the byte
+/// range it occupies, and the group DN it names with escaping undone.
+struct MemberClause {
+    span: (usize, usize),
+    dn: String,
+}
+
+/// Reads the OPATH single-quoted literal whose opening quote sits at `open`,
+/// undoing the `''` escape. Returns the decoded value and the index one past
+/// the closing quote, or `None` if the literal is unterminated.
+fn read_opath_literal(s: &str, open: usize) -> Option<(String, usize)> {
+    let bytes = s.as_bytes();
+    let mut out = String::new();
+    let mut i = open + 1;
     while i < bytes.len() {
-        if bytes[i] != b'\'' {
+        if bytes[i] == b'\'' {
+            // A doubled '' is an escaped quote inside the value, not a close.
+            if bytes.get(i + 1) == Some(&b'\'') {
+                out.push('\'');
+                i += 2;
+                continue;
+            }
+            return Some((out, i + 1));
+        }
+        let ch = s[i..].chars().next()?;
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    None
+}
+
+/// Locates every `MemberOfGroup -eq '…'` comparison in an OPATH filter.
+///
+/// Deliberately narrow: it matches the property, the `-eq` operator and the
+/// quoted operand, so a quoted literal belonging to some *other* property is
+/// not mistaken for a group DN. Reading any quoted string as a group DN is what
+/// let `RecipientTypeDetails -eq 'UserMailbox'` be re-emitted as a
+/// `MemberOfGroup` clause, which both widened the scope and dropped the
+/// restriction it came from.
+fn member_of_group_clauses(filter: &str) -> Vec<MemberClause> {
+    const KEY: &str = "memberofgroup";
+    let lower = filter.to_ascii_lowercase();
+    let bytes = filter.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = lower[from..].find(KEY) {
+        let start = from + rel;
+        let mut i = start + KEY.len();
+        from = i;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
+        }
+        if !lower[i..].starts_with("-eq") {
             continue;
         }
-        let start = i + 1;
-        let mut j = start;
-        while j < bytes.len() {
-            if bytes[j] == b'\'' {
-                // A doubled '' is an escaped quote inside the value, not a close.
-                if bytes.get(j + 1) == Some(&b'\'') {
-                    j += 2;
-                    continue;
-                }
-                break;
-            }
-            j += 1;
+        i += "-eq".len();
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
         }
-        // Only record values with no embedded escaped quote — DNs never contain
-        // apostrophes, so a clean slice is the common (and only relevant) case.
-        if !filter[start..j].contains("''") {
-            out.insert(&filter[start..j]);
+        if bytes.get(i) != Some(&b'\'') {
+            continue;
         }
-        i = j + 1;
+        let Some((dn, end)) = read_opath_literal(filter, i) else {
+            continue;
+        };
+        out.push(MemberClause {
+            span: (start, end),
+            dn,
+        });
+        from = end;
     }
     out
+}
+
+/// The groups a management scope's recipient filter confines access to.
+///
+/// `complete` is the load-bearing field: `false` means the filter holds a
+/// `MemberOfGroup` token this parser could not read as a plain `-eq` operand,
+/// so `dns` is a *partial* view. A caller asking "does this filter reference
+/// group X" must treat an incomplete answer as "it might" — the empty set means
+/// "no reference" only when the filter was fully understood.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeGroups {
+    pub dns: HashSet<String>,
+    pub complete: bool,
+}
+
+/// Parses a management scope's recipient filter into the group DNs it names.
+/// Handles OPATH's doubled-quote escaping (`''` → `'`), so a group whose DN
+/// contains an apostrophe round-trips through
+/// [`member_of_group_filter`](crate::member_of_group_filter) rather than
+/// vanishing.
+pub fn scope_groups_in_filter(filter: &str) -> ScopeGroups {
+    let clauses = member_of_group_clauses(filter);
+    ScopeGroups {
+        complete: clauses.len() == count_member_of_group(filter),
+        dns: clauses.into_iter().map(|c| c.dn).collect(),
+    }
+}
+
+/// The group DNs a filter names, for callers that only compare one filter's
+/// group *set* to another's without depending on Exchange's exact
+/// whitespace/paren formatting. Use [`scope_groups_in_filter`] where a missing
+/// DN would be read as an absence of reference.
+pub fn group_dns_in_filter(filter: &str) -> HashSet<String> {
+    scope_groups_in_filter(filter).dns
 }
 
 /// Counts `MemberOfGroup` clauses in an OPATH recipient filter (the number of
@@ -311,30 +382,166 @@ pub fn count_member_of_group(filter: &str) -> usize {
     filter.to_ascii_lowercase().matches("memberofgroup").count()
 }
 
-/// Which group DNs a management scope's filter should reference after an
-/// attempted consolidation onto the toolkit-managed group.
-///
-/// **Fail closed.** The managed group only becomes the filter once its DN is
-/// resolved AND every member of the source groups is *verified present* in it.
-/// Otherwise the source groups are kept: repointing a scope at a
-/// partially-populated group silently drops the missing mailboxes out of the
-/// app's reach, and a mailbox an integration can no longer read fails as
-/// "not found" rather than "denied" — the hardest kind of outage to trace back
-/// to a permission change. Widening is not the risk here (the managed group is
-/// freshly built from the source membership); narrowing is.
-///
-/// `unverified` counts source members that are missing from the managed group
-/// after the copy — from an add that failed, or one that reported success but
-/// didn't land (EXO silently ignores some recipient types).
-pub fn scope_dns_after_consolidation(
-    source_dns: &[String],
-    managed_dn: Option<&str>,
-    unverified: usize,
-) -> Vec<String> {
-    match managed_dn {
-        Some(dn) if unverified == 0 => vec![dn.to_string()],
-        _ => source_dns.to_vec(),
+/// Why a stored recipient filter cannot be rewritten from a list of group DNs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnrewritableFilter {
+    /// Not built from group membership at all, so its mailboxes can't be
+    /// copied into a group.
+    NoGroupClauses,
+    /// A `MemberOfGroup` token that isn't a plain `-eq '…'` comparison.
+    UnparsedClause,
+    /// Something beyond `MemberOfGroup` clauses OR-ed together — an `-and`
+    /// restriction, a `-not` exclusion, or a condition on another property.
+    UnsupportedClause { leftover: String },
+}
+
+impl std::fmt::Display for UnrewritableFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoGroupClauses => f.write_str("it isn't built from group membership"),
+            Self::UnparsedClause => f.write_str(
+                "it uses a MemberOfGroup comparison this toolkit can't read (only `-eq 'DN'` is understood)",
+            ),
+            Self::UnsupportedClause { leftover } => write!(
+                f,
+                "it combines group membership with conditions this toolkit can't preserve ({leftover})",
+            ),
+        }
     }
+}
+
+/// The group DNs a scope filter confines access to — or a refusal when the
+/// filter is anything other than `MemberOfGroup` comparisons OR-ed together.
+///
+/// **Fail closed.** Rewriting a scope means writing a *new* filter from this DN
+/// list, and Exchange applies a management scope's filter to **every** role
+/// assignment on it. Any clause not modelled here — an `-and` recipient-type
+/// restriction, a `-not` exclusion, a hand-written condition — would be dropped
+/// by that rewrite, and the app's mailbox reach would widen silently in the one
+/// product area whose entire purpose is narrowing it. Refusing is the correct
+/// outcome, not a fallback: the scope keeps working exactly as it is.
+pub fn rewritable_scope_dns(filter: &str) -> Result<Vec<String>, UnrewritableFilter> {
+    let clauses = member_of_group_clauses(filter);
+    if clauses.is_empty() {
+        return Err(UnrewritableFilter::NoGroupClauses);
+    }
+    if clauses.len() != count_member_of_group(filter) {
+        return Err(UnrewritableFilter::UnparsedClause);
+    }
+    // Blank out the clauses we understand; whatever survives is a clause we
+    // would silently drop on rewrite.
+    let mut residue = String::with_capacity(filter.len());
+    let mut cursor = 0usize;
+    for c in &clauses {
+        residue.push_str(&filter[cursor..c.span.0]);
+        cursor = c.span.1;
+    }
+    residue.push_str(&filter[cursor..]);
+    let leftover: String = residue
+        .to_ascii_lowercase()
+        .replace("-or", " ")
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '(' && *c != ')')
+        .collect();
+    if !leftover.is_empty() {
+        return Err(UnrewritableFilter::UnsupportedClause { leftover });
+    }
+    let mut dns: Vec<String> = clauses.into_iter().map(|c| c.dn).collect();
+    dns.sort();
+    dns.dedup();
+    Ok(dns)
+}
+
+/// A consolidation the caller may apply: the group DNs the scope filter should
+/// name afterwards, and whether that differs from what it names today.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsolidationPlan {
+    pub scope_dns: Vec<String>,
+    pub repoint: bool,
+}
+
+/// Why a consolidation was refused. Every variant leaves the scope exactly as
+/// it is, so nothing the app can reach changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// The stored filter is a shape a rewrite would not preserve.
+    Filter(UnrewritableFilter),
+    /// Source groups whose membership could not be read. An **empty** group
+    /// counts as unreadable: `Get-DistributionGroupMember` is also silent for a
+    /// Microsoft 365 group (its members need `Get-UnifiedGroupLinks`), and
+    /// consolidating that onto an empty managed group would cut the app off
+    /// from every mailbox at once.
+    UnreadableSourceGroups(Vec<String>),
+    /// The toolkit-managed group's DN could not be resolved.
+    ManagedGroupUnresolved,
+    /// Source members not verified present in the managed group after the copy
+    /// — an add that failed, or one that reported success but didn't land
+    /// (EXO silently ignores some recipient types).
+    UnverifiedMembers(usize),
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Filter(why) => {
+                write!(f, "the management scope's filter can't be rewritten: {why}")
+            }
+            Self::UnreadableSourceGroups(groups) => write!(
+                f,
+                "the membership of {} couldn't be read (an empty result is treated as unreadable, \
+                 not as \"no mailboxes\")",
+                groups.join(", "),
+            ),
+            Self::ManagedGroupUnresolved => {
+                f.write_str("the toolkit-managed group's distinguished name couldn't be resolved")
+            }
+            Self::UnverifiedMembers(n) => write!(
+                f,
+                "{n} mailbox(es) couldn't be verified present in the toolkit-managed group",
+            ),
+        }
+    }
+}
+
+/// Decides — fail closed — whether a management scope may be repointed at the
+/// toolkit-managed group, and what its filter should then name.
+///
+/// The scope only moves once **all four** hold: the current filter is a shape a
+/// rewrite preserves exactly, every source group's membership was readable, the
+/// managed group's DN resolved, and every source member is *verified present*
+/// in it. Otherwise the scope keeps its current filter.
+///
+/// The asymmetry is deliberate in both directions. Repointing at a
+/// partially-populated group silently drops mailboxes out of the app's reach,
+/// and a mailbox an integration can no longer read fails as "not found" rather
+/// than "denied" — the hardest kind of outage to trace back to a permission
+/// change. Rewriting a filter whose other clauses we cannot reproduce widens
+/// reach instead. Both are refusals, not fallbacks.
+///
+/// `current_filter` is re-parsed here rather than taken as a DN list, so the
+/// plan can never disagree with the filter that is about to be overwritten.
+pub fn plan_consolidation(
+    current_filter: &str,
+    managed_dn: Option<&str>,
+    unreadable_source_groups: &[String],
+    unverified_members: usize,
+) -> Result<ConsolidationPlan, Refusal> {
+    let source_dns = rewritable_scope_dns(current_filter).map_err(Refusal::Filter)?;
+    if !unreadable_source_groups.is_empty() {
+        return Err(Refusal::UnreadableSourceGroups(
+            unreadable_source_groups.to_vec(),
+        ));
+    }
+    let Some(managed_dn) = managed_dn else {
+        return Err(Refusal::ManagedGroupUnresolved);
+    };
+    if unverified_members > 0 {
+        return Err(Refusal::UnverifiedMembers(unverified_members));
+    }
+    Ok(ConsolidationPlan {
+        repoint: !(source_dns.len() == 1 && source_dns[0] == managed_dn),
+        scope_dns: vec![managed_dn.to_string()],
+    })
 }
 
 #[cfg(test)]
@@ -534,36 +741,139 @@ mod tests {
     }
 
     #[test]
-    fn group_dns_in_filter_extracts_the_dn_set() {
-        let f = "RecipientFilter -eq 'CN=a,DC=x' -or MemberOfGroup -eq 'CN=b,DC=x'";
+    fn only_member_of_group_operands_are_read_as_group_dns() {
+        // A quoted literal belonging to another property is NOT a group DN.
+        // Reading it as one re-emitted `RecipientTypeDetails -eq 'UserMailbox'`
+        // as a MemberOfGroup clause on rewrite — widening the scope and
+        // dropping the restriction it came from.
+        let f = "RecipientTypeDetails -eq 'UserMailbox' -and MemberOfGroup -eq 'CN=b,DC=x'";
         let got = group_dns_in_filter(f);
-        assert!(got.contains("CN=a,DC=x") && got.contains("CN=b,DC=x"));
+        assert_eq!(got, HashSet::from(["CN=b,DC=x".to_string()]));
         assert_eq!(count_member_of_group(f), 1);
     }
 
     #[test]
-    fn consolidation_repoints_only_on_a_fully_verified_copy() {
-        let legacy = vec!["CN=Legacy,DC=x".to_string()];
+    fn a_dn_containing_an_apostrophe_round_trips_through_the_filter() {
+        // `escape_opath` writes `''`; the scanner used to SKIP any value
+        // containing one. That hid a live reference from the irreversible
+        // group-delete check and silently shrank a scope on move.
+        let dns = vec!["CN=O'Brien Mailboxes,OU=Groups,DC=x".to_string()];
+        let filter = crate::client::member_of_group_filter(&dns);
+        assert!(filter.contains("O''Brien"), "escaping must be exercised");
         assert_eq!(
-            scope_dns_after_consolidation(&legacy, Some("CN=Managed,DC=x"), 0),
-            vec!["CN=Managed,DC=x".to_string()],
+            group_dns_in_filter(&filter),
+            HashSet::from([dns[0].clone()])
+        );
+        assert_eq!(rewritable_scope_dns(&filter).unwrap(), dns);
+        assert!(scope_groups_in_filter(&filter).complete);
+    }
+
+    #[test]
+    fn a_pure_or_chain_is_rewritable_whatever_its_formatting() {
+        let dns = vec!["CN=a,DC=x".to_string(), "CN=b,DC=y".to_string()];
+        assert_eq!(
+            rewritable_scope_dns(&crate::client::member_of_group_filter(&dns)).unwrap(),
+            dns
+        );
+        assert_eq!(
+            rewritable_scope_dns(
+                "( MemberOfGroup -eq 'CN=a,DC=x' )  -Or ( MemberOfGroup -eq 'CN=b,DC=y' )"
+            )
+            .unwrap(),
+            dns
         );
     }
 
     #[test]
-    fn consolidation_keeps_the_source_groups_when_a_member_is_unverified() {
+    fn a_filter_a_rewrite_would_not_preserve_is_refused() {
+        // Each of these silently WIDENS if rebuilt as a pure OR-chain.
+        for (filter, why) in [
+            (
+                "MemberOfGroup -eq 'CN=a,DC=x' -and RecipientTypeDetails -eq 'UserMailbox'",
+                "an -and restriction",
+            ),
+            ("-not (MemberOfGroup -eq 'CN=a,DC=x')", "a -not exclusion"),
+            (
+                "MemberOfGroup -eq 'CN=a,DC=x' -or CustomAttribute1 -eq 'keep'",
+                "a condition on another property",
+            ),
+            (
+                "MemberOfGroup -like 'CN=a*'",
+                "a MemberOfGroup comparison that isn't -eq",
+            ),
+        ] {
+            assert!(
+                rewritable_scope_dns(filter).is_err(),
+                "{why} must refuse the rewrite, not be dropped from it: {filter}"
+            );
+        }
+        assert_eq!(
+            rewritable_scope_dns("RecipientTypeDetails -eq 'UserMailbox'"),
+            Err(UnrewritableFilter::NoGroupClauses)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_member_of_group_clause_marks_the_parse_incomplete() {
+        // `complete: false` is what stops an empty/partial DN set from reading
+        // as "this filter doesn't reference the group".
+        let got = scope_groups_in_filter("MemberOfGroup -like 'CN=a*'");
+        assert!(got.dns.is_empty());
+        assert!(
+            !got.complete,
+            "a MemberOfGroup token we can't read must not report a clean absence"
+        );
+    }
+
+    fn managed() -> Option<&'static str> {
+        Some("CN=Managed,DC=x")
+    }
+
+    #[test]
+    fn consolidation_repoints_only_on_a_fully_verified_copy() {
+        let legacy = crate::client::member_of_group_filter(&["CN=Legacy,DC=x".to_string()]);
+        assert_eq!(
+            plan_consolidation(&legacy, managed(), &[], 0).unwrap(),
+            ConsolidationPlan {
+                scope_dns: vec!["CN=Managed,DC=x".to_string()],
+                repoint: true,
+            },
+        );
+    }
+
+    #[test]
+    fn consolidation_is_refused_on_anything_unproved() {
         // Fail closed: one mailbox that didn't make it into the managed group
         // means repointing would cut it out of the app's reach.
-        let legacy = vec!["CN=Legacy,DC=x".to_string()];
+        let legacy = crate::client::member_of_group_filter(&["CN=Legacy,DC=x".to_string()]);
         assert_eq!(
-            scope_dns_after_consolidation(&legacy, Some("CN=Managed,DC=x"), 1),
-            legacy,
-            "an unverified member must keep the scope on the source groups"
+            plan_consolidation(&legacy, managed(), &[], 1),
+            Err(Refusal::UnverifiedMembers(1)),
+            "an unverified member must leave the scope alone"
         );
         assert_eq!(
-            scope_dns_after_consolidation(&legacy, None, 0),
-            legacy,
-            "an unresolved managed-group DN must keep the scope on the source groups"
+            plan_consolidation(&legacy, None, &[], 0),
+            Err(Refusal::ManagedGroupUnresolved),
+            "an unresolved managed-group DN must leave the scope alone"
+        );
+        assert_eq!(
+            plan_consolidation(&legacy, managed(), &["CN=Legacy,DC=x".to_string()], 0),
+            Err(Refusal::UnreadableSourceGroups(vec![
+                "CN=Legacy,DC=x".to_string()
+            ])),
+            "an unreadable (or empty) source group must leave the scope alone"
+        );
+        assert!(
+            matches!(
+                plan_consolidation(
+                    "MemberOfGroup -eq 'CN=Legacy,DC=x' -and RecipientTypeDetails -eq 'UserMailbox'",
+                    managed(),
+                    &[],
+                    0,
+                ),
+                Err(Refusal::Filter(_))
+            ),
+            "a filter the rewrite would not preserve must leave the scope alone"
         );
     }
 
@@ -571,12 +881,22 @@ mod tests {
     fn consolidation_folds_several_source_groups_into_one() {
         // Several RestrictAccess policies migrate as a union; consolidating that
         // union onto the managed group collapses the filter to a single clause.
-        let legacy = vec!["CN=A,DC=x".to_string(), "CN=B,DC=x".to_string()];
-        let got = scope_dns_after_consolidation(&legacy, Some("CN=Managed,DC=x"), 0);
-        assert_eq!(got.len(), 1);
+        let legacy = crate::client::member_of_group_filter(&[
+            "CN=A,DC=x".to_string(),
+            "CN=B,DC=x".to_string(),
+        ]);
+        let plan = plan_consolidation(&legacy, managed(), &[], 0).unwrap();
+        assert_eq!(plan.scope_dns.len(), 1);
         assert_eq!(
-            count_member_of_group(&crate::client::member_of_group_filter(&got)),
+            count_member_of_group(&crate::client::member_of_group_filter(&plan.scope_dns)),
             1
         );
+    }
+
+    #[test]
+    fn consolidation_is_a_no_op_when_the_scope_is_already_managed() {
+        let already = crate::client::member_of_group_filter(&["CN=Managed,DC=x".to_string()]);
+        let plan = plan_consolidation(&already, managed(), &[], 0).unwrap();
+        assert!(!plan.repoint, "no rewrite when the scope already names it");
     }
 }

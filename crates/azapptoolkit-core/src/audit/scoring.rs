@@ -388,25 +388,59 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
 /// org-wide set for the ScopeSharePointAccess remediation.
 /// Takes the resource-stripped values: SharePoint scoping is encoded by the
 /// permission name alone, so unlike the mailbox rule it needs no resource.
-fn rule_sharepoint_advisory(values: &[String]) -> (RuleContribution, Vec<&String>) {
+fn rule_sharepoint_advisory(
+    perms: &AppPermissions,
+) -> (RuleContribution, Vec<&ResourcePermission>) {
+    use crate::scoping::{
+        is_scopable_sharepoint_resource_permission, is_sharepoint_orgwide_permission,
+    };
     let mut c = RuleContribution::default();
-    let sharepoint_orgwide: Vec<&String> = values
+
+    let orgwide: Vec<&ResourcePermission> = perms
+        .app_role_grants
         .iter()
-        .filter(|v| crate::scoping::is_sharepoint_orgwide(v))
+        .filter(|g| is_sharepoint_orgwide_permission(g.resource_app_id.as_deref(), &g.value))
         .collect();
-    if !sharepoint_orgwide.is_empty() {
+
+    // Split on the POSITIVE gate, never on the negation of a legacy test: only
+    // grants the Sites.Selected handler can actually confine may carry the fix.
+    let (scopable, unconfinable): (Vec<_>, Vec<_>) = orgwide.into_iter().partition(|g| {
+        is_scopable_sharepoint_resource_permission(g.resource_app_id.as_deref(), &g.value)
+    });
+
+    if !scopable.is_empty() {
         c.issues.push(format!(
-            "Organization-wide SharePoint access: {}",
-            join_refs(&sharepoint_orgwide)
+            "{}: {}",
+            issue::ORG_WIDE_SHAREPOINT,
+            join_values(&scopable)
         ));
         c.recommendations
             .push("Restrict SharePoint access to specific sites using Sites.Selected".to_string());
     }
-    if values.iter().any(|v| v.as_str() == "Sites.Selected") {
-        c.issues
-            .push("SharePoint access scoped to selected sites: Sites.Selected".to_string());
+    if !unconfinable.is_empty() {
+        // Its own finding, and no Fix: converting these would grant Graph's
+        // `Sites.Selected`, strip nothing, and leave the app org-wide while the
+        // audit reported it confined.
+        c.issues.push(format!(
+            "{}: {}",
+            issue::UNCONFINABLE_SHAREPOINT,
+            join_values(&unconfinable)
+        ));
+        c.recommendations.push(
+            "Remove the org-wide Sites.* grant on Office 365 SharePoint Online, or re-declare it \
+             on Microsoft Graph where it can be confined to selected sites"
+                .to_string(),
+        );
     }
-    (c, sharepoint_orgwide)
+    if perms
+        .app_role_grants
+        .iter()
+        .any(|g| g.value.as_str() == "Sites.Selected")
+    {
+        c.issues
+            .push(format!("{}: Sites.Selected", issue::SCOPED_SHAREPOINT));
+    }
+    (c, scopable)
 }
 
 /// Rule 13 (advisory, no score): high-risk delegated permissions. The legacy
@@ -654,7 +688,7 @@ fn build_remediations(
     expired: &[&CredentialSummary],
     mailbox_unscoped: &[&ResourcePermission],
     mailbox_legacy: &[&ResourcePermission],
-    sharepoint_orgwide: &[&String],
+    sharepoint_orgwide: &[&ResourcePermission],
     redundant: &[(String, Vec<String>)],
     owner_count: Option<usize>,
 ) -> Vec<RemediationAction> {
@@ -713,9 +747,9 @@ fn build_remediations(
             ),
             detail: format!(
                 "Converts to Sites.Selected: {}",
-                join_refs(sharepoint_orgwide)
+                join_values(sharepoint_orgwide)
             ),
-            targets: sharepoint_orgwide.iter().map(|v| v.to_string()).collect(),
+            targets: sharepoint_orgwide.iter().map(|g| g.value.clone()).collect(),
         });
     }
     if !redundant.is_empty() {
@@ -826,7 +860,7 @@ pub fn score_application(
     // Rules 11, 12, 18 also return the sets the remediation block keys off.
     let (mail_contrib, mailbox_unscoped, mailbox_legacy) = rule_mailbox_advisory(perms);
     acc.merge(mail_contrib);
-    let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(&values);
+    let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(perms);
     acc.merge(sharepoint_contrib);
     acc.merge(rule_high_risk_delegated(perms)); // Rule 13
 
@@ -926,10 +960,9 @@ pub fn score_service_principal(
     acc.merge(rule_sp_disabled(sp.account_enabled)); // Rule 4
 
     // Rules 11 & 12 also return the sets the remediation block keys off.
-    let values = perms.app_role_values();
     let (mail_contrib, mailbox_unscoped, mailbox_legacy) = rule_mailbox_advisory(perms);
     acc.merge(mail_contrib);
-    let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(&values);
+    let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(perms);
     acc.merge(sharepoint_contrib);
     acc.merge(rule_high_risk_delegated(perms)); // Rule 13
 
@@ -1131,6 +1164,86 @@ mod tests {
                 .any(|x| x.starts_with(issue::SCOPED_SHAREPOINT))
         );
         assert!(scoped.remediations.is_empty());
+    }
+
+    #[test]
+    fn the_sharepoint_fix_is_offered_only_where_the_handler_can_confine_the_grant() {
+        use crate::scoping::{MICROSOFT_GRAPH_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID};
+        // `Sites.*` lives on two resources, and only Graph's is confinable by
+        // `convert_site_access_to_selected` (it resolves Sites.Selected on the
+        // Graph SP and strips org-wide grants whose resource_id is Graph's).
+        // Offering the Fix for the legacy resource would strip NOTHING and
+        // leave the app org-wide while the audit re-scored it as confined.
+        for (resource, value, expect_fix, marker) in [
+            (
+                MICROSOFT_GRAPH_APP_ID,
+                "Sites.Read.All",
+                true,
+                issue::ORG_WIDE_SHAREPOINT,
+            ),
+            (
+                MICROSOFT_GRAPH_APP_ID,
+                "Sites.FullControl.All",
+                true,
+                issue::ORG_WIDE_SHAREPOINT,
+            ),
+            (
+                OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+                "Sites.Read.All",
+                false,
+                issue::UNCONFINABLE_SHAREPOINT,
+            ),
+            (
+                OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+                "Sites.FullControl.All",
+                false,
+                issue::UNCONFINABLE_SHAREPOINT,
+            ),
+        ] {
+            let perms = AppPermissions {
+                app_role_grants: vec![ResourcePermission::on(resource, value)],
+                ..Default::default()
+            };
+            let item = score_service_principal(&base_sp(), &perms, now());
+            assert!(
+                item.issues.iter().any(|x| x.starts_with(marker)),
+                "{resource} {value} must be reported under {marker}: {:?}",
+                item.issues
+            );
+            assert_eq!(
+                item.remediations
+                    .iter()
+                    .any(|r| r.kind == RemediationKind::ScopeSharePointAccess),
+                expect_fix,
+                "{resource} {value}: a Sites.Selected Fix must be offered only where it applies"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unconfinable_sharepoint_grant_is_never_reported_as_org_wide_confinable() {
+        use crate::scoping::OFFICE365_SHAREPOINT_ONLINE_APP_ID;
+        // The two markers must stay disjoint: the frontend groups on
+        // `starts_with`, so a legacy grant leaking into ORG_WIDE_SHAREPOINT
+        // would pull it back into the "has a Fix" bucket.
+        let perms = AppPermissions {
+            app_role_grants: vec![ResourcePermission::on(
+                OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+                "Sites.Read.All",
+            )],
+            ..Default::default()
+        };
+        let item = score_service_principal(&base_sp(), &perms, now());
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|x| x.starts_with(issue::ORG_WIDE_SHAREPOINT))
+        );
+        assert!(
+            !issue::UNCONFINABLE_SHAREPOINT.starts_with(issue::ORG_WIDE_SHAREPOINT),
+            "the markers must not prefix-alias"
+        );
     }
 
     #[test]

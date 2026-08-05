@@ -36,7 +36,7 @@ use azapptoolkit_exchange::models::{
     ExoApplicationAccessPolicy, ExoAuthorizationResult, ExoServicePrincipal,
 };
 
-use crate::commands::dispatch::dispatch_capped;
+use crate::commands::dispatch::{SessionDead, dispatch_capped};
 use crate::commands::exchange::{aap_verdict_for, exchange_client, is_org_wide_auth_row};
 use crate::commands::graph_roles::{graph_role_index, mailbox_resource_roles, resolve_grant};
 use crate::commands::progress::emit_progress;
@@ -571,11 +571,15 @@ pub async fn find_mailbox_reachers(
     let mailbox_shared = Arc::new(mailbox.clone());
 
     let mut rows: Vec<MailboxReacherRow> = Vec::new();
+    let session = SessionDead::new();
     let mut cancelled = dispatch_capped(
         candidates,
         || PROBE_CONCURRENCY,
         |(principal_id, (display_name, held))| {
-            if cancel.is_cancelled() {
+            // A dead session fails every remaining candidate identically —
+            // stop dispatching rather than report a sweep that only looks
+            // complete. In-flight probes still drain into `collect`.
+            if cancel.is_cancelled() || session.is_dead() {
                 return None;
             }
             let client = client.clone();
@@ -588,7 +592,7 @@ pub async fn find_mailbox_reachers(
             let prewarmed = sp_meta_by_principal.get(&principal_id).cloned();
             let app_reg_index = app_reg_index.clone();
             Some(tokio::spawn(async move {
-                let row = probe_candidate(
+                let outcome = probe_candidate(
                     &client,
                     exo.as_deref(),
                     policies.as_deref().map(Vec::as_slice),
@@ -605,20 +609,26 @@ pub async fn find_mailbox_reachers(
                 let progress = MailboxProbeProgress {
                     done: *guard,
                     total,
-                    current_app: row.display_name.clone(),
+                    current_app: outcome.row.display_name.clone(),
                     cancelled: cancel_for_task.is_cancelled(),
                 };
                 drop(guard);
                 emit_progress(&app_handle, "mailbox-probe-progress", progress);
-                row
+                outcome
             }))
         },
         |joined| match joined {
-            Ok(row) => rows.push(row),
+            Ok(outcome) => {
+                session.note_fatal(outcome.session_dead);
+                rows.push(outcome.row);
+            }
             Err(err) => tracing::warn!(?err, "mailbox probe: join error"),
         },
     )
     .await;
+    if session.is_dead() {
+        return Err(session.err("the mailbox reach sweep"));
+    }
     cancelled = cancelled || cancel.is_cancelled();
 
     // Highest-reach first: org-wide, then scoped, then unknown, then no-access;
@@ -671,6 +681,16 @@ fn merge_exchange_candidates(
 // Each argument is an independent piece of probe context (clients, the mailbox,
 // the candidate's identity/grants, and the batch-prewarmed appId); bundling them
 // into a struct would only add ceremony at the single call site.
+/// One candidate's row, plus whether the failure that produced it was
+/// re-auth-fatal. The flag rides back on the value because the probe runs in a
+/// spawned task: the error type itself doesn't survive that boundary, and a
+/// dead session must stop the sweep rather than fill it with "unknown"
+/// verdicts indistinguishable from genuine ones.
+struct ProbeOutcome {
+    row: MailboxReacherRow,
+    session_dead: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn probe_candidate(
     client: &azapptoolkit_graph::GraphClient,
@@ -682,7 +702,7 @@ async fn probe_candidate(
     held_permissions: Vec<String>,
     prewarmed: Option<(String, Option<String>)>,
     app_reg_index: &HashMap<String, String>,
-) -> MailboxReacherRow {
+) -> ProbeOutcome {
     // The Exchange cmdlets and the UI's deep links want the appId (and the
     // servicePrincipalType drives the row's Open routing), not the SP object id
     // the assignment row carries. Use the batch-prewarmed pair when we have it;
@@ -696,21 +716,33 @@ async fn probe_candidate(
         {
             Ok(Some(sp)) => (sp.app_id, sp.service_principal_type),
             other => {
-                if let Err(err) = other {
-                    tracing::info!(%principal_id, ?err, "mailbox probe: SP resolve failed");
-                }
-                return MailboxReacherRow {
-                    app_id: String::new(),
-                    display_name,
-                    held_permissions,
-                    verdict: "unknown".into(),
-                    roles: Vec::new(),
-                    detail: Some("Couldn't resolve the service principal.".into()),
-                    // Can't confirm a local registration; route Open to the
-                    // enterprise pane by SP object id (the reliable fallback).
-                    principal_kind: AuditPrincipalKind::ServicePrincipal,
-                    object_id: principal_id.clone(),
-                    principal_id,
+                // A dead session fails every remaining candidate identically,
+                // so the verdict "unknown" would be indistinguishable from a
+                // genuine one. Report it up so the sweep stops.
+                let session_dead = match other {
+                    Err(err) => {
+                        let ui = UiError::from(err);
+                        tracing::info!(%principal_id, code = %ui.code, "mailbox probe: SP resolve failed");
+                        ui.is_reauth_fatal()
+                    }
+                    // `Ok(None)`: the SP genuinely isn't there.
+                    Ok(_) => false,
+                };
+                return ProbeOutcome {
+                    session_dead,
+                    row: MailboxReacherRow {
+                        app_id: String::new(),
+                        display_name,
+                        held_permissions,
+                        verdict: "unknown".into(),
+                        roles: Vec::new(),
+                        detail: Some("Couldn't resolve the service principal.".into()),
+                        // Can't confirm a local registration; route Open to the
+                        // enterprise pane by SP object id (the reliable fallback).
+                        principal_kind: AuditPrincipalKind::ServicePrincipal,
+                        object_id: principal_id.clone(),
+                        principal_id,
+                    },
                 };
             }
         },
@@ -750,16 +782,19 @@ async fn probe_candidate(
             synthesize(mailbox, &entra, &rbac)
         }
     };
-    MailboxReacherRow {
-        app_id,
-        principal_id,
-        display_name,
-        held_permissions,
-        verdict: result.verdict,
-        roles: result.roles,
-        detail: result.detail,
-        principal_kind,
-        object_id,
+    ProbeOutcome {
+        session_dead: false,
+        row: MailboxReacherRow {
+            app_id,
+            principal_id,
+            display_name,
+            held_permissions,
+            verdict: result.verdict,
+            roles: result.roles,
+            detail: result.detail,
+            principal_kind,
+            object_id,
+        },
     }
 }
 

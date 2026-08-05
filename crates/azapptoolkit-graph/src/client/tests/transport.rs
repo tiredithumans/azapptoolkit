@@ -320,10 +320,15 @@ async fn cae_claims_challenge_triggers_one_remint_and_retry() {
     #[async_trait]
     impl BearerProvider for CaeProvider {
         // `Result` is shadowed by the crate's alias in this module; qualify it.
-        async fn bearer(&self) -> std::result::Result<String, String> {
+        async fn bearer(
+            &self,
+        ) -> std::result::Result<String, azapptoolkit_core::token::TokenError> {
             Ok("tok".into())
         }
-        async fn bearer_with_claims(&self, _claims: &str) -> std::result::Result<String, String> {
+        async fn bearer_with_claims(
+            &self,
+            _claims: &str,
+        ) -> std::result::Result<String, azapptoolkit_core::token::TokenError> {
             Ok("tok-cae".into())
         }
     }

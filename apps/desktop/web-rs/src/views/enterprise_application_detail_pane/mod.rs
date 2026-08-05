@@ -22,7 +22,7 @@ use crate::components::requires_role::RequiresRole;
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    DataTable, DetailLoadError, DetailSkeleton, SkeletonList, TabBar, TabBarItem,
+    Badge, DataTable, DetailLoadError, DetailSkeleton, SkeletonList, TabBar, TabBarItem,
 };
 use crate::components::uri_list_editor::{UriListEditor, UriListState, redirect_uri_reason};
 use crate::hooks::use_command::use_command;
@@ -254,7 +254,7 @@ fn EnterpriseAppPanel(
                 {move || {
                     ro_signal
                         .with(|d| d.service_principal.is_foreign_tenant)
-                        .then(|| view! { <span class="badge badge--warning">"Foreign tenant"</span> })
+                        .then(|| view! { <Badge label="Foreign tenant" tone="warning" /> })
                 }}
                 {move || {
                     ro_signal

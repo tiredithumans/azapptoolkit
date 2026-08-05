@@ -183,11 +183,25 @@ pub(crate) fn sp_index_store(
     tenant_id: &str,
     sps: Vec<ServicePrincipal>,
 ) -> Arc<Vec<ServicePrincipal>> {
+    sp_index_store_if_current(cache, tenant_id, sps, cache.generation())
+}
+
+/// Stores the index only if nothing was invalidated since `since`. Callers that
+/// fetched live must capture [`Cache::generation`] BEFORE the fetch: the scan
+/// takes seconds under no lock, and re-pinning a pre-mutation snapshot would
+/// serve stale authorization data for the full `Lists` TTL, out of LRU's reach.
+pub(crate) fn sp_index_store_if_current(
+    cache: &Cache,
+    tenant_id: &str,
+    sps: Vec<ServicePrincipal>,
+    since: u64,
+) -> Arc<Vec<ServicePrincipal>> {
     let shared = Arc::new(sps);
-    cache.put_typed_index(
+    cache.put_typed_index_if_current(
         CacheKind::Lists,
         sp_index_key(tenant_id),
         Arc::clone(&shared),
+        since,
     );
     shared
 }
@@ -217,8 +231,17 @@ pub(crate) async fn sp_index_cached(
     if let Some(cached) = sp_index_hit(&state.cache, tenant_id) {
         return Ok(cached);
     }
+    // Captured BEFORE the multi-second scan: a mutation landing mid-flight
+    // invalidates the key, and re-pinning this pre-mutation snapshot would
+    // outlive the invalidation it raced.
+    let since = state.cache.generation();
     let sps = client.list_service_principals_index().await?;
-    Ok(sp_index_store(&state.cache, tenant_id, sps))
+    Ok(sp_index_store_if_current(
+        &state.cache,
+        tenant_id,
+        sps,
+        since,
+    ))
 }
 
 /// Reads the cached per-tenant app-registration index, if present.
@@ -240,16 +263,33 @@ pub(crate) fn app_name_index_hit(cache: &Cache, tenant_id: &str) -> Option<Arc<V
 
 /// Caches a freshly-fetched app-registration index and hands back the shared
 /// handle. Pair with [`app_name_index_hit`].
+/// Unconditional store. Production readers fetch live and must use
+/// [`app_name_index_store_if_current`] so a mutation landing mid-scan isn't
+/// overwritten by the pre-mutation snapshot; this shape is for tests that
+/// construct the index directly.
+#[cfg(test)]
 pub(crate) fn app_name_index_store(
     cache: &Cache,
     tenant_id: &str,
     apps: Vec<Application>,
 ) -> Arc<Vec<Application>> {
+    app_name_index_store_if_current(cache, tenant_id, apps, cache.generation())
+}
+
+/// The `/applications` counterpart of [`sp_index_store_if_current`], with the
+/// same rule: capture the generation before the live fetch, not after.
+pub(crate) fn app_name_index_store_if_current(
+    cache: &Cache,
+    tenant_id: &str,
+    apps: Vec<Application>,
+    since: u64,
+) -> Arc<Vec<Application>> {
     let shared = Arc::new(apps);
-    cache.put_typed_index(
+    cache.put_typed_index_if_current(
         CacheKind::Lists,
         app_name_index_key(tenant_id),
         Arc::clone(&shared),
+        since,
     );
     shared
 }
@@ -278,10 +318,17 @@ pub(crate) async fn app_name_index_cached(
     if let Some(cached) = app_name_index_hit(&state.cache, tenant_id) {
         return Ok(cached);
     }
+    // Captured BEFORE the scan — see `sp_index_cached`.
+    let since = state.cache.generation();
     let apps = client
         .list_application_index_named(Some(super::APPS_MAX))
         .await?;
-    Ok(app_name_index_store(&state.cache, tenant_id, apps))
+    Ok(app_name_index_store_if_current(
+        &state.cache,
+        tenant_id,
+        apps,
+        since,
+    ))
 }
 
 /// Both tenant-wide indexes, fetching only the cold ones — and, when both are

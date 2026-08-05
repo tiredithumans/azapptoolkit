@@ -221,6 +221,43 @@ impl AppState {
         }
     }
 
+    /// An `AppState` whose Graph client for `tenant_id` points at `base_url`
+    /// (a mock server) with a static bearer, so a command's `*_core` body can be
+    /// driven end to end: real Graph request/response handling, real cache
+    /// invalidation, no network and no Tauri runtime.
+    ///
+    /// Pre-seeding `graph_clients` is what makes this work — `graph_for` is a
+    /// get-or-build, so the seeded client wins and no `ScopedTokenAdapter` is
+    /// ever constructed. Nothing here touches `settings.json`.
+    #[cfg(test)]
+    pub(crate) fn for_test(tenant_id: &str, base_url: &str) -> Self {
+        use azapptoolkit_core::token::StaticTokenProvider;
+
+        let cache = Cache::new();
+        let client = Arc::new(GraphClient::with_base_url(
+            tenant_id.to_string(),
+            StaticTokenProvider::new("test-token"),
+            StaticTokenProvider::new("test-token"),
+            Arc::clone(&cache),
+            format!("{}/v1.0", base_url.trim_end_matches('/')),
+        ));
+        Self {
+            auth: EntraAuthService::new("test-client", tenant_id),
+            client_id: "test-client".to_string(),
+            tenant_id: tenant_id.to_string(),
+            cache,
+            inflight: Mutex::new(HashMap::new()),
+            graph_clients: Mutex::new(HashMap::from([(tenant_id.to_string(), client)])),
+            exchange_clients: Mutex::new(HashMap::new()),
+            kv_clients: Mutex::new(HashMap::new()),
+            arm_clients: Mutex::new(HashMap::new()),
+            la_clients: Mutex::new(HashMap::new()),
+            audit_cancel: CancelFlag::new(),
+            sweep_cancel: CancelFlag::new(),
+            dr_cancel: CancelFlag::new(),
+        }
+    }
+
     /// True once both IDs resolve to a real (non-placeholder) value. When
     /// false the frontend shows the first-run config screen instead of sign-in.
     pub fn is_configured(&self) -> bool {
@@ -259,10 +296,21 @@ impl AppState {
     /// `search_application_templates`. Both missed, so the prewarm added a
     /// second full-catalog fetch (~39 000 templates) instead of preventing one.
     ///
-    /// Gates are keyed by cache key and kept after use; the set is bounded by
-    /// the number of distinct cache keys that opt in, which is a handful.
+    /// Gates are keyed by cache key. A handful of keys opt in, but the keys are
+    /// **tenant-scoped** (`{tenant_id}|sp_index`, …), so the map grows with
+    /// every tenant the session touches and nothing ever removed an entry.
+    /// Sweeping idle gates past a threshold bounds it: an `Arc` with no other
+    /// holder is a gate nobody is waiting on, so dropping it can never merge or
+    /// split an in-flight fetch.
+    /// Idle-gate sweep threshold. Generous: a handful of opted-in keys times
+    /// the tenants one session realistically visits.
+    const MAX_INFLIGHT_GATES: usize = 64;
+
     pub fn single_flight(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut map = self.inflight.lock();
+        if map.len() >= Self::MAX_INFLIGHT_GATES && !map.contains_key(key) {
+            map.retain(|_, gate| Arc::strong_count(gate) > 1);
+        }
         Arc::clone(
             map.entry(key.to_string())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),

@@ -29,7 +29,7 @@ pub enum KeyVaultError {
     Deserialize(String),
 
     #[error("token: {0}")]
-    Token(String),
+    Token(azapptoolkit_core::token::TokenError),
 
     #[error("invalid name: {0}")]
     InvalidName(String),
@@ -39,13 +39,11 @@ pub enum KeyVaultError {
 }
 
 impl KeyVaultError {
+    /// Delegates to the shared policy — see
+    /// [`azapptoolkit_core::http_retry::is_retryable_code`]. `ui_code` below is
+    /// this crate's only variant-to-class table.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            KeyVaultError::Throttled { .. }
-                | KeyVaultError::Server { .. }
-                | KeyVaultError::Network(_)
-        )
+        azapptoolkit_core::http_retry::is_retryable_code(self.ui_code())
     }
 
     pub fn ui_code(&self) -> &'static str {
@@ -58,7 +56,13 @@ impl KeyVaultError {
             KeyVaultError::Server { .. } => "server_error",
             KeyVaultError::Network(_) => "network_error",
             KeyVaultError::Deserialize(_) => "deserialize_error",
-            KeyVaultError::Token(_) => "token_error",
+            // Pass an auth classification through instead of flattening it:
+            // `is_reauth_fatal` is what stops a long-running fan-out.
+            KeyVaultError::Token(t) => match t.code.as_str() {
+                "refresh_missing" => "refresh_missing",
+                "not_signed_in" => "not_signed_in",
+                _ => "token_error",
+            },
             KeyVaultError::InvalidName(_) => "invalid_name",
             KeyVaultError::Protocol(_) => "protocol_error",
         }

@@ -137,27 +137,27 @@ pub fn permission_scope_cell(
     ) {
         ScopeCell::Mailbox(scope) => mailbox_scope_badge(scope),
         ScopeCell::Resolving => view! {
-            <span
-                class="badge badge--unknown"
+            <Badge
+                label="Resolving…"
+                tone="unknown"
                 title="Querying Exchange for the effective mailbox scope — this takes a few seconds"
-            >
-                "Resolving…"
-            </span>
+            />
         }
         .into_any(),
         ScopeCell::SitesSelected => view! {
-            <span
-                class="badge badge--ok"
+            <Badge
+                label="Scoped (selected sites)"
+                tone="ok"
                 title="Confined to individually-granted sites (Sites.Selected)"
-            >
-                "Scoped (selected sites)"
-            </span>
+            />
         }
         .into_any(),
         ScopeCell::SitesOrgWide => view! {
-            <span class="badge badge--danger" title="Grants access to every site in the tenant">
-                "Org-wide"
-            </span>
+            <Badge
+                label="Org-wide"
+                tone="danger"
+                title="Grants access to every site in the tenant"
+            />
         }
         .into_any(),
         ScopeCell::NotApplicable => view! { <span class="muted">"—"</span> }.into_any(),
@@ -169,18 +169,19 @@ pub fn mailbox_scope_badge(scope: MailPermissionScope) -> AnyView {
     match scope {
         MailPermissionScope::NotScopable => view! { <span class="muted">"—"</span> }.into_any(),
         MailPermissionScope::OrgWide => view! {
-            <span class="badge badge--danger" title="Reaches every mailbox in the tenant">
-                "Org-wide"
-            </span>
+            <Badge
+                label="Org-wide"
+                tone="danger"
+                title="Reaches every mailbox in the tenant"
+            />
         }
         .into_any(),
         MailPermissionScope::Unknown => view! {
-            <span
-                class="badge badge--unknown"
+            <Badge
+                label="Unknown"
+                tone="unknown"
                 title="Mailbox scoping couldn't be determined — the Exchange admin API was unavailable (it may still be loading, or you may need Exchange admin rights / to grant consent). See the Exchange scoping section below."
-            >
-                "Unknown"
-            </span>
+            />
         }
         .into_any(),
         MailPermissionScope::Scoped {
@@ -198,7 +199,7 @@ pub fn mailbox_scope_badge(scope: MailPermissionScope) -> AnyView {
                 let title = recipient_filter
                     .or(scope_name)
                     .unwrap_or_else(|| "Scoped via RBAC for Applications".to_string());
-                view! { <span class="badge badge--ok" title=title>{label}</span> }.into_any()
+                view! { <Badge label=label tone="ok" title=title /> }.into_any()
             }
             // Legacy Application Access Policy: genuinely scoped, but deprecated —
             // an amber badge nudges migration to RBAC for Applications.
@@ -209,8 +210,7 @@ pub fn mailbox_scope_badge(scope: MailPermissionScope) -> AnyView {
                 } else {
                     format!("Legacy Application Access Policy: {detail}. Consider migrating to RBAC for Applications (Exchange scoping section on the Permissions tab).")
                 };
-                view! { <span class="badge badge--warning" title=title>"Scoped (legacy)"</span> }
-                    .into_any()
+                view! { <Badge label="Scoped (legacy)" tone="warning" title=title /> }.into_any()
             }
         },
     }

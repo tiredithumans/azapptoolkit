@@ -214,6 +214,18 @@ impl Bucket {
             .collect();
     }
 
+    /// Drops every entry older than `ttl`.
+    ///
+    /// TTL was otherwise enforced only on read, so an entry nothing ever looks
+    /// up again occupied its slot until something evicted it — and a *pinned*
+    /// index is invisible to LRU, so it occupied one indefinitely. Called from
+    /// the eviction path, where the bucket lock is already held and the cost is
+    /// paid only when a bucket is at its cap.
+    fn evict_expired(&mut self, ttl: Duration) {
+        self.entries.retain(|_, e| e.inserted.elapsed() <= ttl);
+        self.rebuild_lru();
+    }
+
     fn evict_lru(&mut self, max_size: usize) {
         // Shrink down to the cap, not just by one. A single eviction per call is
         // enough on the steady-insert path, but when `configure` lowers
@@ -257,6 +269,13 @@ pub struct Cache {
     buckets: [Mutex<Bucket>; CacheKind::ALL.len()],
     stats: Mutex<CacheStats>,
     config: Mutex<CacheConfig>,
+    /// Bumped by every invalidation. A reader that fetches a tenant-wide index
+    /// live holds no lock for the seconds that scan takes, so a mutation can
+    /// invalidate the key underneath it; storing the pre-mutation snapshot into
+    /// a **pinned** entry afterwards would serve stale authorization data for
+    /// the full `Lists` TTL, out of LRU's reach. Capture this before the fetch
+    /// and store through [`Cache::put_typed_index_if_current`].
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl Cache {
@@ -265,6 +284,7 @@ impl Cache {
             buckets: std::array::from_fn(|_| Mutex::new(Bucket::new())),
             stats: Mutex::new(CacheStats::default()),
             config: Mutex::new(CacheConfig::default()),
+            generation: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -313,7 +333,7 @@ impl Cache {
         }
         let new_max = c.max_size;
         // Release the config lock before taking any bucket lock: every other
-        // path (`cap_if_enabled` → `put_inner`) reads the config and drops it
+        // path (`limits_if_enabled` → `put_inner`) reads the config and drops it
         // before locking a bucket, so never holding both keeps that ordering.
         drop(c);
 
@@ -324,7 +344,10 @@ impl Cache {
         if max_size.is_some() {
             for kind in CacheKind::ALL {
                 let cap = Self::cap_for(kind, new_max);
-                self.buckets[kind.idx()].lock().evict_lru(cap);
+                let ttl = self.config.lock().ttl_for(kind);
+                let mut bucket = self.buckets[kind.idx()].lock();
+                bucket.evict_expired(ttl);
+                bucket.evict_lru(cap);
             }
         }
     }
@@ -357,7 +380,13 @@ impl Cache {
 
     fn cap_for(kind: CacheKind, max_size: usize) -> usize {
         match kind {
-            CacheKind::ServicePrincipal | CacheKind::Lists => {
+            // The per-object headroom is a DEFAULT, not a floor an operator
+            // can't get under. Clamping unconditionally made `max_size` a
+            // no-op for the two buckets that actually hold the memory — so
+            // lowering the cache size shrank nothing while diagnostics
+            // reported the lowered number. Above the default the headroom
+            // still applies, so a normal install fits a whole tenant.
+            CacheKind::ServicePrincipal | CacheKind::Lists if max_size >= MAX_CACHE_SIZE => {
                 max_size.max(MAX_PER_OBJECT_CACHE_SIZE)
             }
             _ => max_size,
@@ -365,12 +394,14 @@ impl Cache {
     }
 
     pub fn clear(&self) {
+        self.bump_generation();
         for kind in CacheKind::ALL {
             self.buckets[kind.idx()].lock().clear();
         }
     }
 
     pub fn clear_kind(&self, kind: CacheKind) {
+        self.bump_generation();
         self.buckets[kind.idx()].lock().clear();
     }
 
@@ -465,7 +496,7 @@ impl Cache {
     where
         T: serde::Serialize,
     {
-        let Some(max_size) = self.cap_if_enabled(kind) else {
+        let Some((max_size, ttl)) = self.limits_if_enabled(kind) else {
             return;
         };
         let json = match serde_json::to_value(value) {
@@ -477,16 +508,19 @@ impl Cache {
         };
         let mut bucket = self.buckets[kind.idx()].lock();
         bucket.insert(key, Arc::new(json), None, pinned);
+        bucket.evict_expired(ttl);
         bucket.evict_lru(max_size);
     }
 
-    /// Effective per-kind entry cap, or `None` when caching is disabled.
-    fn cap_if_enabled(&self, kind: CacheKind) -> Option<usize> {
+    /// Effective per-kind entry cap and TTL, or `None` when caching is
+    /// disabled. Both are read under one config lock, which is then dropped
+    /// before any bucket lock is taken (the ordering `configure` relies on).
+    fn limits_if_enabled(&self, kind: CacheKind) -> Option<(usize, Duration)> {
         let c = self.config.lock();
         if !c.enabled {
             return None;
         }
-        Some(Self::cap_for(kind, c.max_size))
+        Some((Self::cap_for(kind, c.max_size), c.ttl_for(kind)))
     }
 
     /// Caches `value` keeping the original `Arc<T>` so [`Self::get_typed`]
@@ -511,6 +545,33 @@ impl Cache {
         self.put_typed_inner(kind, key, value, true);
     }
 
+    /// Stores a pinned index **only if** nothing was invalidated since
+    /// `since` (a [`Cache::generation`] captured before the live fetch).
+    /// Returns `false` when the store was skipped.
+    ///
+    /// Closes the store-after-invalidate race: a tenant-wide index scan takes
+    /// seconds and holds no lock, so a mutation that lands mid-flight drops the
+    /// key — and an unconditional store would then re-pin the *pre-mutation*
+    /// snapshot for the full `Lists` TTL, where LRU cannot reach it. Skipping
+    /// costs one re-fetch; not skipping serves stale authorization data.
+    pub fn put_typed_index_if_current<T: Send + Sync + 'static>(
+        &self,
+        kind: CacheKind,
+        key: String,
+        value: Arc<T>,
+        since: u64,
+    ) -> bool {
+        if self.generation() != since {
+            tracing::debug!(
+                %key,
+                "cache invalidated during the index fetch; not storing the stale snapshot"
+            );
+            return false;
+        }
+        self.put_typed_inner(kind, key, value, true);
+        true
+    }
+
     fn put_typed_inner<T: Send + Sync + 'static>(
         &self,
         kind: CacheKind,
@@ -518,11 +579,12 @@ impl Cache {
         value: Arc<T>,
         pinned: bool,
     ) {
-        let Some(max_size) = self.cap_if_enabled(kind) else {
+        let Some((max_size, ttl)) = self.limits_if_enabled(kind) else {
             return;
         };
         let mut bucket = self.buckets[kind.idx()].lock();
         bucket.insert(key, Arc::new(serde_json::Value::Null), Some(value), pinned);
+        bucket.evict_expired(ttl);
         bucket.evict_lru(max_size);
     }
 
@@ -541,13 +603,30 @@ impl Cache {
                 Some(arc)
             }
             None => {
+                // Drop it, exactly as `get` does on a failed deserialize: an
+                // entry that can never downcast will never serve a hit, and
+                // `lookup` just touched it — so leaving it refreshes its own LRU
+                // position and, if pinned, keeps the slot until TTL.
+                self.buckets[kind.idx()].lock().remove(key);
                 self.record(kind, false);
                 None
             }
         }
     }
 
+    /// Monotonic invalidation counter. Capture it *before* a long live fetch
+    /// and pass it to [`Cache::put_typed_index_if_current`].
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn bump_generation(&self) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
     pub fn invalidate(&self, kind: CacheKind, key: &str) {
+        self.bump_generation();
         self.buckets[kind.idx()].lock().remove(key);
     }
 
@@ -555,6 +634,7 @@ impl Cache {
     /// tenant-scoped clears (e.g. on sign-out) without enumerating every
     /// list shape.
     pub fn invalidate_prefix(&self, kind: CacheKind, prefix: &str) {
+        self.bump_generation();
         self.buckets[kind.idx()]
             .lock()
             .retain(|k| !k.starts_with(prefix));
@@ -567,6 +647,7 @@ impl Cache {
     /// kind — and a future `CacheKind` is swept automatically, since it is a
     /// bucket too.
     pub fn invalidate_tenant(&self, tenant_id: &str) {
+        self.bump_generation();
         let prefix = format!("{tenant_id}|");
         for kind in CacheKind::ALL {
             self.buckets[kind.idx()]
@@ -603,6 +684,124 @@ mod tests {
     /// they can look straight at what eviction actually did.
     fn entry_count(cache: &Cache, kind: CacheKind) -> usize {
         cache.buckets[kind.idx()].lock().entries.len()
+    }
+
+    #[test]
+    fn an_index_stored_after_an_invalidation_it_raced_is_dropped() {
+        // The store-after-invalidate race: a tenant-wide scan takes seconds
+        // under no lock, so a mutation can invalidate the key mid-flight. An
+        // unconditional store then re-PINS the pre-mutation snapshot, which LRU
+        // cannot evict, and serves stale authorization data for the full TTL.
+        let cache = Cache::new();
+        let key = "t1|sp_index".to_string();
+
+        let since = cache.generation();
+        // ... the live fetch happens here, and a mutation lands during it.
+        cache.invalidate_prefix(CacheKind::Lists, "t1|");
+
+        let stored = cache.put_typed_index_if_current(
+            CacheKind::Lists,
+            key.clone(),
+            Arc::new(vec![1u8]),
+            since,
+        );
+        assert!(!stored, "a snapshot that lost the race must not be stored");
+        assert!(
+            cache.get_typed::<Vec<u8>>(CacheKind::Lists, &key).is_none(),
+            "the invalidated key must stay empty, not hold the stale scan"
+        );
+
+        // The uncontended path still stores.
+        let since = cache.generation();
+        assert!(cache.put_typed_index_if_current(
+            CacheKind::Lists,
+            key.clone(),
+            Arc::new(vec![2u8]),
+            since
+        ));
+        assert_eq!(
+            cache
+                .get_typed::<Vec<u8>>(CacheKind::Lists, &key)
+                .as_deref(),
+            Some(&vec![2u8])
+        );
+    }
+
+    #[test]
+    fn get_typed_drops_a_poisoned_entry_rather_than_re_reading_it() {
+        // `get` already did this; `get_typed` recorded the miss and left the
+        // entry in place — and `lookup` had just touched it, so a pinned one
+        // survived to TTL while never serving a hit.
+        let cache = Cache::new();
+        cache.put_typed_index(CacheKind::Lists, "t1|idx".into(), Arc::new(vec![1u8]));
+        // Wrong type: cannot downcast.
+        assert!(
+            cache
+                .get_typed::<String>(CacheKind::Lists, "t1|idx")
+                .is_none()
+        );
+        assert_eq!(
+            entry_count(&cache, CacheKind::Lists),
+            0,
+            "a value that can never downcast must be dropped, not retained"
+        );
+    }
+
+    #[test]
+    fn lowering_max_size_also_shrinks_the_two_per_object_buckets() {
+        // `cap_for` clamped ServicePrincipal/Lists up to the per-object ceiling
+        // unconditionally, so the operator's setting was a no-op for exactly
+        // the two buckets holding the memory — while diagnostics reported the
+        // lowered number.
+        let cache = Cache::new();
+        for kind in [CacheKind::ServicePrincipal, CacheKind::Lists] {
+            for i in 0..40 {
+                cache.put(kind, format!("t1|k{i}"), &Sample(i.to_string()));
+            }
+        }
+        cache.configure(None, None, None, None, None, Some(10));
+        for kind in [CacheKind::ServicePrincipal, CacheKind::Lists] {
+            assert_eq!(
+                entry_count(&cache, kind),
+                10,
+                "{kind:?} must honour a lowered max_size"
+            );
+            assert_eq!(cache.capacity_for(kind), 10);
+        }
+        // At or above the default, the per-object headroom still applies so a
+        // normal install fits a whole tenant enumeration.
+        cache.configure(None, None, None, None, None, Some(MAX_CACHE_SIZE));
+        assert_eq!(
+            cache.capacity_for(CacheKind::Lists),
+            MAX_PER_OBJECT_CACHE_SIZE
+        );
+    }
+
+    #[test]
+    fn an_expired_entry_is_swept_even_if_nothing_reads_it() {
+        // TTL was enforced only on read, so an entry nothing looks up again held
+        // its slot — and a PINNED one, invisible to LRU, held it indefinitely.
+        let cache = Cache::new();
+        cache.configure(
+            None,
+            None,
+            None,
+            None,
+            Some(Duration::from_millis(10)),
+            Some(100),
+        );
+        cache.put_typed_index(CacheKind::Lists, "t1|idx".into(), Arc::new(vec![1u8]));
+        cache.put(CacheKind::Lists, "t1|other".into(), &Sample("x".into()));
+        assert_eq!(entry_count(&cache, CacheKind::Lists), 2);
+
+        sleep(Duration::from_millis(25));
+        // Any write to the kind now sweeps the expired entries, pinned included.
+        cache.put(CacheKind::Lists, "t1|fresh".into(), &Sample("y".into()));
+        assert_eq!(
+            entry_count(&cache, CacheKind::Lists),
+            1,
+            "expired entries must not keep occupying slots"
+        );
     }
 
     #[test]

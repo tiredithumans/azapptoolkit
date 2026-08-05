@@ -21,10 +21,10 @@ use azapptoolkit_exchange::models::{
     ExoApplicationAccessPolicy, ExoAuthorizationResult, ExoManagementScope, ExoRoleAssignment,
 };
 use azapptoolkit_exchange::targets::{
-    ExchangeTarget, count_member_of_group, exchange_target, filter_targets_by_value,
-    group_dns_in_filter, mailbox_resources_complete, policies_safe_to_remove,
-    require_scopable_targets, scope_dns_after_consolidation, targets_from_declared,
-    targets_from_grants, targets_safe_to_strip,
+    ExchangeTarget, Refusal, UnrewritableFilter, count_member_of_group, exchange_target,
+    filter_targets_by_value, group_dns_in_filter, mailbox_resources_complete, plan_consolidation,
+    policies_safe_to_remove, require_scopable_targets, rewritable_scope_dns,
+    scope_groups_in_filter, targets_from_declared, targets_from_grants, targets_safe_to_strip,
 };
 use azapptoolkit_exchange::{
     ExchangeClient, ExchangeError, exchange_role_for_permission, member_of_group_filter,
@@ -306,7 +306,7 @@ async fn apply_exchange_mailbox_scope(
     if let Ok(Some(existing)) = exo.get_management_scope(&scope_name).await
         && let Some(existing_filter) = existing.recipient_filter.as_deref()
     {
-        let wanted: std::collections::HashSet<&str> = dns.iter().map(String::as_str).collect();
+        let wanted: std::collections::HashSet<String> = dns.iter().cloned().collect();
         let have = group_dns_in_filter(existing_filter);
         if have != wanted {
             warnings.push(format!(
@@ -1347,10 +1347,7 @@ async fn consolidate_scope_group(
     if !unreadable.is_empty() {
         keep_source(
             warnings,
-            format!(
-                "could not read the full membership of {}",
-                unreadable.join("; ")
-            ),
+            Refusal::UnreadableSourceGroups(unreadable).to_string(),
         );
         return ScopeGroupConsolidation {
             group_name,
@@ -1428,24 +1425,30 @@ async fn consolidate_scope_group(
         .map(|m| m.identity.clone())
         .collect();
 
-    let scope_dns =
-        scope_dns_after_consolidation(source_dns, managed_dn.as_deref(), unverified.len());
-    let consolidated = managed_dn.is_some_and(|dn| scope_dns == vec![dn]);
-    if !consolidated {
-        keep_source(
-            warnings,
-            if unverified.is_empty() {
-                format!("'{group_name}' has no distinguished name to build a filter from")
-            } else {
-                format!(
-                    "{} of {} mailbox(es) could not be verified in '{group_name}' ({})",
-                    unverified.len(),
-                    members.len(),
-                    unverified.join(", ")
-                )
-            },
-        );
-    }
+    // 4. The decision itself is pure and lives in `azapptoolkit-exchange`, where
+    //    it is unit-testable without a signed-in session. It re-parses the
+    //    filter it is about to replace, so the plan can never disagree with what
+    //    gets overwritten. Sources were proved readable above, hence `&[]`.
+    let source_filter = member_of_group_filter(source_dns);
+    let plan = plan_consolidation(&source_filter, managed_dn.as_deref(), &[], unverified.len());
+    let (scope_dns, consolidated) = match plan {
+        Ok(plan) => (plan.scope_dns, true),
+        Err(why) => {
+            keep_source(
+                warnings,
+                match why {
+                    // Name the mailboxes: this is the refusal an operator can act on.
+                    Refusal::UnverifiedMembers(n) => format!(
+                        "{n} of {} mailbox(es) could not be verified in '{group_name}' ({})",
+                        members.len(),
+                        unverified.join(", ")
+                    ),
+                    other => other.to_string(),
+                },
+            );
+            (source_dns.to_vec(), false)
+        }
+    };
     ScopeGroupConsolidation {
         group_name,
         copied: members
@@ -1524,11 +1527,16 @@ pub(crate) fn references_to_group(
         let Some(filter) = scope.recipient_filter.as_deref() else {
             continue;
         };
-        if group_dns_in_filter(filter)
-            .into_iter()
-            .any(|dn| group.matches(dn))
-        {
+        // Fail closed on a filter we can't fully read: an unparsed clause could
+        // name this group, and reporting a reference only WITHHOLDS an
+        // irreversible delete, which is the safe direction.
+        let groups = scope_groups_in_filter(filter);
+        if groups.dns.iter().any(|dn| group.matches(dn)) {
             out.push(format!("management scope '{scope_name}'"));
+        } else if !groups.complete {
+            out.push(format!(
+                "management scope '{scope_name}' (filter not fully readable — it may reference this group)"
+            ));
         }
     }
     for policy in policies {
@@ -1710,7 +1718,23 @@ async fn repoint_scope_if_stale(
     let Some(current) = existing.recipient_filter.as_deref() else {
         return;
     };
-    if group_dns_in_filter(current) == group_dns_in_filter(wanted_filter) {
+    // Refuse to overwrite a filter a rebuild would not reproduce: Exchange
+    // applies a scope's filter to EVERY role assignment on it, so dropping an
+    // `-and` restriction or a `-not` exclusion here widens mailbox reach
+    // silently. Leaving the scope alone is the safe direction — the app keeps
+    // exactly the access it has.
+    let current_dns = match rewritable_scope_dns(current) {
+        Ok(dns) => dns,
+        Err(why) => {
+            warnings.push(format!(
+                "management scope '{scope_name}' was left as it is: {why}. Its filter is \
+                 ({current}) — repoint it in Exchange if this app should use the \
+                 toolkit-managed group."
+            ));
+            return;
+        }
+    };
+    if current_dns.iter().cloned().collect::<HashSet<_>>() == group_dns_in_filter(wanted_filter) {
         return;
     }
     match exo
@@ -1773,19 +1797,24 @@ pub async fn move_exchange_scope_to_managed_group(
             ),
         ));
     };
-    let source_dns: Vec<String> = group_dns_in_filter(current_filter)
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    if source_dns.is_empty() {
-        return Err(UiError::validation(
-            "no_scope_group",
+    // The move rewrites this filter from a DN list, so it may only proceed when
+    // a rebuild would reproduce the filter exactly. A clause we can't reproduce
+    // — an `-and` recipient-type restriction, a `-not` exclusion — would be
+    // dropped by the rewrite and widen what every role assignment on this scope
+    // reaches. Refusing is the outcome, not a fallback.
+    let source_dns = rewritable_scope_dns(current_filter).map_err(|why| {
+        UiError::validation(
+            match why {
+                UnrewritableFilter::NoGroupClauses => "no_scope_group",
+                _ => "unsupported_scope_filter",
+            },
             format!(
-                "management scope '{scope_name}' isn't built from group membership \
-                 (filter: {current_filter}), so its mailboxes can't be copied into a group."
+                "management scope '{scope_name}' can't be moved onto the toolkit-managed \
+                 group because {why} (filter: {current_filter}). Nothing was changed — edit \
+                 the scope in Exchange if this app should use the managed group."
             ),
-        ));
-    }
+        )
+    })?;
 
     // Already on the managed group: nothing to do. Resolving the group by name
     // (rather than trusting the filter's DN) keeps this honest if the group was
@@ -2621,7 +2650,12 @@ mod tests {
         let dns = ["CN=a,DC=x".to_string(), "CN=b,DC=y".to_string()];
         let filter = member_of_group_filter(&dns);
         let got = group_dns_in_filter(&filter);
-        assert_eq!(got, ["CN=a,DC=x", "CN=b,DC=y"].into_iter().collect());
+        assert_eq!(
+            got,
+            ["CN=a,DC=x".to_string(), "CN=b,DC=y".to_string()]
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]
@@ -2850,6 +2884,33 @@ mod tests {
             &[aap("app-9", "RestrictAccess", Some("Something Else"))],
         );
         assert!(refs.is_empty(), "{refs:?}");
+    }
+
+    #[test]
+    fn a_group_named_with_an_apostrophe_is_still_seen_as_referenced() {
+        // `member_of_group_filter` writes the DN escaped as `''`. The scanner
+        // used to skip any value containing one, which hid this reference and
+        // offered an irreversible delete of a group still in a live scope.
+        let dn = "CN=O'Brien Mailboxes,DC=x";
+        let group = retired(dn, "O'Brien Mailboxes");
+        let filter = member_of_group_filter(&[dn.to_string()]);
+        assert!(filter.contains("O''Brien"), "escaping must be exercised");
+        let refs = references_to_group(&group, &[scope("app_scope_app-1", &filter)], &[]);
+        assert_eq!(refs.len(), 1, "{refs:?}");
+    }
+
+    #[test]
+    fn a_filter_we_cannot_fully_read_counts_as_a_possible_reference() {
+        // Fail closed: an unparsed MemberOfGroup clause could name this group,
+        // and withholding the delete is the safe direction.
+        let group = retired("CN=Retired,DC=x", "Retired");
+        let refs = references_to_group(
+            &group,
+            &[scope("app_scope_app-1", "MemberOfGroup -like 'CN=Ret*'")],
+            &[],
+        );
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert!(refs[0].contains("not fully readable"), "{refs:?}");
     }
 
     #[test]

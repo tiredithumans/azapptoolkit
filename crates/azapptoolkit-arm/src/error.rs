@@ -29,7 +29,7 @@ pub enum ArmError {
     Deserialize(String),
 
     #[error("token: {0}")]
-    Token(String),
+    Token(azapptoolkit_core::token::TokenError),
 
     /// Client-side contract violation — e.g. a paging `nextLink` pointing off
     /// the ARM origin, which is refused before the bearer is attached.
@@ -38,11 +38,11 @@ pub enum ArmError {
 }
 
 impl ArmError {
+    /// Delegates to the shared policy — see
+    /// [`azapptoolkit_core::http_retry::is_retryable_code`]. `ui_code` below is
+    /// this crate's only variant-to-class table.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            ArmError::Throttled { .. } | ArmError::Server { .. } | ArmError::Network(_)
-        )
+        azapptoolkit_core::http_retry::is_retryable_code(self.ui_code())
     }
 
     pub fn ui_code(&self) -> &'static str {
@@ -55,7 +55,13 @@ impl ArmError {
             ArmError::Server { .. } => "server_error",
             ArmError::Network(_) => "network_error",
             ArmError::Deserialize(_) => "deserialize_error",
-            ArmError::Token(_) => "token_error",
+            // Pass an auth classification through instead of flattening it:
+            // `is_reauth_fatal` is what stops a long-running fan-out.
+            ArmError::Token(t) => match t.code.as_str() {
+                "refresh_missing" => "refresh_missing",
+                "not_signed_in" => "not_signed_in",
+                _ => "token_error",
+            },
             ArmError::Protocol(_) => "protocol_error",
         }
     }
@@ -151,7 +157,10 @@ mod tests {
             ArmError::Deserialize(String::new()).ui_code(),
             "deserialize_error"
         );
-        assert_eq!(ArmError::Token(String::new()).ui_code(), "token_error");
+        assert_eq!(
+            ArmError::Token(azapptoolkit_core::token::TokenError::opaque("")).ui_code(),
+            "token_error"
+        );
         assert_eq!(
             ArmError::Protocol(String::new()).ui_code(),
             "protocol_error"

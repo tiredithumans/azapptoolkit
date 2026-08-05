@@ -10,6 +10,73 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+### Fixed
+
+- **Moving a management scope onto the toolkit-managed group now refuses any
+  filter it cannot reproduce exactly, instead of silently widening access.** The
+  scope filter was rebuilt as a plain `MemberOfGroup` OR-chain from every quoted
+  value it found, so a filter that combined group membership with anything else
+  — an `-and RecipientTypeDetails` restriction, a `-not` exclusion — came back
+  without that clause, and the app could suddenly reach mailboxes the
+  restriction had been holding back. Exchange applies a scope's filter to
+  **every** role assignment using it, so the widening was tenant-wide for that
+  app. The move (and the migration's repoint) now refuse and explain, leaving
+  the scope exactly as it was.
+- **A group whose name contains an apostrophe is no longer invisible to the
+  scope tooling.** Exchange escapes `'` as `''` inside a filter, and the scanner
+  skipped any value containing one. Two consequences: "Move to managed group"
+  dropped that group from the rebuilt filter (quietly shrinking what the app
+  could reach), and the irreversible **Delete group** check reported the group
+  as unreferenced while a live management scope still pointed at it. A filter
+  the toolkit cannot fully read now counts as a possible reference, so the
+  delete is withheld rather than offered.
+- **The audit no longer offers a `Sites.Selected` fix for a SharePoint grant it
+  cannot confine.** `Sites.*` exists on both Microsoft Graph and Office 365
+  SharePoint Online, and the rule keyed on the permission name alone. A
+  legacy-resource grant was therefore listed as org-wide *and* offered the
+  one-click conversion — which grants Graph's `Sites.Selected`, strips nothing
+  on the legacy resource, and left the app just as org-wide as before while the
+  audit re-scored it as confined. Those grants now get their own finding, with
+  guidance instead of a fix that cannot work.
+- **A session that dies mid-run no longer produces a partial result presented as
+  complete.** The DR backup, the SharePoint site sweep, the Key Vault access
+  sweep and the mailbox-reach probe all warned their way through a dead session
+  and returned what they had — in a backup or a least-privilege view that is a
+  wrong answer, not a slow one. The root cause was one layer down: the shared
+  bearer-token boundary flattened every failure to a generic token error, so a
+  dead session was indistinguishable from a transient blip for *any* client
+  call. It now carries its classification, and all four commands stop and ask
+  for re-authentication.
+- **Cache lifecycle:** a tenant-wide index fetched while a mutation lands no
+  longer overwrites the fresh state with the pre-mutation snapshot (which, being
+  pinned, then survived a full hour out of reach of eviction); lowering the
+  cache size limit now actually shrinks the two buckets that hold the most
+  memory, rather than reporting a number it never applied; an entry that can
+  never be read back is dropped instead of holding its slot; and an expired
+  entry is swept even if nothing ever reads it again.
+
+### Changed
+
+- Audit rows whose only finding is an unconfinable mailbox or SharePoint grant
+  now open on the **Permissions** tab, where the grant is actually managed.
+
+### Internal
+
+- The Exchange consolidation decision moved out of the Tauri command layer into
+  `azapptoolkit-exchange` as `plan_consolidation`, where its fail-closed rules
+  are unit-testable without a signed-in session.
+- `repo_invariants.rs` grew from 2 checks to 7: pinned cache writes, positive
+  resource gating on scope fixes, cancel-flag resets, the CHANGELOG header
+  format both release parsers depend on, and AGENTS.md's own size budget. Its
+  `KNOWN_GAPS` list of fan-outs missing a dead-session check is now empty.
+- Command handlers gained a testable seam (`*_core` taking `&AppState`), with
+  the first end-to-end handler tests driving a real Graph request/response and
+  asserting caches are invalidated only on success.
+- Four duplicated shapes collapsed onto one definition each: the
+  forbidden-to-capability remediation splice, the per-client retry policy, the
+  `.badge` markup (now always the `Badge` primitive), and the CHANGELOG format
+  contract.
+
 ## [0.24.0] - 2026-08-04
 
 ### Added

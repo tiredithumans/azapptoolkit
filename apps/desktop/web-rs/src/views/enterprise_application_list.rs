@@ -22,7 +22,9 @@ use crate::components::icon::{Icon, IconName};
 use crate::components::index_cap_notice::IndexCapNotice;
 use crate::components::list_scaffold::ListScaffold;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList};
+use crate::components::ui::{
+    Badge, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
+};
 use crate::components::virtual_list::VirtualList;
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
@@ -415,17 +417,21 @@ fn view_row(
                     {is_disabled
                         .then(|| {
                             view! {
-                                <span class="badge badge--unknown" title="Sign-in disabled — this service principal's accountEnabled is false.">
-                                    "Disabled"
-                                </span>
+                                <Badge
+                                    label="Disabled"
+                                    tone="unknown"
+                                    title="Sign-in disabled — this service principal's accountEnabled is false."
+                                />
                             }
                         })}
                     {is_foreign
                         .then(|| {
                             view! {
-                                <span class="badge badge--warning" title="Foreign tenant — app registered in a different tenant; consented locally.">
-                                    "Foreign"
-                                </span>
+                                <Badge
+                                    label="Foreign"
+                                    tone="warning"
+                                    title="Foreign tenant — app registered in a different tenant; consented locally."
+                                />
                             }
                         })}
                     {paired_app_id

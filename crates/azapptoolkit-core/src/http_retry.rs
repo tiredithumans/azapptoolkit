@@ -5,6 +5,19 @@
 //! were copied verbatim across all three: the budget constants and the
 //! jittered sleep / backoff helpers.
 
+/// The single definition of which failure classes are worth retrying, keyed by
+/// the `ui_code()` every client error exposes.
+///
+/// Each of the four clients had its own `is_retryable` matching its own enum's
+/// variants — four identical policies in four files, so adding a retryable
+/// class (or noticing one was missing from just one client) was a four-file
+/// edit with nothing to catch a miss. The per-crate `ui_code` table stays where
+/// it is: mapping *variants* to a class is genuinely per-crate; deciding which
+/// classes retry is not.
+pub fn is_retryable_code(ui_code: &str) -> bool {
+    matches!(ui_code, "throttled" | "server_error" | "network_error")
+}
+
 /// Maximum number of retries on transient failure (5xx, 429, network error).
 pub const MAX_RETRIES: u32 = 3;
 

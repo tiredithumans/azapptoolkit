@@ -29,7 +29,7 @@ pub enum GraphError {
     Deserialize(String),
 
     #[error("token: {0}")]
-    Token(String),
+    Token(azapptoolkit_core::token::TokenError),
 
     #[error("protocol: {0}")]
     Protocol(String),
@@ -42,11 +42,11 @@ impl From<serde_json::Error> for GraphError {
 }
 
 impl GraphError {
+    /// Delegates to the shared policy — see
+    /// [`azapptoolkit_core::http_retry::is_retryable_code`]. `ui_code` below is
+    /// this crate's only variant-to-class table.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            GraphError::Throttled { .. } | GraphError::Server { .. } | GraphError::Network(_)
-        )
+        azapptoolkit_core::http_retry::is_retryable_code(self.ui_code())
     }
 
     pub fn ui_code(&self) -> &'static str {
@@ -59,7 +59,13 @@ impl GraphError {
             GraphError::Api { .. } => "graph_error",
             GraphError::Network(_) => "network_error",
             GraphError::Deserialize(_) => "deserialize_error",
-            GraphError::Token(_) => "token_error",
+            // Pass an auth classification through instead of flattening it:
+            // `is_reauth_fatal` is what stops a long-running fan-out.
+            GraphError::Token(t) => match t.code.as_str() {
+                "refresh_missing" => "refresh_missing",
+                "not_signed_in" => "not_signed_in",
+                _ => "token_error",
+            },
             GraphError::Protocol(_) => "protocol_error",
         }
     }

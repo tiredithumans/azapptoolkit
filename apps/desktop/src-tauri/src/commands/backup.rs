@@ -29,8 +29,7 @@ use azapptoolkit_core::models::{
 use azapptoolkit_graph::{GraphClient, GraphError};
 
 use crate::commands::applications::{extract_auth_fields, indexes_cached};
-use crate::commands::dispatch::batch_or_serial;
-use crate::commands::dispatch::dispatch_capped;
+use crate::commands::dispatch::{SessionDead, batch_or_serial, dispatch_capped};
 use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
@@ -117,11 +116,12 @@ pub async fn backup_tenant(
         app_pairs.chunks(BATCH_CHUNK).map(<[_]>::to_vec).collect();
     let mut app_backups: Vec<AppRegistrationBackup> = Vec::with_capacity(app_total);
     let cancel = state.dr_cancel.clone();
+    let session = SessionDead::new();
     let cancelled = dispatch_capped(
         app_chunks,
         || throttle.current_limit(),
         |chunk| {
-            if cancel.is_cancelled() {
+            if cancel.is_cancelled() || session.is_dead() {
                 return None;
             }
             let client = client.clone();
@@ -129,6 +129,7 @@ pub async fn backup_tenant(
             let done = done.clone();
             let sp_app_ids = sp_app_ids.clone();
             let throttle = throttle.clone();
+            let session = session.clone();
             Some(tokio::spawn(async move {
                 let report = |count: usize| {
                     emit(
@@ -139,7 +140,7 @@ pub async fn backup_tenant(
                         Some(throttle.current_limit()),
                     );
                 };
-                backup_app_chunk(&client, chunk, &sp_app_ids, &done, &report).await
+                backup_app_chunk(&client, chunk, &sp_app_ids, &done, &report, &session).await
             }))
         },
         |joined| {
@@ -151,6 +152,9 @@ pub async fn backup_tenant(
     .await;
     // A partial backup is a dangerous DR artifact (it reads as complete), so a
     // cancelled run is an error, not a truncated success.
+    if session.is_dead() {
+        return Err(session.err("the tenant backup"));
+    }
     if cancelled || state.dr_cancel.is_cancelled() {
         return Err(cancelled_err());
     }
@@ -184,7 +188,7 @@ pub async fn backup_tenant(
         ent_chunks,
         || throttle.current_limit(),
         |chunk| {
-            if ent_cancel.is_cancelled() {
+            if ent_cancel.is_cancelled() || session.is_dead() {
                 return None;
             }
             let client = client.clone();
@@ -193,6 +197,7 @@ pub async fn backup_tenant(
             let map = app_obj_by_app_id.clone();
             let tenant = tenant_arc.clone();
             let throttle = throttle.clone();
+            let session = session.clone();
             Some(tokio::spawn(async move {
                 backup_enterprise_chunk(
                     &client,
@@ -203,6 +208,7 @@ pub async fn backup_tenant(
                     &done,
                     total,
                     &throttle,
+                    &session,
                 )
                 .await
             }))
@@ -214,6 +220,9 @@ pub async fn backup_tenant(
         },
     )
     .await;
+    if session.is_dead() {
+        return Err(session.err("the tenant backup"));
+    }
     if ent_cancelled || state.dr_cancel.is_cancelled() {
         return Err(cancelled_err());
     }
@@ -320,6 +329,18 @@ pub fn cancel_dr(state: State<'_, AppState>) {
 /// per-app reads for this chunk only (never failing the backup); a per-app
 /// failure skips that one app. Emits per-app progress so the bar still advances
 /// smoothly (in bursts of ≤20). Returns the assembled backups for the chunk.
+/// Classifies the per-item failures of a batched read. A dead session makes
+/// every remaining read fail identically, and a DR backup that quietly drops
+/// what it couldn't read restores as if those objects never existed.
+fn note_graph_failures<'a, T: 'a>(
+    session: &SessionDead,
+    results: impl Iterator<Item = Result<&'a T, &'a GraphError>>,
+) {
+    for err in results.filter_map(Result::err) {
+        session.note_code(err.ui_code());
+    }
+}
+
 async fn backup_app_chunk(
     client: &GraphClient,
     chunk: Vec<(String, String)>,
@@ -330,6 +351,7 @@ async fn backup_app_chunk(
     // handle + throttle to emit progress; tests pass a no-op). `+ Sync` so the
     // reference can be held across the `.await`s in a `Send` future.
     report: &(dyn Fn(usize) + Sync),
+    session: &SessionDead,
 ) -> Vec<AppRegistrationBackup> {
     let object_ids: Vec<String> = chunk.iter().map(|(_, oid)| oid.clone()).collect();
     let (apps_res, feds_res) = tokio::join!(
@@ -350,6 +372,12 @@ async fn backup_app_chunk(
         |oid: String| async move { client.list_federated_credentials(&oid).await },
     )
     .await;
+
+    // A DR backup that silently drops apps is the most dangerous artifact this
+    // app produces — it restores as if those apps never existed. Classify every
+    // per-item failure so a dead session aborts the run instead of thinning it.
+    note_graph_failures(session, app_jsons.iter().map(Result::as_ref));
+    note_graph_failures(session, feds.iter().map(Result::as_ref));
 
     let mut out = Vec::with_capacity(chunk.len());
     for (i, (app_id, object_id)) in chunk.iter().enumerate() {
@@ -452,6 +480,7 @@ async fn backup_enterprise_chunk(
     done: &Mutex<usize>,
     total: usize,
     throttle: &ConcurrencyThrottle,
+    session: &SessionDead,
 ) -> Vec<EnterpriseAppBackup> {
     let sp_ids: Vec<String> = chunk.iter().map(|sp| sp.id.clone()).collect();
     let (sps_res, assigned_res, groups_res) = tokio::join!(
@@ -480,6 +509,10 @@ async fn backup_enterprise_chunk(
         |id: String| async move { client.list_service_principal_groups(&id).await },
     )
     .await;
+
+    note_graph_failures(session, full_sps.iter().map(Result::as_ref));
+    note_graph_failures(session, assigned.iter().map(Result::as_ref));
+    note_graph_failures(session, groups.iter().map(Result::as_ref));
 
     let mut out = Vec::with_capacity(chunk.len());
     for (i, index_sp) in chunk.iter().enumerate() {
@@ -1011,7 +1044,15 @@ mod tests {
         // No-op progress callback — the degrade logic under test doesn't depend on
         // it, and this keeps the test free of a Tauri AppHandle / mock runtime.
         let report = |_count: usize| {};
-        let out = backup_app_chunk(&client, chunk, &sp_app_ids, &done, &report).await;
+        let out = backup_app_chunk(
+            &client,
+            chunk,
+            &sp_app_ids,
+            &done,
+            &report,
+            &SessionDead::new(),
+        )
+        .await;
 
         // The run never fails: obj-1 is recovered via the per-object fallback, and
         // obj-2's failed read is skipped rather than aborting the chunk.
