@@ -359,12 +359,17 @@ fn changelog_headers_match_what_both_parsers_require() {
 #[test]
 fn agents_md_stays_within_its_own_budget() {
     const BUDGET: usize = 28_000;
-    let agents = include_str!("../../../../AGENTS.md");
+    // Measured with `\r` stripped: git checks this file out CRLF on Windows, so
+    // a raw byte count would charge the file one extra byte per line and make
+    // the budget platform-dependent (it failed on windows-latest alone).
+    let size = include_str!("../../../../AGENTS.md")
+        .bytes()
+        .filter(|b| *b != b'\r')
+        .count();
     assert!(
-        agents.len() <= BUDGET,
-        "AGENTS.md is {} bytes, over its documented {BUDGET}-byte budget by {}. \
+        size <= BUDGET,
+        "AGENTS.md is {size} bytes, over its documented {BUDGET}-byte budget by {}. \
          Move the deep detail into docs/architecture/ and leave one invariant + a pointer.",
-        agents.len(),
-        agents.len() - BUDGET
+        size - BUDGET
     );
 }
