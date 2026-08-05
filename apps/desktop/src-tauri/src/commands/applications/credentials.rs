@@ -18,13 +18,32 @@ pub async fn add_password(
     object_id: String,
     input: AddPasswordInput,
 ) -> Result<PasswordCredential, UiError> {
+    add_password_core(&state, &tenant_id, &object_id, input).await
+}
+
+/// The handler body, taking `&AppState` instead of `State<'_, AppState>`.
+///
+/// `tauri::State` can only be built by the Tauri runtime, and the `tauri/test`
+/// dev-dependency was dropped (it broke the Windows test binary — see
+/// `d8d293e`), so a `#[tauri::command]` signature is unreachable from a test.
+/// That is why no test had ever exercised a handler end to end: the rules that
+/// live *here* rather than in a pure helper — call Graph, invalidate **only** on
+/// `Ok`, and invalidate the credential tier without dropping the tenant-wide
+/// indexes — were checked by review alone. Splitting the body out gives that
+/// orchestration a seam without adding a dependency.
+pub(crate) async fn add_password_core(
+    state: &AppState,
+    tenant_id: &str,
+    object_id: &str,
+    input: AddPasswordInput,
+) -> Result<PasswordCredential, UiError> {
     let (start, end) = resolve_password_window(&input, chrono::Utc::now())
         .map_err(|msg| UiError::validation("invalid_secret_window", msg))?;
-    let client = state.graph_for(&tenant_id);
+    let client = state.graph_for(tenant_id);
     let cred = client
-        .add_password_window(&object_id, &input.display_name, start, end)
+        .add_password_window(object_id, &input.display_name, start, end)
         .await?;
-    invalidate_app_credentials(&state.cache, &tenant_id, &object_id);
+    invalidate_app_credentials(&state.cache, tenant_id, object_id);
     Ok(cred)
 }
 
@@ -337,6 +356,153 @@ mod cert_tests {
         assert!(
             normalize_cert_blob("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n")
                 .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+
+    use azapptoolkit_core::cache::CacheKind;
+    use azapptoolkit_core::models::{Application, ServicePrincipal};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::commands::applications::cache::{
+        app_detail_key, app_name_index_hit, app_name_index_store, sp_index_hit, sp_index_store,
+    };
+
+    const TENANT: &str = "t1";
+    const OBJECT: &str = "obj-1";
+
+    /// Seeds what a credential mutation must NOT drop (the two pinned
+    /// tenant-wide indexes) alongside what it must drop (the app's detail row).
+    fn seed(state: &AppState) {
+        sp_index_store(&state.cache, TENANT, vec![ServicePrincipal::default()]);
+        app_name_index_store(&state.cache, TENANT, vec![Application::default()]);
+        state.cache.put(
+            CacheKind::Lists,
+            app_detail_key(TENANT, OBJECT),
+            &serde_json::json!({"id": OBJECT}),
+        );
+    }
+
+    fn detail_cached(state: &AppState) -> bool {
+        state
+            .cache
+            .get::<serde_json::Value>(CacheKind::Lists, &app_detail_key(TENANT, OBJECT))
+            .is_some()
+    }
+
+    fn input() -> AddPasswordInput {
+        AddPasswordInput {
+            display_name: "test secret".to_string(),
+            lifetime_days: None,
+            start_date_time: None,
+            end_date_time: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_successful_secret_add_busts_the_credential_tier_and_keeps_the_indexes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/v1.0/applications/{OBJECT}/addPassword")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keyId": "k1",
+                "displayName": "test secret",
+                "secretText": "s3cret",
+            })))
+            .mount(&server)
+            .await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+
+        let cred = add_password_core(&state, TENANT, OBJECT, input())
+            .await
+            .expect("the mocked addPassword succeeds");
+        assert_eq!(cred.key_id, "k1");
+
+        assert!(
+            !detail_cached(&state),
+            "the app's detail row must be busted — it carries the credential list"
+        );
+        // The AGENTS.md rule a credential-only mutation exists to respect: the
+        // tenant-wide indexes cost a full directory scan and are unaffected by
+        // one app's secret.
+        assert!(
+            sp_index_hit(&state.cache, TENANT).is_some(),
+            "the SP index must survive a credential-only mutation"
+        );
+        assert!(
+            app_name_index_hit(&state.cache, TENANT).is_some(),
+            "the app-registration index must survive a credential-only mutation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_secret_add_invalidates_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/v1.0/applications/{OBJECT}/addPassword")))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(&server)
+            .await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+
+        let err = add_password_core(&state, TENANT, OBJECT, input())
+            .await
+            .expect_err("a 403 must surface as an error");
+        assert_eq!(err.code, "forbidden");
+
+        // "Invalidate caches only on `Ok`" — on failure the cached data is still
+        // accurate, and dropping it costs a re-fetch for nothing.
+        assert!(
+            detail_cached(&state),
+            "a failed mutation must leave the cached detail row alone"
+        );
+        assert!(sp_index_hit(&state.cache, TENANT).is_some());
+        assert!(app_name_index_hit(&state.cache, TENANT).is_some());
+    }
+
+    #[tokio::test]
+    async fn an_invalid_secret_window_never_reaches_graph() {
+        // No mock mounted: any request would 404 and fail the test differently.
+        let server = MockServer::start().await;
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+
+        // An explicit window past the 24-month cap is REJECTED (a bare
+        // `lifetime_days` is clamped instead, so it wouldn't exercise this).
+        let now = chrono::Utc::now();
+        let err = add_password_core(
+            &state,
+            TENANT,
+            OBJECT,
+            AddPasswordInput {
+                display_name: "too long".to_string(),
+                lifetime_days: None,
+                start_date_time: Some(now),
+                end_date_time: Some(now + chrono::Duration::days(MAX_SECRET_LIFETIME_DAYS + 1)),
+            },
+        )
+        .await
+        .expect_err("a window past the 24-month cap is rejected");
+        assert_eq!(err.code, "invalid_secret_window");
+        assert!(
+            detail_cached(&state),
+            "a rejected input invalidates nothing"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
         );
     }
 }
