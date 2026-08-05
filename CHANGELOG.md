@@ -10,6 +10,8 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-08-05
+
 ### Fixed
 
 - **Moving a management scope onto the toolkit-managed group now refuses any
