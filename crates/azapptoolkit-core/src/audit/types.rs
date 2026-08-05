@@ -549,6 +549,14 @@ pub mod issue {
     pub const LEGACY_MAILBOX_POLICY: &str =
         "Mailbox access confined by a legacy Application Access Policy";
     pub const ORG_WIDE_SHAREPOINT: &str = "Organization-wide SharePoint access";
+    /// Org-wide `Sites.*` on **Office 365 SharePoint Online** rather than
+    /// Microsoft Graph. The SharePoint sibling of [`UNCONFINABLE_MAILBOX`], and
+    /// distinct from [`ORG_WIDE_SHAREPOINT`] for the same reason: it carries no
+    /// [`super::RemediationKind::ScopeSharePointAccess`] fix, because
+    /// `convert_site_access_to_selected` grants and strips on the Graph resource
+    /// only and would leave this grant org-wide while reporting it confined.
+    pub const UNCONFINABLE_SHAREPOINT: &str =
+        "Org-wide SharePoint access that Sites.Selected cannot confine";
     pub const SCOPED_SHAREPOINT: &str = "SharePoint access scoped to selected sites";
     pub const NO_OWNERS: &str = "No owners assigned";
     pub const SINGLE_OWNER: &str = "Single owner";

@@ -36,6 +36,11 @@ fn target_tab(item: &AuditItem) -> &'static str {
         // a legacy policy is managed by hand once the operator wants more than
         // the one-click migration.
         || has(issue::LEGACY_MAILBOX_POLICY)
+        // The two "cannot be confined here" markers carry no one-click Fix, so
+        // the Permissions tab — where the grant itself is removed or
+        // re-declared on the confinable resource — is the only place to act.
+        || has(issue::UNCONFINABLE_MAILBOX)
+        || has(issue::UNCONFINABLE_SHAREPOINT)
         || has(issue::ORG_WIDE_SHAREPOINT)
         || has(issue::SCOPED_SHAREPOINT)
         || has(issue::HIGH_RISK_APP_PERMS)

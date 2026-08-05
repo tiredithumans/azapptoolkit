@@ -27,6 +27,12 @@ pub const MICROSOFT_GRAPH_APP_ID: &str = "00000003-0000-0000-c000-000000000000";
 /// path has to understand it, not just the Graph resource.
 pub const OFFICE365_EXCHANGE_ONLINE_APP_ID: &str = "00000002-0000-0ff1-ce00-000000000000";
 
+/// **Office 365 SharePoint Online** — the second resource exposing `Sites.*`
+/// application permissions, for apps calling the SharePoint REST APIs rather
+/// than Microsoft Graph. `Sites.Selected` exists on both, so a `Sites.*` value
+/// alone never identifies which API surface a grant opens.
+pub const OFFICE365_SHAREPOINT_ONLINE_APP_ID: &str = "00000003-0000-0ff1-ce00-000000000000";
+
 /// Exchange Web Services full-mailbox-access scope, exposed as an appRole on
 /// [`OFFICE365_EXCHANGE_ONLINE_APP_ID`] (never on Microsoft Graph). Documented
 /// as an Application-Access-Policy-supported scope, and scopable under RBAC for
@@ -189,11 +195,55 @@ pub fn is_mailbox_reaching_permission(resource_app_id: Option<&str>, value: &str
     }
 }
 
-/// True for an org-wide SharePoint permission — every `Sites.*` except
-/// `Sites.Selected` (the scoped model). Gates the per-permission "Scope…" action
-/// that converts a broad grant to `Sites.Selected` on chosen sites.
+/// True for an org-wide SharePoint permission *by name* — every `Sites.*`
+/// except `Sites.Selected` (the scoped model).
+///
+/// Name-shaped only. `Sites.*` lives on **two** resources, exactly like the
+/// mailbox family: Microsoft Graph and Office 365 SharePoint Online. A caller
+/// that knows the resource must use [`is_sharepoint_orgwide_permission`] to
+/// classify and [`is_scopable_sharepoint_resource_permission`] to decide
+/// whether a fix may be offered.
 pub fn is_sharepoint_orgwide(value: &str) -> bool {
     value.starts_with("Sites.") && value != "Sites.Selected"
+}
+
+/// True when a grant reaches SharePoint site content org-wide, on either
+/// resource. A `None` resource falls back to the name-shaped check, so a build
+/// that cannot resolve the resource reports reach rather than dropping it.
+pub fn is_sharepoint_orgwide_permission(resource_app_id: Option<&str>, value: &str) -> bool {
+    match resource_app_id {
+        Some(MICROSOFT_GRAPH_APP_ID) | Some(OFFICE365_SHAREPOINT_ONLINE_APP_ID) | None => {
+            is_sharepoint_orgwide(value)
+        }
+        // Some other resource that happens to expose a `Sites.`-prefixed role
+        // is not SharePoint site access.
+        Some(_) => false,
+    }
+}
+
+/// True when an org-wide `Sites.*` grant is one the toolkit's `Sites.Selected`
+/// conversion can actually confine — **the positive gate** for offering the
+/// [`crate::audit::RemediationKind::ScopeSharePointAccess`] fix.
+///
+/// Only Microsoft Graph qualifies, and the reason is in the handler rather than
+/// in the permission model: `convert_site_access_to_selected` resolves the
+/// `Sites.Selected` appRole on the *Microsoft Graph* service principal and
+/// strips org-wide grants whose `resource_id` is Graph's. Run against a grant on
+/// Office 365 SharePoint Online it would add Graph's `Sites.Selected`, grant the
+/// per-site permissions, strip **nothing**, and leave the app just as org-wide
+/// as before — while the audit re-scored it as confined.
+///
+/// Both resources *can* be confined by the `Sites.Selected` model in principle
+/// (per-site grants apply to Graph and the SharePoint REST APIs alike), so this
+/// is a limit of the current handler, not of Microsoft's model: teach
+/// `convert_site_access_to_selected` to grant and strip on the SharePoint
+/// resource too and this gate can widen. Until then it must stay closed — an
+/// unresolved (`None`) resource included.
+pub fn is_scopable_sharepoint_resource_permission(
+    resource_app_id: Option<&str>,
+    value: &str,
+) -> bool {
+    resource_app_id == Some(MICROSOFT_GRAPH_APP_ID) && is_sharepoint_orgwide(value)
 }
 
 /// Which scoping *authority* can confine a Graph application permission. Each
@@ -428,6 +478,53 @@ mod tests {
         // Unknown resource falls back to the name shape — over-report, never under.
         assert!(is_mailbox_reaching_permission(None, "Mail.Read"));
         assert!(!is_mailbox_reaching_permission(None, "Directory.Read.All"));
+    }
+
+    #[test]
+    fn the_sharepoint_fix_gate_is_positive_and_graph_only() {
+        // Mirrors `is_scopable_exchange_resource_permission`: a POSITIVE test,
+        // so an unmapped or unresolved resource fails closed instead of
+        // inheriting a fix that cannot apply to it.
+        assert!(is_scopable_sharepoint_resource_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Sites.Read.All"
+        ));
+        assert!(!is_scopable_sharepoint_resource_permission(
+            Some(OFFICE365_SHAREPOINT_ONLINE_APP_ID),
+            "Sites.Read.All"
+        ));
+        assert!(
+            !is_scopable_sharepoint_resource_permission(None, "Sites.Read.All"),
+            "an unresolved resource must not earn a fix"
+        );
+        // Already the scoped model — nothing to convert.
+        assert!(!is_scopable_sharepoint_resource_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Sites.Selected"
+        ));
+    }
+
+    #[test]
+    fn sharepoint_reach_is_reported_on_both_resources() {
+        for resource in [
+            Some(MICROSOFT_GRAPH_APP_ID),
+            Some(OFFICE365_SHAREPOINT_ONLINE_APP_ID),
+            None,
+        ] {
+            assert!(
+                is_sharepoint_orgwide_permission(resource, "Sites.FullControl.All"),
+                "{resource:?} reaches site content org-wide"
+            );
+            assert!(!is_sharepoint_orgwide_permission(
+                resource,
+                "Sites.Selected"
+            ));
+        }
+        // A `Sites.`-prefixed role on some unrelated resource isn't SharePoint.
+        assert!(!is_sharepoint_orgwide_permission(
+            Some(OFFICE365_EXCHANGE_ONLINE_APP_ID),
+            "Sites.Read.All"
+        ));
     }
 
     #[test]
