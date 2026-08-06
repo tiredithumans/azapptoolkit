@@ -330,7 +330,8 @@ pub fn AuditAppsPane() -> impl IntoView {
                                 // the remediation count so a keyed row re-renders
                                 // only when its key changes — the one in-place
                                 // mutation this view performs is `on_remediated`
-                                // clearing an item's remediations (Fix must vanish).
+                                // dropping the remediation that just succeeded
+                                // (that Fix must vanish).
                                 <For
                                     each=move || {
                                         let limit = render_limit.get();
@@ -436,6 +437,11 @@ pub fn AuditAppsPane() -> impl IntoView {
                                                     </ul>
                                                 </td>
                                                 <td>
+                                                    // No `kinds` filter here: this pane is not
+                                                    // grouped by rule, so a row stands for the whole
+                                                    // application and offers every Fix it carries
+                                                    // (the Findings pane scopes each section to its
+                                                    // own rule instead).
                                                     <AuditRowActions item=i.clone() on_done=ctrl.on_remediated />
                                                 </td>
                                             </tr>

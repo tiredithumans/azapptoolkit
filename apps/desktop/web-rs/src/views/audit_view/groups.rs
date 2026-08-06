@@ -8,7 +8,7 @@
 //! `.contains(SCOPED_VIA_RBAC)` vs `.starts_with` asymmetry lives in exactly
 //! one place.
 
-use azapptoolkit_core::audit::{AuditItem, RiskLevel};
+use azapptoolkit_core::audit::{AuditItem, RemediationKind, RiskLevel};
 
 use crate::components::bulk_action_bar::BulkAction;
 
@@ -30,6 +30,13 @@ pub(super) struct GroupSpec {
     pub title: &'static str,
     /// One-sentence explanation shown in the expanded panel.
     pub blurb: &'static str,
+    /// The detail-pane tab a row's "Open" deep-link lands on **from this
+    /// section** — where the operator acts on *this* rule, not on whatever
+    /// else the app was scored for. `target_tab`'s item-wide scan serves the
+    /// ungrouped All-apps pane; here the section already names the finding, so
+    /// it decides. Managed identities are clamped to their two-tab pane
+    /// (`row::target_tab`).
+    pub tab: &'static str,
     pub section: GroupSection,
 }
 
@@ -41,78 +48,91 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         key: "expired",
         title: "Expired credentials",
         blurb: "Apps holding already-expired secrets or certificates. Removing them can't break a working sign-in — expired credentials can't authenticate.",
+        tab: "credentials",
         section: GroupSection::Actionable,
     },
     GroupSpec {
         key: "orgwide_mailbox",
         title: "Org-wide mailbox access",
         blurb: "Mail permissions that reach every mailbox in the tenant. Confine them to specific mail-enabled groups via Exchange RBAC for Applications.",
+        tab: "permissions",
         section: GroupSection::Actionable,
     },
     GroupSpec {
         key: "legacy_mailbox_scope",
         title: "Legacy Application Access Policy scoping",
         blurb: "Mailbox access confined by an Application Access Policy — deprecated, per-app, and blind to anything granted through Exchange RBAC. Migrate each app to a management scope with scoped role assignments; the fix plans the change before applying it.",
+        tab: "permissions",
         section: GroupSection::Actionable,
     },
     GroupSpec {
         key: "orgwide_sharepoint",
         title: "Org-wide SharePoint access",
         blurb: "Sites.* permissions that reach every site collection. Convert them to the Sites.Selected model on the sites the app actually needs.",
+        tab: "permissions",
         section: GroupSection::Actionable,
     },
     GroupSpec {
         key: "redundant_perms",
         title: "Redundant permissions",
         blurb: "Narrower application permissions a broader held permission already fully covers — pure attack surface, safe to remove.",
+        tab: "permissions",
         section: GroupSection::Actionable,
     },
     GroupSpec {
         key: "ownership",
         title: "Missing or single owner",
         blurb: "Apps with no owner (accountability gap) or a single owner (vulnerable to departure). Adding an owner is purely additive.",
+        tab: "owners",
         section: GroupSection::Actionable,
     },
     GroupSpec {
         key: "unused",
         title: "Unused applications",
         blurb: "No sign-in activity in the report window. Disable sign-in (reversible) to verify nothing breaks, or delete when confirmed obsolete.",
+        tab: "overview",
         section: GroupSection::Actionable,
     },
     GroupSpec {
         key: "high_risk_perms",
         title: "High-risk application permissions",
         blurb: "Broad application permissions (e.g. Mail.ReadWrite, Directory.ReadWrite.All). Reducing them is an admin-judged change — open the app's Permissions tab to review downgrades or scoping.",
+        tab: "permissions",
         section: GroupSection::Actionable,
     },
     GroupSpec {
         key: "external_exposure",
         title: "Reachable outside this tenant",
         blurb: "Apps whose sign-in audience lets other directories (or personal Microsoft accounts) consent to them, while they hold application permissions or credentials — so their access isn't confined here. Confirm each is meant to be multi-tenant; verify the publisher if it is.",
+        tab: "overview",
         section: GroupSection::Actionable,
     },
     GroupSpec {
         key: "high_risk_delegated",
         title: "High-risk delegated permissions",
         blurb: "Admin-consented delegated scopes with broad reach. Review on the principal's Permissions tab; delegated scopes are requested by name, so removal is admin-judged.",
+        tab: "permissions",
         section: GroupSection::Actionable,
     },
     GroupSpec {
         key: "no_local_app",
         title: "No local app registration",
-        blurb: "Foreign-tenant enterprise apps, managed identities, and orphaned service principals — scored from their granted roles. Credentials and manifest live in their home tenant; scope fixes still apply here.",
+        blurb: "Foreign-tenant enterprise apps, managed identities, and orphaned service principals — scored from their granted roles. Credentials and manifest live in their home tenant; their scope fixes are offered in the mailbox and SharePoint findings, which list these principals too.",
+        tab: "overview",
         section: GroupSection::Actionable,
     },
     GroupSpec {
         key: "scoped_mailbox",
         title: "Mailbox access scoped",
         blurb: "Mail permissions confirmed confined to specific mailboxes via Exchange RBAC — the configuration the org-wide fix moves apps toward.",
+        tab: "permissions",
         section: GroupSection::Healthy,
     },
     GroupSpec {
         key: "scoped_sites",
         title: "SharePoint scoped to selected sites",
         blurb: "SharePoint access on the least-privilege Sites.Selected model.",
+        tab: "permissions",
         section: GroupSection::Healthy,
     },
 ];
@@ -219,6 +239,34 @@ pub(super) fn group_bulk_actions(key: &str) -> Vec<BulkAction> {
         "ownership" => vec![BulkAction::AddOwner],
         "unused" => vec![BulkAction::DisableSignIn, BulkAction::Delete],
         _ => Vec::new(),
+    }
+}
+
+/// The one-click Fix(es) a group's **rows** may offer — the per-row counterpart
+/// to [`group_bulk_actions`], and paired with the same rule.
+///
+/// An `AuditItem` carries every remediation the scorer attached across *all*
+/// the rules it tripped, and the same item is listed under each finding group
+/// it matches. Rendering the whole set on every row put unrelated buttons in a
+/// section ("Remove 1 expired credential" inside Legacy Application Access
+/// Policy scoping) — and firing one cleared the row's remediations, taking the
+/// section's own Fix with it. A section shows only the Fix for its own rule;
+/// the others are one click away in the section that owns them.
+///
+/// Advisory groups (`high_risk_perms`, `external_exposure`,
+/// `high_risk_delegated`, `no_local_app`) and the Healthy positives own none —
+/// their rows keep the "Open" deep-link alone. Kinds are disjoint across
+/// groups, pinned by the tests below.
+pub(super) fn group_remediation_kinds(key: &str) -> &'static [RemediationKind] {
+    match key {
+        "expired" => &[RemediationKind::RemoveExpiredCredentials],
+        "orgwide_mailbox" => &[RemediationKind::ScopeMailboxAccess],
+        "legacy_mailbox_scope" => &[RemediationKind::MigrateApplicationAccessPolicy],
+        "orgwide_sharepoint" => &[RemediationKind::ScopeSharePointAccess],
+        "redundant_perms" => &[RemediationKind::RemoveRedundantPermissions],
+        "ownership" => &[RemediationKind::AddOwner],
+        "unused" => &[RemediationKind::DisableSignIn],
+        _ => &[],
     }
 }
 
@@ -377,5 +425,77 @@ mod tests {
         assert!(group_bulk_actions("legacy_mailbox_scope").is_empty());
         assert!(group_bulk_actions("no_local_app").is_empty());
         assert!(group_bulk_actions("scoped_mailbox").is_empty());
+    }
+
+    /// A section's `tab` is a deep-link target: an unknown value doesn't error,
+    /// it silently clamps (app/enterprise panes) or renders an empty tab body
+    /// (the managed-identity pane), so a typo would read as a dead "Open".
+    #[test]
+    fn every_group_tab_is_a_real_detail_pane_tab() {
+        use crate::views::tabs::AppTab;
+        for spec in GROUP_CATALOG {
+            assert_eq!(
+                AppTab::from_str(spec.tab).value(),
+                spec.tab,
+                "group {} points at unknown tab {:?}",
+                spec.key,
+                spec.tab
+            );
+        }
+    }
+
+    /// Every remediation the scorer can attach must be offered by exactly ONE
+    /// finding group. Zero owners hides a Fix the audit computed; two owners
+    /// puts the same button in two sections — the cross-section leakage this
+    /// mapping exists to stop.
+    #[test]
+    fn every_remediation_kind_is_owned_by_exactly_one_group() {
+        // Exhaustive by construction: a new variant won't compile until it is
+        // listed here, and won't pass until a group claims it.
+        let all = [
+            RemediationKind::RemoveExpiredCredentials,
+            RemediationKind::ScopeMailboxAccess,
+            RemediationKind::ScopeSharePointAccess,
+            RemediationKind::RemoveRedundantPermissions,
+            RemediationKind::AddOwner,
+            RemediationKind::MigrateApplicationAccessPolicy,
+            RemediationKind::DisableSignIn,
+        ];
+        for kind in all {
+            let owners: Vec<&str> = GROUP_CATALOG
+                .iter()
+                .filter(|s| group_remediation_kinds(s.key).contains(&kind))
+                .map(|s| s.key)
+                .collect();
+            assert_eq!(owners.len(), 1, "{kind:?} is owned by {owners:?}");
+        }
+    }
+
+    #[test]
+    fn advisory_and_healthy_groups_offer_no_row_fix() {
+        // Advisory groups: the change is admin-judged, so the row offers "Open"
+        // only — it must not inherit a sibling rule's Fix.
+        for key in [
+            "high_risk_perms",
+            "high_risk_delegated",
+            "external_exposure",
+            "no_local_app",
+        ] {
+            assert!(group_remediation_kinds(key).is_empty(), "advisory {key}");
+        }
+        // Healthy positives are the end state a fix moves apps toward.
+        for spec in GROUP_CATALOG
+            .iter()
+            .filter(|s| matches!(s.section, GroupSection::Healthy))
+        {
+            assert!(
+                group_remediation_kinds(spec.key).is_empty(),
+                "healthy {}",
+                spec.key
+            );
+        }
+        // Unlike `matches_finding` (which falls through to `true`), an unknown
+        // key here must fall through to NO fixes, never to every fix.
+        assert!(group_remediation_kinds("not-a-group").is_empty());
     }
 }

@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use azapptoolkit_core::audit::RemediationKind;
 use leptos::prelude::*;
 
 use crate::bindings::audit::{self, AuditProgress, AuditRunResult};
@@ -45,10 +46,13 @@ pub(crate) struct AuditController {
     /// pane — a full-tenant HashMap per reader per render.
     pub names: Memo<Arc<HashMap<String, String>>>,
     pub report_available: Memo<bool>,
-    /// When a row's remediation succeeds, drops that item's remediations so
-    /// the "Fix" button is gone for good (the audit cache is already busted
-    /// server-side; scores refresh on the next manual re-run).
-    pub on_remediated: Callback<String>,
+    /// When a row's remediation succeeds, drops **that one kind** from the
+    /// item so its "Fix" button is gone for good (the audit cache is already
+    /// busted server-side; scores refresh on the next manual re-run). Only that
+    /// kind: an item scored under several rules carries a Fix per rule, and
+    /// clearing the whole set made one section's success erase another
+    /// section's still-unfixed button.
+    pub on_remediated: Callback<(String, RemediationKind)>,
     /// After a successful inline bulk run, refetch the App Registrations list
     /// (a delete / remove-expired sweep busts its backend cache). The audit's
     /// own scan is a point-in-time snapshot — deleted rows linger until the
@@ -94,12 +98,12 @@ impl AuditController {
             result.with(|r| r.as_ref().is_some_and(|r| r.sign_in_report_available))
         });
 
-        let on_remediated = Callback::new(move |object_id: String| {
+        let on_remediated = Callback::new(move |(object_id, kind): (String, RemediationKind)| {
             result.update(|opt| {
                 if let Some(r) = opt.as_mut()
                     && let Some(item) = r.items.iter_mut().find(|i| i.object_id == object_id)
                 {
-                    item.remediations.clear();
+                    item.remediations.retain(|a| a.kind != kind);
                 }
             });
         });

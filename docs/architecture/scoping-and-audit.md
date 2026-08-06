@@ -387,8 +387,27 @@ removal path can delete a credential the audit never flagged).
 
 On success the command busts caches (`invalidate_app_lists`) — and, unlike most mutations, a
 **partial** success still invalidates, because credentials were really removed. The audit view's
-`result` signal is a snapshot; clear the item's `remediations` on success (button gone) and re-run
-for fresh scores.
+`result` signal is a snapshot; drop **the kind that just succeeded** from the item's `remediations`
+(that button gone) and re-run for fresh scores. Only that kind: `AuditController::on_remediated`
+takes `(object_id, RemediationKind)` and `retain`s the rest, because one item routinely carries a
+fix per rule it tripped and the others are still unfixed.
+
+**What a row renders is a property of the surface, not the item.** An `AuditItem` carries every
+remediation the scorer attached and is listed under every finding group it matches, so
+`AuditRowActions` takes a `section: Option<&'static GroupSpec>` — the Findings pane passes the
+group's spec, the All-apps pane passes nothing (not grouped by rule). It decides two things:
+
+- **Which Fixes show** — `groups::group_remediation_kinds(spec.key)`, that section's rule only
+  (advisory and Healthy groups own none, so their rows are "Open"-only); no section ⇒ every fix.
+  A new `RemediationKind` must be claimed by exactly one group key;
+  `every_remediation_kind_is_owned_by_exactly_one_group` fails until it is. Without this, one
+  section rendered another's button — and firing it cleared the section's own Fix.
+- **Where "Open" lands** — `GroupSpec::tab`, so the deep-link opens the tab where *this* finding
+  is acted on. `row::scan_item_for_tab` (the item-wide scan) is the no-section fallback only: it
+  ranks a scoping finding above a credential one, so an app tripping both opened on Permissions
+  even from the Expired-credentials section. `target_tab` then clamps managed identities to
+  Overview/Permissions — their pane has no Owners or Credentials tab, and an unmatched deep-link
+  renders an empty tab body rather than failing loudly.
 
 Two kinds vary the pattern:
 

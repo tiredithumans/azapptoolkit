@@ -164,9 +164,10 @@ fn finding_group_view(
     actionable: bool,
 ) -> AnyView {
     let session = use_session();
-    let key = g.spec.key;
-    let title = g.spec.title;
-    let blurb = g.spec.blurb;
+    let spec = g.spec;
+    let key = spec.key;
+    let title = spec.title;
+    let blurb = spec.blurb;
     let count = g.item_indices.len();
     let is_open = move || expanded.get().as_deref() == Some(key);
     let toggle = move |_| {
@@ -411,7 +412,11 @@ fn finding_group_view(
                                             <td>{i.risk_score}</td>
                                             <td>{last_sign_in_cell(&i)}</td>
                                             <td>
-                                                <AuditRowActions item=i.clone() on_done=ctrl.on_remediated />
+                                                <AuditRowActions
+                                                    item=i.clone()
+                                                    section=spec
+                                                    on_done=ctrl.on_remediated
+                                                />
                                             </td>
                                         </tr>
                                     }
