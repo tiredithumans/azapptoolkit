@@ -492,6 +492,37 @@ impl Cache {
         self.put_inner(kind, key, value, true);
     }
 
+    /// [`Self::put_index`] under the store-after-invalidate guard — the
+    /// serializing twin of [`Self::put_typed_index_if_current`], with the same
+    /// contract: `since` is a [`Cache::generation`] captured **before** the
+    /// live fetch, and a store that lost the race is skipped (returns `false`)
+    /// rather than re-pinning a pre-mutation snapshot for the full TTL.
+    ///
+    /// Every pinned index built from a tenant-wide scan belongs on this path.
+    /// A pinned entry is out of LRU's reach, so losing the race there is not a
+    /// stale read that ages out in seconds — it is the wrong answer until the
+    /// TTL expires.
+    pub fn put_index_if_current<T>(
+        &self,
+        kind: CacheKind,
+        key: String,
+        value: &T,
+        since: u64,
+    ) -> bool
+    where
+        T: serde::Serialize,
+    {
+        if self.generation() != since {
+            tracing::debug!(
+                %key,
+                "cache invalidated during the index fetch; not storing the stale snapshot"
+            );
+            return false;
+        }
+        self.put_inner(kind, key, value, true);
+        true
+    }
+
     fn put_inner<T>(&self, kind: CacheKind, key: String, value: &T, pinned: bool)
     where
         T: serde::Serialize,
@@ -684,6 +715,37 @@ mod tests {
     /// they can look straight at what eviction actually did.
     fn entry_count(cache: &Cache, kind: CacheKind) -> usize {
         cache.buckets[kind.idx()].lock().entries.len()
+    }
+
+    #[test]
+    fn a_serialized_index_stored_after_an_invalidation_it_raced_is_dropped() {
+        // The `put_index` twin of the typed race below. The three list caches
+        // (App Registrations pairing, Enterprise Apps, Managed Identities) store
+        // through this one, are pinned, and are dropped by the same
+        // `invalidate_app_lists` a mutation fires — so an unconditional store
+        // re-pinned the pre-mutation rows and showed a deleted app for the full
+        // TTL.
+        let cache = Cache::new();
+        let key = "t1|apps_pairing".to_string();
+
+        let since = cache.generation();
+        // ... the paginated scan happens here, and a mutation lands during it.
+        cache.invalidate_prefix(CacheKind::Lists, "t1|");
+
+        let stored = cache.put_index_if_current(CacheKind::Lists, key.clone(), &vec![1u8], since);
+        assert!(!stored, "a snapshot that lost the race must not be stored");
+        assert!(
+            cache.get::<Vec<u8>>(CacheKind::Lists, &key).is_none(),
+            "the invalidated key must stay empty, not hold the stale scan"
+        );
+
+        // The uncontended path still stores, and still pins.
+        let since = cache.generation();
+        assert!(cache.put_index_if_current(CacheKind::Lists, key.clone(), &vec![2u8], since));
+        assert_eq!(
+            cache.get::<Vec<u8>>(CacheKind::Lists, &key),
+            Some(vec![2u8])
+        );
     }
 
     #[test]

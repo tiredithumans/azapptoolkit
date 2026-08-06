@@ -156,6 +156,11 @@ pub async fn list_applications_with_pairing(
         .with_top(APPS_PAGE_SIZE);
     let client = state.graph_for(&tenant_id);
 
+    // Captured BEFORE the scans below — both this list and the SP index it
+    // seeds are PINNED, so a snapshot that loses the race to a mutation is not
+    // a stale read that ages out, it is out of LRU's reach for the full TTL.
+    let since = state.cache.generation();
+
     // The pairing join reads the shared SP index. When it is already cached,
     // just enumerate the apps; on a cold miss fetch both concurrently so the
     // join's long pole is one directory scan, not two serial ones. Both sides
@@ -171,7 +176,10 @@ pub async fn list_applications_with_pairing(
                 client.list_service_principals_index(),
             )
             .await?;
-            (apps, cache::sp_index_store(&state.cache, &tenant_id, sps))
+            (
+                apps,
+                cache::sp_index_store_if_current(&state.cache, &tenant_id, sps, since),
+            )
         }
     };
 
@@ -193,8 +201,12 @@ pub async fn list_applications_with_pairing(
 
     // Pinned: this is a tenant-wide index (one paginated scan over every app
     // registration), not a per-object entry — it must not be evictable by the
-    // thousands of `app_detail|…` writes that share this bucket.
-    state.cache.put_index(CacheKind::Lists, cache_key, &rows);
+    // thousands of `app_detail|…` writes that share this bucket. Stored only if
+    // nothing was invalidated since `since`; the caller still gets these rows,
+    // it is only the *caching* of a snapshot that lost the race that is skipped.
+    state
+        .cache
+        .put_index_if_current(CacheKind::Lists, cache_key, &rows, since);
 
     Ok(rows)
 }

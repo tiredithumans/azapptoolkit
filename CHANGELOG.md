@@ -10,6 +10,58 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+### Changed
+
+- **Global search warms its corpus when you focus the box, instead of on your
+  first keystroke.** The search corpus is rebuilt from two full directory scans
+  whenever it expires (60-minute TTL) or an app mutation drops it — and that
+  rebuild sat on the keystroke path, so the first search after an idle hour or
+  after creating/deleting an app appeared to hang for seconds. Clicking the bar
+  (or pressing Cmd/Ctrl-K) now starts the rebuild, so it overlaps your typing.
+  A warm corpus still costs nothing, and concurrent rebuilds are collapsed into
+  one.
+
+### Fixed
+
+- **A list or search index rebuilt while an app mutation landed is no longer
+  cached.** A tenant-wide scan takes seconds, so a create/delete/rename
+  routinely lands during one: the mutation cleared the cache, and the in-flight
+  scan then stored the snapshot it had fetched *before* the change. Because
+  these entries are pinned (exempt from eviction so they survive heavy audit
+  runs), the result wasn't a stale read that clears in seconds — App
+  Registrations, Enterprise Apps, Managed Identities, and global search could
+  each show a deleted app, or miss a new one, for up to an hour. All four now
+  drop a snapshot that lost the race and re-fetch, as the two directory indexes
+  they are built from already did. Also fixed the two callers that reached the
+  audit's and the App Registrations join's service-principal index through an
+  unguarded helper, which made the existing check a no-op.
+
+- **A Security finding section now offers only the fix for its own rule.** An
+  app scored under several rules is listed under each of their sections and
+  carries a fix per rule, but every row rendered the whole set — so
+  "Remove 1 expired credential" turned up inside **Legacy Application Access
+  Policy scoping**, alongside (and above) the migration the operator opened
+  that section for. Each section now shows **Open** plus its own rule's fix;
+  the others stay one click away in the section that owns them. Advisory
+  sections (high-risk permissions, external exposure, no local app
+  registration) and the Healthy positives show **Open** only. The All-apps
+  pane is unchanged — its rows are not grouped by rule, so they still offer
+  every fix the app carries.
+- **"Open" now lands on the tab for the section it was clicked in.** The target
+  tab was picked by scanning *all* of an app's findings, which ranks permission
+  scoping above credentials — so opening an app from **Expired credentials**
+  dropped you on its Permissions tab when that same app also had a scoping
+  finding. Each section now names its own tab (expiry → Credentials, ownership
+  → Owners, scoping and permission findings → Permissions, unused / external
+  exposure → Overview). The All-apps pane keeps the old item-wide behaviour —
+  a row there stands for the whole app. Managed identities are clamped to the
+  two tabs their pane has, so no deep-link can land on an empty tab body.
+- **Applying one fix no longer clears the row's other, still-unfixed ones.**
+  A successful remediation dropped the row's entire remediation set, so
+  removing an expired credential took the legacy-policy migration button with
+  it and nothing short of a full re-run brought it back. Only the remediation
+  that actually ran is cleared now.
+
 ## [0.24.1] - 2026-08-05
 
 ### Fixed
