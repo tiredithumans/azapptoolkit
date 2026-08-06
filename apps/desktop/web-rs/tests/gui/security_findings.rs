@@ -1,8 +1,10 @@
 //! GUI tests for the findings-first Security workbench: impact ranking, the
 //! Fix-all eligibility rule, the group↔bulk-action pairing (the retired
-//! over-privileged→remove-redundant mismatch), the add-owner / disable-sign-in
-//! bulk flows, and the Home-drill routing (severity → All apps pane, finding →
-//! expanded group).
+//! over-privileged→remove-redundant mismatch), the per-row fix↔section pairing
+//! (a section offers its own rule's Fix only, deep-links "Open" to its own
+//! tab, and applying one fix leaves the others standing), the add-owner /
+//! disable-sign-in bulk flows, and the Home-drill routing (severity → All apps
+//! pane, finding → expanded group).
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
@@ -18,6 +20,7 @@ use azapptoolkit_dto::bulk::{
     BulkAddOwnerResult, BulkDisableOutcome, BulkDisableSignInResult, BulkOwnerOutcome,
 };
 use azapptoolkit_dto::exchange::{AapMigrationItem, AapMigrationReport};
+use azapptoolkit_dto::remediation::RemediationOutcome;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::security_view::SecurityView;
 
@@ -73,18 +76,29 @@ fn cached_run() -> AuditRunResult {
         &[format!("{} Mail.ReadWrite", issue::HIGH_RISK_APP_PERMS)],
     );
     // Confined by the deprecated policy: its own group, with the plan-first
-    // migration Fix attached.
+    // migration Fix attached. It ALSO holds an expired credential, so it is
+    // listed under two groups carrying two unrelated fixes — the cross-section
+    // leakage `section_rows_offer_only_their_own_rules_fix` pins.
     let mut legacy = fixtures::audit_item(
         "Legacy Policy App",
         RiskLevel::Low,
         &[format!("{}: Mail.Read", issue::LEGACY_MAILBOX_POLICY)],
     );
-    legacy.remediations = vec![RemediationAction {
-        kind: RemediationKind::MigrateApplicationAccessPolicy,
-        label: "Migrate to RBAC for Applications".to_string(),
-        detail: "Replaces the legacy policy confining 1 permission: Mail.Read".to_string(),
-        targets: vec!["Mail.Read".to_string()],
-    }];
+    legacy.credential_status = CredentialStatus::Expired;
+    legacy.remediations = vec![
+        RemediationAction {
+            kind: RemediationKind::MigrateApplicationAccessPolicy,
+            label: "Migrate to RBAC for Applications".to_string(),
+            detail: "Replaces the legacy policy confining 1 permission: Mail.Read".to_string(),
+            targets: vec!["Mail.Read".to_string()],
+        },
+        RemediationAction {
+            kind: RemediationKind::RemoveExpiredCredentials,
+            label: "Remove 1 expired credential".to_string(),
+            detail: "old-secret (expired 2024-01-01)".to_string(),
+            targets: Vec::new(),
+        },
+    ];
 
     AuditRunResult {
         tenant_id: "tenant-1".to_string(),
@@ -124,6 +138,25 @@ fn has_button(label: &str) -> bool {
     ts::query_all("button")
         .iter()
         .any(|el| el.text_content().unwrap_or_default().trim() == label)
+}
+
+/// Clicks the "Open" deep-link inside the row for `app_name`. Every row carries
+/// one, so the label alone is ambiguous — scope the search to the row.
+fn click_row_open(app_name: &str) {
+    for row in ts::query_all("tbody tr") {
+        if !row.text_content().unwrap_or_default().contains(app_name) {
+            continue;
+        }
+        let buttons = row.query_selector_all("button").unwrap();
+        for i in 0..buttons.length() {
+            let el: web_sys::HtmlElement = buttons.item(i).unwrap().unchecked_into();
+            if el.text_content().unwrap_or_default().trim() == "Open" {
+                el.click();
+                return;
+            }
+        }
+    }
+    panic!("no Open button in a row for `{app_name}`");
 }
 
 /// Clicks a button inside the bulk bar's armed panel — the panel's confirm can
@@ -400,6 +433,98 @@ async fn legacy_policy_fix_plans_before_it_migrates() {
         commit.args.get("dryRun").and_then(|v| v.as_bool()),
         Some(false)
     );
+}
+
+/// A section shows "Open" plus the Fix for **its own** rule and nothing else.
+/// The Legacy-policy app also holds an expired credential, so before the
+/// `kinds` gate its row rendered "Remove 1 expired credential" inside the
+/// legacy-policy section — an action with nothing to do with the finding the
+/// operator opened that section for.
+#[wasm_bindgen_test]
+async fn section_rows_offer_only_their_own_rules_fix() {
+    let m = mount_security().await;
+    let expand = |key: &str| {
+        m.session
+            .tenant_ui
+            .audit_expanded_group
+            .set(Some(key.to_string()))
+    };
+
+    expand("legacy_mailbox_scope");
+    ts::wait_for(|| has_button("Migrate to RBAC for Applications")).await;
+    assert!(
+        !has_button("Remove 1 expired credential"),
+        "the legacy-policy section must not offer the credential fix"
+    );
+
+    // …and symmetrically: the expired section owns the credential fix only.
+    expand("expired");
+    ts::wait_for(|| has_button("Remove 1 expired credential")).await;
+    assert!(
+        !has_button("Migrate to RBAC for Applications"),
+        "the expired-credentials section must not offer the migration fix"
+    );
+}
+
+/// "Open" lands on the tab for the section it was clicked in. The Legacy Policy
+/// App trips both the legacy-scoping rule and the expired-credential one, and
+/// the item-wide scan ranks scoping first — so from Expired credentials, Open
+/// used to drop the operator on Permissions.
+#[wasm_bindgen_test]
+async fn open_deep_links_to_the_section_it_was_clicked_in() {
+    let m = mount_security().await;
+    let tab = || m.session.tenant_ui.pending_app_tab.get_untracked();
+
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("expired".to_string()));
+    ts::wait_for(|| has_button("Remove 1 expired credential")).await;
+    click_row_open("Legacy Policy App");
+    assert_eq!(tab().as_deref(), Some("credentials"));
+
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("legacy_mailbox_scope".to_string()));
+    ts::wait_for(|| has_button("Migrate to RBAC for Applications")).await;
+    click_row_open("Legacy Policy App");
+    assert_eq!(tab().as_deref(), Some("permissions"));
+}
+
+/// Applying one section's Fix clears **that** remediation only. Clearing the
+/// row's whole set made the credential fix take the legacy-policy section's
+/// migration button with it — the operator's next stop vanished, with nothing
+/// short of a full re-run to bring it back.
+#[wasm_bindgen_test]
+async fn applying_one_fix_leaves_the_other_sections_fix_standing() {
+    let m = mount_security().await;
+    ts::mock_ok(
+        "remediate_remove_expired_credentials",
+        &RemediationOutcome {
+            removed_secrets: 1,
+            removed_certificates: 0,
+        },
+    );
+
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("expired".to_string()));
+    ts::wait_for(|| has_button("Remove 1 expired credential")).await;
+    click_button("Remove 1 expired credential");
+    ts::wait_for(|| ts::body_contains("Remove expired credentials?")).await;
+    click_button("Remove");
+    ts::wait_for(|| ts::call_count("remediate_remove_expired_credentials") == 1).await;
+    // The applied fix is gone for good.
+    ts::wait_for(|| !has_button("Remove 1 expired credential")).await;
+
+    // The legacy-policy section still offers the migration nobody has run.
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("legacy_mailbox_scope".to_string()));
+    ts::wait_for(|| has_button("Migrate to RBAC for Applications")).await;
 }
 
 #[wasm_bindgen_test]

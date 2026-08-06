@@ -1,6 +1,6 @@
-//! GUI test for the global-search dropdown's keyboard navigation: record hits
-//! are reachable via the roving Arrow/Enter selection, and Enter opens the
-//! highlighted record.
+//! GUI tests for the global-search bar: the dropdown's keyboard navigation
+//! (record hits are reachable via the roving Arrow/Enter selection, and Enter
+//! opens the highlighted record) and the focus-time corpus prewarm.
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
@@ -44,4 +44,25 @@ async fn arrow_down_moves_selection_through_record_hits_and_enter_opens() {
     // clearing the query and closing the dropdown.
     ts::press_key(".global-search__field", "Enter");
     ts::wait_for(|| ts::query("#gs-rec-1").is_none()).await;
+}
+
+/// Focusing the bar warms the tenant's search corpus. It is TTL'd and dropped
+/// by every app mutation, so a cold one made the FIRST query pay for two full
+/// directory scans on the keystroke path — the multi-second "search hung".
+/// Warming on focus overlaps that rebuild with the operator typing.
+#[wasm_bindgen_test]
+async fn focusing_the_bar_prewarms_the_search_corpus() {
+    ts::reset();
+    ts::mock_ok("prefetch_search_corpus", &());
+    ts::mock_ok("global_search", &fixtures::global_search_apps(&[]));
+
+    let _m = ts::mount_view(|| view! { <GlobalSearch /> });
+    assert_eq!(
+        ts::call_count("prefetch_search_corpus"),
+        0,
+        "mounting the bar must not scan the directory — only focusing it does"
+    );
+
+    ts::focus(".global-search__field");
+    ts::wait_for(|| ts::call_count("prefetch_search_corpus") == 1).await;
 }

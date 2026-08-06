@@ -175,6 +175,7 @@ const PINNED_WRITE_SITES: &[(&str, &str, usize)] = &[
 fn pinned_cache_writes_stay_on_the_tenant_wide_indexes() {
     for (name, src, expected) in PINNED_WRITE_SITES {
         let found = src.matches("put_index(").count()
+            + src.matches("put_index_if_current(").count()
             + src.matches("put_typed_index(").count()
             + src.matches("put_typed_index_if_current(").count();
         assert_eq!(
@@ -183,6 +184,36 @@ fn pinned_cache_writes_stay_on_the_tenant_wide_indexes() {
              invisible to LRU, so it must be a tenant-wide INDEX (one per tenant), never a \
              per-object key — those belong in an unpinned `put`. If this is a new tenant-wide \
              index, update PINNED_WRITE_SITES."
+        );
+    }
+}
+
+/// A pinned index built from a **live tenant-wide scan** must store through the
+/// `_if_current` guard.
+///
+/// The scan takes seconds under no lock, so a mutation can land mid-flight and
+/// `invalidate_app_lists` drops the key — and an unconditional store then
+/// re-pins the *pre-mutation* snapshot. Pinned means LRU cannot evict it, so
+/// that is not a stale read that ages out in seconds: the list shows a deleted
+/// app, or misses a new one, until the 60-minute TTL. The three list caches all
+/// had this; the two directory indexes and the search corpus did not.
+///
+/// The one exemption is the application **gallery** corpus: a static,
+/// tenant-independent catalog that no mutation in this app can invalidate, so
+/// it has no race to lose.
+#[test]
+fn pinned_index_writes_are_guarded_except_the_static_gallery_corpus() {
+    for (name, src, _) in PINNED_WRITE_SITES {
+        // The trailing `(` is what separates these from their `_if_current`
+        // siblings (and from doc links like [`Cache::put_index`]).
+        let unguarded = src.matches("put_index(").count() + src.matches("put_typed_index(").count();
+        let expected = usize::from(*name == "commands/gallery.rs");
+        assert_eq!(
+            unguarded, expected,
+            "{name} has {unguarded} UNGUARDED pinned cache write(s), expected {expected}. \
+             Capture `cache.generation()` BEFORE the fetch and store through \
+             `put_index_if_current` / `put_typed_index_if_current`, so a snapshot that raced a \
+             mutation is dropped instead of re-pinned for the full TTL."
         );
     }
 }

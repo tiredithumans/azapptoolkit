@@ -82,6 +82,30 @@ async fn search_corpus(
         return corpus;
     }
 
+    // Single-flight, like the two indexes below and the gallery corpus. A cold
+    // corpus is the slow path (two directory scans), and it is reached from the
+    // *keystroke* path: the debounce fires per burst, a resource re-run doesn't
+    // cancel the command already in flight, and the focus prewarm races the
+    // first query. Every one of those missed, so each rebuilt the corpus and
+    // raced to overwrite the same pinned key.
+    let gate = state.single_flight(&corpus_key);
+    let _held = gate.lock().await;
+    // Re-check: the build we queued behind has already populated the cache.
+    if let Some(corpus) = state
+        .cache
+        .get_typed::<Vec<SearchRow>>(CacheKind::Lists, &corpus_key)
+    {
+        return corpus;
+    }
+
+    // Captured BEFORE the (possibly multi-second) index fetch below. The two
+    // indexes each refuse to store a snapshot older than a mutation that landed
+    // mid-flight; the corpus is derived from them and must refuse on the same
+    // terms, or `invalidate_app_lists` would drop all three and this would
+    // immediately re-pin a pre-mutation corpus for the full `Lists` TTL — where
+    // LRU cannot reach it, so a deleted app stayed searchable for an hour.
+    let since = state.cache.generation();
+
     // Both halves of the corpus are the shared tenant-wide indexes the App Reg /
     // Enterprise lists populate — app registrations without a paired SP appear
     // only in the application index, which is why both are needed.
@@ -129,11 +153,37 @@ async fn search_corpus(
         });
     }
     let corpus = Arc::new(rows);
-    // Pinned: rebuilding this corpus costs two full directory scans.
-    state
-        .cache
-        .put_typed_index(CacheKind::Lists, corpus_key, Arc::clone(&corpus));
+    // Pinned: rebuilding this corpus costs two full directory scans. Stored
+    // only if nothing was invalidated since `since` — see above.
+    state.cache.put_typed_index_if_current(
+        CacheKind::Lists,
+        corpus_key,
+        Arc::clone(&corpus),
+        since,
+    );
     corpus
+}
+
+/// Warms the tenant's search corpus (and, transitively, the two tenant-wide
+/// indexes it is built from) without running a query.
+///
+/// The corpus is `Lists`-TTL'd and dropped by every `invalidate_app_lists`, so
+/// the first search after an idle hour — or after any app mutation — paid for
+/// two full directory scans *on the keystroke path*, which is the multi-second
+/// "search hung" the top bar showed. The front-end fires this when the search
+/// box takes focus, so the rebuild overlaps the operator typing instead of
+/// blocking the query. Best-effort by construction: a warm corpus returns
+/// immediately, a cold one is built exactly once (single-flight), and an
+/// unreadable index degrades to a partial corpus rather than an error — the
+/// same contract `global_search` itself has.
+#[tauri::command]
+pub async fn prefetch_search_corpus(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<(), UiError> {
+    let client = state.graph_for(&tenant_id);
+    search_corpus(&state, &client, &tenant_id).await;
+    Ok(())
 }
 
 #[tauri::command]

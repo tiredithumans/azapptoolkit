@@ -176,8 +176,17 @@ pub(crate) fn sp_index_hit(cache: &Cache, tenant_id: &str) -> Option<Arc<Vec<Ser
     cache.get_typed::<Vec<ServicePrincipal>>(CacheKind::Lists, &sp_index_key(tenant_id))
 }
 
-/// Caches a freshly-fetched service-principal index and hands back the shared
-/// handle. Pair with [`sp_index_hit`].
+/// Unconditional store. Production readers fetch live and must use
+/// [`sp_index_store_if_current`] so a mutation landing mid-scan isn't
+/// overwritten by the pre-mutation snapshot; this shape is for tests that
+/// construct the index directly.
+///
+/// `#[cfg(test)]` is the enforcement, not the doc comment: this wrapper passes
+/// a generation captured *after* the fetch, which makes the guard a no-op, and
+/// two production call sites (the App Registrations pairing join and the
+/// audit's SP prefetch) had quietly taken it. Its `/applications` twin was
+/// already gated — that asymmetry is what let them drift.
+#[cfg(test)]
 pub(crate) fn sp_index_store(
     cache: &Cache,
     tenant_id: &str,

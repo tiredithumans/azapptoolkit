@@ -75,6 +75,10 @@ pub async fn list_enterprise_applications(
 
     let client = state.graph_for(&tenant_id);
 
+    // Captured BEFORE the scans — this list is PINNED, so a snapshot that loses
+    // the race to a mutation would sit out of LRU's reach for the full TTL.
+    let since = state.cache.generation();
+
     // Both the rows and the pairing index come from whole-tenant scans, and both
     // are the SHARED cached indexes every other surface joins against — so a
     // visit here right after the App Registrations tab (or global search) costs
@@ -103,7 +107,11 @@ pub async fn list_enterprise_applications(
         .collect();
 
     // Pinned: a tenant-wide index, not a per-object entry (see `put_index`).
-    state.cache.put_index(CacheKind::Lists, key, &rows);
+    // Guarded: a mutation that landed mid-scan already dropped this key, and
+    // re-pinning the pre-mutation rows would outlive it.
+    state
+        .cache
+        .put_index_if_current(CacheKind::Lists, key, &rows, since);
     Ok(rows)
 }
 

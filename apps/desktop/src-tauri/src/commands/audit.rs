@@ -808,8 +808,13 @@ async fn prefetch_sp_index(
     if let Some(cached) = crate::commands::applications::sp_index_hit(cache, tenant_id) {
         return cached;
     }
+    // Captured BEFORE the scan: it takes seconds under no lock, and re-pinning
+    // a pre-mutation snapshot would outlive the invalidation it raced.
+    let since = cache.generation();
     match client.list_service_principals_index().await {
-        Ok(sps) => crate::commands::applications::sp_index_store(cache, tenant_id, sps),
+        Ok(sps) => {
+            crate::commands::applications::sp_index_store_if_current(cache, tenant_id, sps, since)
+        }
         Err(err) => {
             tracing::info!(
                 ?err,

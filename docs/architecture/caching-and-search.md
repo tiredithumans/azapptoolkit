@@ -73,6 +73,25 @@ bound and swept by tenant invalidation like any other. The corpus is derived fro
 so `invalidate_app_lists` busts it too; a credential-only mutation keeps all three (it changes none
 of them).
 
+The corpus build carries the same two guards its source indexes do, for the same reasons:
+
+- **Single-flight** on `search_corpus_key`. A cold corpus is reached from the *keystroke* path —
+  the debounce fires per burst, a re-run of the front-end resource does not cancel the command
+  already in flight, and the focus prewarm below races the first query — so without a gate each
+  one rebuilt the corpus and raced to overwrite the same pinned key.
+- **`put_typed_index_if_current`**, with the generation captured *before* the index fetch. Both
+  indexes already refuse to store a snapshot older than a mutation that landed mid-flight; the
+  corpus is derived from them, so an unconditional store re-pinned a pre-mutation corpus for the
+  full `Lists` TTL — a deleted app stayed searchable for an hour while the indexes were correct.
+
+**`prefetch_search_corpus`** warms it off the keystroke path. The corpus is `Lists`-TTL'd (60 min)
+and dropped by every `invalidate_app_lists`, so the first query after an idle hour or any app
+mutation paid for two full directory scans *while the operator waited* — the top bar appeared to
+hang. `GlobalSearch` fires this on focus (click or Cmd/Ctrl-K), so the rebuild overlaps typing.
+Best-effort and idempotent, mirroring `prefetch_application_gallery`: warm returns immediately,
+cold builds exactly once behind the gate, and a failed index degrades to a partial corpus rather
+than an error.
+
 ## Gallery search — fetch the corpus once, match every keystroke locally
 
 `search_application_templates` (the New-application → "Browse the gallery" picker) matches over a
@@ -146,6 +165,31 @@ apps-pairing, the *one* app's detail, and the audit run, and deliberately **keep
 `app_name_index`, the enterprise list, and the mailbox-scope verdicts. Keeping the two tenant-wide
 indexes is the point — dropping them would force the next list visit to re-enumerate every app and
 every service principal (tens of seconds on a large tenant) for a change that touched neither.
+
+### The other half: a scan that raced an invalidation must not be stored
+
+Invalidating on `Ok` only works if the reader on the other side of the race respects it. A
+tenant-wide scan takes seconds under no lock, so a mutation routinely lands *during* one: the
+mutation drops the key, and the scan then stores the snapshot it fetched **before** the change. For
+a pinned entry that is not a stale read that ages out in seconds — LRU cannot evict it, so the list
+shows a deleted app (or misses a new one) until the 60-minute TTL.
+
+So every pinned index built from a live scan captures `cache.generation()` **before** the fetch and
+stores through `put_index_if_current` / `put_typed_index_if_current`, which drop a snapshot whose
+generation moved. The caller still returns its rows; only the *caching* is skipped, costing one
+re-fetch. `repo_invariants::pinned_index_writes_are_guarded_except_the_static_gallery_corpus` pins
+this — the sole exemption is the application gallery corpus, a static tenant-independent catalog no
+mutation here can invalidate.
+
+Two shapes of this bug are worth naming, because both hid behind a guard that looked present:
+
+- `sp_index_store` / `app_name_index_store` pass a generation captured *after* the fetch, which
+  makes the guard a no-op. They are `#[cfg(test)]` for exactly that reason — production callers
+  cannot reach them, so the "capture it before the fetch" rule cannot be forgotten, only obeyed.
+- The three list caches (App Registrations pairing, Enterprise Apps, Managed Identities) stored
+  unconditionally, as did the search corpus — while the two indexes they are built from were
+  already guarded. The indexes correctly refused their stale snapshots and the derived caches then
+  re-pinned them anyway.
 
 The general rule for multi-step mutations: **a partial success is a real write — invalidate,
 gated on "something actually changed."** Audit remediations, `remove_exchange_mailbox_access`,

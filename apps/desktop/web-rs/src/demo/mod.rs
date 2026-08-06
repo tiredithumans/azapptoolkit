@@ -576,6 +576,9 @@ fn register_fixtures() {
     mock_ok("create_gallery_application", &f::gallery_app_summary());
 
     // ---- Global search (top bar) ----
+    // The corpus prewarm fires on focus; unregistered it would reject and the
+    // bar would render a search failure the moment the box is clicked.
+    mock_ok("prefetch_search_corpus", &());
     mock_ok(
         "global_search",
         &f::global_search_apps(&[
