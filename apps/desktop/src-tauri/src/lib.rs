@@ -182,6 +182,7 @@ pub fn run() {
             commands::consent::list_app_permission_grants,
             commands::consent::save_app_permission_grants_to_file,
             commands::search::global_search,
+            commands::search::prefetch_search_corpus,
             commands::sharepoint::grant_site_access,
             commands::sharepoint::list_site_permissions,
             commands::sharepoint::remove_site_permission,

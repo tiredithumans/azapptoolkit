@@ -77,6 +77,22 @@ pub fn GlobalSearch() -> impl IntoView {
     let record_hits: RwSignal<Vec<(SelectionKind, SearchHit)>> = RwSignal::new(Vec::new());
     Effect::new(move |_| record_hits.set(flatten_hits(results.get())));
 
+    // Warm the search corpus when the bar takes focus (click or Cmd/Ctrl-K).
+    // It is TTL'd and dropped by every app mutation, so a cold one made the
+    // FIRST query wait on two full directory scans — the lag that reads as
+    // "search hung". Warming here overlaps that rebuild with the operator
+    // typing. Best-effort and idempotent: warm returns immediately, and the
+    // backend single-flights the build, so a re-focus mid-build joins it rather
+    // than starting a second one.
+    let warm_corpus = move || {
+        let Some(t) = tenant.get_untracked() else {
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            let _ = search::prefetch_search_corpus(&t.tenant_id).await;
+        });
+    };
+
     let on_input = move |ev: ev::Event| {
         if let Some(target) = ev.target()
             && let Ok(input) = target.dyn_into::<HtmlInputElement>()
@@ -151,7 +167,10 @@ pub fn GlobalSearch() -> impl IntoView {
                     placeholder="Search apps by name or GUID…"
                     prop:value=move || raw_query.get()
                     on:input=on_input
-                    on:focus=move |_| focused.set(true)
+                    on:focus=move |_| {
+                        focused.set(true);
+                        warm_corpus();
+                    }
                     on:blur=move |_| {
                         let win = web_sys::window();
                         if let Some(w) = win {
