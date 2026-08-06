@@ -10,6 +10,8 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+## [0.24.2] - 2026-08-06
+
 ### Changed
 
 - **Global search warms its corpus when you focus the box, instead of on your
