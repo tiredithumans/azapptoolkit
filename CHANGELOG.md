@@ -10,8 +10,41 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+### Added
+
+- **"Copy all details" on the SSO tab's app-owner summary.** One button copies
+  every value the application owner needs as labelled plain text, ready to paste
+  into mail or a ticket, instead of copying eight fields one at a time.
+  Multi-line values (redirect-URI lists, the SAML signing certificate) are
+  indented under their label so a mail client's wrapping cannot run two URIs
+  together. For OIDC the **client secret is deliberately excluded** — the block
+  is meant for mail or chat, and a credential granting the application's
+  identity does not belong there; the copied text says so and the secret keeps
+  its own separate copy button.
+
 ### Fixed
 
+- **The window no longer scrolls sideways, and content no longer falls off the
+  right edge, below about 1000px.** `.shell__main` sized the single column it
+  creates for its own children to their widest min-content, so every row —
+  top bar, page content, the open-items dock — rendered wider than the window
+  and pushed the tenant switcher, the Delete button and the detail tab strip out
+  of view. The same bare-`1fr` pattern in the open-items workspace could spill a
+  detail pane past its half.
+- **The Security Posture card's finding counts sat outside the card.** The
+  findings list used an implicit `auto` grid track, which grew to the longest
+  finding name ("Legacy Application Access Policy scoping") and pushed each
+  row's count and chevron past the card's border. Titles now ellipsize and the
+  row stays inside the card.
+- **The tenant name is no longer squeezed to an initial on a narrow window.**
+  The centred search field was capped against the whole window rather than the
+  space beside the tenant chip, so between roughly 740px and 1024px it kept its
+  full width and "Contoso Ltd" rendered as "C..". The search yields first now.
+- **Seven full-width rows rendered wider than the container they fill** — the
+  Permission Tester's identity field (visibly 22px wider than the mailbox field
+  below it), the account-menu and vault-picker options, the nav items, the
+  global-search rows and the gallery results — each overflowing by exactly its
+  own horizontal padding.
 - **Org-wide Graph `Calendars.*` and `Contacts.*` grants now appear in the
   mailbox audit, and can be scoped.** The advisory's membership test matched
   `Mail.*` and `MailboxSettings.*` by name only, while the toolkit's own role
