@@ -429,6 +429,13 @@ fn register_fixtures() {
     // this a visitor clicking SSO got the DemoFriendly rejection where the
     // whole tab should be, on the surface this app is most known for.
     mock_ok("get_sso_config", &f::sso_config("sp-demo", "app-demo"));
+    // Same reasoning one section lower: without this, "Details for the
+    // application owner" — the values the whole SSO flow exists to produce, and
+    // the home of the "Copy all details" action — renders as a rejection.
+    mock_ok(
+        "get_sso_summary",
+        &f::saml_sso_summary("sp-demo", "app-demo"),
+    );
     mock_ok(
         "get_enterprise_app_provisioning",
         &vec![f::provisioning_job(
