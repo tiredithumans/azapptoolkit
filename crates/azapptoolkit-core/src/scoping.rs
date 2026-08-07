@@ -207,18 +207,35 @@ pub fn is_blanket_mailbox_grant(value: &str) -> bool {
 /// A `None` resource falls back to the name-shaped check, so a build that cannot
 /// resolve the resource still reports reach rather than silently dropping it.
 pub fn is_mailbox_reaching_permission(resource_app_id: Option<&str>, value: &str) -> bool {
-    fn mail_named(value: &str) -> bool {
-        value.starts_with("Mail.") || value.starts_with("MailboxSettings.")
+    /// Name-shaped mailbox reach, for the arms with no authoritative resource
+    /// mapping to consult.
+    ///
+    /// Covers all four families [`graph_mail_role`] maps — `Mail.*`,
+    /// `MailboxSettings.*`, `Calendars.*`, `Contacts.*`. A narrower `Mail.` /
+    /// `MailboxSettings.`-only test used to drop Graph `Calendars.*` and
+    /// `Contacts.*` grants out of the mailbox advisory entirely: this function
+    /// decides advisory membership, and the org-wide / scopable / unscopable
+    /// split happens only among its hits, so an org-wide calendar or contacts
+    /// grant that RBAC for Applications *can* confine produced neither a
+    /// finding nor a `ScopeMailboxAccess` fix.
+    fn mailbox_named(value: &str) -> bool {
+        ["Mail.", "MailboxSettings.", "Calendars.", "Contacts."]
+            .iter()
+            .any(|prefix| value.starts_with(prefix))
     }
     match resource_app_id {
-        Some(MICROSOFT_GRAPH_APP_ID) => mail_named(value),
+        // Authoritative on Graph — every value with an RBAC role reaches
+        // mailboxes — plus the name-shaped test, so a Graph permission this
+        // build's `graph_mail_role` table doesn't know yet still reports reach
+        // rather than vanishing from the advisory.
+        Some(MICROSOFT_GRAPH_APP_ID) => graph_mail_role(value).is_some() || mailbox_named(value),
         Some(OFFICE365_EXCHANGE_ONLINE_APP_ID) => {
             is_blanket_mailbox_grant(value)
                 || is_unscopable_legacy_exchange_permission(OFFICE365_EXCHANGE_ONLINE_APP_ID, value)
         }
         // A resource this build doesn't map (or didn't resolve): only the
         // name-shaped signal is available, and over-reporting is the safe side.
-        _ => mail_named(value),
+        _ => mailbox_named(value),
     }
 }
 
@@ -561,6 +578,56 @@ mod tests {
         // Unknown resource falls back to the name shape — over-report, never under.
         assert!(is_mailbox_reaching_permission(None, "Mail.Read"));
         assert!(!is_mailbox_reaching_permission(None, "Directory.Read.All"));
+    }
+
+    #[test]
+    fn every_confinable_graph_mail_permission_reaches_mailboxes() {
+        // The advisory's membership test must be a SUPERSET of what can be
+        // scoped, or a grant is confinable but never offered the fix. This used
+        // to test `Mail.` / `MailboxSettings.` prefixes only, so Graph's
+        // `Calendars.*` and `Contacts.*` — which `graph_mail_role` maps to real
+        // RBAC-for-Applications roles — produced no mailbox finding and no
+        // `ScopeMailboxAccess` fix, while the identically named grant on the
+        // LEGACY resource was classified in. Org-wide calendar and contacts
+        // access across every mailbox simply did not appear in the audit.
+        let graph = Some(MICROSOFT_GRAPH_APP_ID);
+        for value in [
+            "Mail.Read",
+            "Mail.ReadBasic",
+            "Mail.ReadBasic.All",
+            "Mail.ReadWrite",
+            "Mail.Send",
+            "MailboxSettings.Read",
+            "MailboxSettings.ReadWrite",
+            "Calendars.Read",
+            "Calendars.ReadWrite",
+            "Contacts.Read",
+            "Contacts.ReadWrite",
+        ] {
+            assert!(
+                graph_mail_role(value).is_some(),
+                "{value} should map to an Exchange RBAC role"
+            );
+            assert!(
+                is_mailbox_reaching_permission(graph, value),
+                "{value} is confinable on Graph, so it must enter the mailbox advisory"
+            );
+            assert!(
+                is_scopable_exchange_resource_permission(graph, value),
+                "{value} must remain offerable for scoping"
+            );
+        }
+        // The legacy namesakes stay classified in (they defeat the Graph
+        // scope) but are still NOT scopable — the asymmetry that must hold.
+        let exo = Some(OFFICE365_EXCHANGE_ONLINE_APP_ID);
+        for value in ["Calendars.Read", "Contacts.ReadWrite"] {
+            assert!(is_mailbox_reaching_permission(exo, value));
+            assert!(!is_scopable_exchange_resource_permission(exo, value));
+        }
+        // Non-mailbox Graph permissions sharing no prefix are still excluded.
+        for value in ["Directory.Read.All", "Files.ReadWrite.All", "User.Read.All"] {
+            assert!(!is_mailbox_reaching_permission(graph, value));
+        }
     }
 
     #[test]
