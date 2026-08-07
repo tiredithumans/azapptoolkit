@@ -12,6 +12,39 @@ Older releases (**0.19.2 and earlier**) live in
 
 ### Fixed
 
+- **Org-wide Graph `Calendars.*` and `Contacts.*` grants now appear in the
+  mailbox audit, and can be scoped.** The advisory's membership test matched
+  `Mail.*` and `MailboxSettings.*` by name only, while the toolkit's own role
+  table maps Graph's `Calendars.Read/ReadWrite` and `Contacts.Read/ReadWrite`
+  to real RBAC-for-Applications roles. Membership is decided *before* the
+  org-wide / scopable / unscopable split, so an application reading or writing
+  every calendar and every contact in the tenant produced no finding and was
+  never offered "Scope…" — while the identically named grant on the legacy
+  Office 365 Exchange Online resource was reported. **This raises risk scores
+  for applications holding those grants**, which previously scored as if the
+  permissions did not reach mailboxes at all.
+- **Exchange admin-API collection reads now follow `@odata.nextLink`.** The
+  transport deserialized the `value` array and discarded the continuation link,
+  so every unbounded read — group members, management scopes, Exchange service
+  principals — silently stopped at the first page (1000 entries by default) and
+  returned a short list indistinguishable from a complete one. Scope
+  consolidation and the reverse "which scopes reference this group" lookup both
+  treat absence as proof, so a truncated read could retire a scope that was
+  still in use. A response exceeding the page ceiling is now an error rather
+  than a partial collection.
+- **A scoped-mailbox grant no longer proceeds against a management scope it
+  could not check.** The fail-closed guard that refuses when an existing scope
+  targets a different group set was written so that both a failed read *and* a
+  scope with no recipient-restriction filter skipped it entirely — falling
+  through to assign roles against that scope and strip the org-wide grants,
+  confining the application to something the operator never specified. Both
+  cases now refuse and change nothing.
+- **An audit that could not score every application no longer reports as a
+  complete scan.** A transient per-application scoring failure was logged and
+  the application dropped from the results, while the run still reported
+  nothing cancelled, truncated or degraded — and cached itself as
+  authoritative. Such a run is now flagged in the Findings pane and is not
+  cached, like its two sibling coverage gaps.
 - **The audit now says when part of its analysis could not run, instead of
   presenting a lower score as a clean result.** Two tenant-wide reads — Graph
   app-role assignments and org-wide EWS full-mailbox-access grants — were
