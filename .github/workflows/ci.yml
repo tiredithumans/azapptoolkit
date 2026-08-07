@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual re-run. `cancel-in-progress` below means an infra hiccup — or a
+  # `gh pr update-branch`, which supersedes the run it just triggered — can
+  # leave a PR with cancelled checks and no way to retry them: `push` and
+  # `pull_request` only fire on new commits, so the alternatives are an empty
+  # commit or closing and reopening the PR. Both were needed during a real
+  # Actions outage before this existed.
+  workflow_dispatch:
   schedule:
     # Weekly RustSec database refresh so we catch advisories filed after merge.
     # Only the dependency-advisory jobs (audit/deny) run on this tick — the
