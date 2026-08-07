@@ -40,12 +40,14 @@ pub struct AuditRunResult {
     /// as untruncated.
     #[serde(default)]
     pub truncated: bool,
-    /// Tenant-wide reads that FAILED this run, each disabling a piece of the
-    /// analysis. Empty on a fully-covered run.
+    /// Reads that FAILED this run, each disabling a piece of the analysis.
+    /// Empty on a fully-covered run.
     ///
     /// Third sibling of [`Self::cancelled`] and [`Self::truncated`], and the
     /// one that was missing. Those two mean "we did not look at every app";
-    /// this means "we looked, but with part of the analysis switched off". Each
+    /// this mostly means "we looked, but with part of the analysis switched
+    /// off" — with [`AuditCoverageGap::PerPrincipalScoring`] the exception that
+    /// also covers individual apps dropped mid-run. Each
     /// prefetch here was best-effort by design — a failure logged at `info!` and
     /// returned an empty map — which is correct for availability and wrong for
     /// reporting: an empty map is indistinguishable from "the tenant has none
@@ -59,7 +61,8 @@ pub struct AuditRunResult {
     pub degraded: Vec<AuditCoverageGap>,
 }
 
-/// A tenant-wide read that failed, and what the audit could no longer do.
+/// A read that failed, and what the audit could no longer do. Tenant-wide for
+/// every variant except [`AuditCoverageGap::PerPrincipalScoring`].
 ///
 /// Serialized as a plain string so the field can gain variants without a
 /// wire-format change; unknown variants deserialize as
@@ -82,6 +85,18 @@ pub enum AuditCoverageGap {
     /// scope on the same principal, so without this read a scoped verdict can
     /// be reported for a principal that in fact has full mailbox access.
     EwsFullAccessGrants,
+    /// One or more individual principals could not be scored, and were dropped
+    /// from the result.
+    ///
+    /// Unlike its two siblings this is not a tenant-wide read but a per-app
+    /// one: a transient scoring failure (or a task that panicked) was logged at
+    /// `warn!` and the app silently omitted from `items`, while `total_apps`
+    /// still counted it. The run then reported cancelled=false, truncated=false
+    /// and degraded=[] — a *complete* scan missing exactly the apps whose
+    /// scoring hit trouble — and cached itself as authoritative. Those apps are
+    /// disproportionately the interesting ones: a scoring failure usually means
+    /// a Graph or Exchange probe failed on that specific principal.
+    PerPrincipalScoring,
     /// A gap recorded by a newer build than the one reading it back.
     #[serde(other)]
     Other,
@@ -98,9 +113,49 @@ impl AuditCoverageGap {
             AuditCoverageGap::EwsFullAccessGrants => {
                 "Org-wide EWS full-mailbox-access grants could not be read, so an application                  shown as scoped to specific mailboxes may still reach every mailbox."
             }
+            AuditCoverageGap::PerPrincipalScoring => {
+                "Some applications could not be scored and are missing from these results,                  so a risk this run does not show may simply not have been looked at."
+            }
             AuditCoverageGap::Other => {
                 "Part of this run's tenant-wide analysis could not be completed."
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coverage_gaps_round_trip_and_unknown_variants_degrade_to_other() {
+        // The enum is serialized as a plain camelCase string precisely so a new
+        // variant is not a wire-format change: an older build reading a newer
+        // build's cached run must land on `Other` (which still reads as "part of
+        // this run could not be completed") rather than failing the whole read
+        // and losing the result.
+        for gap in [
+            AuditCoverageGap::GraphAppRoleAssignments,
+            AuditCoverageGap::EwsFullAccessGrants,
+            AuditCoverageGap::PerPrincipalScoring,
+        ] {
+            let json = serde_json::to_string(&gap).expect("serialize");
+            assert_eq!(
+                serde_json::from_str::<AuditCoverageGap>(&json).expect("round trip"),
+                gap
+            );
+            assert!(
+                !gap.description().trim().is_empty(),
+                "{gap:?} needs an operator-facing description"
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&AuditCoverageGap::PerPrincipalScoring).unwrap(),
+            "\"perPrincipalScoring\""
+        );
+        assert_eq!(
+            serde_json::from_str::<AuditCoverageGap>("\"somethingFromANewerBuild\"").unwrap(),
+            AuditCoverageGap::Other
+        );
     }
 }

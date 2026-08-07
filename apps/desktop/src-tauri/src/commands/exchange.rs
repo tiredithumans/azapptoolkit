@@ -325,24 +325,53 @@ async fn apply_exchange_mailbox_scope(
     // half-applied state. Repointing is a deliberate action with its own
     // command; see AGENTS.md, "Repointing a management scope is an explicit
     // action, and fail-closed".
-    if let Ok(Some(existing)) = exo.get_management_scope(&scope_name).await
-        && let Some(existing_filter) = existing.recipient_filter.as_deref()
-    {
-        let wanted: std::collections::HashSet<String> = dns.iter().cloned().collect();
-        let have = group_dns_in_filter(existing_filter);
-        if have != wanted {
-            return Err(UiError::validation(
-                "scope_group_mismatch",
-                format!(
-                    "a management scope “{scope_name}” already exists for this app with a different group set, \
-                     and Exchange keeps the existing scope — so the groups requested here would NOT have been \
-                     applied, while the org-wide grants were removed. Nothing was changed. Repointing a scope \
-                     changes what every role assignment using it reaches, so it is a deliberate action, not a \
-                     side effect of granting: use “Move to managed group” to consolidate onto the \
-                     toolkit-managed group, or edit the scope in Exchange, then grant again."
-                ),
-            ));
+    //
+    // Matched exhaustively rather than `if let Ok(Some(..))`: that form let BOTH
+    // an `Err` read and a scope with no `RecipientRestrictionFilter` skip the
+    // guard entirely and fall through to assign-then-strip — the exact outcome
+    // the paragraph above says must never happen. An unrestricted or custom
+    // scope carrying this app's name is precisely the case where confining the
+    // app to it, and then removing its org-wide grants, is least likely to be
+    // what the operator meant.
+    match exo.get_management_scope(&scope_name).await {
+        Ok(Some(existing)) => {
+            let Some(existing_filter) = existing.recipient_filter.as_deref() else {
+                return Err(UiError::validation(
+                    "scope_filter_unreadable",
+                    format!(
+                        "a management scope “{scope_name}” already exists for this app but has no recipient \
+                         restriction filter, so it does not confine anything to the groups requested here — \
+                         and Exchange keeps the existing scope rather than replacing it. Assigning roles \
+                         against it and removing the org-wide grants would change what this app reaches in a \
+                         way that was not asked for, so nothing was changed. Review the scope in Exchange, or \
+                         use “Move to managed group” to consolidate onto the toolkit-managed group."
+                    ),
+                ));
+            };
+            let wanted: std::collections::HashSet<String> = dns.iter().cloned().collect();
+            let have = group_dns_in_filter(existing_filter);
+            if have != wanted {
+                return Err(UiError::validation(
+                    "scope_group_mismatch",
+                    format!(
+                        "a management scope “{scope_name}” already exists for this app with a different group set, \
+                         and Exchange keeps the existing scope — so the groups requested here would NOT have been \
+                         applied, while the org-wide grants were removed. Nothing was changed. Repointing a scope \
+                         changes what every role assignment using it reaches, so it is a deliberate action, not a \
+                         side effect of granting: use “Move to managed group” to consolidate onto the \
+                         toolkit-managed group, or edit the scope in Exchange, then grant again."
+                    ),
+                ));
+            }
         }
+        // No scope yet — `ensure_management_scope` creates it below with exactly
+        // the requested filter, which is the clean path this guard protects.
+        Ok(None) => {}
+        // Refuse rather than proceed blind. `ensure_management_scope` re-reads
+        // with `?` and so aborts on a *persistent* failure anyway; this closes
+        // the transient case, where the first read errs, the second succeeds,
+        // and the pre-existing scope is never compared at all.
+        Err(err) => return Err(err.into()),
     }
     exo.ensure_management_scope(&scope_name, &scope_filter)
         .await?;

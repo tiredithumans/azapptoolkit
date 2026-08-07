@@ -571,3 +571,89 @@ async fn forbidden_without_diagnostics_is_flagged_reasonless() {
         other => panic!("expected Forbidden, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn a_paged_collection_is_followed_to_the_end() {
+    // The admin API caps a response at 1000 entries and signals more with
+    // `@odata.nextLink`; continuation is a POST to that URL with the SAME body
+    // (not a GET, unlike Graph). Dropping the link returned a first page
+    // indistinguishable from a complete collection — and every caller of a
+    // collection read here feeds a scoping decision that is only sound on a
+    // complete set (`plan_consolidation`'s "unverified == 0", the reverse
+    // "which scopes reference this group" lookup).
+    let server = MockServer::start().await;
+    let page2 = format!("{}/page2", server.uri());
+
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [{ "Name": "scope-a", "RecipientFilter": "MemberOfGroup -eq 'CN=a'" }],
+            "@odata.nextLink": page2,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/page2"))
+        // Same body as the first request, per the pagination contract.
+        .and(body_json(json!({
+            "CmdletInput": { "CmdletName": "Get-ManagementScope", "Parameters": {} }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [{ "Name": "scope-b", "RecipientFilter": "MemberOfGroup -eq 'CN=b'" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let scopes = make_client(&server.uri())
+        .list_management_scopes()
+        .await
+        .expect("paged read");
+    let names: Vec<_> = scopes.iter().filter_map(|s| s.name.as_deref()).collect();
+    assert_eq!(
+        names,
+        vec!["scope-a", "scope-b"],
+        "the second page must be followed, not dropped"
+    );
+}
+
+#[tokio::test]
+async fn a_single_page_response_makes_exactly_one_request() {
+    // The paging loop must not cost an extra round trip on the common case: no
+    // `@odata.nextLink` means done.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [{ "Name": "only", "RecipientFilter": "MemberOfGroup -eq 'CN=x'" }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let scopes = make_client(&server.uri())
+        .list_management_scopes()
+        .await
+        .expect("single page");
+    assert_eq!(scopes.len(), 1);
+    // `expect(1)` is asserted when the server drops at end of scope.
+}
+
+#[tokio::test]
+async fn an_empty_next_link_terminates_rather_than_looping() {
+    // A present-but-blank link is treated as "no more pages", not as a URL to
+    // POST to — otherwise one malformed response spins until MAX_PAGES.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [{ "Name": "only" }],
+            "@odata.nextLink": "   ",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let scopes = make_client(&server.uri())
+        .list_management_scopes()
+        .await
+        .expect("blank link terminates");
+    assert_eq!(scopes.len(), 1);
+}

@@ -202,7 +202,9 @@ pub async fn run_audit(
     // so instead of reading as a clean scan (see `AuditRunResult::degraded`).
     let (graph_roles_by_sp, graph_roles_gap) = graph_roles_by_sp;
     let (ews_full_access_sps, ews_gap) = ews_full_access_sps;
-    let degraded: Vec<AuditCoverageGap> =
+    // `mut` because a third kind of gap — per-principal scoring failures — can
+    // only be known after the fan-out below has run.
+    let mut degraded: Vec<AuditCoverageGap> =
         [graph_roles_gap, ews_gap].into_iter().flatten().collect();
 
     let app_ids: Vec<String> = apps.iter().map(|a| a.app_id.clone()).collect();
@@ -272,6 +274,11 @@ pub async fn run_audit(
     let reauth_fatal = Arc::new(AtomicBool::new(false));
     let reauth_fatal_spawn = reauth_fatal.clone();
     let mut fatal_err: Option<UiError> = None;
+    // Apps this run set out to score but dropped. Counted rather than merely
+    // logged: an app missing from `items` is invisible in the result, so
+    // without this the run reports a clean, complete scan that simply never
+    // looked at the principals whose scoring failed.
+    let mut unscored: usize = 0;
     // Dynamic in-flight cap: the tracker shrinks it on 429s mid-run.
     let cancelled_before_all_dispatched = dispatch_capped(
         apps,
@@ -319,13 +326,25 @@ pub async fn run_audit(
                     }
                 }
                 AuditFailure::Transient => {
+                    unscored += 1;
                     tracing::warn!(?err, "audit scoring failed for one app")
                 }
             },
-            Err(err) => tracing::warn!(?err, "audit join error"),
+            Err(err) => {
+                unscored += 1;
+                tracing::warn!(?err, "audit join error")
+            }
         },
     )
     .await;
+
+    // A dropped app is a hole in the analysis exactly like a failed tenant-wide
+    // read, so it travels the same way: named in `degraded`, and therefore never
+    // cached and never presented as an all-clear.
+    if unscored > 0 {
+        tracing::warn!(unscored, "audit completed with unscored principals");
+        degraded.push(AuditCoverageGap::PerPrincipalScoring);
+    }
 
     // Before phase 2 and before any cache write: a partial audit served as
     // authoritative is worse than a failed one, because a risk report silently

@@ -15,8 +15,30 @@ use azapptoolkit_core::http_retry::{
 use super::{ADMIN_API_VERSION, ExchangeClient, INVOKE_ENDPOINT, X_ANCHOR_MAILBOX};
 use crate::error::{ExchangeError, Result, is_not_found_body};
 
+/// Upper bound on pages followed for one cmdlet, as a runaway guard rather than
+/// a coverage limit: the admin API returns up to 1000 entries per page, so this
+/// covers 200 000 objects. Hitting it is surfaced as an error — never a short
+/// list — because every caller of a collection read here feeds a scoping
+/// decision that is only sound on a complete set.
+const MAX_PAGES: usize = 200;
+
 impl ExchangeClient {
-    /// POSTs a `CmdletInput` envelope and returns the parsed `value` array.
+    /// POSTs a `CmdletInput` envelope and returns the parsed `value` array,
+    /// following `@odata.nextLink` until the collection is exhausted.
+    ///
+    /// **Paging is not optional here.** The admin API caps a response at 1000
+    /// entries by default and signals more with `@odata.nextLink`; this used to
+    /// deserialize `value` alone and drop the link, so every unbounded read
+    /// (group members, management scopes, service principals) silently returned
+    /// a first page indistinguishable from a complete collection. The
+    /// consolidation planner's "unverified == 0" check and the reverse
+    /// "which scopes reference this group" lookup both treat a short list as
+    /// proof of absence, so a truncated read widens access rather than failing.
+    ///
+    /// Continuation is a POST to the `@odata.nextLink` URL with the *same* body
+    /// and headers (not a GET, unlike Microsoft Graph), and the link is only
+    /// valid for 5-10 minutes — hence no delay between pages.
+    /// See <https://learn.microsoft.com/exchange/reference/admin-api-get-started#pagination>.
     pub(crate) async fn invoke_command(
         &self,
         cmdlet: &str,
@@ -32,18 +54,35 @@ impl ExchangeClient {
         let body = json!({
             "CmdletInput": { "CmdletName": cmdlet, "Parameters": parameters }
         });
-        let bytes = self.send_core(cmdlet, &url, &body).await?;
-        if bytes.is_empty() {
-            return Ok(Vec::new());
-        }
         #[derive(serde::Deserialize)]
         struct Envelope {
             #[serde(default)]
             value: Vec<serde_json::Value>,
+            #[serde(rename = "@odata.nextLink")]
+            next_link: Option<String>,
         }
-        let env: Envelope = serde_json::from_slice(&bytes)
-            .map_err(|e| ExchangeError::Deserialize(e.to_string()))?;
-        Ok(env.value)
+
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        let mut target = url;
+        for page in 1..=MAX_PAGES {
+            let bytes = self.send_core(cmdlet, &target, &body).await?;
+            if bytes.is_empty() {
+                return Ok(out);
+            }
+            let env: Envelope = serde_json::from_slice(&bytes)
+                .map_err(|e| ExchangeError::Deserialize(e.to_string()))?;
+            out.extend(env.value);
+            match env.next_link.as_deref().map(str::trim) {
+                Some(link) if !link.is_empty() => {
+                    tracing::debug!(cmdlet, page, "following @odata.nextLink");
+                    target = link.to_string();
+                }
+                _ => return Ok(out),
+            }
+        }
+        Err(ExchangeError::Protocol(format!(
+            "{cmdlet} returned more than {MAX_PAGES} pages; refusing to return a truncated collection"
+        )))
     }
 
     /// Like [`Self::invoke_command`] but maps a "not found" cmdlet error (the
