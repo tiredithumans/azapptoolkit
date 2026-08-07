@@ -73,8 +73,12 @@ pub(crate) fn FindingsPane() -> impl IntoView {
                     .then(|| {
                         view! {
                             <Callout tone="warn">
+                                // Deliberately not "reached every application":
+                                // `PerPrincipalScoring` is exactly the gap where
+                                // it did not, so a lede claiming full coverage
+                                // would contradict the item below it.
                                 <p class="findings-pane__degraded-lede">
-                                    "This scan reached every application, but part of the analysis could not run — treat the results as incomplete and re-run."
+                                    "Part of this scan could not run — treat the results as incomplete and re-run."
                                 </p>
                                 <ul class="findings-pane__degraded-list">
                                     {gaps
