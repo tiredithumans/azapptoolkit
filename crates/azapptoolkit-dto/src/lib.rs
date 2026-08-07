@@ -81,15 +81,22 @@ impl UiError {
     /// no session at all (`not_signed_in`). Both need ONE interactive round trip
     /// (`reauthenticate`) — not a sign-out, which would drop every data cache.
     ///
-    /// **The single definition.** This predicate was previously three
-    /// hand-maintained `matches!` arms across the frontend, which AGENTS.md
-    /// called out as a footgun ("a new re-auth-fatal code must extend BOTH
-    /// `matches!` sets"). It lives here because `azapptoolkit-dto` is the one
-    /// crate both the Tauri backend and the WASM frontend share, so adding a code
-    /// is now one edit rather than a hunt. Retryability is orthogonal: these are
-    /// never `retryable`, because retrying without re-auth just fails again.
+    /// **The single definition**, now genuinely single: the code set itself
+    /// lives in [`azapptoolkit_core::reauth::REAUTH_FATAL_CODES`] and this is a
+    /// thin reading of it.
+    ///
+    /// It was previously three hand-maintained `matches!` arms across the
+    /// frontend, which AGENTS.md called out as a footgun ("a new re-auth-fatal
+    /// code must extend BOTH `matches!` sets"). Collapsing those into this
+    /// method fixed the frontend but left `core::token::TokenError` — which sits
+    /// *below* this crate and so cannot call it — hardcoding the same two
+    /// literals behind a comment admitting it was a mirror. Both now read one
+    /// slice, so adding a code is one edit and cannot half-land.
+    ///
+    /// Retryability is orthogonal: these are never `retryable`, because
+    /// retrying without re-auth just fails again.
     pub fn is_reauth_fatal(&self) -> bool {
-        matches!(self.code.as_str(), "refresh_missing" | "not_signed_in")
+        azapptoolkit_core::reauth::is_reauth_fatal(&self.code)
     }
 
     /// (De)serialization error: fixed `serde` code, never retryable.
@@ -240,6 +247,52 @@ mod backend_conv {
             // `AuthError::Http(reqwest::Error)` is the only variant omitted —
             // `reqwest::Error` has no public constructor — but its arm maps to
             // ("network", true).
+        }
+    }
+}
+
+#[cfg(test)]
+mod reauth_agreement_tests {
+    use super::UiError;
+    use azapptoolkit_core::reauth::REAUTH_FATAL_CODES;
+    use azapptoolkit_core::token::TokenError;
+
+    /// The two predicates sit on opposite sides of a dependency edge — `UiError`
+    /// here, `TokenError` in the crate below — and used to hardcode the same two
+    /// literals independently, behind a comment that admitted the mirror. A code
+    /// added to one and not the other desyncs silently, and the consequence is
+    /// the one the classification exists to prevent: a long-running fan-out that
+    /// never learns the session is dead, warns its way to the end, and returns a
+    /// partial result the UI presents as complete.
+    ///
+    /// This is the test that makes "the single definition" true rather than
+    /// aspirational: it walks the shared set, so a new code that reaches only
+    /// one side cannot pass.
+    #[test]
+    fn ui_error_and_token_error_agree_on_every_fatal_code() {
+        assert!(
+            !REAUTH_FATAL_CODES.is_empty(),
+            "an empty set would make every assertion below vacuous"
+        );
+        for code in REAUTH_FATAL_CODES {
+            let ui = UiError::new(*code, "session is gone", false);
+            let token = TokenError::new(*code, "session is gone");
+            assert!(ui.is_reauth_fatal(), "UiError missed `{code}`");
+            assert!(token.is_reauth_fatal(), "TokenError missed `{code}`");
+        }
+    }
+
+    #[test]
+    fn ui_error_and_token_error_agree_that_an_operation_failure_is_survivable() {
+        for code in [
+            "token_error",
+            "forbidden",
+            "throttled",
+            "network_error",
+            "consent_required",
+        ] {
+            assert!(!UiError::new(code, "m", true).is_reauth_fatal());
+            assert!(!TokenError::new(code, "m").is_reauth_fatal());
         }
     }
 }

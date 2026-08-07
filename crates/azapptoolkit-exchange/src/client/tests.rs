@@ -311,6 +311,104 @@ async fn set_management_scope_filter_rereads_when_the_cmdlet_returns_nothing() {
 }
 
 #[tokio::test]
+async fn set_management_scope_filter_rejects_a_filter_that_did_not_land() {
+    // The re-read proves a scope by that name EXISTS — which was already true
+    // before the call. It must also prove the filter took: this scope governs
+    // every role assignment using it, so reporting success on an unapplied
+    // filter leaves them all pointed at the previous group set.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .and(body_json(json!({
+            "CmdletInput": {
+                "CmdletName": "Set-ManagementScope",
+                "Parameters": {
+                    "Identity": "app_scope_app-1",
+                    "RecipientRestrictionFilter": "MemberOfGroup -eq 'CN=Managed,DC=prod'",
+                    "Confirm": false
+                }
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [] })))
+        .mount(&server)
+        .await;
+    // Exchange still reports the OLD group — the repoint silently did not apply.
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .and(body_json(json!({
+            "CmdletInput": {
+                "CmdletName": "Get-ManagementScope",
+                "Parameters": { "Identity": "app_scope_app-1" }
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [{
+                "Name": "app_scope_app-1",
+                "RecipientFilter": "MemberOfGroup -eq 'CN=Stale,DC=prod'"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let err = client
+        .set_management_scope_filter("app_scope_app-1", "MemberOfGroup -eq 'CN=Managed,DC=prod'")
+        .await
+        .expect_err("a filter that did not land must not report success");
+    assert!(
+        err.to_string().contains("did not take the filter"),
+        "error must name the unapplied filter, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn set_management_scope_filter_accepts_exchange_reformatting_the_same_groups() {
+    // The comparison is on the group DN *set*, not the raw string: Exchange
+    // normalizes OPATH whitespace, parens and quoting, and a byte comparison
+    // would reject filters that applied perfectly.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .and(body_json(json!({
+            "CmdletInput": {
+                "CmdletName": "Set-ManagementScope",
+                "Parameters": {
+                    "Identity": "app_scope_app-1",
+                    "RecipientRestrictionFilter": "MemberOfGroup -eq 'CN=A,DC=prod' -or MemberOfGroup -eq 'CN=B,DC=prod'",
+                    "Confirm": false
+                }
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [] })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .and(body_json(json!({
+            "CmdletInput": {
+                "CmdletName": "Get-ManagementScope",
+                "Parameters": { "Identity": "app_scope_app-1" }
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [{
+                "Name": "app_scope_app-1",
+                // Same two groups, Exchange's own formatting.
+                "RecipientFilter": "((MemberOfGroup -eq 'CN=B,DC=prod') -or (MemberOfGroup -eq 'CN=A,DC=prod'))"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    client
+        .set_management_scope_filter(
+            "app_scope_app-1",
+            "MemberOfGroup -eq 'CN=A,DC=prod' -or MemberOfGroup -eq 'CN=B,DC=prod'",
+        )
+        .await
+        .expect("reformatting that preserves the group set must be accepted");
+}
+
+#[tokio::test]
 async fn add_group_member_swallows_already_member() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

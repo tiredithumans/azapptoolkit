@@ -3736,6 +3736,21 @@ h3 {
   margin: var(--space-2) 0;
 }
 
+/* Coverage-gap banner: what a degraded audit run could not determine. One
+   line per failed tenant-wide read, inside the warn Callout. */
+.findings-pane__degraded-lede {
+  margin: 0;
+}
+
+.findings-pane__degraded-list {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-4);
+}
+
+.findings-pane__degraded-list > li + li {
+  margin-top: var(--space-1);
+}
+
 /* Add-owner candidate list (the audit's guided owner picker + the bulk bar). */
 .add-owner-candidates {
   list-style: none;
@@ -4163,4 +4178,16 @@ h3 {
   min-height: 1em;
   font-size: var(--text-xs);
   color: var(--text-muted);
+}
+
+/* Objects a backup could not capture, listed under the ready-to-save summary.
+   A short manifest restores as if these never existed, so the list is part of
+   the artifact's description, not a log detail. */
+.dr-view__skipped-list {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-4);
+}
+
+.dr-view__skipped-list > li + li {
+  margin-top: var(--space-1);
 }

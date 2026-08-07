@@ -136,6 +136,15 @@ struct Bucket {
     // on the hot paths to a single `remove` + `insert`.
     lru: BTreeMap<u64, String>,
     tick: u64,
+    /// `inserted` of the oldest live entry, i.e. the first moment at which a
+    /// TTL sweep could find anything to do. Lets the `put` path answer "is
+    /// anything expired yet?" in one comparison instead of a full scan — see
+    /// [`Bucket::evict_if_needed`].
+    ///
+    /// `None` when the bucket is empty. Recomputed after each sweep; never
+    /// narrowed on plain removal, so it is a conservative *lower* bound — at
+    /// worst it buys one unnecessary sweep, never a missed one.
+    oldest_insert: Option<Instant>,
 }
 
 impl Bucket {
@@ -144,6 +153,7 @@ impl Bucket {
             entries: HashMap::new(),
             lru: BTreeMap::new(),
             tick: 0,
+            oldest_insert: None,
         }
     }
 
@@ -168,10 +178,12 @@ impl Bucket {
     ) {
         self.tick += 1;
         let tick = self.tick;
+        let inserted = Instant::now();
+        self.oldest_insert.get_or_insert(inserted);
         let entry = Entry {
             value,
             typed,
-            inserted: Instant::now(),
+            inserted,
             last_access: tick,
             pinned,
         };
@@ -204,6 +216,7 @@ impl Bucket {
         self.entries.clear();
         self.lru.clear();
         self.tick = 0;
+        self.oldest_insert = None;
     }
 
     fn rebuild_lru(&mut self) {
@@ -224,6 +237,37 @@ impl Bucket {
     fn evict_expired(&mut self, ttl: Duration) {
         self.entries.retain(|_, e| e.inserted.elapsed() <= ttl);
         self.rebuild_lru();
+        self.oldest_insert = self.entries.values().map(|e| e.inserted).min();
+    }
+
+    /// The `put` path's eviction pass, run only when there is actually
+    /// something to evict.
+    ///
+    /// Both passes used to run on EVERY put, which made each write O(n):
+    /// `evict_expired` is a full `retain` followed by a `rebuild_lru` that
+    /// clones every key `String`, and `n` here runs to `MAX_CACHE_SIZE` — all
+    /// of it under the bucket mutex that interactive list reads contend on. So
+    /// the steady-state cost of caching one app's detail was proportional to
+    /// everything else already cached, paid on the path a user is waiting on.
+    ///
+    /// Both conditions are load-bearing and neither subsumes the other:
+    ///
+    /// * **At cap** — LRU has to make room. Nothing else does.
+    /// * **Something has expired** — the TTL sweep is what reclaims entries
+    ///   nothing reads again, and the only thing that reclaims an expired
+    ///   *pinned* index, which LRU cannot touch. A bucket that never reaches
+    ///   its cap would otherwise hold them until the process exits.
+    ///
+    /// The expiry test is one `Instant` comparison against the oldest live
+    /// entry, so the common put — bucket under cap, nothing expired yet — now
+    /// costs the insert alone.
+    fn evict_if_needed(&mut self, ttl: Duration, max_size: usize) {
+        let anything_expired = self.oldest_insert.is_some_and(|o| o.elapsed() > ttl);
+        if !anything_expired && self.entries.len() <= max_size {
+            return;
+        }
+        self.evict_expired(ttl);
+        self.evict_lru(max_size);
     }
 
     fn evict_lru(&mut self, max_size: usize) {
@@ -269,22 +313,124 @@ pub struct Cache {
     buckets: [Mutex<Bucket>; CacheKind::ALL.len()],
     stats: Mutex<CacheStats>,
     config: Mutex<CacheConfig>,
-    /// Bumped by every invalidation. A reader that fetches a tenant-wide index
-    /// live holds no lock for the seconds that scan takes, so a mutation can
-    /// invalidate the key underneath it; storing the pre-mutation snapshot into
-    /// a **pinned** entry afterwards would serve stale authorization data for
-    /// the full `Lists` TTL, out of LRU's reach. Capture this before the fetch
-    /// and store through [`Cache::put_typed_index_if_current`].
-    generation: std::sync::atomic::AtomicU64,
+    /// Per-key invalidation counters, for the keys someone is currently
+    /// fetching. A reader that fetches a tenant-wide index live holds no lock
+    /// for the seconds that scan takes, so a mutation can invalidate the key
+    /// underneath it; storing the pre-mutation snapshot into a **pinned** entry
+    /// afterwards would serve stale authorization data for the full `Lists`
+    /// TTL, out of LRU's reach.
+    ///
+    /// Deliberately per **key**, not one global counter and not per
+    /// (tenant, kind): the invalidation tiers exist precisely so a
+    /// credential-only mutation can drop `apps_pairing` and the per-app detail
+    /// while PRESERVING the two tenant-wide indexes. A coarser counter makes
+    /// those tier-preserved indexes refuse to store whenever any sibling key is
+    /// dropped — turning the guard into the very tenant-wide rescan the tier
+    /// was created to avoid, once per queued reader behind the single-flight
+    /// gate.
+    ///
+    /// Bounded by construction: an entry lives only as long as the
+    /// [`IndexWatch`] guard [`Cache::generation_for`] hands out — released by
+    /// the paired store, and by the guard's `Drop` on every path that never
+    /// reaches one (a failed fetch, a cancelled task, an early `?`). Without
+    /// that `Drop` the table only grows, and once it reaches
+    /// [`Cache::MAX_WATCHES`] every pinned-index store refuses **for the life
+    /// of the process** — a silent, unrecoverable full-rescan-on-every-read.
+    watches: Mutex<HashMap<(usize, String), Watch>>,
+}
+
+/// One watched key: the invalidation counter, and how many in-flight fetches
+/// are relying on it. Refcounted because `generation_for` on an already-watched
+/// key hands both fetchers the same counter; releasing on the first one to
+/// finish would leave the other unable to prove its key current.
+#[derive(Debug)]
+struct Watch {
+    counter: u64,
+    refs: usize,
+}
+
+/// A live watch on one cache key, held across a long live index fetch.
+///
+/// Capture one *before* the fetch and hand it to the matching
+/// `put_*_if_current`, which stores only if this exact key was not invalidated
+/// in between. The guard exists so that the paths which never reach a store —
+/// the fetch returned `Err`, the task was cancelled, a sibling future in a
+/// `try_join` lost — still end the watch: [`Cache::generation_for`] is the only
+/// thing that registers one, and a registration that outlives its fetch is
+/// leaked forever.
+///
+/// Not `Clone` and not `Copy` on purpose: exactly one owner releases it.
+#[must_use = "an IndexWatch must reach a put_*_if_current or be dropped promptly; \
+              holding one open keeps the key watched"]
+pub struct IndexWatch<'a> {
+    cache: &'a Cache,
+    kind: CacheKind,
+    key: String,
+    /// The counter read at registration, or [`Cache::WATCH_UNAVAILABLE`] when
+    /// the table was full and nothing was registered.
+    since: u64,
+    /// Whether this guard owns a reference in the watch table. False for the
+    /// unavailable case (nothing to release) and after a store consumed it.
+    holds_ref: bool,
+}
+
+impl IndexWatch<'_> {
+    /// The kind this watch covers.
+    pub fn kind(&self) -> CacheKind {
+        self.kind
+    }
+
+    /// The key this watch covers.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Consumes the guard, releasing its reference and returning
+    /// `(kind, key, since, current)` — where `current` is the key's live
+    /// counter, or `None` when this guard never held a watch.
+    fn release(mut self) -> (CacheKind, String, u64, Option<u64>) {
+        let current = if self.holds_ref {
+            self.holds_ref = false;
+            self.cache.release_watch(self.kind, &self.key)
+        } else {
+            None
+        };
+        (
+            self.kind,
+            std::mem::take(&mut self.key),
+            self.since,
+            current,
+        )
+    }
+}
+
+impl Drop for IndexWatch<'_> {
+    fn drop(&mut self) {
+        if self.holds_ref {
+            self.cache.release_watch(self.kind, &self.key);
+        }
+    }
 }
 
 impl Cache {
+    /// Ceiling on concurrently watched keys. Only tenant-wide index fetches
+    /// watch, and `single_flight` already collapses concurrent fetchers of the
+    /// same key, so the live set is a handful — this is a runaway guard, not a
+    /// working limit. Past it `generation_for` returns
+    /// [`Cache::WATCH_UNAVAILABLE`] and the paired store refuses.
+    const MAX_WATCHES: usize = 256;
+
+    /// Sentinel returned by [`Cache::generation_for`] when no watch could be
+    /// registered. It can never equal a live counter (which starts at 0 and
+    /// only increments), so the paired store always refuses — fail-closed.
+    pub const WATCH_UNAVAILABLE: u64 = u64::MAX;
+
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             buckets: std::array::from_fn(|_| Mutex::new(Bucket::new())),
             stats: Mutex::new(CacheStats::default()),
             config: Mutex::new(CacheConfig::default()),
-            generation: std::sync::atomic::AtomicU64::new(0),
+            watches: Mutex::new(HashMap::new()),
         })
     }
 
@@ -394,14 +540,15 @@ impl Cache {
     }
 
     pub fn clear(&self) {
-        self.bump_generation();
+        // Everything goes, so every watch is invalidated.
+        self.bump_watches(None, |_| true);
         for kind in CacheKind::ALL {
             self.buckets[kind.idx()].lock().clear();
         }
     }
 
     pub fn clear_kind(&self, kind: CacheKind) {
-        self.bump_generation();
+        self.bump_watches(Some(kind), |_| true);
         self.buckets[kind.idx()].lock().clear();
     }
 
@@ -494,7 +641,7 @@ impl Cache {
 
     /// [`Self::put_index`] under the store-after-invalidate guard — the
     /// serializing twin of [`Self::put_typed_index_if_current`], with the same
-    /// contract: `since` is a [`Cache::generation`] captured **before** the
+    /// contract: `since` is a [`Cache::generation_for`] captured **before** the
     /// live fetch, and a store that lost the race is skipped (returns `false`)
     /// rather than re-pinning a pre-mutation snapshot for the full TTL.
     ///
@@ -502,25 +649,39 @@ impl Cache {
     /// A pinned entry is out of LRU's reach, so losing the race there is not a
     /// stale read that ages out in seconds — it is the wrong answer until the
     /// TTL expires.
-    pub fn put_index_if_current<T>(
-        &self,
-        kind: CacheKind,
-        key: String,
-        value: &T,
-        since: u64,
-    ) -> bool
+    pub fn put_index_if_current<T>(&self, watch: IndexWatch<'_>, value: &T) -> bool
     where
         T: serde::Serialize,
     {
-        if self.generation() != since {
-            tracing::debug!(
-                %key,
-                "cache invalidated during the index fetch; not storing the stale snapshot"
-            );
-            return false;
+        match Self::still_current(watch) {
+            Some((kind, key)) => {
+                self.put_inner(kind, key, value, true);
+                true
+            }
+            None => false,
         }
-        self.put_inner(kind, key, value, true);
-        true
+    }
+
+    /// Consumes `watch`, returning its `(kind, key)` when the key survived
+    /// untouched — and releasing it either way.
+    ///
+    /// A key that is not (or is no longer) watched cannot be proven current, so
+    /// it refuses: that covers both the table-full case and a second store
+    /// against an already-consumed watch.
+    fn still_current(watch: IndexWatch<'_>) -> Option<(CacheKind, String)> {
+        let (kind, key, since, current) = watch.release();
+        match current {
+            Some(now) if now == since => Some((kind, key)),
+            other => {
+                tracing::debug!(
+                    %key,
+                    watched = ?other,
+                    since,
+                    "key invalidated during the index fetch (or never watched); not storing"
+                );
+                None
+            }
+        }
     }
 
     fn put_inner<T>(&self, kind: CacheKind, key: String, value: &T, pinned: bool)
@@ -539,8 +700,7 @@ impl Cache {
         };
         let mut bucket = self.buckets[kind.idx()].lock();
         bucket.insert(key, Arc::new(json), None, pinned);
-        bucket.evict_expired(ttl);
-        bucket.evict_lru(max_size);
+        bucket.evict_if_needed(ttl, max_size);
     }
 
     /// Effective per-kind entry cap and TTL, or `None` when caching is
@@ -576,8 +736,8 @@ impl Cache {
         self.put_typed_inner(kind, key, value, true);
     }
 
-    /// Stores a pinned index **only if** nothing was invalidated since
-    /// `since` (a [`Cache::generation`] captured before the live fetch).
+    /// Stores a pinned index **only if THIS KEY** was not invalidated since
+    /// `since` (a [`Cache::generation_for`] captured before the live fetch).
     /// Returns `false` when the store was skipped.
     ///
     /// Closes the store-after-invalidate race: a tenant-wide index scan takes
@@ -585,22 +745,24 @@ impl Cache {
     /// key — and an unconditional store would then re-pin the *pre-mutation*
     /// snapshot for the full `Lists` TTL, where LRU cannot reach it. Skipping
     /// costs one re-fetch; not skipping serves stale authorization data.
+    ///
+    /// Per-key, emphatically: a coarser counter would make a credential-only
+    /// mutation — which invalidates `apps_pairing` and a per-app detail
+    /// specifically in order to PRESERVE the tenant-wide indexes — refuse a
+    /// perfectly valid index store, and the single-flight gate would then hand
+    /// each queued reader its own multi-second rescan.
     pub fn put_typed_index_if_current<T: Send + Sync + 'static>(
         &self,
-        kind: CacheKind,
-        key: String,
+        watch: IndexWatch<'_>,
         value: Arc<T>,
-        since: u64,
     ) -> bool {
-        if self.generation() != since {
-            tracing::debug!(
-                %key,
-                "cache invalidated during the index fetch; not storing the stale snapshot"
-            );
-            return false;
+        match Self::still_current(watch) {
+            Some((kind, key)) => {
+                self.put_typed_inner(kind, key, value, true);
+                true
+            }
+            None => false,
         }
-        self.put_typed_inner(kind, key, value, true);
-        true
     }
 
     fn put_typed_inner<T: Send + Sync + 'static>(
@@ -615,8 +777,7 @@ impl Cache {
         };
         let mut bucket = self.buckets[kind.idx()].lock();
         bucket.insert(key, Arc::new(serde_json::Value::Null), Some(value), pinned);
-        bucket.evict_expired(ttl);
-        bucket.evict_lru(max_size);
+        bucket.evict_if_needed(ttl, max_size);
     }
 
     /// Returns the typed value (a refcount clone — no deserialize) when present,
@@ -645,19 +806,110 @@ impl Cache {
         }
     }
 
-    /// Monotonic invalidation counter. Capture it *before* a long live fetch
-    /// and pass it to [`Cache::put_typed_index_if_current`].
-    pub fn generation(&self) -> u64 {
-        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    /// Start watching one key for invalidation across a long live fetch.
+    ///
+    /// Capture this *before* the fetch and pass the returned guard to the
+    /// matching `put_*_if_current`, which stores only if this exact key was not
+    /// invalidated in between. Watching a key already being watched joins its
+    /// existing watch, so two racing fetchers of the same key both refuse if it
+    /// was dropped.
+    ///
+    /// The guard releases the watch on `Drop`, so a fetch that fails, is
+    /// cancelled, or otherwise never reaches its store cannot leak the entry.
+    /// That matters more than it looks: the table is capped at
+    /// [`Cache::MAX_WATCHES`], and leaked entries are never reclaimed, so a
+    /// steady trickle of failed index fetches would eventually fill it and make
+    /// *every* pinned-index store refuse permanently — degrading every
+    /// tenant-wide read to a full rescan with no signal and no way back short
+    /// of a restart.
+    ///
+    /// When the table is genuinely full the guard carries
+    /// [`Cache::WATCH_UNAVAILABLE`] and the paired store refuses — fail-closed,
+    /// costing one re-fetch.
+    pub fn generation_for(&self, kind: CacheKind, key: &str) -> IndexWatch<'_> {
+        let mut watches = self.watches.lock();
+        let id = (kind.idx(), key.to_string());
+        if let Some(watch) = watches.get_mut(&id) {
+            watch.refs += 1;
+            let since = watch.counter;
+            drop(watches);
+            return IndexWatch {
+                cache: self,
+                kind,
+                key: key.to_string(),
+                since,
+                holds_ref: true,
+            };
+        }
+        if watches.len() >= Self::MAX_WATCHES {
+            tracing::warn!(
+                %key,
+                watches = watches.len(),
+                "cache watch table full; the index store will refuse and re-fetch"
+            );
+            drop(watches);
+            return IndexWatch {
+                cache: self,
+                kind,
+                key: key.to_string(),
+                since: Self::WATCH_UNAVAILABLE,
+                holds_ref: false,
+            };
+        }
+        watches.insert(
+            id,
+            Watch {
+                counter: 0,
+                refs: 1,
+            },
+        );
+        drop(watches);
+        IndexWatch {
+            cache: self,
+            kind,
+            key: key.to_string(),
+            since: 0,
+            holds_ref: true,
+        }
     }
 
-    fn bump_generation(&self) {
-        self.generation
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    /// Bumps the counter of every watched key this invalidation actually drops.
+    /// `matches` decides membership, so the exact-key, prefix and tenant sweeps
+    /// each bump precisely what they removed — and nothing else.
+    fn bump_watches(&self, kind: Option<CacheKind>, matches: impl Fn(&str) -> bool) {
+        let mut watches = self.watches.lock();
+        for ((watched_kind, watched_key), watch) in watches.iter_mut() {
+            if kind.is_none_or(|k| k.idx() == *watched_kind) && matches(watched_key) {
+                watch.counter += 1;
+            }
+        }
+    }
+
+    /// Drops one reference to a watch, returning the key's live counter and
+    /// removing the entry once the last holder lets go. `None` means the key
+    /// was not watched at all, which callers treat as "cannot prove this is
+    /// current" and therefore refuse.
+    fn release_watch(&self, kind: CacheKind, key: &str) -> Option<u64> {
+        let mut watches = self.watches.lock();
+        let id = (kind.idx(), key.to_string());
+        let watch = watches.get_mut(&id)?;
+        let counter = watch.counter;
+        watch.refs = watch.refs.saturating_sub(1);
+        if watch.refs == 0 {
+            watches.remove(&id);
+        }
+        Some(counter)
+    }
+
+    /// How many keys are currently watched. Test/diagnostic surface — a healthy
+    /// process idles at zero, and a number that only ever climbs is the leak
+    /// this guard exists to prevent.
+    pub fn watch_count(&self) -> usize {
+        self.watches.lock().len()
     }
 
     pub fn invalidate(&self, kind: CacheKind, key: &str) {
-        self.bump_generation();
+        self.bump_watches(Some(kind), |watched| watched == key);
         self.buckets[kind.idx()].lock().remove(key);
     }
 
@@ -665,7 +917,7 @@ impl Cache {
     /// tenant-scoped clears (e.g. on sign-out) without enumerating every
     /// list shape.
     pub fn invalidate_prefix(&self, kind: CacheKind, prefix: &str) {
-        self.bump_generation();
+        self.bump_watches(Some(kind), |watched| watched.starts_with(prefix));
         self.buckets[kind.idx()]
             .lock()
             .retain(|k| !k.starts_with(prefix));
@@ -678,8 +930,8 @@ impl Cache {
     /// kind — and a future `CacheKind` is swept automatically, since it is a
     /// bucket too.
     pub fn invalidate_tenant(&self, tenant_id: &str) {
-        self.bump_generation();
         let prefix = format!("{tenant_id}|");
+        self.bump_watches(None, |watched| watched.starts_with(&prefix));
         for kind in CacheKind::ALL {
             self.buckets[kind.idx()]
                 .lock()
@@ -728,11 +980,11 @@ mod tests {
         let cache = Cache::new();
         let key = "t1|apps_pairing".to_string();
 
-        let since = cache.generation();
+        let watch = cache.generation_for(CacheKind::Lists, &key);
         // ... the paginated scan happens here, and a mutation lands during it.
         cache.invalidate_prefix(CacheKind::Lists, "t1|");
 
-        let stored = cache.put_index_if_current(CacheKind::Lists, key.clone(), &vec![1u8], since);
+        let stored = cache.put_index_if_current(watch, &vec![1u8]);
         assert!(!stored, "a snapshot that lost the race must not be stored");
         assert!(
             cache.get::<Vec<u8>>(CacheKind::Lists, &key).is_none(),
@@ -740,8 +992,8 @@ mod tests {
         );
 
         // The uncontended path still stores, and still pins.
-        let since = cache.generation();
-        assert!(cache.put_index_if_current(CacheKind::Lists, key.clone(), &vec![2u8], since));
+        let watch = cache.generation_for(CacheKind::Lists, &key);
+        assert!(cache.put_index_if_current(watch, &vec![2u8]));
         assert_eq!(
             cache.get::<Vec<u8>>(CacheKind::Lists, &key),
             Some(vec![2u8])
@@ -757,16 +1009,11 @@ mod tests {
         let cache = Cache::new();
         let key = "t1|sp_index".to_string();
 
-        let since = cache.generation();
+        let watch = cache.generation_for(CacheKind::Lists, &key);
         // ... the live fetch happens here, and a mutation lands during it.
         cache.invalidate_prefix(CacheKind::Lists, "t1|");
 
-        let stored = cache.put_typed_index_if_current(
-            CacheKind::Lists,
-            key.clone(),
-            Arc::new(vec![1u8]),
-            since,
-        );
+        let stored = cache.put_typed_index_if_current(watch, Arc::new(vec![1u8]));
         assert!(!stored, "a snapshot that lost the race must not be stored");
         assert!(
             cache.get_typed::<Vec<u8>>(CacheKind::Lists, &key).is_none(),
@@ -774,18 +1021,181 @@ mod tests {
         );
 
         // The uncontended path still stores.
-        let since = cache.generation();
-        assert!(cache.put_typed_index_if_current(
-            CacheKind::Lists,
-            key.clone(),
-            Arc::new(vec![2u8]),
-            since
-        ));
+        let watch = cache.generation_for(CacheKind::Lists, &key);
+        assert!(cache.put_typed_index_if_current(watch, Arc::new(vec![2u8])));
         assert_eq!(
             cache
                 .get_typed::<Vec<u8>>(CacheKind::Lists, &key)
                 .as_deref(),
             Some(&vec![2u8])
+        );
+    }
+
+    /// The guard must be keyed to the ONE key being written. The invalidation
+    /// tiers exist so a credential-only mutation can drop `apps_pairing` and a
+    /// per-app detail while deliberately PRESERVING the two tenant-wide
+    /// indexes; a global (or per-kind, or per-tenant) counter makes those
+    /// preserved indexes refuse a perfectly valid store, and behind the
+    /// single-flight gate every queued reader then pays its own multi-second
+    /// directory rescan — the exact cost the tier was created to avoid.
+    #[test]
+    fn a_sibling_key_invalidation_does_not_block_an_untouched_index() {
+        let cache = Cache::new();
+        let index = "t1|sp_index".to_string();
+
+        let watch = cache.generation_for(CacheKind::Lists, &index);
+        // A credential-only mutation lands mid-scan: it drops the pairing list,
+        // one app's detail and the expiry roll-up — and keeps the indexes.
+        cache.invalidate(CacheKind::Lists, "t1|apps_pairing");
+        cache.invalidate(CacheKind::Lists, "t1|app_detail|obj-1");
+        cache.invalidate(CacheKind::Lists, "t1|credential_expirations");
+        // A different TENANT's sweep must not block it either.
+        cache.invalidate_tenant("t2");
+
+        assert!(
+            cache.put_typed_index_if_current(watch, Arc::new(vec![7u8])),
+            "no invalidation touched this key, so the scan's result must be stored"
+        );
+        assert_eq!(
+            cache
+                .get_typed::<Vec<u8>>(CacheKind::Lists, &index)
+                .as_deref(),
+            Some(&vec![7u8])
+        );
+    }
+
+    #[test]
+    fn a_store_consumes_its_watch_and_leaves_the_table_empty() {
+        // The watch is moved into the store, so a replay is a *compile* error
+        // rather than a runtime refusal. What is still worth pinning at runtime
+        // is the other half: the store must release the entry, or the table
+        // fills with the residue of successful fetches.
+        let cache = Cache::new();
+        let key = "t1|sp_index".to_string();
+
+        let watch = cache.generation_for(CacheKind::Lists, &key);
+        assert_eq!(cache.watch_count(), 1, "the fetch is watching its key");
+        assert!(cache.put_typed_index_if_current(watch, Arc::new(vec![1u8])));
+        assert_eq!(
+            cache.watch_count(),
+            0,
+            "a completed store must stop watching"
+        );
+
+        // A second store needs a fresh watch, which proves the window since.
+        let watch = cache.generation_for(CacheKind::Lists, &key);
+        assert!(cache.put_typed_index_if_current(watch, Arc::new(vec![2u8])));
+        assert_eq!(
+            cache
+                .get_typed::<Vec<u8>>(CacheKind::Lists, &key)
+                .as_deref(),
+            Some(&vec![2u8])
+        );
+        assert_eq!(cache.watch_count(), 0);
+    }
+
+    #[test]
+    fn a_fetch_that_never_reaches_its_store_releases_its_watch() {
+        // The leak this guard exists to prevent. A watch was registered by
+        // `generation_for` and removed ONLY by the paired store, so every failed
+        // or cancelled index fetch left one behind permanently. The table is
+        // capped, entries were never reclaimed, and once the cap was reached
+        // `generation_for` could no longer register — making EVERY pinned-index
+        // store refuse for the life of the process. That presents as unexplained
+        // slowness (a full rescan on every tenant-wide read) with no error, no
+        // log at the point of failure, and no recovery short of a restart.
+        let cache = Cache::new();
+
+        for _ in 0..(Cache::MAX_WATCHES * 4) {
+            let watch = cache.generation_for(CacheKind::Lists, "t1|sp_index");
+            // ... the live scan fails here, so the store is never reached and
+            // `watch` is dropped on the error path.
+            drop(watch);
+        }
+        assert_eq!(
+            cache.watch_count(),
+            0,
+            "a dropped watch must not outlive its fetch"
+        );
+
+        // And the table still works afterwards — the pre-guard failure mode was
+        // that it did not.
+        let watch = cache.generation_for(CacheKind::Lists, "t1|sp_index");
+        assert!(
+            cache.put_typed_index_if_current(watch, Arc::new(vec![1u8])),
+            "an exhausted watch table would have refused this store forever"
+        );
+    }
+
+    #[test]
+    fn two_fetchers_of_one_key_each_hold_a_reference() {
+        // `generation_for` on an already-watched key joins the existing watch.
+        // Releasing on the FIRST holder to finish would leave the second unable
+        // to prove its key current, turning a valid store into a needless
+        // tenant-wide rescan — so the watch is refcounted.
+        let cache = Cache::new();
+        let key = "t1|sp_index".to_string();
+
+        let first = cache.generation_for(CacheKind::Lists, &key);
+        let second = cache.generation_for(CacheKind::Lists, &key);
+        assert_eq!(cache.watch_count(), 1, "one key, one watch");
+
+        drop(first);
+        assert_eq!(
+            cache.watch_count(),
+            1,
+            "the second fetcher is still relying on this watch"
+        );
+        assert!(
+            cache.put_typed_index_if_current(second, Arc::new(vec![1u8])),
+            "nothing invalidated the key, so the surviving fetcher must store"
+        );
+        assert_eq!(cache.watch_count(), 0);
+    }
+
+    #[test]
+    fn both_racing_fetchers_refuse_when_their_shared_key_is_invalidated() {
+        let cache = Cache::new();
+        let key = "t1|sp_index".to_string();
+
+        let first = cache.generation_for(CacheKind::Lists, &key);
+        let second = cache.generation_for(CacheKind::Lists, &key);
+        cache.invalidate(CacheKind::Lists, &key);
+
+        assert!(!cache.put_typed_index_if_current(first, Arc::new(vec![1u8])));
+        assert!(!cache.put_typed_index_if_current(second, Arc::new(vec![2u8])));
+        assert!(cache.get_typed::<Vec<u8>>(CacheKind::Lists, &key).is_none());
+        assert_eq!(cache.watch_count(), 0);
+    }
+
+    #[test]
+    fn a_full_watch_table_refuses_rather_than_storing_unproven() {
+        // Fail-closed: past the cap nothing is registered, so the paired store
+        // cannot prove its key current and skips. One re-fetch, never a stale
+        // pin. (Reaching this at all means watches are leaking — the guard
+        // above is what keeps the live set to a handful.)
+        let cache = Cache::new();
+        let held: Vec<_> = (0..Cache::MAX_WATCHES)
+            .map(|i| cache.generation_for(CacheKind::Lists, &format!("t1|key-{i}")))
+            .collect();
+        assert_eq!(cache.watch_count(), Cache::MAX_WATCHES);
+
+        let overflow = cache.generation_for(CacheKind::Lists, "t1|one-too-many");
+        assert!(
+            !cache.put_typed_index_if_current(overflow, Arc::new(vec![1u8])),
+            "an unregistered watch cannot authorize a store"
+        );
+        assert!(
+            cache
+                .get_typed::<Vec<u8>>(CacheKind::Lists, "t1|one-too-many")
+                .is_none()
+        );
+
+        drop(held);
+        assert_eq!(
+            cache.watch_count(),
+            0,
+            "dropping the holders frees the table again"
         );
     }
 

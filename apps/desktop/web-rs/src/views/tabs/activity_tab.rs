@@ -12,7 +12,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 use crate::bindings::activity::{self, ActivityLogItem};
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::auth;
-use crate::components::ui::{DataTable, DetailLoadError, Skeleton, SkeletonList};
+use crate::components::ui::{Callout, DataTable, DetailLoadError, Skeleton, SkeletonList};
 use crate::state::use_session;
 
 use crate::util::no_tenant;
@@ -76,7 +76,7 @@ pub fn ActivityPanel(
                         // Graceful degradation: the backend tags missing
                         // consent/license as "activity_unavailable".
                         Err(e) if e.code == "activity_unavailable" => {
-                            view! { <div class="alert alert--warn">{e.message}</div> }.into_any()
+                            view! { <Callout tone="warn">{e.message}</Callout> }.into_any()
                         }
                         // Anything else is a real failure (429, network, …) and
                         // must offer a way out, not just a message.
@@ -153,7 +153,7 @@ fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
                                 });
                             };
                             view! {
-                                <div class="alert alert--warn">
+                                <Callout tone="warn">
                                     {msg}
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
@@ -161,13 +161,13 @@ fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
                                     >
                                         "Grant consent & retry"
                                     </Button>
-                                </div>
+                                </Callout>
                             }
                                 .into_any()
                         }
                         Ok(dto) => {
                             view! {
-                                <div class="alert alert--warn">{dto.message.unwrap_or_default()}</div>
+                                <Callout tone="warn">{dto.message.unwrap_or_default()}</Callout>
                             }
                                 .into_any()
                         }

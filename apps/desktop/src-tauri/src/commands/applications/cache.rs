@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use azapptoolkit_core::cache::{Cache, CacheKind};
+use azapptoolkit_core::cache::{Cache, CacheKind, IndexWatch};
 use azapptoolkit_core::models::{Application, ServicePrincipal};
 use azapptoolkit_graph::{GraphClient, GraphError};
 
@@ -169,9 +169,9 @@ pub(crate) fn invalidate_app_credentials(cache: &Cache, tenant_id: &str, object_
 /// `mail_scopes|…` entries sharing its bucket can't evict an index that costs a
 /// full `/servicePrincipals` scan to rebuild.
 ///
-/// Every reader must go through this (and [`sp_index_store`]) rather than
-/// `cache.get`: a typed entry read untyped reads as a miss, silently costing a
-/// tenant-wide rescan.
+/// Every reader must go through this (and [`sp_index_store_if_current`])
+/// rather than `cache.get`: a typed entry read untyped reads as a miss,
+/// silently costing a tenant-wide rescan.
 pub(crate) fn sp_index_hit(cache: &Cache, tenant_id: &str) -> Option<Arc<Vec<ServicePrincipal>>> {
     cache.get_typed::<Vec<ServicePrincipal>>(CacheKind::Lists, &sp_index_key(tenant_id))
 }
@@ -192,26 +192,32 @@ pub(crate) fn sp_index_store(
     tenant_id: &str,
     sps: Vec<ServicePrincipal>,
 ) -> Arc<Vec<ServicePrincipal>> {
-    sp_index_store_if_current(cache, tenant_id, sps, cache.generation())
+    let watch = cache.generation_for(CacheKind::Lists, &sp_index_key(tenant_id));
+    sp_index_store_if_current(cache, sps, watch)
 }
 
-/// Stores the index only if nothing was invalidated since `since`. Callers that
-/// fetched live must capture [`Cache::generation`] BEFORE the fetch: the scan
-/// takes seconds under no lock, and re-pinning a pre-mutation snapshot would
-/// serve stale authorization data for the full `Lists` TTL, out of LRU's reach.
+/// Starts watching the SP-index key across a live scan.
+///
+/// Exists so callers that fetch the SP index as part of a larger join capture
+/// the watch for the key they will actually store under. Watches are per KEY:
+/// a watch taken for some other key cannot prove this one current, so the store
+/// would refuse rather than land.
+pub(crate) fn sp_index_watch<'a>(cache: &'a Cache, tenant_id: &str) -> IndexWatch<'a> {
+    cache.generation_for(CacheKind::Lists, &sp_index_key(tenant_id))
+}
+
+/// Stores the index only if THIS KEY was not invalidated since `since`.
+/// Callers that fetched live must capture [`Cache::generation_for`] BEFORE the
+/// fetch: the scan takes seconds under no lock, and re-pinning a pre-mutation
+/// snapshot would serve stale authorization data for the full `Lists` TTL, out
+/// of LRU's reach.
 pub(crate) fn sp_index_store_if_current(
     cache: &Cache,
-    tenant_id: &str,
     sps: Vec<ServicePrincipal>,
-    since: u64,
+    watch: IndexWatch<'_>,
 ) -> Arc<Vec<ServicePrincipal>> {
     let shared = Arc::new(sps);
-    cache.put_typed_index_if_current(
-        CacheKind::Lists,
-        sp_index_key(tenant_id),
-        Arc::clone(&shared),
-        since,
-    );
+    cache.put_typed_index_if_current(watch, Arc::clone(&shared));
     shared
 }
 
@@ -242,15 +248,14 @@ pub(crate) async fn sp_index_cached(
     }
     // Captured BEFORE the multi-second scan: a mutation landing mid-flight
     // invalidates the key, and re-pinning this pre-mutation snapshot would
-    // outlive the invalidation it raced.
-    let since = state.cache.generation();
+    // outlive the invalidation it raced. Watched per KEY, so a credential-only
+    // mutation elsewhere in this tenant cannot make a valid index refuse.
+    let watch = state.cache.generation_for(CacheKind::Lists, &key);
+    // `?` here drops `watch`, ending the watch. That is the whole point of the
+    // guard: a failed scan used to leave its registration behind forever, and
+    // enough of those fill the table until every pinned-index store refuses.
     let sps = client.list_service_principals_index().await?;
-    Ok(sp_index_store_if_current(
-        &state.cache,
-        tenant_id,
-        sps,
-        since,
-    ))
+    Ok(sp_index_store_if_current(&state.cache, sps, watch))
 }
 
 /// Reads the cached per-tenant app-registration index, if present.
@@ -282,24 +287,19 @@ pub(crate) fn app_name_index_store(
     tenant_id: &str,
     apps: Vec<Application>,
 ) -> Arc<Vec<Application>> {
-    app_name_index_store_if_current(cache, tenant_id, apps, cache.generation())
+    let watch = cache.generation_for(CacheKind::Lists, &app_name_index_key(tenant_id));
+    app_name_index_store_if_current(cache, apps, watch)
 }
 
 /// The `/applications` counterpart of [`sp_index_store_if_current`], with the
 /// same rule: capture the generation before the live fetch, not after.
 pub(crate) fn app_name_index_store_if_current(
     cache: &Cache,
-    tenant_id: &str,
     apps: Vec<Application>,
-    since: u64,
+    watch: IndexWatch<'_>,
 ) -> Arc<Vec<Application>> {
     let shared = Arc::new(apps);
-    cache.put_typed_index_if_current(
-        CacheKind::Lists,
-        app_name_index_key(tenant_id),
-        Arc::clone(&shared),
-        since,
-    );
+    cache.put_typed_index_if_current(watch, Arc::clone(&shared));
     shared
 }
 
@@ -328,16 +328,12 @@ pub(crate) async fn app_name_index_cached(
         return Ok(cached);
     }
     // Captured BEFORE the scan — see `sp_index_cached`.
-    let since = state.cache.generation();
+    let watch = state.cache.generation_for(CacheKind::Lists, &key);
+    // `?` drops `watch` — see `sp_index_cached`.
     let apps = client
         .list_application_index_named(Some(super::APPS_MAX))
         .await?;
-    Ok(app_name_index_store_if_current(
-        &state.cache,
-        tenant_id,
-        apps,
-        since,
-    ))
+    Ok(app_name_index_store_if_current(&state.cache, apps, watch))
 }
 
 /// Both tenant-wide indexes, fetching only the cold ones — and, when both are

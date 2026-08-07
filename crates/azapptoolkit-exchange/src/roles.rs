@@ -11,5 +11,5 @@
 pub use azapptoolkit_core::scoping::{
     EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
     exchange_role_for_permission, exchange_role_for_resource_permission, is_blanket_mailbox_grant,
-    is_scopable_exchange_permission,
+    is_scopable_exchange_resource_permission,
 };

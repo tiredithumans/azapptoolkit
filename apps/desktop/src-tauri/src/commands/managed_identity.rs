@@ -66,7 +66,7 @@ pub async fn list_managed_identities(
     // Captured BEFORE the scan the index accessor may run — this list is
     // PINNED, so a snapshot that loses the race to a mutation would sit out of
     // LRU's reach for the full TTL.
-    let since = state.cache.generation();
+    let watch = state.cache.generation_for(CacheKind::Lists, &key);
     let sps = crate::commands::applications::sp_index_cached(&state, &client, &tenant_id).await?;
     let rows: Vec<ManagedIdentityDto> = sps
         .iter()
@@ -82,9 +82,7 @@ pub async fn list_managed_identities(
 
     // Guarded like its source index: a mutation that landed mid-scan already
     // dropped this key, and re-pinning the pre-mutation rows would outlive it.
-    state
-        .cache
-        .put_index_if_current(CacheKind::Lists, key, &rows, since);
+    state.cache.put_index_if_current(watch, &rows);
     Ok(rows)
 }
 

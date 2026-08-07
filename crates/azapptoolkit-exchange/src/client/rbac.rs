@@ -113,16 +113,46 @@ impl ExchangeClient {
             )
             .await?;
         // `Set-ManagementScope` returns nothing on success, so re-read to hand
-        // the caller the scope as Exchange now has it (and to prove it landed).
-        match first_optional_as::<ExoManagementScope>(values)? {
-            Some(updated) => Ok(updated),
+        // the caller the scope as Exchange now has it.
+        let scope = match first_optional_as::<ExoManagementScope>(values)? {
+            Some(updated) => updated,
             None => match self.get_management_scope(name).await? {
-                Some(scope) => Ok(scope),
-                None => Err(crate::error::ExchangeError::Protocol(format!(
-                    "management scope '{name}' disappeared after Set-ManagementScope"
-                ))),
+                Some(scope) => scope,
+                None => {
+                    return Err(crate::error::ExchangeError::Protocol(format!(
+                        "management scope '{name}' disappeared after Set-ManagementScope"
+                    )));
+                }
             },
+        };
+
+        // ...and PROVE the filter landed, which the re-read alone does not: it
+        // only shows a scope by that name exists, which was already true before
+        // the call. This scope governs every role assignment using it, so a
+        // silently-unapplied filter leaves those assignments pointed at the old
+        // group set while the caller reports success.
+        //
+        // Compare the group DN *sets*, not the raw strings: Exchange normalizes
+        // OPATH whitespace, parenthesization and quoting, so a byte comparison
+        // would reject filters that applied perfectly. The DN set is the
+        // property that decides reach, and it is what every caller of this
+        // function is actually asserting.
+        let wanted = crate::targets::group_dns_in_filter(recipient_restriction_filter);
+        let landed = scope
+            .recipient_filter
+            .as_deref()
+            .map(crate::targets::group_dns_in_filter)
+            .unwrap_or_default();
+        if wanted != landed {
+            return Err(crate::error::ExchangeError::Protocol(format!(
+                "management scope '{name}' did not take the filter it was given: asked for \
+                 {} group(s), Exchange reports {}. The scope was NOT repointed as requested; \
+                 role assignments using it still reach the previous group set.",
+                wanted.len(),
+                landed.len(),
+            )));
         }
+        Ok(scope)
     }
 
     pub async fn get_management_scope(&self, name: &str) -> Result<Option<ExoManagementScope>> {

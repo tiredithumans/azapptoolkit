@@ -17,7 +17,7 @@ use crate::bindings::sharepoint::GrantSiteAccessResult;
 use crate::bindings::{auth, sharepoint};
 use crate::components::app_site_access_panel::AppSiteAccessPanel;
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
-use crate::components::ui::DataTable;
+use crate::components::ui::{Callout, DataTable};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -224,7 +224,7 @@ pub fn SharePointSitesSection(
                                     .get()
                                     .then(|| {
                                         view! {
-                                            <div class="alert alert--warn">
+                                            <Callout tone="warn">
                                                 "Managing site permissions needs the Sites.FullControl.All admin permission. Grant consent to continue (you must be a SharePoint or Global administrator)."
                                                 <div class="actions-row">
                                                     <Button
@@ -235,7 +235,7 @@ pub fn SharePointSitesSection(
                                                         "Grant consent"
                                                     </Button>
                                                 </div>
-                                            </div>
+                                            </Callout>
                                         }
                                     })
                             }}
@@ -248,7 +248,7 @@ pub fn SharePointSitesSection(
                                             r.permission.roles.join(", "),
                                             r.site_display_name.unwrap_or(r.site_id),
                                         );
-                                        view! { <div class="alert alert--ok">{summary}</div> }
+                                        view! { <Callout tone="ok">{summary}</Callout> }
                                     })
                             }}
 

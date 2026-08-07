@@ -684,7 +684,7 @@ pub fn ExchangeScopingSection(
                                         Err(e) => {
                                             let needs_consent = e.code == "consent_required";
                                             view! {
-                                                <div class="alert alert--warn">
+                                                <Callout tone="warn">
                                                     <Body1>{e.message}</Body1>
                                                     <div class="actions-row">
                                                         {needs_consent
@@ -705,7 +705,7 @@ pub fn ExchangeScopingSection(
                                                             "Retry"
                                                         </Button>
                                                     </div>
-                                                </div>
+                                                </Callout>
                                             }
                                                 .into_any()
                                         }

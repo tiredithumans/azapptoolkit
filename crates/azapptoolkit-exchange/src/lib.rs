@@ -12,18 +12,23 @@
 //! `https://outlook.office365.com/Exchange.Manage` audience) and retries
 //! transient failures with the same exponential backoff.
 
+pub mod aap;
 pub mod client;
 pub mod error;
 pub mod models;
 pub mod roles;
 pub mod targets;
 
+pub use aap::{
+    SourceGroupRead, SourceMember, group_policies_for_migration, plan_source_membership,
+    source_member, unverified_members,
+};
 pub use client::{EXCHANGE_BASE, ExchangeClient, member_of_group_filter};
 pub use error::{ExchangeError, Result};
 pub use roles::{
     EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
     exchange_role_for_permission, exchange_role_for_resource_permission, is_blanket_mailbox_grant,
-    is_scopable_exchange_permission,
+    is_scopable_exchange_resource_permission,
 };
 pub use targets::{
     ConsolidationPlan, ExchangeTarget, NoScopablePermission, Refusal, ResourceRoles, ScopeGroups,

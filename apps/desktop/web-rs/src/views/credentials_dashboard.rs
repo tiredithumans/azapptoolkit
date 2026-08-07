@@ -14,7 +14,7 @@ use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::credentials::{self, CredentialRowDto};
 use crate::components::audit_dashboard::AuditDashboard;
-use crate::components::ui::CopyableId;
+use crate::components::ui::{Callout, CopyableId};
 use crate::state::use_session;
 
 const CRITICAL_DAYS: i64 = 7;
@@ -67,11 +67,11 @@ pub fn CredentialsDashboard() -> impl IntoView {
                 (expired + soon > 0)
                     .then(|| {
                         view! {
-                            <div class="alert alert--warn">
+                            <Callout tone="warn">
                                 {format!(
                                     "{expired} credential(s) already expired; {soon} expire within {CRITICAL_DAYS} days.",
                                 )}
-                            </div>
+                            </Callout>
                         }
                             .into_any()
                     })

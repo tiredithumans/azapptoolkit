@@ -10,6 +10,119 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+### Fixed
+
+- **The audit now says when part of its analysis could not run, instead of
+  presenting a lower score as a clean result.** Two tenant-wide reads — Graph
+  app-role assignments and org-wide EWS full-mailbox-access grants — were
+  best-effort: a failure logged a line and returned an empty map, which is
+  indistinguishable from "this tenant has none". The run then scored *lower*
+  risk, skipped every enterprise app / managed identity / orphaned service
+  principal, and cached the result as authoritative. Such a run is now flagged
+  in the Findings pane, names what it could not determine, and is not cached.
+- **Mailbox permission scoping is now decided by the permission's resource, not
+  its name.** Office 365 Exchange Online exposes its own `Mail.*`,
+  `Calendars.*`, `Contacts.*` and `MailboxSettings.*` appRoles (retired Outlook
+  REST) that RBAC for Applications cannot confine, and they share their names
+  with Microsoft Graph's. Six gates tested the bare value, so a legacy grant was
+  counted as scopable mailbox reach, offered as a scoping candidate, and allowed
+  to take a legacy Application Access Policy's reduced "scoped" weight — hiding
+  genuinely org-wide mailbox access behind a healthy-looking verdict. The
+  "Scope…" and "Grant access" actions are likewise offered only where the
+  scoping can actually be applied.
+- **A backup now reports the objects it could not capture.** Per-object read
+  failures were logged at `warn` and the object silently dropped, so a short
+  manifest restored as if those apps never existed. They are recorded on the
+  backup and listed before you save it.
+- **A restore that stopped because the session expired now says so.** The report
+  carried the distinction all along; the DR view showed it identically to an
+  operator-initiated cancel.
+- **A failed tenant-wide index fetch no longer leaks its cache watch.** Watches
+  were released only by a successful store, so every failed or cancelled index
+  scan left one behind permanently. Once 256 accumulated, *every* pinned-index
+  store refused for the life of the process — presenting as unexplained
+  slowness (a full directory rescan on every read) with no error and no recovery
+  short of a restart.
+- **The App Registrations pairing join now actually seeds the shared
+  service-principal index.** It reused one cache watch for two different keys,
+  and the second store could never prove its key current, so it silently
+  refused every time.
+
+### Changed
+
+- **Cache writes no longer sweep the whole bucket.** Every `put` ran a full
+  expiry `retain` plus an LRU rebuild that clones every key, making each write
+  proportional to everything else cached — under the lock interactive list reads
+  contend on. The sweep now runs only when the bucket is at its cap or something
+  has actually expired.
+- **The legacy Application Access Policy migration planner moved into
+  `azapptoolkit-exchange`.** The rules that decide which policies may be
+  rebuilt as an allow-list, and whether a scope may be narrowed onto a partly
+  verified group, are now pure functions with their own tests rather than logic
+  reachable only through a live Exchange session.
+
+### Added
+
+- **`cargo deny` now blocks the `rsa` crate** (RUSTSEC-2023-0071), which was
+  previously policy stated only in comments.
+- **Repo invariants now check the properties, not just the shapes:** all four
+  version literals agree, cache watches are captured *before* the fetch they
+  guard (a capture-after is textually identical and silently disables the
+  guard — two production sites had drifted), `generation_for` returns an owned
+  guard, and the dead-session coverage allowlist must stay empty.
+- The re-auth-fatal wire codes now have one definition shared by `UiError` and
+  `TokenError`, with a test asserting the two agree.
+
+
+- **Granting scoped mailbox access now refuses when the app's existing
+  management scope covers different groups, instead of warning and proceeding.**
+  Exchange keeps an existing scope rather than repointing it, so the groups you
+  picked were never applied — but the org-wide grants were still stripped,
+  leaving the app confined to whatever group set was already there. When that
+  set was broader than the one requested, the result was an app reaching *more*
+  mailboxes than you asked for, behind a warning. Nothing is changed now; use
+  "Move to managed group" or edit the scope in Exchange, then grant again.
+- **Repointing a management scope now verifies the new filter actually took.**
+  The client re-read the scope afterwards but only proved one by that name
+  existed — which was already true. It now compares the group set Exchange
+  reports against the one requested (tolerating Exchange's own reformatting) and
+  fails if they differ, rather than reporting success while every role
+  assignment on that scope still points at the old groups.
+- **The audit no longer reports a `Sites.Selected` grant as confirmed-scoped
+  when it can't inspect it.** The healthy "SharePoint scoped to selected sites"
+  verdict keyed off the permission name alone, so the same grant on the legacy
+  Office 365 SharePoint Online resource — whose per-site grants this app cannot
+  read — was shown as verified-confined.
+- **A capped audit scan is no longer cached or presented as a clean result.**
+  A tenant holding more app registrations than one run scores was silently
+  scanned in part, and "no findings" from that partial scan looked identical to
+  an all-clear. It is now surfaced like a cancelled run and never cached.
+- **A restore now stops when the sign-in session expires mid-run.** All five
+  passes kept going, producing one identical failure per remaining item, so a
+  report full of errors read as the tenant rejecting the writes rather than as a
+  session that died on the first one. The report still comes back — a restore
+  has already created objects and you need to know which.
+- **A cache index rebuilt while an unrelated key was invalidated is no longer
+  discarded.** The store-after-invalidate guard added in 0.24.2 compared one
+  process-wide counter, so a credential-only mutation — whose entire purpose is
+  to preserve the two tenant-wide directory indexes — made a valid, in-flight
+  index refuse to store, and every reader queued behind it then paid its own
+  multi-second directory rescan. The guard is now per cache key.
+
+### Changed
+
+- **Inline notices render through one component.** Thirty files hand-rolled the
+  notice markup instead of using the shared primitive, so the tone vocabulary
+  could drift box to box; all of them now go through `Callout`, and a check
+  keeps the markup in one place.
+- **CI can be re-run manually** (`workflow_dispatch`). A cancelled run — which an
+  infrastructure outage or a branch update can cause — previously had no retry
+  path short of an empty commit or reopening the PR.
+- **`just setup` now installs a WebDriver and detects any Chromium-family
+  browser**, so the frontend's browser test suite is runnable locally instead of
+  loud-skipping by default. It reports precisely what is missing, and explains
+  how to point the driver at Brave/Chromium/Edge when Chrome is absent.
+
 ## [0.24.2] - 2026-08-06
 
 ### Changed

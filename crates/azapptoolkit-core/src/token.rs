@@ -41,11 +41,16 @@ impl TokenError {
         Self::new("token_error", message)
     }
 
-    /// The session is gone and no amount of retrying will bring it back — the
-    /// single definition is `UiError::is_reauth_fatal`, mirrored here because
-    /// this crate sits below the DTO layer.
+    /// The session is gone and no amount of retrying will bring it back.
+    ///
+    /// Delegates to [`crate::reauth`], which is also what
+    /// `UiError::is_reauth_fatal` answers from — this crate sits below the DTO
+    /// layer, so the two predicates cannot call each other, and they used to
+    /// hardcode the same literals independently. A code added to one side and
+    /// not the other desyncs silently, and the failure mode is the one this
+    /// type exists to prevent: a fan-out that never learns the session is dead.
     pub fn is_reauth_fatal(&self) -> bool {
-        matches!(self.code.as_str(), "refresh_missing" | "not_signed_in")
+        crate::reauth::is_reauth_fatal(&self.code)
     }
 }
 

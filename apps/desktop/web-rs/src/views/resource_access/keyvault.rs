@@ -13,8 +13,8 @@ use crate::bindings::keyvault_rbac::{
     self, KeyVaultAccessRow, KeyVaultSweepProgress, KeyVaultSweepResult,
 };
 use crate::bindings::sharepoint;
-use crate::components::ui::Badge;
 use crate::components::ui::SearchInput;
+use crate::components::ui::{Badge, Callout};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
@@ -283,7 +283,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                 .get()
                 .map(|e| {
                     view! {
-                        <div class="alert alert--warn">
+                        <Callout tone="warn">
                             <Body1>{e}</Body1>
                             {consent_required
                                 .get()
@@ -299,7 +299,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                                         </div>
                                     }
                                 })}
-                        </div>
+                        </Callout>
                     }
                 })
         }}

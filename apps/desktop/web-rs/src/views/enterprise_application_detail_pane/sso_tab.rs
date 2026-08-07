@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::components::ui::Callout;
 use crate::hooks::use_command::use_command;
 
 /// SSO configuration for the enterprise app — view/edit the SAML or OIDC setup
@@ -360,7 +361,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                         .get()
                         .then(|| {
                             view! {
-                                <div class="alert alert--warn">
+                                <Callout tone="warn">
                                     "Custom claims need admin consent for Policy.ReadWrite.ApplicationConfiguration."
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
@@ -369,7 +370,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                                     >
                                         "Grant admin consent"
                                     </Button>
-                                </div>
+                                </Callout>
                             }
                         })
                 }}
@@ -403,9 +404,9 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
             {(!configured)
                 .then(|| {
                     view! {
-                        <div class="alert alert--warn">
+                        <Callout tone="warn">
                             "Single sign-on isn't set to SAML or OIDC for this application. Choose a method above and select \"Apply method\" to configure it here."
-                        </div>
+                        </Callout>
                     }
                 })}
 
@@ -420,7 +421,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                             {move || Suspend::new(async move {
                                 match summary.await {
                                     Err(e) => {
-                                        view! { <div class="alert alert--warn">{e.message}</div> }
+                                        view! { <Callout tone="warn">{e.message}</Callout> }
                                             .into_any()
                                     }
                                     Ok(value) => {

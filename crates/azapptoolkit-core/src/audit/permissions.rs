@@ -177,10 +177,27 @@ pub fn risk_level_for_app_permission(value: &str) -> Option<RiskLevel> {
 /// equivalent. Derives from the shared scope predicates so it stays consistent
 /// with Rule 11/12 and the scope badges.
 pub fn least_privilege_alternative(value: &str) -> Option<&'static str> {
+    least_privilege_alternative_for(Some(crate::scoping::MICROSOFT_GRAPH_APP_ID), value)
+}
+
+/// [`least_privilege_alternative`] for a permission whose resource is known.
+///
+/// The resource decides whether the Exchange advice is even true: RBAC for
+/// Applications confines Microsoft Graph's mail family (and the EWS scope), not
+/// Office 365 Exchange Online's identically-named retired Outlook REST
+/// appRoles. Offering "scope this to specific mailboxes" for one of those sends
+/// an operator after a remediation that cannot be applied, and quietly implies
+/// the grant is containable when the only remedy is removing it.
+///
+/// A `None` resource yields no Exchange advice for the same reason.
+pub fn least_privilege_alternative_for(
+    resource_app_id: Option<&str>,
+    value: &str,
+) -> Option<&'static str> {
     if crate::scoping::is_sharepoint_orgwide(value) {
         // Every broad `Sites.*` has the scoped `Sites.Selected` model (Rule 12).
         Some("Sites.Selected")
-    } else if crate::scoping::is_scopable_exchange_permission(value) {
+    } else if crate::scoping::is_scopable_exchange_resource_permission(resource_app_id, value) {
         // Mail/calendar/contacts can be confined to mailboxes via Exchange RBAC.
         Some("Scope to specific mailboxes (Exchange RBAC)")
     } else {

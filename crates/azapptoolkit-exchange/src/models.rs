@@ -77,7 +77,12 @@ pub struct ExoGroupMember {
 }
 
 /// A legacy Application Access Policy, read during migration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Default` is derived so the pure migration planner's tests can build one
+/// field at a time; every field is already `Option` + `#[serde(default)]`, so
+/// the default is the same "nothing was reported" shape a sparse EXO response
+/// deserializes to.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExoApplicationAccessPolicy {
     #[serde(rename = "Identity", default)]
     pub identity: Option<String>,

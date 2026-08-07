@@ -77,7 +77,7 @@ pub async fn list_enterprise_applications(
 
     // Captured BEFORE the scans — this list is PINNED, so a snapshot that loses
     // the race to a mutation would sit out of LRU's reach for the full TTL.
-    let since = state.cache.generation();
+    let watch = state.cache.generation_for(CacheKind::Lists, &key);
 
     // Both the rows and the pairing index come from whole-tenant scans, and both
     // are the SHARED cached indexes every other surface joins against — so a
@@ -109,9 +109,7 @@ pub async fn list_enterprise_applications(
     // Pinned: a tenant-wide index, not a per-object entry (see `put_index`).
     // Guarded: a mutation that landed mid-scan already dropped this key, and
     // re-pinning the pre-mutation rows would outlive it.
-    state
-        .cache
-        .put_index_if_current(CacheKind::Lists, key, &rows, since);
+    state.cache.put_index_if_current(watch, &rows);
     Ok(rows)
 }
 

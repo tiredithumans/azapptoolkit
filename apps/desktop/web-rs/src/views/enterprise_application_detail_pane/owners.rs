@@ -1,4 +1,5 @@
 use super::*;
+use crate::components::ui::Callout;
 
 /// Owners tab — lists current owners and lets you add/remove them. Only **users**
 /// can own a service principal (Graph rejects groups), so the search targets
@@ -152,9 +153,9 @@ pub(super) fn OwnersContent(
                     {empty
                         .then(|| {
                             view! {
-                                <div class="alert alert--warn">
+                                <Callout tone="warn">
                                     "No owners assigned — no one is accountable for this enterprise application. Only Application Administrators can manage it."
-                                </div>
+                                </Callout>
                             }
                         })}
                     <ul class="candidates">

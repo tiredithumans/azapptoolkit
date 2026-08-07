@@ -20,7 +20,7 @@ use thaw::{Body1, Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 
 use crate::bindings::events;
 use crate::bindings::sharepoint::{self, AppSiteAccessDto, SiteSweepProgress};
-use crate::components::ui::DataTable;
+use crate::components::ui::{Callout, DataTable};
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
 
@@ -199,7 +199,7 @@ pub fn AppSiteAccessPanel(
                 .get()
                 .map(|e| {
                     view! {
-                        <div class="alert alert--warn">
+                        <Callout tone="warn">
                             <Body1>{e}</Body1>
                             {consent_required
                                 .get()
@@ -215,7 +215,7 @@ pub fn AppSiteAccessPanel(
                                         </div>
                                     }
                                 })}
-                        </div>
+                        </Callout>
                     }
                 })
         }}

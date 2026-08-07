@@ -436,14 +436,56 @@ setup:
       ok "wasm-pack installed"
     fi
     # `just web-itest` runs the Leptos views in a real headless browser, so it
-    # needs a browser + a matching WebDriver on $PATH (CI uses Chrome). It is not
-    # part of `just verify`, so this is a soft prerequisite — warn, don't fail.
+    # needs BOTH a browser and a matching WebDriver. This is the only behavioural
+    # gate for ~46k lines of frontend, and it is the gate most likely to be
+    # missing locally — so install the driver rather than only naming it, and
+    # report the browser side precisely instead of assuming Chrome.
+    info "Checking the browser GUI test prerequisites ('just web-itest')"
+    BROWSER=""
+    for candidate in \
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+      "/Applications/Chromium.app/Contents/MacOS/Chromium" \
+      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"; do
+      if [[ -x "$candidate" ]]; then BROWSER="$candidate"; break; fi
+    done
+    if [[ -z "$BROWSER" ]]; then
+      for candidate in google-chrome google-chrome-stable chromium chromium-browser brave-browser microsoft-edge; do
+        if need_cmd "$candidate"; then BROWSER="$(command -v "$candidate")"; break; fi
+      done
+    fi
+
+    if ! need_cmd chromedriver && ! need_cmd geckodriver; then
+      # Small, safe, and useless to defer — unlike a browser, which is a large
+      # unattended install this script will not perform on someone's behalf.
+      if need_cmd brew; then
+        warn "No WebDriver found — installing chromedriver via Homebrew"
+        brew install chromedriver >/dev/null 2>&1 || warn "chromedriver install failed; install it manually"
+      elif need_cmd apt-get; then
+        warn "No WebDriver found — install with: sudo apt-get install -y chromium-driver"
+      fi
+    fi
+
     if need_cmd chromedriver || need_cmd geckodriver; then
-      ok "WebDriver present (for 'just web-itest' browser GUI tests)"
+      if [[ -n "$BROWSER" ]]; then
+        ok "Browser GUI tests can run ($(basename "$BROWSER") + WebDriver)"
+        case "$BROWSER" in
+          *Chrome*|*chrome*) ;;
+          *)
+            # wasm-pack asks for Chrome by name; a Chromium-family sibling needs
+            # its binary path handed to the driver. Without this the run fails
+            # with an opaque 404 from a driver that started fine.
+            warn "Only a non-Chrome Chromium browser was found. If 'just web-itest' fails to start one,"
+            warn "  create apps/desktop/web-rs/webdriver.json with:"
+            warn "  {\"goog:chromeOptions\": {\"binary\": \"$BROWSER\"}}"
+            ;;
+        esac
+      else
+        warn "A WebDriver is present but no browser was found — 'just web-itest' cannot run."
+        warn "  macOS: brew install --cask google-chrome    Linux: apt-get install -y chromium"
+      fi
     else
-      warn "No chromedriver/geckodriver found — 'just web-itest' (browser GUI tests) needs one:"
-      warn "  macOS:  brew install --cask google-chrome chromedriver   (versions must match)"
-      warn "  Linux:  apt-get install chromium-driver   (or firefox + geckodriver)"
+      warn "No WebDriver — 'just web-itest' will LOUD-SKIP, leaving the frontend unproven locally."
     fi
 
     info "cargo check --workspace"

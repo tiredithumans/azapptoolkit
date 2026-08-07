@@ -126,6 +126,17 @@ async fn load_gallery_corpus(
     let rows: Arc<Vec<GalleryRow>> = Arc::new(templates.into_iter().map(gallery_row).collect());
     // Pinned: the catalog is tens of thousands of rows and one fetch backs every
     // subsequent keystroke.
+    //
+    // Deliberately the UNGUARDED `put_typed_index`, and the only one left in the
+    // tree: the store-after-invalidate race this codebase guards everywhere else
+    // needs an invalidation to race, and nothing invalidates this key. The
+    // gallery is a static, tenant-INDEPENDENT Microsoft catalog that no mutation
+    // in this app can change, so there is no window in which a fetched snapshot
+    // could go stale mid-flight. `repo_invariants::
+    // pinned_index_writes_are_guarded_except_the_static_gallery_corpus` encodes
+    // that exemption by name — if this ever becomes tenant-scoped or
+    // invalidatable, move it onto `put_typed_index_if_current` and drop the
+    // allowlist entry.
     state
         .cache
         .put_typed_index(CacheKind::Lists, key, Arc::clone(&rows));

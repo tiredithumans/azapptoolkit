@@ -14,9 +14,13 @@ use std::collections::{HashMap, HashSet};
 
 use tauri::State;
 
+use azapptoolkit_core::audit::ResourcePermission;
 use azapptoolkit_core::audit::{MailPermissionScope, ScopeMechanism};
 use azapptoolkit_core::cache::{Cache, CacheKind};
-use azapptoolkit_core::scoping::{is_blanket_mailbox_grant, is_scopable_exchange_permission};
+use azapptoolkit_core::scoping::{
+    is_blanket_mailbox_grant, is_scopable_exchange_resource_permission,
+};
+use azapptoolkit_exchange::models::ExoGroupMember;
 use azapptoolkit_exchange::models::{
     ExoApplicationAccessPolicy, ExoAuthorizationResult, ExoManagementScope, ExoRoleAssignment,
 };
@@ -27,7 +31,9 @@ use azapptoolkit_exchange::targets::{
     scope_groups_in_filter, targets_from_declared, targets_from_grants, targets_safe_to_strip,
 };
 use azapptoolkit_exchange::{
-    ExchangeClient, ExchangeError, exchange_role_for_permission, member_of_group_filter,
+    ExchangeClient, ExchangeError, SourceGroupRead, exchange_role_for_permission,
+    group_policies_for_migration, member_of_group_filter, plan_source_membership, source_member,
+    unverified_members,
 };
 use azapptoolkit_graph::GraphClient;
 
@@ -303,19 +309,39 @@ async fn apply_exchange_mailbox_scope(
     // rewriting its filter. So if a different permission was already scoped to a
     // different group set, the groups requested *here* silently won't apply —
     // warn instead of misleading the user into thinking they took effect.
+    // FAIL CLOSED, not warn-and-proceed. This used to push a warning and fall
+    // through — but the fall-through then assigned roles against the EXISTING
+    // scope and stripped the org-wide Entra grants, so the app ended up confined
+    // to a group set the operator never asked for while its broad access was
+    // removed. When the existing groups are a superset of the request that is an
+    // access-WIDENING outcome delivered behind a warning; when they are a subset
+    // the app silently loses reach it was just granted. Either way the mutation
+    // did not do what was asked.
+    //
+    // Refusing here is safe precisely because nothing access-affecting has
+    // happened yet: only `ensure_service_principal` (an idempotent pointer
+    // registration) has run, so the app is left exactly as it was — org-wide,
+    // which is the status quo the operator was trying to improve, not a
+    // half-applied state. Repointing is a deliberate action with its own
+    // command; see AGENTS.md, "Repointing a management scope is an explicit
+    // action, and fail-closed".
     if let Ok(Some(existing)) = exo.get_management_scope(&scope_name).await
         && let Some(existing_filter) = existing.recipient_filter.as_deref()
     {
         let wanted: std::collections::HashSet<String> = dns.iter().cloned().collect();
         let have = group_dns_in_filter(existing_filter);
         if have != wanted {
-            warnings.push(format!(
-                    "a management scope “{scope_name}” already exists for this app with a different group set — \
-                     Exchange keeps the existing scope, so the groups requested here were NOT applied to it. \
-                     Repointing a scope changes what every role assignment using it reaches, so it is a \
-                     deliberate action, not a side effect of granting: use “Move to managed group” to \
-                     consolidate onto the toolkit-managed group, or edit the scope in Exchange."
-                ));
+            return Err(UiError::validation(
+                "scope_group_mismatch",
+                format!(
+                    "a management scope “{scope_name}” already exists for this app with a different group set, \
+                     and Exchange keeps the existing scope — so the groups requested here would NOT have been \
+                     applied, while the org-wide grants were removed. Nothing was changed. Repointing a scope \
+                     changes what every role assignment using it reaches, so it is a deliberate action, not a \
+                     side effect of granting: use “Move to managed group” to consolidate onto the \
+                     toolkit-managed group, or edit the scope in Exchange, then grant again."
+                ),
+            ));
         }
     }
     exo.ensure_management_scope(&scope_name, &scope_filter)
@@ -625,20 +651,28 @@ pub(crate) fn aap_verdict_for(
 ///   evidence than a failed probe, the same call `scope_from_rbac_error` makes.
 ///
 /// A `Scoped` RBAC verdict is never overwritten: that app already migrated.
+///
+/// Takes the grants with their resources attached, not bare values: Office 365
+/// Exchange Online exposes its own `Mail.*` appRoles (retired Outlook REST) that
+/// an Application Access Policy cannot confine either, and a value-keyed test
+/// answers `true` for them because it can only see the name. That handed the
+/// legacy namesake a scoped verdict and dropped a genuinely org-wide grant out
+/// of the mailbox findings at the reduced weight.
 pub(crate) fn apply_legacy_policy_verdict(
     scopes: &mut HashMap<String, MailPermissionScope>,
-    values: &[String],
+    grants: &[ResourcePermission],
     verdict: Option<&MailPermissionScope>,
 ) {
     let Some(verdict) = verdict else { return };
-    for value in values {
-        if !is_scopable_exchange_permission(value) {
+    for grant in grants {
+        if !is_scopable_exchange_resource_permission(grant.resource_app_id.as_deref(), &grant.value)
+        {
             continue;
         }
-        match scopes.get(value) {
+        match scopes.get(&grant.value) {
             Some(MailPermissionScope::Scoped { .. }) => {}
             _ => {
-                scopes.insert(value.clone(), verdict.clone());
+                scopes.insert(grant.value.clone(), verdict.clone());
             }
         }
     }
@@ -729,11 +763,16 @@ pub(crate) async fn held_orgwide_mail_grants(
         .iter()
         // Resolve each grant against the resource it was made on, so an appRole
         // id collision across APIs can't match the wrong permission.
-        .filter_map(|a| {
-            resolve_grant(&resources, &a.resource_id, &a.app_role_id).map(|(_, _, value)| value)
+        // Keep the RESOURCE the grant was made on. `resolve_grant` already
+        // resolved it; discarding it here and testing the value alone answered
+        // `true` for Office 365 Exchange Online's own `Mail.*` appRoles, which
+        // RBAC for Applications cannot confine — so an org-wide legacy grant
+        // was counted as scopable mailbox reach it could never actually get.
+        .filter_map(|a| resolve_grant(&resources, &a.resource_id, &a.app_role_id))
+        .filter(|(resource, _, value)| {
+            is_scopable_exchange_resource_permission(Some(resource), value)
         })
-        .filter(|v| is_scopable_exchange_permission(v))
-        .map(str::to_string)
+        .map(|(_, _, value)| value.to_string())
         .collect()
 }
 
@@ -1252,35 +1291,6 @@ pub async fn remove_exchange_scope_group_members(
 // that silently stops seeing a mailbox reports "not found", not "denied", which
 // is the hardest kind of outage to trace back to a permission change.
 
-/// A member of a source group, as identified for copy + verification.
-/// `identity` is what `Add-DistributionGroupMember` is given; `key` is the
-/// case-folded value the post-copy membership check compares on.
-struct SourceMember {
-    identity: String,
-    key: String,
-}
-
-fn source_member(m: &azapptoolkit_exchange::models::ExoGroupMember) -> Option<SourceMember> {
-    // Primary SMTP first (stable and what the members list shows), GUID as the
-    // fallback for a mail-less recipient. A member with neither can't be copied
-    // *or* verified, so it isn't one — the caller counts it as unverifiable.
-    let identity = m
-        .primary_smtp_address
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            m.guid
-                .as_deref()
-                .map(str::trim)
-                .filter(|s: &&str| !s.is_empty())
-        })?;
-    Some(SourceMember {
-        identity: identity.to_string(),
-        key: identity.to_ascii_lowercase(),
-    })
-}
-
 /// Outcome of consolidating `source_dns`' membership onto the managed group.
 struct ScopeGroupConsolidation {
     group_name: String,
@@ -1320,43 +1330,47 @@ async fn consolidate_scope_group(
     //    returns nothing for a Microsoft 365 group (its members need
     //    `Get-UnifiedGroupLinks`), and consolidating that onto an empty managed
     //    group would cut the app off from every mailbox at once.
-    let mut members: Vec<SourceMember> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut unreadable = Vec::new();
+    //    Fetch, then plan: the enumeration is the only part that needs a client,
+    //    and `plan_source_membership` owns every rule about what the results
+    //    mean — including the load-bearing "an empty list is unreadable, not
+    //    empty" one — so those rules are unit-testable without a session.
+    let mut reads: Vec<(&String, Result<Vec<ExoGroupMember>, String>)> =
+        Vec::with_capacity(source_dns.len());
     for dn in source_dns {
-        match exo.list_group_members(dn).await {
-            Ok(list) if !list.is_empty() => {
-                let mut unidentifiable = 0_usize;
-                for m in &list {
-                    match source_member(m) {
-                        Some(sm) if seen.insert(sm.key.clone()) => members.push(sm),
-                        Some(_) => {}
-                        None => unidentifiable += 1,
-                    }
-                }
-                if unidentifiable > 0 {
-                    unreadable.push(format!(
-                        "{dn} ({unidentifiable} member(s) with no address or GUID to copy)"
-                    ));
-                }
-            }
-            Ok(_) => unreadable.push(format!("{dn} (no readable members)")),
-            Err(err) => unreadable.push(format!("{dn} ({err})")),
+        let result = exo
+            .list_group_members(dn)
+            .await
+            .map_err(|err| err.to_string());
+        reads.push((dn, result));
+    }
+    let planned = plan_source_membership(
+        &reads
+            .iter()
+            .map(|(dn, result)| SourceGroupRead {
+                dn: dn.as_str(),
+                members: match result {
+                    Ok(list) => Ok(list.as_slice()),
+                    Err(err) => Err(err.clone()),
+                },
+            })
+            .collect::<Vec<_>>(),
+    );
+    let members = match planned {
+        Ok(members) => members,
+        Err(unreadable) => {
+            keep_source(
+                warnings,
+                Refusal::UnreadableSourceGroups(unreadable).to_string(),
+            );
+            return ScopeGroupConsolidation {
+                group_name,
+                copied: Vec::new(),
+                unverified: Vec::new(),
+                scope_dns: source_dns.to_vec(),
+                consolidated: false,
+            };
         }
-    }
-    if !unreadable.is_empty() {
-        keep_source(
-            warnings,
-            Refusal::UnreadableSourceGroups(unreadable).to_string(),
-        );
-        return ScopeGroupConsolidation {
-            group_name,
-            copied: Vec::new(),
-            unverified: Vec::new(),
-            scope_dns: source_dns.to_vec(),
-            consolidated: false,
-        };
-    }
+    };
 
     let copied: Vec<String> = members.iter().map(|m| m.identity.clone()).collect();
     if dry_run {
@@ -1399,7 +1413,7 @@ async fn consolidate_scope_group(
 
     // 3. Verify against the group's ACTUAL membership rather than trusting the
     //    adds: EXO accepts some recipient types and then doesn't list them.
-    let present: HashSet<String> = match exo.list_group_members(&group_name).await {
+    let present: Vec<String> = match exo.list_group_members(&group_name).await {
         Ok(list) => list
             .iter()
             .filter_map(source_member)
@@ -1419,11 +1433,7 @@ async fn consolidate_scope_group(
             };
         }
     };
-    let unverified: Vec<String> = members
-        .iter()
-        .filter(|m| !present.contains(&m.key))
-        .map(|m| m.identity.clone())
-        .collect();
+    let unverified = unverified_members(&members, &present);
 
     // 4. The decision itself is pure and lives in `azapptoolkit-exchange`, where
     //    it is unit-testable without a signed-in session. It re-parses the
@@ -1453,7 +1463,7 @@ async fn consolidate_scope_group(
         group_name,
         copied: members
             .iter()
-            .filter(|m| present.contains(&m.key))
+            .filter(|m| present.iter().any(|k| k == &m.key))
             .map(|m| m.identity.clone())
             .collect(),
         unverified,
@@ -1938,62 +1948,6 @@ pub(crate) fn retired_groups_note(groups: &[RetiredScopeGroupDto]) -> String {
 }
 
 // ---------------- Migrate legacy Application Access Policies ----------------
-
-/// Groups the tenant's policies into the per-application batches a migration
-/// runs on, dropping the ones that must not be migrated. Pure, so the two
-/// exclusion rules are unit-testable without Exchange.
-///
-/// Two rules, both load-bearing:
-/// - **`RestrictAccess` only.** A `DenyAccess` policy is a *blocklist* (every
-///   mailbox EXCEPT its group), while an RBAC management scope is an allow-list.
-///   Rebuilding one as the other inverts the policy — the app would gain exactly
-///   the mailboxes it was denied and lose the rest — so those are reported, never
-///   migrated. A policy with no readable `AccessRight` is equally unsafe to guess
-///   at, so it is excluded too.
-/// - **One batch per application.** Several `RestrictAccess` policies on one app
-///   grant access to the *union* of their groups (`New-ApplicationAccessPolicy`
-///   evaluation rule 3), and an app gets exactly one management scope. Migrating
-///   them one at a time meant the second policy's group was silently dropped —
-///   `ensure_management_scope` keeps the existing scope — after which both
-///   policies were deleted and those mailboxes lost access.
-fn group_policies_for_migration(
-    policies: Vec<ExoApplicationAccessPolicy>,
-) -> (Vec<(String, Vec<ExoApplicationAccessPolicy>)>, Vec<String>) {
-    let mut batches: Vec<(String, Vec<ExoApplicationAccessPolicy>)> = Vec::new();
-    let mut excluded = Vec::new();
-    for policy in policies {
-        let Some(policy_app_id) = policy.app_id.clone() else {
-            excluded.push("policy without an AppId skipped".to_string());
-            continue;
-        };
-        match policy.access_right.as_deref().map(str::trim) {
-            Some(right) if right.eq_ignore_ascii_case("RestrictAccess") => {}
-            Some(right) => {
-                excluded.push(format!(
-                    "{policy_app_id}: skipped a {right} policy — only RestrictAccess policies are \
-                     migratable. A DenyAccess policy blocks its group and allows every other \
-                     mailbox, whereas an RBAC management scope allows only what it names, so \
-                     migrating it would invert the policy. Re-express the exclusion as a \
-                     management-scope recipient filter instead."
-                ));
-                continue;
-            }
-            None => {
-                excluded.push(format!(
-                    "{policy_app_id}: skipped a policy with no readable AccessRight — \
-                     RestrictAccess and DenyAccess migrate to opposite scopes, so it can't be \
-                     guessed."
-                ));
-                continue;
-            }
-        }
-        match batches.iter_mut().find(|(a, _)| *a == policy_app_id) {
-            Some((_, batch)) => batch.push(policy),
-            None => batches.push((policy_app_id, vec![policy])),
-        }
-    }
-    (batches, excluded)
-}
 
 /// Migrates legacy Application Access Policies to RBAC for Applications,
 /// following the Microsoft-documented steps: create a management scope from the
@@ -2672,40 +2626,6 @@ mod tests {
         );
     }
 
-    fn exo_member(
-        smtp: Option<&str>,
-        guid: Option<&str>,
-    ) -> azapptoolkit_exchange::models::ExoGroupMember {
-        azapptoolkit_exchange::models::ExoGroupMember {
-            display_name: Some("Someone".into()),
-            primary_smtp_address: smtp.map(str::to_string),
-            recipient_type: Some("UserMailbox".into()),
-            guid: guid.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn source_member_prefers_smtp_and_folds_case_for_verification() {
-        // The verification key must match regardless of how EXO cases the
-        // address on the way back out, or a copied mailbox reads as missing and
-        // the consolidation fails closed for no reason.
-        let m = source_member(&exo_member(Some("Sales@Contoso.com"), Some("guid-1"))).unwrap();
-        assert_eq!(m.identity, "Sales@Contoso.com");
-        assert_eq!(m.key, "sales@contoso.com");
-    }
-
-    #[test]
-    fn source_member_falls_back_to_guid_then_gives_up() {
-        // A mail-less recipient is still copyable by GUID...
-        let by_guid = source_member(&exo_member(None, Some("guid-1"))).unwrap();
-        assert_eq!(by_guid.identity, "guid-1");
-        // ...but one with neither can be neither copied nor verified, so it must
-        // NOT silently drop out of the count — `None` makes the caller treat the
-        // whole source group as unreadable and keep the existing scope.
-        assert!(source_member(&exo_member(None, None)).is_none());
-        assert!(source_member(&exo_member(Some("  "), None)).is_none());
-    }
-
     fn auth_row(
         role: &str,
         allowed_scope: Option<&str>,
@@ -2968,17 +2888,28 @@ mod tests {
             ("Mail.Read".to_string(), MailPermissionScope::OrgWide),
             ("Mail.Send".to_string(), rbac.clone()),
         ]);
-        let values = [
-            "Mail.Read".to_string(),
-            "Mail.Send".to_string(),
+        let grants = [
+            ResourcePermission::graph("Mail.Read"),
+            ResourcePermission::graph("Mail.Send"),
             // No verdict at all (probe failed / never ran) — the policy answers.
-            "Calendars.Read".to_string(),
+            ResourcePermission::graph("Calendars.Read"),
             // Not Exchange-scopable: a policy can't confine it, so it must not
             // gain a scoped verdict (that would under-report its reach).
-            "Directory.Read.All".to_string(),
+            ResourcePermission::graph("Directory.Read.All"),
+            // Same NAME as a scopable Graph permission, different resource. An
+            // Application Access Policy cannot confine Office 365 Exchange
+            // Online's retired Outlook REST appRoles, so this must not lend the
+            // legacy grant a scoped verdict — the value-keyed test could not
+            // tell the two apart and did exactly that.
+            ResourcePermission::exchange_online("Contacts.Read"),
+            // An unresolvable resource is never treated as scoped.
+            ResourcePermission {
+                resource_app_id: None,
+                value: "MailboxSettings.Read".to_string(),
+            },
         ];
 
-        apply_legacy_policy_verdict(&mut scopes, &values, Some(&legacy));
+        apply_legacy_policy_verdict(&mut scopes, &grants, Some(&legacy));
 
         assert_eq!(scopes.get("Mail.Read"), Some(&legacy), "org-wide → legacy");
         assert_eq!(
@@ -2992,59 +2923,24 @@ mod tests {
             "an app that already migrated keeps its RBAC verdict"
         );
         assert!(!scopes.contains_key("Directory.Read.All"));
+        assert!(
+            !scopes.contains_key("Contacts.Read"),
+            "an AAP cannot confine Office 365 Exchange Online's own Contacts.Read, so it must \
+             not earn a scoped verdict — scoring it at the reduced weight hides org-wide reach"
+        );
+        assert!(
+            !scopes.contains_key("MailboxSettings.Read"),
+            "an unresolved resource must be scored conservatively, never as scoped"
+        );
 
         // No policy for this app ⇒ untouched (today's behavior).
         let mut untouched =
             HashMap::from([("Mail.Read".to_string(), MailPermissionScope::OrgWide)]);
-        apply_legacy_policy_verdict(&mut untouched, &values, None);
+        apply_legacy_policy_verdict(&mut untouched, &grants, None);
         assert_eq!(
             untouched.get("Mail.Read"),
             Some(&MailPermissionScope::OrgWide)
         );
-    }
-
-    #[test]
-    fn migration_never_converts_a_deny_access_policy() {
-        // A DenyAccess policy blocks its group and allows every other mailbox; a
-        // management scope allows only what it names. Migrating one would invert
-        // it — the app would gain exactly the mailboxes it was denied. It must be
-        // reported, never batched.
-        let (batches, excluded) =
-            group_policies_for_migration(vec![aap("app-1", "DenyAccess", Some("Execs"))]);
-        assert!(batches.is_empty(), "DenyAccess must never be migrated");
-        assert_eq!(excluded.len(), 1);
-        assert!(excluded[0].contains("DenyAccess"));
-        assert!(excluded[0].contains("invert"));
-    }
-
-    #[test]
-    fn migration_skips_a_policy_with_no_readable_access_right() {
-        // RestrictAccess and DenyAccess migrate to opposite scopes, so an absent
-        // AccessRight can't be guessed.
-        let mut policy = aap("app-1", "RestrictAccess", Some("Sales"));
-        policy.access_right = None;
-        let (batches, excluded) = group_policies_for_migration(vec![policy]);
-        assert!(batches.is_empty());
-        assert_eq!(excluded.len(), 1);
-    }
-
-    #[test]
-    fn migration_batches_every_policy_of_one_app_together() {
-        // Two RestrictAccess policies on one app grant access to the UNION of
-        // their groups, and an app gets exactly one management scope. Migrating
-        // them separately dropped the second group (ensure_management_scope keeps
-        // the existing scope) and then deleted both policies.
-        let (batches, excluded) = group_policies_for_migration(vec![
-            aap("app-1", "RestrictAccess", Some("Sales")),
-            aap("app-2", "RestrictAccess", Some("Support")),
-            aap("app-1", "RestrictAccess", Some("Finance")),
-        ]);
-        assert!(excluded.is_empty());
-        assert_eq!(batches.len(), 2, "one batch per application");
-        assert_eq!(batches[0].0, "app-1");
-        assert_eq!(batches[0].1.len(), 2, "both of app-1's policies");
-        assert_eq!(batches[1].0, "app-2");
-        assert_eq!(batches[1].1.len(), 1);
     }
 
     #[test]

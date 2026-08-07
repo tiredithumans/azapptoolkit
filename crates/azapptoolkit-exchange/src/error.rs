@@ -73,11 +73,9 @@ impl ExchangeError {
             ExchangeError::Deserialize(_) => "deserialize_error",
             // Pass an auth classification through instead of flattening it:
             // `is_reauth_fatal` is what stops a long-running fan-out.
-            ExchangeError::Token(t) => match t.code.as_str() {
-                "refresh_missing" => "refresh_missing",
-                "not_signed_in" => "not_signed_in",
-                _ => "token_error",
-            },
+            ExchangeError::Token(t) => {
+                azapptoolkit_core::reauth::passthrough_code(&t.code).unwrap_or("token_error")
+            }
             ExchangeError::Protocol(_) => "protocol_error",
         }
     }

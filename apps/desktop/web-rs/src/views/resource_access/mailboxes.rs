@@ -11,6 +11,7 @@ use crate::bindings::permission_tester::{
     self, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
 };
 use crate::bindings::sharepoint;
+use crate::components::ui::Callout;
 use crate::constants::*;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_progress_stream::use_progress_stream;
@@ -179,7 +180,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
         {move || {
             error
                 .get()
-                .map(|e| view! { <div class="alert alert--warn"><Body1>{e}</Body1></div> })
+                .map(|e| view! { <Callout tone="warn"><Body1>{e}</Body1></Callout> })
         }}
         {move || {
             let Some(r) = result.get() else {

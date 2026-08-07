@@ -27,7 +27,8 @@ use azapptoolkit_core::audit::{
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
 use azapptoolkit_core::scoping::{
-    EWS_FULL_ACCESS_AS_APP, OFFICE365_EXCHANGE_ONLINE_APP_ID, is_scopable_exchange_permission,
+    EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
+    is_scopable_exchange_resource_permission,
 };
 use azapptoolkit_exchange::{ExchangeClient, ExchangeError};
 use azapptoolkit_graph::GraphClient;
@@ -43,7 +44,7 @@ use crate::commands::graph_roles::graph_role_index;
 use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
-use crate::dto::audit::{AuditProgress, AuditRunResult};
+use crate::dto::audit::{AuditCoverageGap, AuditProgress, AuditRunResult};
 use crate::state::AppState;
 
 /// What the audit's per-app collector should do with one failed scoring task.
@@ -188,9 +189,21 @@ pub async fn run_audit(
         prefetch_legacy_access_policies(exo.as_deref()),
     );
 
-    let apps = apps?;
+    // The audit is the one caller that CANNOT swallow truncation: it caches its
+    // result and the UI presents that as the tenant's risk posture. A scan
+    // capped at MAX_APPS_PER_RUN has not seen every app, so "no findings" from
+    // it is "nothing found YET", exactly like a cancelled run.
+    let (apps, truncated) = apps?;
     let (admin_consent_clients, delegated_scopes_by_client) = consent_grants;
     let (sign_in_available, sign_in_consent_required, sign_in_map) = sign_in;
+    // Third way a run can be partial, alongside `cancelled` and `truncated`:
+    // the scan reached every app, but with part of the analysis switched off
+    // because a tenant-wide read failed. Collected here so the result can say
+    // so instead of reading as a clean scan (see `AuditRunResult::degraded`).
+    let (graph_roles_by_sp, graph_roles_gap) = graph_roles_by_sp;
+    let (ews_full_access_sps, ews_gap) = ews_full_access_sps;
+    let degraded: Vec<AuditCoverageGap> =
+        [graph_roles_gap, ews_gap].into_iter().flatten().collect();
 
     let app_ids: Vec<String> = apps.iter().map(|a| a.app_id.clone()).collect();
     client.seed_lean_sps_from_index(&app_ids, &sp_index);
@@ -359,7 +372,13 @@ pub async fn run_audit(
     let cancelled = cancelled_before_all_dispatched || cancel.is_cancelled();
     items.sort_by_key(|i| std::cmp::Reverse(i.risk_score));
 
-    if !cancelled {
+    // A truncated run is cached no more than a cancelled one: both scored an
+    // arbitrary subset of the tenant, and a cached subset is indistinguishable
+    // from a clean full scan on the next read.
+    // ...and neither is a degraded one, for the same reason: a cached partial
+    // analysis is indistinguishable from a full one on the next read, and this
+    // one under-reports risk rather than merely covering fewer apps.
+    if !cancelled && !truncated && degraded.is_empty() {
         state
             .cache
             .put(CacheKind::Audit, audit_cache_key(&tenant_id), &items);
@@ -377,6 +396,8 @@ pub async fn run_audit(
         cancelled,
         sign_in_report_available: sign_in_available,
         sign_in_consent_required,
+        truncated,
+        degraded,
     })
 }
 
@@ -413,6 +434,11 @@ pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option
         cancelled: false,
         sign_in_report_available,
         sign_in_consent_required: false,
+        // A truncated run is never cached (see `run_audit`), so anything read
+        // back from here covered the whole tenant by construction.
+        truncated: false,
+        // Nor is a degraded one, for the same reason.
+        degraded: Vec::new(),
     })
 }
 
@@ -642,9 +668,15 @@ async fn prefetch_admin_consent_grants(
 /// ONE tenant-wide `appRoleAssignedTo` read on the Microsoft Graph SP →
 /// `spObjectId -> granted Graph permission values`. Feeds both the SP-only
 /// scoring phase and (via [`derive_orgwide_mail_scopes`]) score_one's scoped-mail
-/// reconciliation. Best-effort: an empty map ⇒ no SP items this run and no
-/// reconciliation — identical to the swallowed-error behavior.
-async fn prefetch_graph_app_roles(client: &GraphClient) -> HashMap<String, Vec<String>> {
+/// reconciliation.
+///
+/// Still best-effort — a failure must not abort the whole audit — but it now
+/// REPORTS the failure alongside the empty map. An empty map is
+/// indistinguishable from "this tenant has no such grants", so swallowing the
+/// error made the run score LOWER risk and present the result as complete.
+async fn prefetch_graph_app_roles(
+    client: &GraphClient,
+) -> (HashMap<String, Vec<String>>, Option<AuditCoverageGap>) {
     let mut graph_roles_by_sp: HashMap<String, Vec<String>> = HashMap::new();
     if let Ok((graph_sp_id, role_value_by_id)) = graph_role_index(client).await {
         match client.list_app_role_assigned_to(&graph_sp_id).await {
@@ -668,10 +700,20 @@ async fn prefetch_graph_app_roles(client: &GraphClient) -> HashMap<String, Vec<S
                     ?err,
                     "audit: tenant-wide app-role assignments read failed; SP coverage and org-wide mail reconciliation unavailable"
                 );
+                return (
+                    graph_roles_by_sp,
+                    Some(AuditCoverageGap::GraphAppRoleAssignments),
+                );
             }
         }
+    } else {
+        // The role index itself failed, so nothing below could run either.
+        return (
+            graph_roles_by_sp,
+            Some(AuditCoverageGap::GraphAppRoleAssignments),
+        );
     }
-    graph_roles_by_sp
+    (graph_roles_by_sp, None)
 }
 
 /// Service principals holding the EWS `full_access_as_app` scope as an org-wide
@@ -687,13 +729,19 @@ async fn prefetch_graph_app_roles(client: &GraphClient) -> HashMap<String, Vec<S
 /// Best-effort: a tenant with no EWS-consenting app has no service principal for
 /// the resource at all, which is normal — an empty set simply means no blanket
 /// grant to reconcile against.
-async fn prefetch_ews_full_access_grants(client: &GraphClient) -> HashSet<String> {
+async fn prefetch_ews_full_access_grants(
+    client: &GraphClient,
+) -> (HashSet<String>, Option<AuditCoverageGap>) {
     let mut out = HashSet::new();
+    // A tenant with no EWS-consenting app has no service principal for the
+    // resource at all. That is an ordinary empty answer, NOT a gap — reporting
+    // it as one would flag most tenants as degraded and teach operators to
+    // ignore the banner.
     let Ok(Some(sp)) = client
         .resolve_resource_sp(OFFICE365_EXCHANGE_ONLINE_APP_ID)
         .await
     else {
-        return out;
+        return (out, None);
     };
     let full_access_role_ids: HashSet<&str> = sp
         .app_roles
@@ -702,7 +750,7 @@ async fn prefetch_ews_full_access_grants(client: &GraphClient) -> HashSet<String
         .map(|r| r.id.as_str())
         .collect();
     if full_access_role_ids.is_empty() {
-        return out;
+        return (out, None);
     }
     match client.list_app_role_assigned_to(&sp.id).await {
         Ok(assigned) => {
@@ -720,9 +768,13 @@ async fn prefetch_ews_full_access_grants(client: &GraphClient) -> HashSet<String
                 "audit: Office 365 Exchange Online app-role assignments read failed; \
                  org-wide EWS reconciliation unavailable"
             );
+            // The SP exists, so this tenant DOES use the resource — the read
+            // genuinely failed, and a principal that looks scoped may hold
+            // blanket mailbox access.
+            return (out, Some(AuditCoverageGap::EwsFullAccessGrants));
         }
     }
-    out
+    (out, None)
 }
 
 /// ONE tenant-wide `Get-ApplicationAccessPolicy` read → the legacy scoping
@@ -777,9 +829,16 @@ fn derive_orgwide_mail_scopes(
     let mut out: HashMap<String, HashSet<String>> = graph_roles_by_sp
         .iter()
         .map(|(sp_id, values)| {
+            // `graph_roles_by_sp` holds Microsoft Graph roles by construction,
+            // so name that resource rather than testing the bare value: the
+            // value-only form also answers `true` for Office 365 Exchange
+            // Online's identically-named legacy appRoles, which RBAC for
+            // Applications cannot confine.
             let mail: HashSet<String> = values
                 .iter()
-                .filter(|v| is_scopable_exchange_permission(v))
+                .filter(|v| {
+                    is_scopable_exchange_resource_permission(Some(MICROSOFT_GRAPH_APP_ID), v)
+                })
                 .cloned()
                 .collect();
             (sp_id.clone(), mail)
@@ -810,11 +869,12 @@ async fn prefetch_sp_index(
     }
     // Captured BEFORE the scan: it takes seconds under no lock, and re-pinning
     // a pre-mutation snapshot would outlive the invalidation it raced.
-    let since = cache.generation();
+    let watch = cache.generation_for(
+        azapptoolkit_core::cache::CacheKind::Lists,
+        &crate::commands::applications::sp_index_key(tenant_id),
+    );
     match client.list_service_principals_index().await {
-        Ok(sps) => {
-            crate::commands::applications::sp_index_store_if_current(cache, tenant_id, sps, since)
-        }
+        Ok(sps) => crate::commands::applications::sp_index_store_if_current(cache, sps, watch),
         Err(err) => {
             tracing::info!(
                 ?err,
@@ -920,10 +980,10 @@ fn score_sp_only(
         has_admin_consent: ctx.admin_consent_clients.contains(&sp.id),
         mail_scopes: HashMap::new(),
     };
-    let granted_values = perms.app_role_values();
+    let granted_grants = perms.app_role_grants.clone();
     apply_legacy_policy_verdict(
         &mut perms.mail_scopes,
-        &granted_values,
+        &granted_grants,
         ctx.legacy_policies.get(&sp.app_id),
     );
     let input = SpAuditInput {
@@ -1126,9 +1186,9 @@ async fn score_one(
         // permission and its SP resolved.
         let orgwide = match &sp {
             Some(sp)
-                if declared_values
-                    .iter()
-                    .any(|p| is_scopable_exchange_permission(p)) =>
+                if perms.app_role_grants.iter().any(|g| {
+                    is_scopable_exchange_resource_permission(g.resource_app_id.as_deref(), &g.value)
+                }) =>
             {
                 // One tenant-wide read (above) replaces the former per-app
                 // appRoleAssignments GET; a map miss ⇒ empty set, same as before.
@@ -1178,9 +1238,10 @@ async fn score_one(
     // block on purpose: the policy read already happened (before the breaker
     // could trip), and a `RestrictAccess` policy confines the app whether or not
     // this app's RBAC probe ran, failed, or was skipped.
+    let declared_grants = perms.app_role_grants.clone();
     apply_legacy_policy_verdict(
         &mut perms.mail_scopes,
-        &declared_values,
+        &declared_grants,
         ctx.legacy_policies.get(&app.app_id),
     );
 

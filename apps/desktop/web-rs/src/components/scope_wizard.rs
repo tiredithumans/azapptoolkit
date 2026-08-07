@@ -29,11 +29,12 @@ use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
 use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
 use crate::components::requires_role::RequiresRole;
 use crate::components::site_selection_panel::SiteSelectionPanel;
+use crate::components::ui::Callout;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
 use crate::util::parse_lines;
-use azapptoolkit_core::scoping::{ScopeKind, scope_kind};
+use azapptoolkit_core::scoping::{ScopeKind, scope_kind_for};
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::permissions::PermissionKind;
 
@@ -249,6 +250,53 @@ async fn apply_orgwide(
     }
 }
 
+/// The single scoping mechanism this cart can apply, or `None` for org-wide.
+///
+/// `Some(k)` only when the cart is non-empty **and** every item is an
+/// Application permission resolving to the same [`ScopeKind`] on its own
+/// resource. A delegated scope, a mixed cart, or anything unscopable forces
+/// `None` — the wizard then offers org-wide only, because there is no single
+/// apply path that would honour every item.
+///
+/// A free function so the rule is testable without mounting the wizard: it
+/// decides whether a scoped apply is offered at all, and getting it wrong
+/// either hides a scoping the operator can perform or offers one that silently
+/// leaves half the cart org-wide.
+fn cart_mechanism(cart: &[PickerSelection]) -> Option<ScopeKind> {
+    if cart.is_empty() {
+        return None;
+    }
+    let mut kind: Option<ScopeKind> = None;
+    for item in cart {
+        if item.kind != PermissionKind::Application {
+            return None;
+        }
+        // Resource-aware: `PickerSelection` carries the resource the permission
+        // was picked on, and only Graph's mail family and `Sites.*` can actually
+        // be confined. Inferring from the value alone offered an apply step that
+        // would leave the grant org-wide on the legacy resource.
+        let k = scope_kind_for(Some(&item.resource_app_id), &item.permission_value)?;
+        match kind {
+            None => kind = Some(k),
+            Some(prev) if prev == k => {}
+            // Two mechanisms have two apply paths and two target types; there
+            // is no single scoped apply that honours both.
+            _ => return None,
+        }
+    }
+    kind
+}
+
+/// Whether a SharePoint site grant needs write access: true unless every item
+/// in the cart is the read-only `Sites.Read.All`.
+///
+/// Erring toward write on a mixed cart is deliberate — under-granting here
+/// produces a scoped grant that cannot do what the app was consented for, and
+/// the operator has no signal beyond the app failing later.
+fn sites_need_write(cart: &[PickerSelection]) -> bool {
+    cart.iter().any(|i| i.permission_value != "Sites.Read.All")
+}
+
 #[component]
 pub fn ScopeWizard(
     #[prop(into)] open: Signal<bool>,
@@ -295,28 +343,7 @@ pub fn ScopeWizard(
     // non-empty and every item is an Application permission mapping to the same
     // `ScopeKind`; otherwise `None` (org-wide only). Delegated scopes never
     // scope, so they force `None`.
-    let mechanism = Signal::derive(move || {
-        selected.with(|s| {
-            if s.is_empty() {
-                return None;
-            }
-            let mut kind: Option<ScopeKind> = None;
-            for item in s {
-                if item.kind != PermissionKind::Application {
-                    return None;
-                }
-                match scope_kind(&item.permission_value) {
-                    Some(k) => match kind {
-                        None => kind = Some(k),
-                        Some(prev) if prev == k => {}
-                        _ => return None,
-                    },
-                    None => return None,
-                }
-            }
-            kind
-        })
-    });
+    let mechanism = Signal::derive(move || selected.with(|s| cart_mechanism(s)));
 
     use_escape(
         move || open.get_untracked() && !busy.get_untracked(),
@@ -348,7 +375,7 @@ pub fn ScopeWizard(
         if open.get()
             && let Some(sel) = preseed.get_untracked()
         {
-            if let Some(k) = scope_kind(&sel.permission_value) {
+            if let Some(k) = scope_kind_for(Some(&sel.resource_app_id), &sel.permission_value) {
                 if k == ScopeKind::SharePoint {
                     site_write.set(sel.permission_value != "Sites.Read.All");
                 }
@@ -361,27 +388,24 @@ pub fn ScopeWizard(
 
     // Add/remove a permission from the cart, then re-anchor the scope mode to the
     // resulting mechanism's default (org-wide when the cart isn't scopable).
-    let toggle =
-        move |sel: PickerSelection| {
-            selected.update(|s| {
-                if let Some(pos) = s.iter().position(|x| x == &sel) {
-                    s.remove(pos);
-                } else {
-                    s.push(sel.clone());
-                }
-            });
-            error.set(None);
-            match mechanism.get_untracked() {
-                Some(ScopeKind::SharePoint) => {
-                    site_write.set(selected.with_untracked(|s| {
-                        s.iter().any(|i| i.permission_value != "Sites.Read.All")
-                    }));
-                    scope_mode.set(ScopeMode::Sites);
-                }
-                Some(k) => scope_mode.set(default_mode(k)),
-                None => scope_mode.set(ScopeMode::OrgWide),
+    let toggle = move |sel: PickerSelection| {
+        selected.update(|s| {
+            if let Some(pos) = s.iter().position(|x| x == &sel) {
+                s.remove(pos);
+            } else {
+                s.push(sel.clone());
             }
-        };
+        });
+        error.set(None);
+        match mechanism.get_untracked() {
+            Some(ScopeKind::SharePoint) => {
+                site_write.set(selected.with_untracked(|s| sites_need_write(s)));
+                scope_mode.set(ScopeMode::Sites);
+            }
+            Some(k) => scope_mode.set(default_mode(k)),
+            None => scope_mode.set(ScopeMode::OrgWide),
+        }
+    };
     let on_toggle = Callback::new(move |sel: PickerSelection| toggle(sel));
 
     let run_apply = move || {
@@ -641,11 +665,11 @@ pub fn ScopeWizard(
                                 })
                         }}
                         <Show when=move || scope_mode.get() == ScopeMode::OrgWide fallback=|| ()>
-                            <div class="alert alert--warn">
+                            <Callout tone="warn">
                                 <Body1>
                                     "The app will reach every resource in the tenant. Only choose this when the permission genuinely needs tenant-wide reach."
                                 </Body1>
-                            </div>
+                            </Callout>
                         </Show>
                         {move || {
                             mechanism
@@ -662,7 +686,7 @@ pub fn ScopeWizard(
                                 .get()
                                 .then(|| {
                                     view! {
-                                        <div class="alert alert--warn">
+                                        <Callout tone="warn">
                                             "Scoping needs an admin consent for this mechanism."
                                             <Button
                                                 appearance=Signal::derive(|| ButtonAppearance::Primary)
@@ -671,7 +695,7 @@ pub fn ScopeWizard(
                                             >
                                                 "Grant consent & retry"
                                             </Button>
-                                        </div>
+                                        </Callout>
                                     }
                                 })
                         }}
@@ -782,5 +806,142 @@ fn SelectPermissionsStep(
                 })
         }}
         <PermissionPicker tenant_id=tenant_id mode=mode selected=selected on_toggle=on_toggle />
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use azapptoolkit_core::scoping::{
+        MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
+        OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+    };
+
+    fn app(resource: &str, value: &str) -> PickerSelection {
+        PickerSelection {
+            resource_app_id: resource.to_string(),
+            kind: PermissionKind::Application,
+            permission_id: format!("id-{value}"),
+            permission_value: value.to_string(),
+        }
+    }
+
+    fn delegated(resource: &str, value: &str) -> PickerSelection {
+        PickerSelection {
+            kind: PermissionKind::Delegated,
+            ..app(resource, value)
+        }
+    }
+
+    #[test]
+    fn an_empty_cart_has_no_mechanism() {
+        assert_eq!(cart_mechanism(&[]), None);
+    }
+
+    #[test]
+    fn a_uniform_application_cart_resolves_to_its_one_mechanism() {
+        assert_eq!(
+            cart_mechanism(&[
+                app(MICROSOFT_GRAPH_APP_ID, "Mail.Read"),
+                app(MICROSOFT_GRAPH_APP_ID, "Calendars.Read"),
+            ]),
+            Some(ScopeKind::Exchange)
+        );
+        assert_eq!(
+            cart_mechanism(&[
+                app(MICROSOFT_GRAPH_APP_ID, "Sites.Read.All"),
+                app(MICROSOFT_GRAPH_APP_ID, "Sites.Selected"),
+            ]),
+            Some(ScopeKind::SharePoint)
+        );
+    }
+
+    #[test]
+    fn a_mixed_cart_falls_back_to_org_wide() {
+        // Two mechanisms have two different apply paths and two target types;
+        // there is no single scoped apply that honours both, so offering one
+        // would leave half the cart org-wide without saying so.
+        assert_eq!(
+            cart_mechanism(&[
+                app(MICROSOFT_GRAPH_APP_ID, "Mail.Read"),
+                app(MICROSOFT_GRAPH_APP_ID, "Sites.Read.All"),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn one_unscopable_item_disqualifies_the_whole_cart() {
+        assert_eq!(
+            cart_mechanism(&[
+                app(MICROSOFT_GRAPH_APP_ID, "Mail.Read"),
+                app(MICROSOFT_GRAPH_APP_ID, "Directory.Read.All"),
+            ]),
+            None,
+            "a scoped apply that silently skips Directory.Read.All would report \
+             success while leaving it org-wide"
+        );
+    }
+
+    #[test]
+    fn a_delegated_scope_never_scopes() {
+        // Delegated permissions are consented per user and carry no
+        // resource-scoping mechanism at all.
+        assert_eq!(
+            cart_mechanism(&[delegated(MICROSOFT_GRAPH_APP_ID, "Mail.Read")]),
+            None
+        );
+        assert_eq!(
+            cart_mechanism(&[
+                app(MICROSOFT_GRAPH_APP_ID, "Mail.Read"),
+                delegated(MICROSOFT_GRAPH_APP_ID, "Mail.Read"),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn the_legacy_resources_offer_no_mechanism_even_under_a_familiar_name() {
+        // The resource-blind version of this rule offered an Exchange apply for
+        // Office 365 Exchange Online's retired Outlook REST `Mail.*`, which RBAC
+        // for Applications cannot confine — the apply would report success and
+        // the grant would stay org-wide.
+        assert_eq!(
+            cart_mechanism(&[app(OFFICE365_EXCHANGE_ONLINE_APP_ID, "Mail.Read")]),
+            None
+        );
+        assert_eq!(
+            cart_mechanism(&[app(OFFICE365_SHAREPOINT_ONLINE_APP_ID, "Sites.Read.All")]),
+            None
+        );
+        // The EWS scope on that same resource IS scopable, so the rule must not
+        // be "reject the whole resource".
+        assert_eq!(
+            cart_mechanism(&[app(OFFICE365_EXCHANGE_ONLINE_APP_ID, "full_access_as_app")]),
+            Some(ScopeKind::Exchange)
+        );
+    }
+
+    #[test]
+    fn site_write_is_needed_unless_every_item_is_read_only() {
+        assert!(!sites_need_write(&[app(
+            MICROSOFT_GRAPH_APP_ID,
+            "Sites.Read.All"
+        )]));
+        assert!(sites_need_write(&[app(
+            MICROSOFT_GRAPH_APP_ID,
+            "Sites.ReadWrite.All"
+        )]));
+        assert!(
+            sites_need_write(&[
+                app(MICROSOFT_GRAPH_APP_ID, "Sites.Read.All"),
+                app(MICROSOFT_GRAPH_APP_ID, "Sites.ReadWrite.All"),
+            ]),
+            "a mixed cart must not under-grant — the app would fail later with no signal here"
+        );
+        assert!(
+            !sites_need_write(&[]),
+            "an empty cart never reaches the sites step"
+        );
     }
 }

@@ -11,6 +11,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::bindings::auth;
+use crate::components::ui::Callout;
 use crate::hooks::use_command::use_command;
 
 #[component]
@@ -39,7 +40,7 @@ pub fn ScopeUnavailableBanner(
     view! {
         // `role="status"` so the banner — inserted after an async scope
         // resolution fails — is announced to assistive tech, not silently shown.
-        <div class="alert alert--warn" role="status">
+        <Callout tone="warn" role="status">
             <Body1>
                 {format!("Mailbox scoping (Scope column) unavailable — {message}")}
             </Body1>
@@ -66,6 +67,6 @@ pub fn ScopeUnavailableBanner(
             {move || {
                 cmd.error.get().map(|m| view! { <Body1 class="form-error">{m}</Body1> })
             }}
-        </div>
+        </Callout>
     }
 }

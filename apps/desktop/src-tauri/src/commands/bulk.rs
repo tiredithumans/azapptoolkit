@@ -157,7 +157,11 @@ pub async fn bulk_remove_expired_credentials(
     // `requiredResourceAccess` etc. — the bulk of a permission-heavy app's
     // payload, multiplied across a full-tenant scan. Mirrors
     // `list_credential_expirations`.
-    let mut apps = client
+    // `_truncated`: the sweep is either scoped to an explicit `object_ids` set
+    // (below, where the cap cannot matter) or is a best-effort tenant sweep whose
+    // per-app outcomes are all reported individually — it never claims to have
+    // covered every app.
+    let (mut apps, _truncated) = client
         .list_applications_all(
             AppListQuery::default()
                 .with_top(azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE)

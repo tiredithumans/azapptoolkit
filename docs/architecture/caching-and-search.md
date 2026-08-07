@@ -174,9 +174,23 @@ mutation drops the key, and the scan then stores the snapshot it fetched **befor
 a pinned entry that is not a stale read that ages out in seconds — LRU cannot evict it, so the list
 shows a deleted app (or misses a new one) until the 60-minute TTL.
 
-So every pinned index built from a live scan captures `cache.generation()` **before** the fetch and
-stores through `put_index_if_current` / `put_typed_index_if_current`, which drop a snapshot whose
-generation moved. The caller still returns its rows; only the *caching* is skipped, costing one
+So every pinned index built from a live scan captures `cache.generation_for(kind, key)` **before**
+the fetch and stores through `put_index_if_current` / `put_typed_index_if_current`, which drop a
+snapshot whose key was invalidated in between. The counters are per **key**, so a credential-only
+mutation — which drops `apps_pairing` and a per-app detail precisely in order to PRESERVE the
+tenant-wide indexes — cannot make a valid index store refuse.
+
+`generation_for` returns an owned `IndexWatch` guard rather than a bare counter, and the guard
+releases its watch on `Drop`. That is what covers the paths that never reach a store: a failed
+fetch, a cancelled task, a sibling future losing a `try_join`. Releasing only on a successful store
+leaked one entry per failed scan, and because the watch table is capped and leaked entries were
+never reclaimed, enough failures made `generation_for` unable to register at all — at which point
+**every** pinned-index store refuses for the life of the process, degrading every tenant-wide read
+to a full rescan with no error, no log at the point of failure, and no recovery short of a restart.
+`repo_invariants::generation_for_hands_out_an_owned_guard_not_a_bare_counter` pins the shape, and
+`a_watch_is_captured_before_the_fetch_it_guards_not_after` pins the ordering — a capture placed
+after the fetch is textually identical to a correct one and silently empties the window being
+checked, which is how two production sites drifted. The caller still returns its rows; only the *caching* is skipped, costing one
 re-fetch. `repo_invariants::pinned_index_writes_are_guarded_except_the_static_gallery_corpus` pins
 this — the sole exemption is the application gallery corpus, a static tenant-independent catalog no
 mutation here can invalidate.

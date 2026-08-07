@@ -895,3 +895,184 @@ fn parse_delete(
         fails,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err(code: &str) -> bulk::BulkError {
+        bulk::BulkError {
+            code: code.to_string(),
+            message: format!("{code} happened"),
+            retryable: false,
+        }
+    }
+
+    fn scope_outcome(id: &str, error: Option<bulk::BulkError>) -> bulk::BulkScopeOutcome {
+        bulk::BulkScopeOutcome {
+            object_id: id.to_string(),
+            error,
+        }
+    }
+
+    fn owner_outcome(
+        id: &str,
+        added: bool,
+        skipped: bool,
+        error: Option<bulk::BulkError>,
+    ) -> bulk::BulkOwnerOutcome {
+        bulk::BulkOwnerOutcome {
+            object_id: id.to_string(),
+            added,
+            skipped,
+            error,
+        }
+    }
+
+    fn upper(id: &str) -> String {
+        id.to_uppercase()
+    }
+
+    #[test]
+    fn only_failed_rows_become_failures_and_they_keep_their_wire_code() {
+        let fails = failures_of(
+            &[
+                scope_outcome("a", None),
+                scope_outcome("b", Some(err("forbidden"))),
+                scope_outcome("c", None),
+            ],
+            upper,
+        );
+        assert_eq!(fails.len(), 1);
+        assert_eq!(fails[0].label, "B", "the label goes through label_for");
+        assert_eq!(
+            fails[0].code.as_deref(),
+            Some("forbidden"),
+            "the code is what lets the bar tell a dead session from a failed app"
+        );
+    }
+
+    /// The distinction the whole `code` field exists for.
+    ///
+    /// A mid-run `refresh_missing` does not mean this app failed — it means the
+    /// SESSION died, the backend stopped the run, and the tail of the selection
+    /// was never attempted. Rendering it as N app-level failures tells the
+    /// operator to go fix N apps that are fine, and hides the one action that
+    /// would actually help.
+    #[test]
+    fn a_dead_session_is_detected_among_ordinary_failures() {
+        let fails = failures_of(
+            &[
+                scope_outcome("a", Some(err("forbidden"))),
+                scope_outcome("b", Some(err("refresh_missing"))),
+            ],
+            upper,
+        );
+        let dead = session_dead_error(&fails).expect("the session death must surface");
+        assert_eq!(dead.code, "refresh_missing");
+        assert!(dead.is_reauth_fatal());
+    }
+
+    #[test]
+    fn ordinary_failures_alone_are_not_a_dead_session() {
+        let fails = failures_of(
+            &[
+                scope_outcome("a", Some(err("forbidden"))),
+                scope_outcome("b", Some(err("throttled"))),
+                scope_outcome("c", Some(err("not_found"))),
+            ],
+            upper,
+        );
+        assert!(
+            session_dead_error(&fails).is_none(),
+            "these are per-app failures; prompting for re-auth would be wrong"
+        );
+    }
+
+    #[test]
+    fn a_synthesized_failure_with_no_code_never_reads_as_a_dead_session() {
+        // Failures derived from counts rather than an error carry `code: None`.
+        let fails = vec![BulkFailure {
+            label: "app".into(),
+            reason: "3 credential(s) could not be removed".into(),
+            code: None,
+        }];
+        assert!(session_dead_error(&fails).is_none());
+    }
+
+    #[test]
+    fn every_reauth_fatal_code_is_recognised() {
+        // Reads the shared set, so a code added there cannot reach the backend
+        // without also being understood here.
+        for code in azapptoolkit_core::reauth::REAUTH_FATAL_CODES {
+            let fails = failures_of(&[scope_outcome("a", Some(err(code)))], upper);
+            assert!(
+                session_dead_error(&fails).is_some(),
+                "{code} must trigger the re-auth prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn the_scope_summary_counts_successes_by_subtraction() {
+        let (summary, fails) = parse_scope(
+            "mailbox",
+            bulk::BulkScopeResult {
+                outcomes: vec![
+                    scope_outcome("a", None),
+                    scope_outcome("b", None),
+                    scope_outcome("c", Some(err("forbidden"))),
+                ],
+                cancelled: false,
+            },
+            upper,
+        );
+        assert_eq!(fails.len(), 1);
+        assert!(
+            summary.contains("2 app(s)"),
+            "scoped count must exclude failures: {summary}"
+        );
+        assert!(summary.contains("1 failed"), "{summary}");
+        assert!(
+            !summary.contains("cancelled"),
+            "a completed run must not claim it was cancelled: {summary}"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_run_says_so_in_its_summary() {
+        // A partial run that reads as complete is the failure mode; the suffix
+        // is the only thing distinguishing them in the summary line.
+        let (summary, _) = parse_scope(
+            "mailbox",
+            bulk::BulkScopeResult {
+                outcomes: vec![scope_outcome("a", None)],
+                cancelled: true,
+            },
+            upper,
+        );
+        assert!(summary.contains(cancelled_suffix(true).trim()), "{summary}");
+        assert_eq!(cancelled_suffix(false), "");
+    }
+
+    #[test]
+    fn the_add_owner_summary_separates_added_from_already_present() {
+        // `skipped` means the owner was already there — reporting it as "added"
+        // overstates what the run changed, and as "failed" understates success.
+        let (summary, fails) = parse_add_owner(
+            bulk::BulkAddOwnerResult {
+                outcomes: vec![
+                    owner_outcome("a", true, false, None),
+                    owner_outcome("b", false, true, None),
+                    owner_outcome("c", false, false, Some(err("forbidden"))),
+                ],
+                cancelled: false,
+            },
+            upper,
+        );
+        assert_eq!(fails.len(), 1);
+        assert!(summary.contains("to 1 app(s)"), "{summary}");
+        assert!(summary.contains("1 already had them"), "{summary}");
+        assert!(summary.contains("1 failed"), "{summary}");
+    }
+}
