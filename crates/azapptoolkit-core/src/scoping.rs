@@ -137,7 +137,7 @@ pub fn exchange_role_for_permission(value: &str) -> Option<&'static str> {
 /// Remaining legitimate use is display-only, where the resource is truly
 /// unavailable and a wrong answer costs a hint rather than access.
 #[deprecated(
-    since = "0.24.3",
+    since = "0.25.0",
     note = "resource-blind: answers true for unscopable Office 365 Exchange Online appRoles.             Use is_scopable_exchange_resource_permission with the grant's resource_app_id."
 )]
 pub fn is_scopable_exchange_permission(value: &str) -> bool {

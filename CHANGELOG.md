@@ -10,6 +10,8 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-07
+
 ### Added
 
 - **"Copy all details" on the SSO tab's app-owner summary.** One button copies
