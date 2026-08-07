@@ -17,7 +17,7 @@ use thaw::Body1;
 use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 
 use crate::bindings::readiness;
-use crate::components::ui::{SectionHeader, SkeletonList};
+use crate::components::ui::{Callout, SectionHeader, SkeletonList};
 use crate::state::use_session;
 
 /// (badge class, label) for a verdict pill.
@@ -77,11 +77,11 @@ fn render_report(rep: ReadinessReport) -> impl IntoView {
     let indeterminate = rep.directory_roles_indeterminate;
     let banner = indeterminate.then(|| {
         view! {
-            <div class="alert alert--warn">
+            <Callout tone="warn">
                 "Couldn't read your active directory roles, so directory-role requirements show as \
                  \"?\". This is usually a missing Directory.Read.All consent or a tenant that \
                  restricts directory reads."
-            </div>
+            </Callout>
         }
     });
     let groups = group_by_plane(rep.items)
@@ -143,13 +143,13 @@ pub fn ReadinessView() -> impl IntoView {
                         }
                         Some(Err(e)) => {
                             view! {
-                                <div class="alert alert--warn">
+                                <Callout tone="warn">
                                     {format!(
                                         "Couldn't check readiness [{}]: {}",
                                         e.code,
                                         e.message,
                                     )}
-                                </div>
+                                </Callout>
                             }
                                 .into_any()
                         }

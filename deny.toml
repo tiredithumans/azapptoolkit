@@ -69,6 +69,19 @@ multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
 
+# `rsa` carries RUSTSEC-2023-0071 (Marvin — a key-recovery timing sidechannel)
+# with no fixed release. `cert.rs` uses `rcgen` on the `aws_lc_rs` backend
+# specifically to keep it out of the graph, and dependabot.yml records the
+# policy — but a comment cannot stop a transitive dependency from pulling it
+# back in, and this app generates SAML signing certificates. `cargo deny` is
+# already a required check on both trees, so the ban belongs here where it
+# actually fails a build.
+#
+# If a future dependency needs `rsa`, that is a decision to make deliberately:
+# delete this entry in the same commit, with the reasoning.
+[[bans.deny]]
+name = "rsa"
+
 [sources]
 # Only crates.io and the one git dependency the frontend needs (tauri-sys,
 # pinned to its v2 branch) are permitted. A new git/registry source must be

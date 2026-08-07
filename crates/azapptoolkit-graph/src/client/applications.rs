@@ -309,20 +309,28 @@ impl GraphClient {
     /// Fetches every application in the tenant by following `@odata.nextLink`
     /// until exhausted. A safety `cap` argument prevents unbounded memory in
     /// pathological tenants; pass `None` to disable.
+    /// Every application in the tenant, up to `cap`, **and whether the cap cut
+    /// the scan short**.
+    ///
+    /// The `bool` is deliberately in the return type rather than dropped here:
+    /// a capped scan is a partial view of the tenant, and a caller that presents
+    /// it as complete (a cached "clean" audit, a bulk sweep reporting how many
+    /// apps it touched) is making a claim the data does not support. Forcing
+    /// each caller to bind the flag makes ignoring it a visible, commented
+    /// decision instead of an invisible default — this used to be
+    /// `let (items, _truncated)` right here, so no caller could see it at all.
     pub async fn list_applications_all(
         &self,
         q: AppListQuery,
         cap: Option<usize>,
-    ) -> Result<Vec<Application>> {
+    ) -> Result<(Vec<Application>, bool)> {
         let page = self.list_applications(q).await?;
         // `None` disables the cap: `collect_all_pages_capped` with `usize::MAX`
         // paginates to exhaustion (never reaching the bound) without the
         // hard-error past page limit that `collect_all_pages` raises — the right
         // degradation for a tenant-wide scan.
-        let (items, _truncated) = self
-            .collect_all_pages_capped(page, cap.unwrap_or(usize::MAX))
-            .await?;
-        Ok(items)
+        self.collect_all_pages_capped(page, cap.unwrap_or(usize::MAX))
+            .await
     }
 
     /// The tenant's app-registration index: `id`, `appId`, and `displayName`

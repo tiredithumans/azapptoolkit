@@ -26,7 +26,7 @@ use crate::components::scope_badge::is_exchange_scopable_on;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::ui::{
-    Badge, CopyableId, DataTable, DetailLoadError, SkeletonList, TabBar, TabBarItem,
+    Badge, Callout, CopyableId, DataTable, DetailLoadError, SkeletonList, TabBar, TabBarItem,
 };
 use crate::state::use_session;
 use crate::util::keep_alive;
@@ -375,7 +375,7 @@ pub fn ManagedIdentityDetailPane(
                                 });
                             };
                             view! {
-                                <div class="alert alert--warn">
+                                <Callout tone="warn">
                                     <p>
                                         "Azure RBAC needs your consent to read Azure Service Management (management.azure.com). Granting opens your browser once."
                                     </p>
@@ -391,15 +391,15 @@ pub fn ManagedIdentityDetailPane(
                                             .get()
                                             .map(|m| view! { <Body1 class="form-error">{m}</Body1> })
                                     }}
-                                </div>
+                                </Callout>
                             }
                                 .into_any()
                         }
                         Err(_) => {
                             view! {
-                                <div class="alert alert--warn">
+                                <Callout tone="warn">
                                     "Azure RBAC is unavailable — it needs consent to Azure Service Management (management.azure.com) and an Azure subscription you can read."
-                                </div>
+                                </Callout>
                             }
                                 .into_any()
                         }
@@ -430,7 +430,7 @@ pub fn ManagedIdentityDetailPane(
                                         "Partial view — {}. Roles on subscriptions not scanned aren't shown.",
                                         parts.join("; "),
                                     );
-                                    view! { <div class="alert alert--warn">{msg}</div> }
+                                    view! { <Callout tone="warn">{msg}</Callout> }
                                 });
                             view! {
                                 {coverage}

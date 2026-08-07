@@ -3,6 +3,7 @@
 //! Grouped in one file — each is a small wrapper over a binding / shared panel.
 
 use super::*;
+use crate::components::ui::Callout;
 
 #[component]
 pub(super) fn ProvisioningContent(
@@ -37,9 +38,9 @@ pub(super) fn ProvisioningContent(
                     // they already have, with no way to retry.
                     Err(e) if e.code == "forbidden" || e.code == "consent_required" => {
                         view! {
-                            <div class="alert alert--warn">
+                            <Callout tone="warn">
                                 "Provisioning status is unavailable. It needs admin consent to Synchronization.Read.All and an Entra ID P1/P2 license."
-                            </div>
+                            </Callout>
                         }
                             .into_any()
                     }

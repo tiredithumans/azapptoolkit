@@ -159,18 +159,27 @@ pub async fn list_applications_with_pairing(
     // Captured BEFORE the scans below — both this list and the SP index it
     // seeds are PINNED, so a snapshot that loses the race to a mutation is not
     // a stale read that ages out, it is out of LRU's reach for the full TTL.
-    let since = state.cache.generation();
+    let watch = state.cache.generation_for(CacheKind::Lists, &cache_key);
 
     // The pairing join reads the shared SP index. When it is already cached,
     // just enumerate the apps; on a cold miss fetch both concurrently so the
     // join's long pole is one directory scan, not two serial ones. Both sides
     // follow `@odata.nextLink` to completion.
-    let (apps, sps) = match cache::sp_index_hit(&state.cache, &tenant_id) {
+    // `_truncated`: the App Registrations list is a browse surface with its own
+    // "showing N of M" affordance; a capped scan shows fewer rows but claims
+    // nothing about completeness.
+    let ((apps, _truncated), sps) = match cache::sp_index_hit(&state.cache, &tenant_id) {
         Some(cached_index) => (
             client.list_applications_all(query, Some(APPS_MAX)).await?,
             cached_index,
         ),
         None => {
+            // The SP index needs its OWN watch: watches are per KEY, and this
+            // store lands under `sp_index_key`, not `cache_key`. Sharing one
+            // watch across the two stores meant the second could never prove
+            // its key current, so it silently refused every time — the index
+            // this join exists to seed was never actually seeded from here.
+            let sp_watch = cache::sp_index_watch(&state.cache, &tenant_id);
             let (apps, sps) = futures::future::try_join(
                 client.list_applications_all(query, Some(APPS_MAX)),
                 client.list_service_principals_index(),
@@ -178,7 +187,7 @@ pub async fn list_applications_with_pairing(
             .await?;
             (
                 apps,
-                cache::sp_index_store_if_current(&state.cache, &tenant_id, sps, since),
+                cache::sp_index_store_if_current(&state.cache, sps, sp_watch),
             )
         }
     };
@@ -202,11 +211,10 @@ pub async fn list_applications_with_pairing(
     // Pinned: this is a tenant-wide index (one paginated scan over every app
     // registration), not a per-object entry — it must not be evictable by the
     // thousands of `app_detail|…` writes that share this bucket. Stored only if
-    // nothing was invalidated since `since`; the caller still gets these rows,
-    // it is only the *caching* of a snapshot that lost the race that is skipped.
-    state
-        .cache
-        .put_index_if_current(CacheKind::Lists, cache_key, &rows, since);
+    // this key was not invalidated since `watch` was taken; the caller still
+    // gets these rows, it is only the *caching* of a snapshot that lost the
+    // race that is skipped.
+    state.cache.put_index_if_current(watch, &rows);
 
     Ok(rows)
 }

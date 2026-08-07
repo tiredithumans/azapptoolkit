@@ -245,7 +245,7 @@ pub fn ManagedScopeGroupPanel(
                     Some(Err(e)) => {
                         let needs_consent = e.code == "consent_required";
                         view! {
-                            <div class="alert alert--warn">
+                            <Callout tone="warn">
                                 <Body1>{e.message}</Body1>
                                 {needs_consent
                                     .then(|| {
@@ -260,7 +260,7 @@ pub fn ManagedScopeGroupPanel(
                                             </div>
                                         }
                                     })}
-                            </div>
+                            </Callout>
                         }
                             .into_any()
                     }

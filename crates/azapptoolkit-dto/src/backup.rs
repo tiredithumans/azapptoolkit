@@ -55,6 +55,51 @@ pub struct TenantBackup {
     pub enterprise_apps: Vec<EnterpriseAppBackup>,
     #[serde(default)]
     pub managed_identities: Vec<ManagedIdentityBackup>,
+    /// Objects that were enumerated for this backup but could NOT be captured.
+    ///
+    /// A DR backup that silently drops what it could not read is the most
+    /// dangerous artifact this app produces: it restores as if those objects
+    /// never existed, and nothing in the manifest or the UI said so. The
+    /// per-object failures were logged at `warn!` — which reaches a log file
+    /// nobody reads during an incident, not the operator holding the file.
+    ///
+    /// A non-empty list does not invalidate the backup; it bounds it. Restore
+    /// surfaces the same list so the gap is visible at the moment it matters.
+    /// `#[serde(default)]` so manifests written before this field load as
+    /// "nothing known to be missing" — which is what they claimed.
+    #[serde(default)]
+    pub skipped: Vec<SkippedObject>,
+}
+
+/// One object left out of a backup, and why.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedObject {
+    /// `application`, `enterpriseApp`, or `managedIdentity`.
+    pub kind: String,
+    /// Directory object id, so the operator can find it in the source tenant.
+    pub object_id: String,
+    /// Display name when it was known before the read failed.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// What failed, in the operator's terms.
+    pub reason: String,
+}
+
+impl SkippedObject {
+    pub fn new(
+        kind: &str,
+        object_id: impl Into<String>,
+        display_name: Option<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: kind.to_string(),
+            object_id: object_id.into(),
+            display_name,
+            reason: reason.into(),
+        }
+    }
 }
 
 /// Full configuration of one app registration. Source ids are kept for
@@ -352,9 +397,21 @@ pub struct RestoreReport {
     /// gallery) and the deeper SSO surface (SAML signing cert, claims policy).
     #[serde(default)]
     pub manual_items: Vec<ManualItem>,
-    /// True when the run stopped early (cancelled) before creating every app;
-    /// the apps that *were* created are still fully wired and reported.
+    /// True when the run stopped early — either cancelled by the operator or
+    /// aborted because the session died (see [`Self::session_expired`]); the
+    /// apps that *were* created are still fully wired and reported.
     pub cancelled: bool,
+    /// True when the run stopped because the sign-in session died mid-restore
+    /// (a re-auth-fatal error), rather than because the operator cancelled.
+    ///
+    /// Distinct from [`Self::cancelled`] because the remedy differs and because
+    /// a restore has already made irreversible changes: unlike the read-only
+    /// fan-outs, which discard a partial result and return `session.err(..)`,
+    /// this flow must still hand back the report — an operator who has just had
+    /// N applications created in their tenant needs to know which ones. The
+    /// front end pairs this with the re-auth prompt.
+    #[serde(default)]
+    pub session_expired: bool,
 }
 
 /// An enterprise application whose access was re-applied on restore (its SP was
@@ -502,6 +559,7 @@ mod tests {
                 arm_resource_id: Some("/subscriptions/s/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/mi-prod".into()),
                 ..Default::default()
             }],
+            skipped: Vec::new(),
         };
 
         let json = serde_json::to_value(&backup).unwrap();

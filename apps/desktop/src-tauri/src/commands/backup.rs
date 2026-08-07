@@ -35,7 +35,8 @@ use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
 use crate::dto::backup::{
     AppRegistrationBackup, AppRoleAssigneeRef, AppRoleGrantRef, BACKUP_SCHEMA_VERSION,
-    CredentialMeta, EnterpriseAppBackup, ManagedIdentityBackup, PrincipalRef, TenantBackup,
+    CredentialMeta, EnterpriseAppBackup, ManagedIdentityBackup, PrincipalRef, SkippedObject,
+    TenantBackup,
 };
 use crate::dto::bulk::BulkProgress;
 use crate::dto::managed_identity::MiSubtype;
@@ -115,6 +116,9 @@ pub async fn backup_tenant(
     let app_chunks: Vec<Vec<(String, String)>> =
         app_pairs.chunks(BATCH_CHUNK).map(<[_]>::to_vec).collect();
     let mut app_backups: Vec<AppRegistrationBackup> = Vec::with_capacity(app_total);
+    // Carried onto the manifest so a short backup says so — see
+    // `TenantBackup::skipped`.
+    let mut skipped: Vec<SkippedObject> = Vec::new();
     let cancel = state.dr_cancel.clone();
     let session = SessionDead::new();
     let cancelled = dispatch_capped(
@@ -144,8 +148,9 @@ pub async fn backup_tenant(
             }))
         },
         |joined| {
-            if let Ok(mut v) = joined {
+            if let Ok((mut v, mut s)) = joined {
                 app_backups.append(&mut v);
+                skipped.append(&mut s);
             }
         },
     )
@@ -214,8 +219,9 @@ pub async fn backup_tenant(
             }))
         },
         |joined| {
-            if let Ok(mut v) = joined {
+            if let Ok((mut v, mut s)) = joined {
                 enterprise_apps.append(&mut v);
+                skipped.append(&mut s);
             }
         },
     )
@@ -250,6 +256,7 @@ pub async fn backup_tenant(
         app_registrations: app_backups,
         enterprise_apps,
         managed_identities,
+        skipped,
     })
 }
 
@@ -352,7 +359,7 @@ async fn backup_app_chunk(
     // reference can be held across the `.await`s in a `Send` future.
     report: &(dyn Fn(usize) + Sync),
     session: &SessionDead,
-) -> Vec<AppRegistrationBackup> {
+) -> (Vec<AppRegistrationBackup>, Vec<SkippedObject>) {
     let object_ids: Vec<String> = chunk.iter().map(|(_, oid)| oid.clone()).collect();
     let (apps_res, feds_res) = tokio::join!(
         client.batch_get_applications_backup_json(&object_ids),
@@ -380,6 +387,10 @@ async fn backup_app_chunk(
     note_graph_failures(session, feds.iter().map(Result::as_ref));
 
     let mut out = Vec::with_capacity(chunk.len());
+    // Every `skipping` below used to end at a `warn!` and nowhere else, so the
+    // resulting manifest was short by exactly these apps with no record of it.
+    // Collected and carried on the backup instead.
+    let mut skipped: Vec<SkippedObject> = Vec::new();
     for (i, (app_id, object_id)) in chunk.iter().enumerate() {
         let has_sp = sp_app_ids.contains(app_id);
         match &app_jsons[i] {
@@ -387,15 +398,33 @@ async fn backup_app_chunk(
                 Ok(federated) => match assemble_app_backup(value, federated.clone(), has_sp) {
                     Ok(b) => out.push(b),
                     Err(err) => {
-                        tracing::warn!(%object_id, error = %err, "backup: app deserialize failed; skipping")
+                        tracing::warn!(%object_id, error = %err, "backup: app deserialize failed; skipping");
+                        skipped.push(SkippedObject::new(
+                            "application",
+                            object_id,
+                            None,
+                            format!("configuration could not be read: {err}"),
+                        ));
                     }
                 },
                 Err(err) => {
-                    tracing::warn!(%object_id, error = %err, "backup: federated creds failed; skipping app")
+                    tracing::warn!(%object_id, error = %err, "backup: federated creds failed; skipping app");
+                    skipped.push(SkippedObject::new(
+                        "application",
+                        object_id,
+                        None,
+                        format!("federated credentials could not be read: {err}"),
+                    ));
                 }
             },
             Err(err) => {
-                tracing::warn!(%object_id, error = %err, "backup: app read failed; skipping")
+                tracing::warn!(%object_id, error = %err, "backup: app read failed; skipping");
+                skipped.push(SkippedObject::new(
+                    "application",
+                    object_id,
+                    None,
+                    format!("application could not be read: {err}"),
+                ));
             }
         }
         let count = {
@@ -405,7 +434,7 @@ async fn backup_app_chunk(
         };
         report(count);
     }
-    out
+    (out, skipped)
 }
 
 /// Assembles one app registration's backup from an already-fetched config JSON
@@ -481,7 +510,7 @@ async fn backup_enterprise_chunk(
     total: usize,
     throttle: &ConcurrencyThrottle,
     session: &SessionDead,
-) -> Vec<EnterpriseAppBackup> {
+) -> (Vec<EnterpriseAppBackup>, Vec<SkippedObject>) {
     let sp_ids: Vec<String> = chunk.iter().map(|sp| sp.id.clone()).collect();
     let (sps_res, assigned_res, groups_res) = tokio::join!(
         client.batch_get_service_principals(&sp_ids),
@@ -515,6 +544,7 @@ async fn backup_enterprise_chunk(
     note_graph_failures(session, groups.iter().map(Result::as_ref));
 
     let mut out = Vec::with_capacity(chunk.len());
+    let mut skipped: Vec<SkippedObject> = Vec::new();
     for (i, index_sp) in chunk.iter().enumerate() {
         let entry = match &full_sps[i] {
             Ok(Some(sp)) => {
@@ -535,6 +565,12 @@ async fn backup_enterprise_chunk(
             Ok(None) => None, // vanished between the index read and now
             Err(err) => {
                 tracing::warn!(sp = %index_sp.id, error = %err, "backup: enterprise SP fetch failed; skipping");
+                skipped.push(SkippedObject::new(
+                    "enterpriseApp",
+                    &index_sp.id,
+                    Some(index_sp.display_name.clone()),
+                    format!("service principal could not be read: {err}"),
+                ));
                 None
             }
         };
@@ -554,7 +590,7 @@ async fn backup_enterprise_chunk(
             Some(throttle.current_limit()),
         );
     }
-    out
+    (out, skipped)
 }
 
 /// Assembles one enterprise application's backup from already-fetched data — no
@@ -1044,7 +1080,7 @@ mod tests {
         // No-op progress callback — the degrade logic under test doesn't depend on
         // it, and this keeps the test free of a Tauri AppHandle / mock runtime.
         let report = |_count: usize| {};
-        let out = backup_app_chunk(
+        let (out, skipped) = backup_app_chunk(
             &client,
             chunk,
             &sp_app_ids,
@@ -1060,6 +1096,16 @@ mod tests {
             out.len(),
             1,
             "the failed object should be skipped, not fatal"
+        );
+        // ...and the skip is REPORTED. Dropping obj-2 silently is what makes a
+        // short manifest read as a complete one: restore would recreate the
+        // tenant without it and nothing would say why.
+        assert_eq!(skipped.len(), 1, "the dropped object must be recorded");
+        assert_eq!(skipped[0].object_id, "obj-2");
+        assert_eq!(skipped[0].kind, "application");
+        assert!(
+            !skipped[0].reason.is_empty(),
+            "the operator needs to know what failed"
         );
         // Progress still advances for every object in the chunk, including the skip.
         assert_eq!(*done.lock().await, 2);

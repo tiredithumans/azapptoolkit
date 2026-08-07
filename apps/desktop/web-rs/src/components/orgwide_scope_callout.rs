@@ -23,6 +23,7 @@ use crate::components::permission_picker::{MICROSOFT_GRAPH_APP_ID, PickerSelecti
 use azapptoolkit_core::scoping::is_blanket_mailbox_grant;
 
 use crate::components::scope_badge::{is_exchange_scopable_on, is_sharepoint_orgwide};
+use crate::components::ui::Callout;
 
 /// One held grant that reads as organization-wide, carrying everything the
 /// wizard needs to be pre-seeded to it.
@@ -107,7 +108,7 @@ pub fn OrgwideScopeCallout(
                  scope it first.",
             );
         view! {
-            <div class="alert alert--warn">
+            <Callout tone="warn">
                 {format!(
                     "This identity holds organization-wide access: {listing}. It can be confined to specific mailboxes (Exchange RBAC) or sites (Sites.Selected).",
                 )}
@@ -120,7 +121,7 @@ pub fn OrgwideScopeCallout(
                         "Scope…"
                     </Button>
                 </div>
-            </div>
+            </Callout>
         }
     })
 }

@@ -485,6 +485,11 @@ pub fn audit_run_result() -> AuditRunResult {
         cancelled: false,
         sign_in_report_available: true,
         sign_in_consent_required: false,
+        truncated: false,
+        // The demo tenant is a fully-covered run — the coverage-gap banner is a
+        // real-failure surface, and showing it here would misrepresent the
+        // findings below it as incomplete.
+        degraded: Vec::new(),
     }
 }
 

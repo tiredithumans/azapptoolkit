@@ -30,7 +30,9 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_core::audit::{AuditPrincipalKind, MailPermissionScope};
-use azapptoolkit_core::scoping::{is_scopable_exchange_permission, is_sharepoint_orgwide};
+use azapptoolkit_core::scoping::{
+    MICROSOFT_GRAPH_APP_ID, is_scopable_exchange_resource_permission, is_sharepoint_orgwide,
+};
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_exchange::models::{
     ExoApplicationAccessPolicy, ExoAuthorizationResult, ExoServicePrincipal,
@@ -69,11 +71,16 @@ async fn orgwide_mailbox_grant(
     let assignments = client.list_app_role_assignments(&sp.id).await.ok()?;
     let mut perms: Vec<String> = assignments
         .iter()
-        .filter_map(|a| {
-            resolve_grant(&resources, &a.resource_id, &a.app_role_id).map(|(_, _, value)| value)
+        // Resource-aware: `resolve_grant` knows which of the two mailbox
+        // resources the grant sits on, and only Microsoft Graph's mail family
+        // (plus the EWS scope) can be confined by RBAC for Applications.
+        // Testing the bare value admitted Office 365 Exchange Online's retired
+        // Outlook REST `Mail.*` appRoles, which cannot be scoped at all.
+        .filter_map(|a| resolve_grant(&resources, &a.resource_id, &a.app_role_id))
+        .filter(|(resource, _, value)| {
+            is_scopable_exchange_resource_permission(Some(resource), value)
         })
-        .filter(|value| is_scopable_exchange_permission(value))
-        .map(str::to_string)
+        .map(|(_, _, value)| value.to_string())
         .collect();
     perms.sort();
     perms.dedup();
@@ -452,7 +459,10 @@ pub async fn find_mailbox_reachers(
         let Some(value) = role_value_by_id.get(&a.app_role_id) else {
             continue;
         };
-        if !is_scopable_exchange_permission(value) {
+        // `role_value_by_id` is built from the Microsoft Graph SP's appRoles
+        // (see `graph_role_index`), so the resource is known here — name it
+        // rather than letting a value-only test stand in for it.
+        if !is_scopable_exchange_resource_permission(Some(MICROSOFT_GRAPH_APP_ID), value) {
             continue;
         }
         let entry = candidates

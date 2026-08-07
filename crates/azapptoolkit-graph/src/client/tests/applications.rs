@@ -400,9 +400,14 @@ async fn list_applications_all_follows_next_link() {
         .list_applications_all(AppListQuery::default(), None)
         .await
         .unwrap();
+    let (apps, truncated) = apps;
     assert_eq!(apps.len(), 3);
     assert_eq!(apps[0].app_id, "app-1");
     assert_eq!(apps[2].app_id, "app-3");
+    assert!(
+        !truncated,
+        "an uncapped scan that reached the last page is complete"
+    );
 }
 
 #[tokio::test]

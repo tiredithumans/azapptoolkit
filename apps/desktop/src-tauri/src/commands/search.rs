@@ -104,7 +104,7 @@ async fn search_corpus(
     // terms, or `invalidate_app_lists` would drop all three and this would
     // immediately re-pin a pre-mutation corpus for the full `Lists` TTL — where
     // LRU cannot reach it, so a deleted app stayed searchable for an hour.
-    let since = state.cache.generation();
+    let watch = state.cache.generation_for(CacheKind::Lists, &corpus_key);
 
     // Both halves of the corpus are the shared tenant-wide indexes the App Reg /
     // Enterprise lists populate — app registrations without a paired SP appear
@@ -154,13 +154,10 @@ async fn search_corpus(
     }
     let corpus = Arc::new(rows);
     // Pinned: rebuilding this corpus costs two full directory scans. Stored
-    // only if nothing was invalidated since `since` — see above.
-    state.cache.put_typed_index_if_current(
-        CacheKind::Lists,
-        corpus_key,
-        Arc::clone(&corpus),
-        since,
-    );
+    // only if this key was not invalidated since `watch` — see above.
+    state
+        .cache
+        .put_typed_index_if_current(watch, Arc::clone(&corpus));
     corpus
 }
 

@@ -10,6 +10,7 @@ use crate::bindings::events;
 use crate::bindings::updater::{self, UpdateInfo, UpdateProgress};
 use crate::components::changelog_notes::ChangelogNotes;
 use crate::components::modal_shell::ModalShell;
+use crate::components::ui::Callout;
 use crate::hooks::use_progress_stream::use_progress_stream;
 
 #[component]
@@ -100,7 +101,7 @@ pub fn UpdateSplash(open: RwSignal<bool>, info: RwSignal<Option<UpdateInfo>>) ->
                                         })
                                 }}
                                 {move || {
-                                    error.get().map(|e| view! { <div class="alert alert--warn">{e}</div> })
+                                    error.get().map(|e| view! { <Callout tone="warn">{e}</Callout> })
                                 }}
                                 <div class="actions-row">
                                     <Button

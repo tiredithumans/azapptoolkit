@@ -25,7 +25,9 @@ use std::collections::HashMap;
 
 use tauri::{AppHandle, State};
 
-use azapptoolkit_core::models::{PreAuthorizedApplication, RequiredResourceAccess};
+use azapptoolkit_core::restore_plan::{
+    remap_pre_authorized, remap_required_resource_access, rewrite_identifier_uris,
+};
 use azapptoolkit_graph::GraphClient;
 use azapptoolkit_graph::client::{
     ApiApplicationPatch, AppPatch, ApplicationAuthenticationPatch, ApplicationExposeApiPatch,
@@ -34,6 +36,7 @@ use azapptoolkit_graph::client::{
 };
 
 use crate::commands::applications::{create_application_core, invalidate_app_lists};
+use crate::commands::dispatch::SessionDead;
 use crate::commands::managed_identity::grant_managed_identity_roles_core;
 use crate::commands::permissions::grant_admin_consent_core;
 use crate::commands::progress::emit_progress;
@@ -131,11 +134,21 @@ pub async fn restore_tenant(
     // The apps we actually created, paired with their backup + new ids, so
     // passes 2–3 finish wiring exactly those (even after a cancel).
     let mut created: Vec<CreatedApp> = Vec::new();
+    // One latch across all five passes: the first re-auth-fatal error stops the
+    // rest instead of letting each remaining item fail the same way.
+    let session = SessionDead::new();
 
     // ---- Pass 1: create shells ----
     let mut done = 0;
     for app in &backup.app_registrations {
         if state.dr_cancel.is_cancelled() {
+            report.cancelled = true;
+            break;
+        }
+        // A dead session makes every remaining create fail identically, so the
+        // loop would otherwise manufacture one indistinguishable failure per
+        // remaining app and report them as if the tenant had rejected them.
+        if session.is_dead() {
             report.cancelled = true;
             break;
         }
@@ -157,11 +170,14 @@ pub async fn restore_tenant(
                     new_app_id: res.application.app_id,
                 });
             }
-            Err(e) => report.failures.push(RestoreFailure {
-                display_name: app.display_name.clone(),
-                source_app_id: app.source_app_id.clone(),
-                message: e.message,
-            }),
+            Err(e) => {
+                session.note_code(&e.code);
+                report.failures.push(RestoreFailure {
+                    display_name: app.display_name.clone(),
+                    source_app_id: app.source_app_id.clone(),
+                    message: e.message,
+                });
+            }
         }
         done += 1;
         emit(&app_handle, done, total, Some(app.display_name.clone()));
@@ -169,13 +185,19 @@ pub async fn restore_tenant(
 
     // ---- Pass 2: wire references + regenerate secrets (per created app) ----
     for c in &created {
+        if session.is_dead() {
+            break;
+        }
         report
             .apps
-            .push(wire_application(&client, c, &app_id_remap, &mut principals).await);
+            .push(wire_application(&client, c, &app_id_remap, &mut principals, &session).await);
     }
 
     // ---- Pass 3: re-consent (after all apps wired, so resources exist) ----
     for (idx, c) in created.iter().enumerate() {
+        if session.is_dead() {
+            break;
+        }
         if !c.backup.admin_consent_granted {
             continue;
         }
@@ -191,9 +213,12 @@ pub async fn restore_tenant(
                         .push(format!("consent: {} ({})", f.message, f.resource_app_id));
                 }
             }
-            Err(e) => report.apps[idx]
-                .warnings
-                .push(format!("admin consent failed: {}", e.message)),
+            Err(e) => {
+                session.note_code(&e.code);
+                report.apps[idx]
+                    .warnings
+                    .push(format!("admin consent failed: {}", e.message));
+            }
         }
     }
 
@@ -202,6 +227,9 @@ pub async fn restore_tenant(
     // were recreated by the app-reg restore above. Foreign/gallery apps — and
     // paired apps that weren't restored — become runbook entries.
     for ent in &backup.enterprise_apps {
+        if session.is_dead() {
+            break;
+        }
         restore_enterprise_app(&client, ent, &app_id_remap, &mut report, &mut principals).await;
     }
 
@@ -209,7 +237,7 @@ pub async fn restore_tenant(
     // MIs are Azure resources — they can't be created here. Re-bind Graph
     // app-roles to any MI already recreated (matched by name); Azure RBAC and
     // not-yet-recreated MIs become runbook entries.
-    if !backup.managed_identities.is_empty() {
+    if !backup.managed_identities.is_empty() && !session.is_dead() {
         restore_managed_identities(&client, &backup.managed_identities, &mut report).await;
     }
 
@@ -218,6 +246,12 @@ pub async fn restore_tenant(
     if !created.is_empty() {
         invalidate_app_lists(&state.cache, &tenant_id);
     }
+    // Unlike the read-only fan-outs, which return `session.err(..)` rather than
+    // a partial result, a restore has already created objects in the tenant —
+    // discarding the report would leave the operator with no record of what
+    // exists. So the report comes back, flagged, and the front end pairs the
+    // flag with the re-auth prompt.
+    report.session_expired = session.is_dead();
     emit(&app_handle, total, total, None);
     Ok(report)
 }
@@ -264,11 +298,20 @@ struct CreatedApp {
 /// Expose-an-API, authentication, federated credentials, owners, and secret
 /// regeneration. Every step is best-effort — a failure becomes a warning and
 /// the app keeps its other config (it already exists).
+/// Wires one freshly-created app: permissions, URIs, federated credentials,
+/// owners and secrets.
+///
+/// Every step degrades to a warning rather than failing, so a dead session
+/// would otherwise be indistinguishable from a tenant rejecting each individual
+/// write. `session` is the latch that tells them apart: each failure is noted
+/// through it by `ui_code`, keeping `UiError::is_reauth_fatal` the single
+/// definition of which codes are fatal.
 async fn wire_application(
     client: &GraphClient,
     c: &CreatedApp,
     app_id_remap: &HashMap<String, String>,
     principals: &mut HashMap<String, Option<String>>,
+    session: &SessionDead,
 ) -> RestoredApp {
     let app = &c.backup;
     let mut out = RestoredApp {
@@ -288,6 +331,7 @@ async fn wire_application(
             ..Default::default()
         };
         if let Err(e) = client.update_application(&c.new_object_id, &patch).await {
+            session.note_code(e.ui_code());
             out.warnings.push(format!("permissions: {e}"));
         }
     }
@@ -342,6 +386,7 @@ async fn wire_application(
             is_fallback_public_client: Some(app.is_fallback_public_client),
         };
         if let Err(e) = client.patch_application_web(&c.new_object_id, &patch).await {
+            session.note_code(e.ui_code());
             out.warnings.push(format!("authentication: {e}"));
         }
     }
@@ -374,6 +419,7 @@ async fn wire_application(
         match resolve_principal(client, principals, owner).await {
             Some(new_id) => {
                 if let Err(e) = client.add_owner(&c.new_object_id, &new_id).await {
+                    session.note_code(e.ui_code());
                     out.warnings.push(format!("owner: {e}"));
                 }
             }
@@ -395,7 +441,10 @@ async fn wire_application(
                 secret_value: cred.secret_text.unwrap_or_default(),
                 expires: cred.end_date_time,
             }),
-            Err(e) => out.warnings.push(format!("secret '{name}': {e}")),
+            Err(e) => {
+                session.note_code(e.ui_code());
+                out.warnings.push(format!("secret '{name}': {e}"));
+            }
         }
     }
 
@@ -624,54 +673,6 @@ fn map_assignee_role_id(
         .map(|r| r.id.clone())
 }
 
-/// Remaps an app's declared permissions: a `resource_app_id` that names another
-/// app in this backup is rewritten to that app's new appId; first-party (and
-/// any pre-existing external) resource appIds are left untouched. Permission
-/// (role/scope) ids are preserved — first-party ids are stable, and a custom
-/// resource's exposed-scope ids are re-applied verbatim by its own restore.
-fn remap_required_resource_access(
-    rra: &[RequiredResourceAccess],
-    app_id_remap: &HashMap<String, String>,
-) -> Vec<RequiredResourceAccess> {
-    rra.iter()
-        .map(|r| RequiredResourceAccess {
-            resource_app_id: app_id_remap
-                .get(&r.resource_app_id)
-                .cloned()
-                .unwrap_or_else(|| r.resource_app_id.clone()),
-            resource_access: r.resource_access.clone(),
-        })
-        .collect()
-}
-
-/// Rewrites the `api://{source_app_id}` identifier URI to the new appId. Other
-/// URIs (custom domains, other forms) are passed through unchanged.
-fn rewrite_identifier_uris(uris: &[String], source_app_id: &str, new_app_id: &str) -> Vec<String> {
-    let old = format!("api://{source_app_id}");
-    let new = format!("api://{new_app_id}");
-    uris.iter()
-        .map(|u| if u == &old { new.clone() } else { u.clone() })
-        .collect()
-}
-
-/// Remaps pre-authorized client appIds against the backup; a client app that
-/// isn't in the backup is left as-is (it may pre-exist in the destination).
-fn remap_pre_authorized(
-    pre_auth: &[PreAuthorizedApplication],
-    app_id_remap: &HashMap<String, String>,
-) -> Vec<PreAuthorizedApplication> {
-    pre_auth
-        .iter()
-        .map(|p| PreAuthorizedApplication {
-            app_id: app_id_remap
-                .get(&p.app_id)
-                .cloned()
-                .unwrap_or_else(|| p.app_id.clone()),
-            delegated_permission_ids: p.delegated_permission_ids.clone(),
-        })
-        .collect()
-}
-
 /// Cache key for a principal: its UPN (lowercased) when present, else its display
 /// name. `None` when neither is set (nothing to resolve). Mirrors the lookup
 /// branch order in [`resolve_principal_uncached`].
@@ -774,71 +775,6 @@ fn emit(app_handle: &AppHandle, done: usize, total: usize, current_app: Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use azapptoolkit_core::models::ResourceAccess;
-
-    fn remap() -> HashMap<String, String> {
-        // Only the custom app is in the backup; Graph's appId is not.
-        HashMap::from([("custom-src-app".to_string(), "custom-new-app".to_string())])
-    }
-
-    #[test]
-    fn first_party_resource_survives_custom_is_remapped() {
-        let graph = "00000003-0000-0000-c000-000000000000";
-        let rra = vec![
-            RequiredResourceAccess {
-                resource_app_id: graph.to_string(),
-                resource_access: vec![ResourceAccess {
-                    id: "role-1".into(),
-                    r#type: "Role".into(),
-                }],
-            },
-            RequiredResourceAccess {
-                resource_app_id: "custom-src-app".into(),
-                resource_access: vec![ResourceAccess {
-                    id: "scope-1".into(),
-                    r#type: "Scope".into(),
-                }],
-            },
-        ];
-        let out = remap_required_resource_access(&rra, &remap());
-        // First-party Graph appId untouched; its permission id preserved.
-        assert_eq!(out[0].resource_app_id, graph);
-        assert_eq!(out[0].resource_access[0].id, "role-1");
-        // Custom resource appId remapped; scope id preserved (re-applied by the
-        // custom app's own restore).
-        assert_eq!(out[1].resource_app_id, "custom-new-app");
-        assert_eq!(out[1].resource_access[0].id, "scope-1");
-    }
-
-    #[test]
-    fn identifier_uri_appid_form_is_rewritten_others_passthrough() {
-        let uris = vec![
-            "api://src-app".to_string(),
-            "https://contoso.com/app".to_string(),
-        ];
-        let out = rewrite_identifier_uris(&uris, "src-app", "new-app");
-        assert_eq!(out[0], "api://new-app");
-        assert_eq!(out[1], "https://contoso.com/app");
-    }
-
-    #[test]
-    fn pre_authorized_client_appid_remapped_when_in_backup() {
-        let pre = vec![
-            PreAuthorizedApplication {
-                app_id: "custom-src-app".into(),
-                delegated_permission_ids: vec!["p1".into()],
-            },
-            PreAuthorizedApplication {
-                app_id: "external-app".into(),
-                delegated_permission_ids: vec!["p2".into()],
-            },
-        ];
-        let out = remap_pre_authorized(&pre, &remap());
-        assert_eq!(out[0].app_id, "custom-new-app");
-        assert_eq!(out[0].delegated_permission_ids, vec!["p1".to_string()]);
-        // Not in the backup → left as-is (may pre-exist in the destination).
-        assert_eq!(out[1].app_id, "external-app");
-    }
 
     #[test]
     fn assignee_role_maps_default_passthrough_value_match_or_none() {
@@ -961,6 +897,7 @@ mod tests {
             app_registrations: vec![app(2, 1, 3, 1), app(0, 0, 0, 2)],
             enterprise_apps: Vec::new(),
             managed_identities: Vec::new(),
+            skipped: Vec::new(),
         };
 
         // Same cloud, different destination tenant — the expected DR case. Counts

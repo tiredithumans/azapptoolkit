@@ -16,6 +16,7 @@ use crate::bindings::sso::{
 };
 use crate::components::claims_editor::{ClaimsEditor, ClaimsEditorState};
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
+use crate::components::ui::Callout;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
@@ -345,7 +346,7 @@ pub fn SsoWizardDialog(
                                 .get()
                                 .then(|| {
                                     view! {
-                                        <div class="alert alert--warn">
+                                        <Callout tone="warn">
                                             "Custom claims need admin consent for Policy.ReadWrite.ApplicationConfiguration."
                                             <Button
                                                 appearance=Signal::derive(|| ButtonAppearance::Primary)
@@ -354,7 +355,7 @@ pub fn SsoWizardDialog(
                                             >
                                                 "Grant admin consent & retry"
                                             </Button>
-                                        </div>
+                                        </Callout>
                                     }
                                 })
                         }}

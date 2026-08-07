@@ -26,7 +26,9 @@ use crate::components::icon::{Icon, IconName};
 use crate::components::list_scaffold::ListScaffold;
 use crate::components::select_all_bar::SelectAllBar;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList};
+use crate::components::ui::{
+    Callout, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
+};
 use crate::components::virtual_list::VirtualList;
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
@@ -358,11 +360,11 @@ fn LoadedApps(
         {capped
             .then(|| {
                 view! {
-                    <div class="alert alert--warn app-list__cap-notice">
+                    <Callout tone="warn" class="app-list__cap-notice">
                         {format!(
                             "Loaded the first {APPS_HARD_CAP} apps — search and filters apply within this set.",
                         )}
-                    </div>
+                    </Callout>
                 }
             })}
         <VirtualRows items=shown total=total />

@@ -10,7 +10,7 @@ use thaw::{Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 use crate::bindings::{backup, events};
 use crate::components::icon::{Icon, IconName};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{Card, CopyableId, SectionHeader};
+use crate::components::ui::{Callout, Card, CopyableId, SectionHeader};
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
 
@@ -289,6 +289,44 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                             b.enterprise_apps.len(),
                             b.managed_identities.len(),
                         );
+                        // Objects the backup could not capture. Rendered
+                        // BEFORE the save button, because the decision this
+                        // informs is whether to keep this file as the tenant's
+                        // DR artifact — a manifest short by an app restores as
+                        // if that app never existed, and until now the only
+                        // trace was a warn! line in a log nobody reads during an
+                        // incident.
+                        let skipped_notice = (!b.skipped.is_empty())
+                            .then(|| {
+                                let n = b.skipped.len();
+                                let rows = b
+                                    .skipped
+                                    .iter()
+                                    .map(|s| {
+                                        let label = s
+                                            .display_name
+                                            .clone()
+                                            .unwrap_or_else(|| s.object_id.clone());
+                                        let detail = format!(" ({}) — {}", s.kind, s.reason);
+                                        view! {
+                                            <li>
+                                                <strong>{label}</strong>
+                                                {detail}
+                                            </li>
+                                        }
+                                    })
+                                    .collect_view();
+                                view! {
+                                    <Callout tone="warn">
+                                        <p>
+                                            {format!(
+                                                "{n} object(s) could not be read and are NOT in this backup. Restoring it will not recreate them.",
+                                            )}
+                                        </p>
+                                        <ul class="dr-view__skipped-list">{rows}</ul>
+                                    </Callout>
+                                }
+                            });
                         view! {
                             <div class="dr-view__result">
                                 <p class="dr-view__summary">
@@ -298,6 +336,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                                          regeneration on restore.",
                                     )}
                                 </p>
+                                {skipped_notice}
                                 <Button appearance=ButtonAppearance::Primary on_click=save_file>
                                     <Icon name=IconName::Download size=16 /> " Save backup file…"
                                 </Button>
@@ -437,16 +476,32 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
     let enterprise = report.enterprise_apps.clone();
     let managed = report.managed_identities.clone();
     let manual = report.manual_items.clone();
+    // `cancelled` is set for BOTH an operator cancel and a session that died
+    // mid-run, and `session_expired` is the only thing that tells them apart —
+    // the backend has always set it and nothing here read it. The distinction is
+    // the operator's next action: a cancel is resumable as-is, an expired
+    // session means the destination tenant was left half-written by a run that
+    // stopped where it happened to be, and they must re-authenticate first.
+    let session_expired = report.session_expired;
     view! {
         <div class="dr-view__result">
             <p class="dr-view__summary">
                 {format!(
                     "Restored {} app(s){}. {} secret(s) regenerated.",
                     report.apps.len(),
-                    if report.cancelled { " (cancelled before completing — partial)" } else { "" },
+                    match (report.cancelled, session_expired) {
+                        (_, true) => " (stopped early — the sign-in session expired)",
+                        (true, false) => " (cancelled before completing — partial)",
+                        (false, false) => "",
+                    },
                     total_secrets,
                 )}
             </p>
+            <Show when=move || session_expired>
+                <Callout tone="warn">
+                    "The sign-in session expired part-way through this restore, so it stopped where it had got to rather than completing. Everything listed below was created and wired; anything absent was not attempted. Re-authenticate and run the restore again — it recreates only what is missing."
+                </Callout>
+            </Show>
             <Show when=move || has_secrets>
                 <p class="dr-view__warn">
                     "⚠ The regenerated secret values below are shown only once. Save the report, \

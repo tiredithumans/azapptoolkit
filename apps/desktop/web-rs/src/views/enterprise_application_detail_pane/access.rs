@@ -1,4 +1,5 @@
 use super::*;
+use crate::components::ui::Callout;
 
 #[component]
 pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
@@ -500,7 +501,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                 .map(|e| {
                     if e.code == "consent_required" {
                         view! {
-                            <div class="alert alert--warn">
+                            <Callout tone="warn">
                                 <Body1>
                                     {format!("Group membership changes need consent — {}", e.message)}
                                 </Body1>
@@ -513,7 +514,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                                         "Grant consent & retry"
                                     </Button>
                                 </div>
-                            </div>
+                            </Callout>
                         }
                             .into_any()
                     } else {

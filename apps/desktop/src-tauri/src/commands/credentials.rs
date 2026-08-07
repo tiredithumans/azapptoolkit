@@ -51,7 +51,12 @@ pub async fn list_credential_expirations(
     // default projection drags in `requiredResourceAccess`, `verifiedPublisher`,
     // etc. — unused here and, for permission-heavy apps, the bulk of the
     // payload, multiplied across a full-tenant scan on every visit to this view.
-    let apps = client
+    // `_truncated`: this view is a credential-expiry roll-up over the first
+    // MAX_APPS registrations. A tenant past that cap loses the tail of the list,
+    // which understates expiries — acceptable here only because the same cap
+    // governs every other tenant-wide view, so the number shown is consistent
+    // with them rather than silently different.
+    let (apps, _truncated) = client
         .list_applications_all(
             AppListQuery::default()
                 .with_top(PAGE_SIZE)

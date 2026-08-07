@@ -18,6 +18,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::components::bulk_action_bar::BulkActionBar;
 use crate::components::select_all_bar::SelectAllBar;
+use crate::components::ui::Callout;
 use crate::constants::*;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::use_session;
@@ -59,6 +60,32 @@ pub(crate) fn FindingsPane() -> impl IntoView {
 
     view! {
         <div class="findings-pane">
+            // A run whose tenant-wide reads partly failed under-reports risk,
+            // and every other signal on this pane looks identical to a clean
+            // scan. Unconditional (not folded into the no-findings case below):
+            // the dangerous outcome is a run that DOES show findings while
+            // silently omitting whole categories of them.
+            {move || {
+                let gaps = ctrl
+                    .result
+                    .with(|r| r.as_ref().map(|r| r.degraded.clone()).unwrap_or_default());
+                (!gaps.is_empty())
+                    .then(|| {
+                        view! {
+                            <Callout tone="warn">
+                                <p class="findings-pane__degraded-lede">
+                                    "This scan reached every application, but part of the analysis could not run — treat the results as incomplete and re-run."
+                                </p>
+                                <ul class="findings-pane__degraded-list">
+                                    {gaps
+                                        .into_iter()
+                                        .map(|g| view! { <li>{g.description()}</li> })
+                                        .collect_view()}
+                                </ul>
+                            </Callout>
+                        }
+                    })
+            }}
             {move || {
                 let Some(gs) = groups.get() else {
                     return view! {
@@ -74,25 +101,40 @@ pub(crate) fn FindingsPane() -> impl IntoView {
                     <div class="finding-groups">
                         {(!any_findings)
                             .then(|| {
-                                // "Nothing to fix" is an all-clear, and a cancelled
-                                // run has not earned one — it scored an arbitrary
-                                // prefix of the tenant, so a clean result here means
-                                // "nothing found YET". Qualify rather than suppress:
-                                // the pane must not go silently blank.
-                                let partial = ctrl
+                                // "Nothing to fix" is an all-clear, and a run that
+                                // saw only part of the tenant has not earned one —
+                                // it scored an arbitrary prefix, so a clean result
+                                // means "nothing found YET". Qualify rather than
+                                // suppress: the pane must not go silently blank.
+                                //
+                                // TWO ways to be partial, with different remedies:
+                                // cancelled (re-run as-is) and truncated (the tenant
+                                // holds more apps than one run scores, so re-running
+                                // changes nothing).
+                                let (cancelled, truncated) = ctrl
                                     .result
-                                    .with(|r| r.as_ref().is_some_and(|r| r.cancelled));
-                                if partial {
+                                    .with(|r| {
+                                        r.as_ref()
+                                            .map(|r| (r.cancelled, r.truncated))
+                                            .unwrap_or((false, false))
+                                    });
+                                if truncated {
                                     view! {
-                                        <div class="alert alert--warn">
+                                        <Callout tone="warn">
+                                            "No actionable findings among the applications this scan reached — but the tenant holds more app registrations than one run scores, so this is not an all-clear and re-running will not extend it."
+                                        </Callout>
+                                    }
+                                } else if cancelled {
+                                    view! {
+                                        <Callout tone="warn">
                                             "No actionable findings in the part of the tenant this cancelled scan reached. This is not an all-clear — re-run for full coverage."
-                                        </div>
+                                        </Callout>
                                     }
                                 } else {
                                     view! {
-                                        <div class="alert alert--ok">
+                                        <Callout tone="ok">
                                             "No actionable findings — nothing to fix right now."
-                                        </div>
+                                        </Callout>
                                     }
                                 }
                             })}
@@ -300,9 +342,9 @@ fn finding_group_view(
                     {(key == "unused" && !ctrl.report_available.get())
                         .then(|| {
                             view! {
-                                <div class="alert">
+                                <Callout>
                                     "The sign-in activity report wasn't available for this run, so unused detection carries no signal — grant consent above and re-run."
-                                </div>
+                                </Callout>
                             }
                         })}
                     {has_bulk
