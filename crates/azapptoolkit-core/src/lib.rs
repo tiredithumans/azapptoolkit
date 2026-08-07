@@ -14,7 +14,9 @@ pub mod identity;
 pub mod models;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod net;
+pub mod reauth;
 pub mod redirect;
+pub mod restore_plan;
 pub mod scoping;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod settings;

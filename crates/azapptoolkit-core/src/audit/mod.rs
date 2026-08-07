@@ -23,8 +23,8 @@ pub use permissions::{
     EXPIRY_WARNING_DAYS, HIGH_RISK_APP_PERMISSIONS, HIGH_RISK_DELEGATED_PERMISSIONS,
     LONG_LIVED_SECRET_DAYS, MEDIUM_RISK_APP_PERMISSIONS, RISK_CRITICAL, RISK_HIGH, RISK_MEDIUM,
     STALE_APP_DAYS, UNUSED_APP_DAYS, classify_app_permission_risk, downgrade_alternatives,
-    is_risky_delegated_scope, least_privilege_alternative, redundant_app_permissions,
-    risk_level_for_app_permission, subsuming_app_permissions,
+    is_risky_delegated_scope, least_privilege_alternative, least_privilege_alternative_for,
+    redundant_app_permissions, risk_level_for_app_permission, subsuming_app_permissions,
 };
 pub use scoring::{
     SpAuditInput, disable_sign_in_remediation, score_application, score_service_principal,

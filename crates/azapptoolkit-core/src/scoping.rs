@@ -95,13 +95,22 @@ pub fn exchange_role_for_resource_permission(
     }
 }
 
-/// The Exchange application role for a permission `value` whose resource isn't
-/// known at the call site (the effective-scope probe, badge rendering, a
-/// caller-supplied permission list). Unambiguous because the two mapped
-/// resources share no value names: `full_access_as_app` exists only on Office
-/// 365 Exchange Online, and every other mapped value only on Microsoft Graph.
-/// Prefer [`exchange_role_for_resource_permission`] wherever the resource IS
-/// known.
+/// The Exchange application role for a permission `value` whose resource is
+/// genuinely unknown at the call site (badge rendering from a bare value, a
+/// caller-supplied permission list with no resource context).
+///
+/// **Optimistic, not unambiguous.** The doc here used to claim the two mapped
+/// resources "share no value names"; they do — Office 365 Exchange Online
+/// exposes its own `Mail.*` / `Calendars.*` / `Contacts.*` /
+/// `MailboxSettings.*` appRoles (retired Outlook REST), which is exactly why
+/// [`is_unscopable_legacy_exchange_permission`] exists thirty lines below. What
+/// this function actually does is resolve the *Microsoft Graph* reading first,
+/// which is the right precedence for display (Graph's is the one that can be
+/// scoped) and the wrong answer for a gate: it says "scopable" about a legacy
+/// grant that RBAC for Applications cannot touch.
+///
+/// Use [`exchange_role_for_resource_permission`] wherever the resource is
+/// known — which is every gate, and nearly every caller.
 pub fn exchange_role_for_permission(value: &str) -> Option<&'static str> {
     graph_mail_role(value).or(exchange_role_for_resource_permission(
         OFFICE365_EXCHANGE_ONLINE_APP_ID,
@@ -110,9 +119,27 @@ pub fn exchange_role_for_permission(value: &str) -> Option<&'static str> {
 }
 
 /// True when `value` is an Exchange mailbox permission that can be
-/// resource-scoped via RBAC for Applications. Authoritative (map-backed): a
-/// permission that merely *looks* like a mail permission but has no Exchange
-/// application role is **not** scopable.
+/// resource-scoped via RBAC for Applications — **assuming Microsoft Graph**.
+///
+/// Deprecated as a *gate*. It answers `true` for Office 365 Exchange Online's
+/// identically-named `Mail.*` / `Calendars.*` / `Contacts.*` /
+/// `MailboxSettings.*` appRoles, which RBAC for Applications cannot confine, so
+/// every gate built on it treated an unscopable legacy grant as scopable: the
+/// audit counted mailbox reach it could not scope, the effective-scope probe
+/// listed it as a scoping candidate, and a legacy Application Access Policy
+/// verdict was allowed to score it at the reduced "scoped" weight — hiding
+/// genuinely org-wide mailbox access.
+///
+/// AGENTS.md states the rule this violated: permissions travel as
+/// `ResourcePermission { resource_app_id, value }`, and "value-keyed shortcuts
+/// here have silently widened access".
+///
+/// Remaining legitimate use is display-only, where the resource is truly
+/// unavailable and a wrong answer costs a hint rather than access.
+#[deprecated(
+    since = "0.24.3",
+    note = "resource-blind: answers true for unscopable Office 365 Exchange Online appRoles.             Use is_scopable_exchange_resource_permission with the grant's resource_app_id."
+)]
 pub fn is_scopable_exchange_permission(value: &str) -> bool {
     exchange_role_for_permission(value).is_some()
 }
@@ -246,6 +273,29 @@ pub fn is_scopable_sharepoint_resource_permission(
     resource_app_id == Some(MICROSOFT_GRAPH_APP_ID) && is_sharepoint_orgwide(value)
 }
 
+/// True when a `Sites.Selected` grant is the confined end state **this toolkit
+/// can verify** — the positive gate for the healthy `SCOPED_SHAREPOINT` audit
+/// note, and the counterpart to [`is_scopable_sharepoint_resource_permission`].
+///
+/// Deliberately NOT expressible through that function: it is the *org-wide*
+/// gate, and `is_sharepoint_orgwide` excludes `Sites.Selected` by construction
+/// (`value != "Sites.Selected"`), so reusing it here would always answer false.
+///
+/// Only Microsoft Graph qualifies, mirroring the handler limit documented
+/// above. Office 365 SharePoint Online also exposes `Sites.Selected`, and a
+/// grant of it there *is* genuinely confined in SharePoint's own model — but
+/// the per-site grants this toolkit reads and writes are Graph's, so it can
+/// neither verify which sites that grant reaches nor manage it. Claiming the
+/// healthy verdict on a grant it cannot inspect is the same false-confidence
+/// bug as the mailbox side's, so the legacy resource gets no note in either
+/// direction: not org-wide (it isn't), and not confirmed-scoped (unverifiable).
+pub fn is_scoped_sharepoint_resource_permission(
+    resource_app_id: Option<&str>,
+    value: &str,
+) -> bool {
+    resource_app_id == Some(MICROSOFT_GRAPH_APP_ID) && value == "Sites.Selected"
+}
+
 /// Which scoping *authority* can confine a Graph application permission. Each
 /// mechanism has its own target type and apply strategy, but the scope UX shell
 /// (pick permission → choose targets → review) is uniform across them — this enum
@@ -289,8 +339,19 @@ impl ScopeKind {
 /// `full_access_as_app` scope → Exchange RBAC; `Sites.Selected` or a broad
 /// `Sites.*` → SharePoint `Sites.Selected`; everything else (e.g.
 /// `Directory.Read.All`) is org-wide only and returns `None`.
+///
+/// **Display-only; not a gate.** This is the optimistic reading — it resolves
+/// each name against whichever mailbox resource defines it, which is what makes
+/// it usable for a badge built from a bare value (and it must stay that way:
+/// [`EWS_FULL_ACCESS_AS_APP`] exists *only* on Office 365 Exchange Online, so
+/// pinning this to Graph would lose the single most dangerous mailbox grant
+/// there is). The cost is the other direction: it also answers `Exchange` for
+/// that resource's unscopable `Mail.*` namesakes.
+///
+/// Use [`scope_kind_for`] anywhere the answer decides whether an apply action
+/// is offered.
 pub fn scope_kind(value: &str) -> Option<ScopeKind> {
-    if is_scopable_exchange_permission(value) {
+    if exchange_role_for_permission(value).is_some() {
         Some(ScopeKind::Exchange)
     } else if value == "Sites.Selected" || is_sharepoint_orgwide(value) {
         Some(ScopeKind::SharePoint)
@@ -299,7 +360,29 @@ pub fn scope_kind(value: &str) -> Option<ScopeKind> {
     }
 }
 
+/// [`scope_kind`] for a permission whose resource is known — the form every
+/// surface holding a `resource_app_id` should use.
+///
+/// The resource decides whether the mechanism can be applied at all. Office 365
+/// Exchange Online's retired Outlook REST `Mail.*` appRoles and Office 365
+/// SharePoint Online's `Sites.*` share their names with Graph's, and neither is
+/// something this toolkit can confine. Inferring a mechanism from the name
+/// alone offers the operator a "Scope…" action that resolves to a no-op against
+/// that resource, while the grant stays org-wide.
+pub fn scope_kind_for(resource_app_id: Option<&str>, value: &str) -> Option<ScopeKind> {
+    if is_scopable_exchange_resource_permission(resource_app_id, value) {
+        Some(ScopeKind::Exchange)
+    } else if is_scoped_sharepoint_resource_permission(resource_app_id, value)
+        || is_scopable_sharepoint_resource_permission(resource_app_id, value)
+    {
+        Some(ScopeKind::SharePoint)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
+#[allow(deprecated)] // exercises the deprecated value-only gate on purpose
 mod tests {
     use super::*;
 
@@ -505,6 +588,38 @@ mod tests {
     }
 
     #[test]
+    fn the_scoped_sharepoint_gate_is_positive_and_cannot_be_derived_from_the_orgwide_one() {
+        // The healthy note needs its OWN gate: `is_sharepoint_orgwide` excludes
+        // Sites.Selected by construction, so routing this question through
+        // `is_scopable_sharepoint_resource_permission` always answers false —
+        // which is why the note was value-keyed in the first place.
+        assert!(!is_scopable_sharepoint_resource_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Sites.Selected"
+        ));
+        assert!(is_scoped_sharepoint_resource_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Sites.Selected"
+        ));
+        // The legacy resource's Sites.Selected is genuinely confined in
+        // SharePoint's own model, but the per-site grants this toolkit reads are
+        // Graph's — unverifiable here, so no healthy claim.
+        assert!(!is_scoped_sharepoint_resource_permission(
+            Some(OFFICE365_SHAREPOINT_ONLINE_APP_ID),
+            "Sites.Selected"
+        ));
+        assert!(
+            !is_scoped_sharepoint_resource_permission(None, "Sites.Selected"),
+            "an unresolved resource must not earn a healthy verdict"
+        );
+        // Only the scoped model qualifies — a broad grant is not "scoped".
+        assert!(!is_scoped_sharepoint_resource_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Sites.Read.All"
+        ));
+    }
+
+    #[test]
     fn sharepoint_reach_is_reported_on_both_resources() {
         for resource in [
             Some(MICROSOFT_GRAPH_APP_ID),
@@ -566,5 +681,126 @@ mod tests {
         );
         assert!(ScopeKind::Exchange.admin_applicable());
         assert!(ScopeKind::SharePoint.admin_applicable());
+    }
+}
+
+#[cfg(test)]
+mod resource_aware_gate_tests {
+    use super::*;
+
+    /// The defect this pair of functions exists to separate.
+    ///
+    /// Both mailbox resources expose appRoles named `Mail.Read`, `Contacts.Read`
+    /// and friends, and only Microsoft Graph's can be confined by RBAC for
+    /// Applications — Office 365 Exchange Online's are the retired Outlook REST
+    /// family, which nothing here can scope. A value-only gate cannot see the
+    /// difference, so it reported the legacy grant as scopable: the audit
+    /// counted mailbox reach it could not confine, the effective-scope probe
+    /// offered it as a candidate, and a legacy AAP verdict scored it at the
+    /// reduced "scoped" weight — hiding org-wide mailbox access behind a
+    /// healthy-looking badge.
+    #[test]
+    fn the_legacy_namesake_is_not_scopable_even_though_it_shares_the_name() {
+        for value in ["Mail.Read", "Mail.Send", "Contacts.Read", "Calendars.Read"] {
+            assert!(
+                is_scopable_exchange_resource_permission(Some(MICROSOFT_GRAPH_APP_ID), value),
+                "Graph's {value} IS confinable by RBAC for Applications"
+            );
+            assert!(
+                !is_scopable_exchange_resource_permission(
+                    Some(OFFICE365_EXCHANGE_ONLINE_APP_ID),
+                    value
+                ),
+                "Office 365 Exchange Online's {value} is retired Outlook REST — unscopable"
+            );
+            // ...and the deprecated value-only form cannot tell them apart,
+            // which is the whole reason it is deprecated.
+            #[allow(deprecated)]
+            {
+                assert!(is_scopable_exchange_permission(value));
+            }
+        }
+    }
+
+    #[test]
+    fn an_unresolved_resource_is_never_scopable() {
+        // Conservative by construction: an unresolvable resource can only
+        // over-report risk, never under-report it.
+        for value in ["Mail.Read", EWS_FULL_ACCESS_AS_APP, "Sites.Read.All"] {
+            assert!(!is_scopable_exchange_resource_permission(None, value));
+            assert_eq!(scope_kind_for(None, value), None);
+        }
+    }
+
+    #[test]
+    fn the_ews_scope_is_scopable_only_on_the_resource_that_defines_it() {
+        assert_eq!(
+            scope_kind_for(
+                Some(OFFICE365_EXCHANGE_ONLINE_APP_ID),
+                EWS_FULL_ACCESS_AS_APP
+            ),
+            Some(ScopeKind::Exchange),
+            "full_access_as_app lives only on Office 365 Exchange Online"
+        );
+        assert_eq!(
+            scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), EWS_FULL_ACCESS_AS_APP),
+            None,
+            "Graph does not define it, so no mechanism applies there"
+        );
+        // The display-only form stays optimistic so a bare-value badge still
+        // recognises the most dangerous mailbox grant there is.
+        assert_eq!(
+            scope_kind(EWS_FULL_ACCESS_AS_APP),
+            Some(ScopeKind::Exchange)
+        );
+    }
+
+    #[test]
+    fn a_mechanism_is_inferred_only_where_it_can_actually_be_applied() {
+        // The ScopeWizard turns this into an apply step. On the legacy
+        // resources the apply is a no-op that leaves the grant org-wide, so no
+        // mechanism must be offered at all.
+        assert_eq!(
+            scope_kind_for(Some(OFFICE365_EXCHANGE_ONLINE_APP_ID), "Mail.Read"),
+            None
+        );
+        assert_eq!(
+            scope_kind_for(Some(OFFICE365_SHAREPOINT_ONLINE_APP_ID), "Sites.Read.All"),
+            None
+        );
+        assert_eq!(
+            scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), "Sites.Read.All"),
+            Some(ScopeKind::SharePoint)
+        );
+        assert_eq!(
+            scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), "Sites.Selected"),
+            Some(ScopeKind::SharePoint),
+            "already-scoped still reports its mechanism, so the wizard can re-target it"
+        );
+        assert_eq!(
+            scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), "Directory.Read.All"),
+            None
+        );
+    }
+
+    #[test]
+    fn least_privilege_advice_is_not_offered_where_it_cannot_be_followed() {
+        assert_eq!(
+            crate::audit::least_privilege_alternative_for(
+                Some(MICROSOFT_GRAPH_APP_ID),
+                "Mail.Read"
+            ),
+            Some("Scope to specific mailboxes (Exchange RBAC)")
+        );
+        assert_eq!(
+            crate::audit::least_privilege_alternative_for(
+                Some(OFFICE365_EXCHANGE_ONLINE_APP_ID),
+                "Mail.Read"
+            ),
+            None,
+            "telling an operator to scope an unscopable grant sends them after a fix that \
+             cannot be applied, and implies the grant is containable when removal is the \
+             only remedy"
+        );
     }
 }

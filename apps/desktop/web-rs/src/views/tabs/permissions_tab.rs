@@ -34,7 +34,7 @@ use crate::hooks::use_command::use_command;
 use crate::state::{Session, use_session};
 use crate::views::tabs::usage_panel::UsagePanel;
 use azapptoolkit_core::audit::{MailPermissionScope, downgrade_alternatives};
-use azapptoolkit_core::scoping::ScopeKind;
+use azapptoolkit_core::scoping::{ScopeKind, is_scopable_sharepoint_resource_permission};
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::permissions::{PermissionKind, ResolvedPermission};
 
@@ -57,8 +57,14 @@ struct PendingDowngrade {
 /// Exchange RBAC scoping is **app-wide** (one management scope binds the whole
 /// principal's mail roles), so it's driven solely by the app-wide "Exchange
 /// scoping" section below, never per row.
-fn row_scope_kind(value: &str) -> Option<ScopeKind> {
-    is_sharepoint_orgwide(value).then_some(ScopeKind::SharePoint)
+///
+/// Resource-aware: `Sites.*` exists on Office 365 SharePoint Online as well as
+/// on Microsoft Graph, and only Graph's per-site grants are the ones this
+/// toolkit reads and writes. The row's own `resource_app_id` settles it, so the
+/// button appears only where the conversion can actually be performed.
+fn row_scope_kind(resource_app_id: Option<&str>, value: &str) -> Option<ScopeKind> {
+    is_scopable_sharepoint_resource_permission(resource_app_id, value)
+        .then_some(ScopeKind::SharePoint)
 }
 
 /// Runs the admin-consent grant for the app in `detail`, reporting via toasts.
@@ -556,7 +562,7 @@ pub fn PermissionsTab(
                             })
                             .collect_view();
                         view! {
-                            <div class="alert alert--warn">
+                            <Callout tone="warn">
                                 <Body1>
                                     {format!(
                                         "Replace {} with a narrower permission. The narrower one is granted first, then {} is removed — only proceed if the app doesn't use the broader capability, because this changes its effective access.",
@@ -573,7 +579,7 @@ pub fn PermissionsTab(
                                         "Cancel"
                                     </Button>
                                 </div>
-                            </div>
+                            </Callout>
                         }
                     })
             }}
@@ -781,26 +787,27 @@ where
     // restricted per row after the fact — an org-wide Sites.* (mail scoping is
     // app-wide, handled by the "Exchange scoping" section, not this button).
     let scope_button = match (permission_kind, granted, scope_value.as_deref()) {
-        // A held-scopable row is always a Microsoft Graph `Sites.*` application
-        // role, so the selection is fully determined here; the wizard infers the
-        // mechanism from it.
-        (PermissionKind::Application, true, Some(value)) => row_scope_kind(value).map(|_kind| {
-            let sel = PickerSelection {
-                resource_app_id: p.resource_app_id.clone(),
-                kind: PermissionKind::Application,
-                permission_id: p.permission_id.clone(),
-                permission_value: value.to_string(),
-            };
-            let on_click = move |_| scope(sel.clone());
-            view! {
-                <IconButton
-                    icon=IconName::Filter
-                    aria_label="Scope this permission".to_string()
-                    title="Scope…".to_string()
-                    on_click=Callback::new(on_click)
-                />
-            }
-        }),
+        // A held-scopable row is a Microsoft Graph `Sites.*` application role —
+        // now checked rather than assumed, since the row carries its resource.
+        (PermissionKind::Application, true, Some(value)) => {
+            row_scope_kind(Some(&p.resource_app_id), value).map(|_kind| {
+                let sel = PickerSelection {
+                    resource_app_id: p.resource_app_id.clone(),
+                    kind: PermissionKind::Application,
+                    permission_id: p.permission_id.clone(),
+                    permission_value: value.to_string(),
+                };
+                let on_click = move |_| scope(sel.clone());
+                view! {
+                    <IconButton
+                        icon=IconName::Filter
+                        aria_label="Scope this permission".to_string()
+                        title="Scope…".to_string()
+                        on_click=Callback::new(on_click)
+                    />
+                }
+            })
+        }
         _ => None,
     };
 
@@ -869,5 +876,70 @@ where
                 </div>
             </td>
         </tr>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use azapptoolkit_core::scoping::{MICROSOFT_GRAPH_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID};
+
+    /// The "Scope…" button's gate. It must appear exactly where the per-row
+    /// conversion to `Sites.Selected` can actually be performed: offering it
+    /// elsewhere runs an apply that changes nothing while the row re-renders as
+    /// handled, and withholding it hides a remediation the operator can do.
+    #[test]
+    fn the_scope_button_is_offered_only_for_graph_org_wide_sites() {
+        assert_eq!(
+            row_scope_kind(Some(MICROSOFT_GRAPH_APP_ID), "Sites.Read.All"),
+            Some(ScopeKind::SharePoint)
+        );
+        assert_eq!(
+            row_scope_kind(Some(MICROSOFT_GRAPH_APP_ID), "Sites.ReadWrite.All"),
+            Some(ScopeKind::SharePoint)
+        );
+    }
+
+    #[test]
+    fn an_already_scoped_row_needs_no_conversion() {
+        assert_eq!(
+            row_scope_kind(Some(MICROSOFT_GRAPH_APP_ID), "Sites.Selected"),
+            None
+        );
+    }
+
+    #[test]
+    fn mail_is_never_a_per_row_scope() {
+        // Exchange RBAC scoping is app-wide — one management scope binds the
+        // whole principal's mail roles — so it is driven by the app-wide
+        // "Exchange scoping" section, never this button.
+        assert_eq!(
+            row_scope_kind(Some(MICROSOFT_GRAPH_APP_ID), "Mail.Read"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_legacy_sharepoint_resource_gets_no_button() {
+        // Office 365 SharePoint Online exposes the same `Sites.*` names, but the
+        // per-site grants this toolkit reads and writes are Graph's — the
+        // conversion cannot be performed there.
+        assert_eq!(
+            row_scope_kind(Some(OFFICE365_SHAREPOINT_ONLINE_APP_ID), "Sites.Read.All"),
+            None
+        );
+        assert_eq!(
+            row_scope_kind(None, "Sites.Read.All"),
+            None,
+            "an unresolved resource must not earn an apply action"
+        );
+    }
+
+    #[test]
+    fn a_non_sites_permission_has_no_per_row_mechanism() {
+        assert_eq!(
+            row_scope_kind(Some(MICROSOFT_GRAPH_APP_ID), "Directory.Read.All"),
+            None
+        );
     }
 }

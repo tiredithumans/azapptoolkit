@@ -432,11 +432,18 @@ fn rule_sharepoint_advisory(
                 .to_string(),
         );
     }
-    if perms
-        .app_role_grants
-        .iter()
-        .any(|g| g.value.as_str() == "Sites.Selected")
-    {
+    // POSITIVE gate, like the org-wide split above and the mailbox rule's — not
+    // a bare `value == "Sites.Selected"`. Office 365 SharePoint Online exposes
+    // `Sites.Selected` too, and this healthy note claims the app's SharePoint
+    // reach is confined AND knowable; for a legacy-resource grant it is neither
+    // (the per-site grants the toolkit reads are Graph's). A value-keyed check
+    // here reported an app the toolkit cannot inspect as confirmed-scoped.
+    if perms.app_role_grants.iter().any(|g| {
+        crate::scoping::is_scoped_sharepoint_resource_permission(
+            g.resource_app_id.as_deref(),
+            &g.value,
+        )
+    }) {
         c.issues
             .push(format!("{}: Sites.Selected", issue::SCOPED_SHAREPOINT));
     }
@@ -1216,6 +1223,49 @@ mod tests {
                     .any(|r| r.kind == RemediationKind::ScopeSharePointAccess),
                 expect_fix,
                 "{resource} {value}: a Sites.Selected Fix must be offered only where it applies"
+            );
+        }
+    }
+
+    /// The healthy `SCOPED_SHAREPOINT` note asserts SharePoint reach is confined
+    /// AND knowable. Office 365 SharePoint Online exposes `Sites.Selected` too,
+    /// but the per-site grants this toolkit reads are Graph's — so a legacy
+    /// grant is unverifiable, and the bare `value == "Sites.Selected"` check
+    /// this replaces reported it as confirmed-scoped. Same class of bug as the
+    /// mailbox side's, which is gated positively and pinned three ways.
+    #[test]
+    fn the_scoped_sharepoint_note_requires_the_graph_resource() {
+        use crate::scoping::{MICROSOFT_GRAPH_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID};
+        for (resource, expect_note) in [
+            (MICROSOFT_GRAPH_APP_ID, true),
+            (OFFICE365_SHAREPOINT_ONLINE_APP_ID, false),
+        ] {
+            let perms = AppPermissions {
+                app_role_grants: vec![ResourcePermission::on(resource, "Sites.Selected")],
+                ..Default::default()
+            };
+            let item = score_service_principal(&base_sp(), &perms, now());
+            assert_eq!(
+                item.issues
+                    .iter()
+                    .any(|x| x.starts_with(issue::SCOPED_SHAREPOINT)),
+                expect_note,
+                "{resource} Sites.Selected: the healthy note may be claimed only where the \
+                 toolkit can actually inspect the per-site grants: {:?}",
+                item.issues
+            );
+            // And neither resource may read as reaching every site: Sites.Selected
+            // is excluded from `is_sharepoint_orgwide` by construction, so a
+            // legacy grant must fall silent rather than into either org-wide
+            // bucket.
+            assert!(
+                !item
+                    .issues
+                    .iter()
+                    .any(|x| x.starts_with(issue::ORG_WIDE_SHAREPOINT)
+                        || x.starts_with(issue::UNCONFINABLE_SHAREPOINT)),
+                "{resource} Sites.Selected must not be reported as org-wide: {:?}",
+                item.issues
             );
         }
     }
