@@ -609,6 +609,16 @@ h3 {
   display: grid;
   /* topbar · content (the workspace overlays this row) · open-items dock */
   grid-template-rows: var(--topbar-height) 1fr auto;
+  /* ...and ONE column, pinned. `min-width: 0` below stops this box from being
+     stretched by its parent's track, but says nothing about the column THIS
+     grid creates for its own children: an implicit column is `auto`, which
+     sizes to the widest child's min-content. The topbar's search field and
+     tenant pill were doing exactly that — the column resolved ~112px wider than
+     the box, so every row (topbar, content, dock) rendered over-wide and the
+     tenant switcher, the Delete button and the tab strip fell off the right
+     edge below ~1000px. The 0 floor lets the column be narrower than its
+     content so the inner scroll containers do the work. */
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
   /* Grid items default to `min-width: auto`, so a wide child (a data table, a
      long unbroken id) can stretch this 1fr track past the viewport and scroll
@@ -796,6 +806,10 @@ h3 {
   text-align: left;
   cursor: pointer;
   width: 100%;
+  /* Fills its container, then adds padding — and this sheet has no global
+     `* { box-sizing: border-box }`, so without this the row renders wider
+     than the box it was meant to fill by exactly its horizontal padding. */
+  box-sizing: border-box;
 }
 .shell__account-item:hover {
   background: var(--bg-subtle);
@@ -945,13 +959,18 @@ h3 {
 }
 .workspace__panes {
   display: grid;
-  grid-template-columns: 1fr;
+  /* `minmax(0, 1fr)`, not a bare `1fr`: `1fr` means `minmax(auto, 1fr)`, whose
+     auto floor is the pane content's min-content — so one wide detail pane
+     widened the track and spilled the pane past the workspace. */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-3);
   height: 100%;
   min-height: 0;
 }
 .workspace__panes--two {
-  grid-template-columns: 1fr 1fr;
+  /* Same reasoning, doubled: in 2-up compare either pane could otherwise push
+     the other off-screen instead of both scrolling inside their own half. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 .workspace__pane {
   display: flex;
@@ -1021,6 +1040,10 @@ h3 {
   cursor: pointer;
   text-align: left;
   width: 100%;
+  /* Fills its container, then adds padding — and this sheet has no global
+     `* { box-sizing: border-box }`, so without this the row renders wider
+     than the box it was meant to fill by exactly its horizontal padding. */
+  box-sizing: border-box;
   transition: background-color var(--motion-base) var(--ease-standard),
     color var(--motion-base) var(--ease-standard);
 }
@@ -1757,6 +1780,13 @@ h3 {
 }
 .posture-findings {
   display: grid;
+  /* `minmax(0, 1fr)`, never the implicit `auto` track: a row's min-content
+     contribution includes its `white-space: nowrap` title in full, so an `auto`
+     track grows to the longest finding name ("Legacy Application Access Policy
+     scoping") and the count + chevron get pushed outside the card's border. The
+     0 floor lets the track be narrower than its content so the title's own
+     ellipsis does the work instead. */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-1);
 }
 .posture-finding {
@@ -1764,6 +1794,13 @@ h3 {
   align-items: center;
   gap: var(--space-2);
   width: 100%;
+  /* There is no global `* { box-sizing: border-box }` in this sheet, so
+     `width: 100%` + padding would otherwise measure 100% PLUS 16px and spill
+     past the track this row was just constrained to. */
+  box-sizing: border-box;
+  /* A flex container's automatic minimum size is its content's; without this
+     the row refuses to shrink below the full title width and overflows. */
+  min-width: 0;
   padding: var(--space-2);
   border: none;
   border-radius: var(--radius-md);
@@ -1788,6 +1825,9 @@ h3 {
   white-space: nowrap;
 }
 .posture-finding__count {
+  /* Never shrink: the title is the flexible element, and a squeezed count
+     would wrap or clip the very number the row exists to show. */
+  flex: none;
   font-weight: var(--weight-semibold);
   font-variant-numeric: tabular-nums;
 }
@@ -1916,6 +1956,10 @@ h3 {
 .vault-picker__option {
   display: block;
   width: 100%;
+  /* Fills its container, then adds padding — and this sheet has no global
+     `* { box-sizing: border-box }`, so without this the row renders wider
+     than the box it was meant to fill by exactly its horizontal padding. */
+  box-sizing: border-box;
   text-align: left;
   padding: 6px var(--space-2);
   background: transparent;
@@ -2423,6 +2467,10 @@ h3 {
   background: transparent;
   border: none;
   width: 100%;
+  /* Fills its container, then adds padding — and this sheet has no global
+     `* { box-sizing: border-box }`, so without this the row renders wider
+     than the box it was meant to fill by exactly its horizontal padding. */
+  box-sizing: border-box;
   text-align: left;
   font: inherit;
   color: inherit;
@@ -3117,6 +3165,10 @@ h3 {
   flex-direction: column;
   gap: 2px;
   width: 100%;
+  /* Fills its container, then adds padding — and this sheet has no global
+     `* { box-sizing: border-box }`, so without this the row renders wider
+     than the box it was meant to fill by exactly its horizontal padding. */
+  box-sizing: border-box;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -3206,14 +3258,23 @@ h3 {
     padding: 10px var(--space-2);
   }
   .nav__item--selected::before { left: 0; }
+  /* The centred search is capped at `min(520px, 60vw)` — but 60vw measures the
+     whole window, not the space left beside the tenant chip, so once the nav
+     collapses the field kept its full width and the topbar's right third was
+     squeezed until "Contoso Ltd" rendered as "C..". Make the search yield
+     first: a shorter search field still works, a tenant name cut to an initial
+     does not. */
+  .global-search { width: min(520px, 38vw); }
 }
 
 /* Below 740px: tighten topbar; collapse side-by-side compare to one pane.
    (All three lists are full-width now — detail opens in the workspace overlay.) */
 @media (max-width: 740px) {
-  /* One pane at a time on narrow screens — side-by-side compare needs width. */
+  /* One pane at a time on narrow screens — side-by-side compare needs width.
+     Still `minmax(0, ...)`: this is the width-starved case, so the pane must be
+     allowed to be narrower than its content and scroll inside itself. */
   .workspace__panes--two {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .shell__topbar {
     padding: 0 var(--space-3);
@@ -3415,6 +3476,15 @@ h3 {
   flex-direction: column;
   gap: var(--space-2);
 }
+/* "Copy all details" sits between the lede and the fields it copies, so the
+   affordance is visible before the operator starts copying values one at a
+   time. Left-aligned and not stretched: it is one action, not a form row. */
+.sso-summary__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+}
 .sso-claims {
   display: flex;
   flex-direction: column;
@@ -3576,6 +3646,10 @@ h3 {
 }
 .permission-tester .input {
   width: 100%;
+  /* Fills its container, then adds padding — and this sheet has no global
+     `* { box-sizing: border-box }`, so without this the row renders wider
+     than the box it was meant to fill by exactly its horizontal padding. */
+  box-sizing: border-box;
   padding: 6px 10px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
@@ -3605,6 +3679,10 @@ h3 {
   align-items: flex-start;
   gap: 2px;
   width: 100%;
+  /* Fills its container, then adds padding — and this sheet has no global
+     `* { box-sizing: border-box }`, so without this the row renders wider
+     than the box it was meant to fill by exactly its horizontal padding. */
+  box-sizing: border-box;
   padding: 6px 10px;
   border: 0;
   background: transparent;
