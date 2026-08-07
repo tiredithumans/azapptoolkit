@@ -38,7 +38,7 @@ use azapptoolkit_dto::permissions::{
 };
 use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use azapptoolkit_dto::sharepoint::SiteSweepProgress;
-use azapptoolkit_dto::sso::SsoConfigDto;
+use azapptoolkit_dto::sso::{SamlSsoSummary, SsoConfigDto};
 use chrono::{DateTime, TimeZone, Utc};
 
 /// A `UiError` with the given code and message (the error-path mock payload).
@@ -271,6 +271,33 @@ pub fn sso_config(object_id: &str, app_id: &str) -> SsoConfigDto {
         signing_cert_expiry: Some("2027-04-30".to_string()),
         notification_emails: vec!["identity-team@contoso.com".to_string()],
         claims_policy: None,
+        claims_policy_id: None,
+    }
+}
+
+/// The app-owner SAML summary the SSO tab renders under "Details for the
+/// application owner". Deliberately carries no `signing_cert_base64`: the
+/// public certificate is returned only right after creation or rotation, so an
+/// existing app's summary never has one.
+pub fn saml_sso_summary(object_id: &str, app_id: &str) -> SamlSsoSummary {
+    SamlSsoSummary {
+        object_id: object_id.to_string(),
+        service_principal_id: object_id.to_string(),
+        app_id: app_id.to_string(),
+        entity_id_issuer: "https://sts.windows.net/00000000-0000-0000-0000-000000000000/"
+            .to_string(),
+        login_url: "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/saml2"
+            .to_string(),
+        logout_url: "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/saml2"
+            .to_string(),
+        federation_metadata_url:
+            "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/federationmetadata/2007-06/federationmetadata.xml?appid=app-demo"
+                .to_string(),
+        sp_entity_id: "https://saml.contoso.com/sp".to_string(),
+        reply_url: "https://saml.contoso.com/acs".to_string(),
+        signing_cert_base64: None,
+        signing_cert_thumbprint: Some("A1B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
+        signing_cert_expiry: Some("2027-04-30".to_string()),
         claims_policy_id: None,
     }
 }
