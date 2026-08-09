@@ -69,6 +69,14 @@ pub async fn backup_tenant(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<TenantBackup, UiError> {
+    // Claimed before the first await, not beside the dispatch it feeds. A token
+    // claimed after a long read carries a HIGHER generation than a cancel
+    // issued during that read, and `is_cancelled()` (`cancelled >= generation`)
+    // discards it — so a Cancel pressed during the index enumeration below,
+    // which on a large tenant is most of the wait before any progress appears,
+    // did nothing. Pinned by `repo_invariants::cancel`.
+    let cancel = state.dr_cancel.claim();
+    let session = SessionDead::new();
     let client = state.graph_for(&tenant_id);
 
     // Adaptive in-flight concurrency: every 429 (including the per-sub-request
@@ -118,8 +126,6 @@ pub async fn backup_tenant(
     // Carried onto the manifest so a short backup says so — see
     // `TenantBackup::skipped`.
     let mut skipped: Vec<SkippedObject> = Vec::new();
-    let cancel = state.dr_cancel.claim();
-    let session = SessionDead::new();
     let cancelled = dispatch_capped(
         app_chunks,
         || throttle.current_limit(),

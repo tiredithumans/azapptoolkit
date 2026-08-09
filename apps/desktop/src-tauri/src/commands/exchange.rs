@@ -1588,31 +1588,87 @@ pub async fn delete_exchange_scope_group(
     Ok(())
 }
 
+/// Reads this app's management scope and refuses the migration unless what is
+/// there is something the migration can reason about.
+///
+/// Returns the existing recipient filter, or `None` when no scope exists yet —
+/// the clean path, where the caller's `ensure_management_scope` creates it with
+/// exactly the filter this migration computed.
+///
+/// FAIL CLOSED on a scope that exists with **no** `RecipientRestrictionFilter`.
+/// Such a scope confines nothing, and `ensure_management_scope` is create-only,
+/// so it is kept rather than replaced. Proceeding assigns this app's roles
+/// against an unrestricted scope, then strips its org-wide Entra grants and
+/// deletes the legacy policy — leaving the app reaching every mailbox in the
+/// tenant while the report says it was confined. That is strictly worse than
+/// the legacy policy it replaced, and it is the one outcome this whole flow
+/// exists to prevent.
+///
+/// This is the same guard `apply_exchange_mailbox_scope` applies to the same
+/// state (`scope_filter_unreadable`, see its comment block); the migration path
+/// reached the identical assign-then-strip sequence through
+/// `repoint_scope_if_stale`, which returned silently on `None`, and through the
+/// branches that never called it at all. Refusing is safe precisely because the
+/// caller runs this BEFORE the first mutation, so the app is left exactly as it
+/// was — on its legacy policy, which is the status quo, not a half-applied
+/// state. AGENTS.md: "Repointing a management scope is an explicit action, and
+/// fail-closed."
+async fn existing_scope_filter_checked(
+    exo: &ExchangeClient,
+    scope_name: &str,
+) -> Result<Option<String>, UiError> {
+    // Refuse rather than proceed blind on a read error — the same reasoning as
+    // the grant path: `ensure_management_scope` re-reads and aborts on a
+    // *persistent* failure anyway, so this closes the transient case where the
+    // first read errs, the second succeeds, and the pre-existing scope is never
+    // compared at all.
+    let read = exo.get_management_scope(scope_name).await?;
+    scope_filter_decision(read, scope_name)
+}
+
+/// The decision half of [`existing_scope_filter_checked`], split out so the
+/// fail-closed rule is unit-testable without an Exchange round trip.
+fn scope_filter_decision(
+    read: Option<ExoManagementScope>,
+    scope_name: &str,
+) -> Result<Option<String>, UiError> {
+    match read {
+        None => Ok(None),
+        Some(scope) => match scope.recipient_filter {
+            Some(filter) => Ok(Some(filter)),
+            None => Err(UiError::validation(
+                "scope_filter_unreadable",
+                format!(
+                    "a management scope “{scope_name}” already exists for this app but has no \
+                     recipient restriction filter, so it confines nothing — and Exchange keeps the \
+                     existing scope rather than replacing it. Migrating onto it would assign this \
+                     app's roles against an unrestricted scope and then remove the org-wide grants \
+                     and the legacy policy, leaving the app able to reach every mailbox in the \
+                     tenant. Nothing was changed. Review the scope in Exchange, or use “Move to \
+                     managed group” to consolidate onto the toolkit-managed group."
+                ),
+            )),
+        },
+    }
+}
+
 /// Points an existing management scope at `wanted_filter` when its current
-/// filter names a different group set. A no-op when the scope is already right
-/// (or doesn't exist yet — the caller's `ensure_management_scope` just made it
-/// with this filter). Never fatal: a failed repoint leaves the scope as it was,
-/// which is the wider-or-equal side, so it warns rather than erroring out
-/// mid-flow.
+/// filter names a different group set. A no-op when the scope is already right.
+/// Never fatal: a failed repoint leaves the scope as it was, which is the
+/// wider-or-equal side, so it warns rather than erroring out mid-flow.
+///
+/// `current` comes from [`existing_scope_filter_checked`], which the caller has
+/// already run — so by the time this is reached the scope is known to exist and
+/// to carry a filter. It is deliberately not re-read here: the unfiltered case
+/// is fatal and belongs to that guard, not to a function documented as never
+/// fatal.
 async fn repoint_scope_if_stale(
     exo: &ExchangeClient,
     scope_name: &str,
+    current: &str,
     wanted_filter: &str,
     warnings: &mut Vec<String>,
 ) {
-    let existing = match exo.get_management_scope(scope_name).await {
-        Ok(Some(scope)) => scope,
-        Ok(None) => return,
-        Err(err) => {
-            warnings.push(format!(
-                "could not read management scope '{scope_name}' to check its filter ({err})"
-            ));
-            return;
-        }
-    };
-    let Some(current) = existing.recipient_filter.as_deref() else {
-        return;
-    };
     // Refuse to overwrite a filter a rebuild would not reproduce: Exchange
     // applies a scope's filter to EVERY role assignment on it, so dropping an
     // `-and` restriction or a `-not` exclusion here widens mailbox reach
@@ -1860,6 +1916,27 @@ pub async fn migrate_application_access_policies(
     scope_name: Option<String>,
     dry_run: bool,
 ) -> Result<AapMigrationReport, UiError> {
+    // This loop runs once per APP IN THE TENANT, each iteration doing several
+    // multi-second Exchange and Entra round trips — the same shape as the audit
+    // and DR fan-outs, and it had neither of their stop conditions. The operator
+    // could not stop a whole-tenant migration once started, and a session that
+    // died on the first app still burned through every remaining one, producing
+    // an identical "failed" line per app that read as a tenant rejecting the
+    // writes. Shares `audit_cancel` with the security audit and bulk actions
+    // (AGENTS.md), claimed ONCE so a cancel can't be lost at a boundary.
+    //
+    // Claimed BEFORE the three tenant-wide reads below, not after them — the
+    // same rule and the same reason as `run_audit`: `claim()` takes a fresh
+    // generation and `cancel()` stamps whatever generation is current when it
+    // runs, so a token claimed after a long read carries a HIGHER generation
+    // than the cancel the operator issued during it, and `is_cancelled()`
+    // (`cancelled >= generation`) never sees it. `get_application_access_policies`
+    // walks every policy in the tenant, so pressing Cancel while it ran was both
+    // likely and, until this moved, silently discarded.
+    let cancel = state.audit_cancel.claim();
+    let session = SessionDead::new();
+    let mut cancelled = false;
+
     let graph = state.graph_for(&tenant_id);
     let exo = exchange_client_checked(&state, &tenant_id).await?;
 
@@ -1883,28 +1960,23 @@ pub async fn migrate_application_access_policies(
 
     let (batches, mut failures) = group_policies_for_migration(policies);
 
-    // This loop runs once per APP IN THE TENANT, each iteration doing several
-    // multi-second Exchange and Entra round trips — the same shape as the audit
-    // and DR fan-outs, and it had neither of their stop conditions. The operator
-    // could not stop a whole-tenant migration once started, and a session that
-    // died on the first app still burned through every remaining one, producing
-    // an identical "failed" line per app that read as a tenant rejecting the
-    // writes. Shares `audit_cancel` with the security audit and bulk actions
-    // (AGENTS.md), claimed ONCE here so a cancel can't be lost at a boundary.
-    let cancel = state.audit_cancel.claim();
-    let session = SessionDead::new();
-    let mut cancelled = false;
-
     let mut items = Vec::new();
-    for (policy_app_id, batch) in batches {
-        if cancel.is_cancelled() {
+    // Drained rather than consumed by `for`, so a stop can name the apps it
+    // never reached. A cancelled run previously reported only `incomplete: true`
+    // and dropped the remaining batches, leaving the operator to diff the report
+    // against the tenant to find out which apps are still on legacy policies —
+    // the same "a partial run is never presented as a complete one" rule the
+    // flag exists for, applied to the apps rather than to the run.
+    let mut remaining = batches.into_iter();
+    let mut unattempted: Vec<String> = Vec::new();
+    while let Some((policy_app_id, batch)) = remaining.next() {
+        if cancel.is_cancelled() || session.is_dead() {
+            // A dead session makes every remaining app fail identically. Stop
+            // and report what was already migrated rather than manufacturing N
+            // failures.
             cancelled = true;
-            break;
-        }
-        // A dead session makes every remaining app fail identically. Stop and
-        // report what was already migrated rather than manufacturing N failures.
-        if session.is_dead() {
-            cancelled = true;
+            unattempted.push(policy_app_id);
+            unattempted.extend(remaining.map(|(id, _)| id));
             break;
         }
         match migrate_one(
@@ -1945,6 +2017,7 @@ pub async fn migrate_application_access_policies(
         items,
         failures,
         incomplete: cancelled,
+        unattempted,
     })
 }
 
@@ -2023,6 +2096,15 @@ async fn migrate_one(
         .map(str::to_string)
         .unwrap_or_else(|| tenant_defaults.scope_name_for(app_id));
 
+    // Read the scope BEFORE anything is mutated, and refuse an unrestricted one.
+    // Unconditional on purpose: the repoint below only runs for a consolidated
+    // run without an operator-supplied scope name, so gating the check on it
+    // left the other branches — an unconsolidated migration, and an explicit
+    // `scope_override` — reaching assign-then-strip against a scope that
+    // confines nothing. A dry run checks too, so the plan shows the refusal
+    // instead of promising a migration that would fail.
+    let existing_filter = existing_scope_filter_checked(exo, &scope_name).await?;
+
     // Consolidate onto the toolkit-managed group: copy the legacy group(s)'
     // membership into `app_scope_group_<appId>` and scope to THAT, so the old
     // group can be retired and every app's reach is edited in one predictable
@@ -2100,8 +2182,11 @@ async fn migrate_one(
     // the consolidation. Repoint it — but only a scope this tenant's pattern
     // names for THIS app: an operator-supplied `scope_override` may be shared
     // with other apps, and rewriting that would change their reach too.
-    if consolidation.consolidated && scope_override.is_none() {
-        repoint_scope_if_stale(exo, &scope_name, &scope_filter, &mut warnings).await;
+    if let Some(current) = existing_filter.as_deref()
+        && consolidation.consolidated
+        && scope_override.is_none()
+    {
+        repoint_scope_if_stale(exo, &scope_name, current, &scope_filter, &mut warnings).await;
     }
     exo.ensure_service_principal(app_id, &entra_sp.id, &entra_sp.display_name)
         .await?;
@@ -2867,5 +2952,52 @@ mod tests {
             MICROSOFT_GRAPH_APP_ID
         )]));
         assert!(!mailbox_resources_complete(&[]));
+    }
+
+    /// The migration refuses a pre-existing scope that confines nothing.
+    ///
+    /// `ensure_management_scope` is create-only, so such a scope is KEPT.
+    /// Proceeding assigned this app's roles against it, then stripped the
+    /// org-wide Entra grants and deleted the legacy policy — leaving the app
+    /// reaching every mailbox in the tenant while the report said it had been
+    /// confined, which is strictly worse than the policy it replaced. The grant
+    /// path has always refused this exact state (`scope_filter_unreadable`);
+    /// the migration reached it through `repoint_scope_if_stale`, which
+    /// returned silently on `None`, and through the two branches that never
+    /// called it at all.
+    #[test]
+    fn a_scope_with_no_recipient_filter_fails_the_migration_closed() {
+        let scope = |filter: Option<&str>| ExoManagementScope {
+            name: Some("app_scope_1".into()),
+            identity: Some("app_scope_1".into()),
+            recipient_filter: filter.map(str::to_string),
+        };
+
+        // No scope yet: the clean path — `ensure_management_scope` creates it
+        // below with exactly the filter the migration computed.
+        assert_eq!(scope_filter_decision(None, "app_scope_1").unwrap(), None);
+
+        // A scope with a filter is readable, and its filter is handed back so
+        // the repoint can compare group sets without a second round trip.
+        assert_eq!(
+            scope_filter_decision(
+                Some(scope(Some("MemberOfGroup -eq 'CN=a,DC=x'"))),
+                "app_scope_1"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("MemberOfGroup -eq 'CN=a,DC=x'")
+        );
+
+        // The fail-closed case, carrying the same code the grant path uses so
+        // one UI mapping covers both.
+        let err = scope_filter_decision(Some(scope(None)), "app_scope_1")
+            .expect_err("an unrestricted scope must not be migrated onto");
+        assert_eq!(err.code, "scope_filter_unreadable");
+        assert!(
+            err.message.contains("confines nothing"),
+            "the refusal must say WHY, not just that it refused: {}",
+            err.message
+        );
     }
 }

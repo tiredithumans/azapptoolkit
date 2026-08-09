@@ -381,6 +381,11 @@ pub async fn sweep_site_permissions(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<SiteSweepResult, UiError> {
+    // Claimed before the first await: `list_all_sites` walks every site in the
+    // tenant, and a token claimed after it carries a higher generation than a
+    // cancel issued during it, which `is_cancelled()` then discards. Pinned by
+    // `repo_invariants::cancel`.
+    let cancel = state.sweep_cancel.claim();
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
 
     let sites = client
@@ -398,8 +403,6 @@ pub async fn sweep_site_permissions(
             cancelled: false,
         },
     );
-
-    let cancel = state.sweep_cancel.claim();
 
     // Adaptive throttling, like the audit and DR fan-outs. `/sites/*` is the
     // throttle-happiest endpoint family in the transport, and this sweep

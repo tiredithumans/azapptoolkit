@@ -12,6 +12,35 @@ Older releases (**0.19.2 and earlier**) live in
 
 ### Fixed
 
+- **The legacy-policy migration no longer confines an app to a management scope
+  that confines nothing.** If a management scope already existed for the app but
+  carried no recipient restriction filter, the migration accepted it silently,
+  assigned the app's Exchange roles against it, removed the org-wide Entra
+  grants and deleted the legacy Application Access Policy — leaving the app able
+  to reach *every* mailbox in the tenant while the report said it had been
+  scoped. That is strictly worse than the policy it replaced. The migration now
+  refuses that app and changes nothing, with the same message the "Grant scoped
+  access" flow has always shown for the identical situation. Checked on every
+  path, including a dry run, so the plan shows the refusal instead of promising
+  a migration that would misfire.
+- **Cancel now works during the first minutes of five more long-running
+  operations.** A backup, the expired-secret sweep, the Key Vault access sweep,
+  the "who can reach this mailbox" search and the SharePoint site sweep all took
+  their cancellation handle *after* the tenant-wide enumeration that precedes
+  any visible progress — so a Cancel pressed during that phase, the likeliest
+  moment, was discarded and the run continued. Same fix and same cause as the
+  audit and legacy-policy entries below; a test now pins the ordering for every
+  long-running command rather than for one at a time.
+- **A stopped legacy-policy migration now names the apps it never reached.** The
+  report said only that it was incomplete, leaving the remaining apps to be
+  found by comparing it against the tenant — the one thing least likely to work
+  when the run stopped because the session died.
+- **A mailbox scope filter containing a non-ASCII character no longer crashes
+  the app.** Reading an Exchange recipient filter walked it a byte at a time, so
+  the first accented letter, curly quote or non-breaking space *outside* a
+  quoted value hit a character boundary mid-way and panicked. Operator-authored
+  filters reach this from three places, and a filter pasted from a document is
+  enough to trigger it.
 - **A security audit that could not read an API's permissions no longer reports
   itself as clean.** When the toolkit failed to look up the permission
   definitions for a resource — Microsoft Graph itself, most consequentially —
@@ -29,7 +58,6 @@ Older releases (**0.19.2 and earlier**) live in
   corrupted value. One such read anywhere threw away the index every list,
   search and audit surface shares, and the next visit to any of them paid for a
   full directory scan.
-
 - **The legacy-policy migration can now be stopped, and a stopped run says so.**
   Migrating Application Access Policies across a whole tenant looped over every
   affected app doing Exchange and Entra writes with no Cancel and no
