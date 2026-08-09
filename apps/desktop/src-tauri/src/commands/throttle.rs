@@ -144,6 +144,87 @@ impl Drop for ThrottleGuard {
     }
 }
 
+/// The adaptive-throttle + completion-counter pair every capped fan-out needs,
+/// wired once.
+///
+/// Four commands each built this by hand — `bulk_delete_applications`,
+/// `bulk_grant_permissions`, `run_audit` and `sweep_site_permissions` — as an
+/// `Arc<ConcurrencyThrottle>`, a `ThrottleGuard::attach`, and an
+/// `Arc<Mutex<usize>>` bumped inside the spawned task before emitting progress.
+/// Four copies of the wiring is four places to get the *observer lifetime* and
+/// the *cap re-read* right, and that scaffold is where `dispatch_capped`'s
+/// `is_dead()` gating and the progress contract live.
+///
+/// Deliberately NOT a generic fan-out driver: the per-item work, the result
+/// collection and the progress payload genuinely differ per command
+/// (`BulkProgress` vs `AuditProgress`), and a driver abstract enough to cover
+/// all of them would hide the gating rather than share it. This shares the
+/// mechanical part and leaves the decisions visible at each call site.
+pub(crate) struct FanOutMeter {
+    tracker: Arc<ConcurrencyThrottle>,
+    done: Arc<tokio::sync::Mutex<usize>>,
+    /// Detaches the observer on drop; held, never read.
+    _guard: ThrottleGuard,
+}
+
+impl FanOutMeter {
+    /// Starts at `initial` in-flight and attaches the observer to `client`.
+    pub(crate) fn attach(client: Arc<GraphClient>, initial: usize) -> Self {
+        let tracker = Arc::new(ConcurrencyThrottle::new(initial));
+        let _guard = ThrottleGuard::attach(client, tracker.clone());
+        Self {
+            tracker,
+            done: Arc::new(tokio::sync::Mutex::new(0usize)),
+            _guard,
+        }
+    }
+
+    /// The live in-flight cap. `dispatch_capped` re-reads this between
+    /// completions, so a mid-run halving takes effect without restarting.
+    pub(crate) fn limit(&self) -> usize {
+        self.tracker.current_limit()
+    }
+
+    /// The count so far. Read by a command that continues emitting progress
+    /// after the fan-out has joined (the audit's sequential phase 2).
+    pub(crate) async fn done(&self) -> usize {
+        *self.done.lock().await
+    }
+
+    /// A handle the spawned tasks own. The meter itself is not `Clone` on
+    /// purpose — the guard's lifetime is the command's, and cloning it would
+    /// invite a task outliving the detach.
+    pub(crate) fn ticker(&self) -> FanOutTicker {
+        FanOutTicker {
+            tracker: self.tracker.clone(),
+            done: self.done.clone(),
+        }
+    }
+}
+
+/// The task-side half of a [`FanOutMeter`]: counts one completion and reports
+/// the live cap alongside it.
+#[derive(Clone)]
+pub(crate) struct FanOutTicker {
+    tracker: Arc<ConcurrencyThrottle>,
+    done: Arc<tokio::sync::Mutex<usize>>,
+}
+
+impl FanOutTicker {
+    /// Records one completed item and returns `(done_so_far, in_flight_cap)`.
+    ///
+    /// Both are read under the same lock acquisition so a progress event can
+    /// never pair a count with a cap from a different instant — which is the
+    /// kind of skew that makes a progress bar jump backwards.
+    pub(crate) async fn tick(&self) -> (usize, usize) {
+        let mut guard = self.done.lock().await;
+        *guard += 1;
+        let done = *guard;
+        drop(guard);
+        (done, self.tracker.current_limit())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
