@@ -254,6 +254,13 @@ fn register_fixtures() {
     // Sign-out clears the tenant (→ sign-in screen); mocking sign_in lets the
     // demo round-trip back into the shell instead of dead-ending.
     mock_ok("sign_in", &f::sign_in_outcome(demo_tenant()));
+    // `sign_out` must be mocked as a SUCCESS, not left to the friendly-unmocked
+    // path. The shell now only clears the tenant when the backend confirms the
+    // credentials were cleared — reporting "signed out" without that is a claim
+    // the app has not verified. An unmocked `sign_out` therefore reads as a
+    // failure and leaves the demo stuck in the shell. There is no keyring
+    // behind the demo, so signing out really does succeed.
+    mock_ok("sign_out", &());
     mock_ok("reauthenticate", &f::sign_in_outcome(demo_tenant()));
     mock_ok("current_tenants", &vec![demo_tenant()]);
 
