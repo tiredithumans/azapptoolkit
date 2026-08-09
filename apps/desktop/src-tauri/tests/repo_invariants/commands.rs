@@ -1,7 +1,7 @@
 //! Rules that scan the whole command layer, plus the shared source table the
 //! other concern modules read.
 
-/// The `.alert` markup lives in exactly ONE component.
+/// The `.alert` tone vocabulary lives in exactly ONE component.
 ///
 /// AGENTS.md states "one primitive per UI pattern", and `Callout` is that
 /// primitive for inline notices — but 30 files had hand-rolled
@@ -10,6 +10,13 @@
 /// up when the tone vocabulary or the box's markup needs to change in 30 places
 /// at once. The primitive now carries the `class`/`role` escape hatches those
 /// sites needed, so there is no remaining reason to hand-roll one.
+///
+/// The first version of this rule matched the literal `class="alert`, which is
+/// only the *inline* spelling. Five files had already drifted past it by binding
+/// the class to a variable first — `let cls = if ok { "alert alert--ok" } else
+/// { "alert alert--warn" }; view! { <div class=cls> }` — which is the same
+/// bypass with one more line. Matching the tone-class strings themselves catches
+/// both spellings, because the vocabulary is what must not be duplicated.
 #[test]
 fn inline_notice_markup_lives_only_in_the_callout_primitive() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -38,7 +45,15 @@ fn inline_notice_markup_lives_only_in_the_callout_primitive() {
             let Ok(src) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            if src.contains("class=\"alert") {
+            // Both spellings: the inline attribute AND the tone classes bound to
+            // a variable first. Bare `"alert"` is deliberately not matched — it
+            // is too common a substring to key on, and every real bypass so far
+            // reached for a tone modifier.
+            let bypass = src.contains("class=\"alert")
+                || src.contains("\"alert alert--ok\"")
+                || src.contains("\"alert alert--warn\"")
+                || src.contains("\"alert alert--danger\"");
+            if bypass {
                 offenders.push(
                     path.strip_prefix(&root)
                         .unwrap_or(&path)
@@ -53,7 +68,8 @@ fn inline_notice_markup_lives_only_in_the_callout_primitive() {
         offenders.is_empty(),
         "hand-rolled inline-notice markup outside the Callout primitive: {offenders:#?}\n\
          Use `components::ui::Callout` (tone=\"ok\"|\"warn\"|\"danger\", plus optional \
-         class/role) instead of writing the `.alert` classes directly."
+         class/role) instead of writing the `.alert` classes directly — including via a \
+         `let cls = if .. {{ \"alert alert--ok\" }} ..` binding, which is the same bypass."
     );
 }
 

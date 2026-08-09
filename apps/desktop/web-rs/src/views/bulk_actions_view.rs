@@ -18,7 +18,7 @@ use crate::bindings::bulk;
 use crate::bindings::events;
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar, BulkFailure};
 use crate::components::icon::IconName;
-use crate::components::ui::{EmptyState, SectionHeader, TabBar, TabBarItem};
+use crate::components::ui::{Callout, EmptyState, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
 
 #[component]
@@ -201,12 +201,12 @@ pub fn BulkActionsView() -> impl IntoView {
                                     summary
                                         .get()
                                         .map(|s| {
-                                            let cls = if failures.with(|f| f.is_empty()) {
-                                                "alert alert--ok"
+                                            let tone = if failures.with(|f| f.is_empty()) {
+                                                "ok"
                                             } else {
-                                                "alert alert--warn"
+                                                "warn"
                                             };
-                                            view! { <div class=cls>{s}</div> }
+                                            view! { <Callout tone=tone>{s}</Callout> }
                                         })
                                 }}
                                 {move || {

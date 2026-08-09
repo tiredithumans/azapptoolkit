@@ -277,3 +277,46 @@ fn generation_for_hands_out_an_owned_guard_not_a_bare_counter() {
          that never reach a store."
     );
 }
+
+/// `CacheKind::ServicePrincipal` self-invalidates **in the graph client**, and
+/// `invalidate_app_lists` must not touch it.
+///
+/// AGENTS.md states this as its own invariant, and it was the one cache rule in
+/// that list with no mechanical backstop. It is easy to get wrong in a way that
+/// looks like a tidy-up: the SP cache is keyed by `appId`, but every SP mutator
+/// takes an SP *object* id, so a targeted bust is impossible and the client
+/// sweeps the whole `{tenant}|` prefix instead. Someone "completing"
+/// `invalidate_app_lists` by adding the missing kind to it would move the sweep
+/// to the aggregators, where the object-id/appId mismatch makes it a silent
+/// no-op — leaving a patched or deleted SP cached for up to the 60-minute TTL,
+/// skewing the audit's `accountEnabled` read and the detail pane's paired-SP
+/// fields.
+#[test]
+fn service_principal_cache_self_invalidates_in_the_client() {
+    let client_src =
+        include_str!("../../../../../crates/azapptoolkit-graph/src/client/service_principals.rs");
+    assert!(
+        client_src.contains("fn invalidate_sp_cache(&self)")
+            && client_src.contains("invalidate_prefix(CacheKind::ServicePrincipal"),
+        "the graph client must keep sweeping its own `{{tenant}}|` prefix for \
+         CacheKind::ServicePrincipal. The SP mutators know only the SP object id while the cache \
+         is keyed by appId, so the prefix sweep is the only bust that can't miss."
+    );
+
+    let cache_facade = include_str!("../../src/commands/applications/cache.rs");
+    let lists = cache_facade
+        .split_once("pub(crate) fn invalidate_app_lists")
+        .expect("invalidate_app_lists moved")
+        .1;
+    let body = lists
+        .split_once("\npub(crate) fn ")
+        .map(|(b, _)| b)
+        .unwrap_or(lists);
+    assert!(
+        !body.contains("CacheKind::ServicePrincipal"),
+        "invalidate_app_lists must NOT invalidate CacheKind::ServicePrincipal. That kind is keyed \
+         by appId and is swept by the graph client itself (`invalidate_sp_cache`); an \
+         aggregator-side bust here is keyed wrong, so it silently clears nothing while reading as \
+         though it covered the case."
+    );
+}
