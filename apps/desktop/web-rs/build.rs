@@ -16,6 +16,10 @@
 
 use std::path::{Path, PathBuf};
 
+// The pure parser lives in its own file so `src/lib.rs` can mount the same
+// source under `#[cfg(test)]` — a build script is compiled into no test target.
+include!("build_support.rs");
+
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let changelog = repo_root(&manifest).join("CHANGELOG.md");
@@ -40,22 +44,4 @@ fn repo_root(manifest: &Path) -> PathBuf {
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .unwrap_or_else(|| manifest.to_path_buf())
-}
-
-/// The body of `## [version]`, up to the next `## [` header. `None` when the
-/// version has no section (or an empty one) — e.g. a local build whose manifest
-/// version was bumped before the changelog was finalized.
-fn section_for(changelog: &str, version: &str) -> Option<String> {
-    // The closing bracket is part of the match, so `[0.2.4]` cannot hit
-    // `[0.2.41]`.
-    let header = format!("## [{version}]");
-    let mut lines = changelog.lines().skip_while(|l| !l.starts_with(&header));
-    lines.next()?; // the header itself
-    let body = lines
-        .take_while(|l| !l.starts_with("## ["))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string();
-    (!body.is_empty()).then_some(body)
 }

@@ -231,3 +231,11 @@ fn initial_theme() -> Theme {
         .unwrap_or(false);
     if dark { Theme::dark() } else { Theme::light() }
 }
+
+/// `build.rs`'s CHANGELOG parser, mounted so its tests run in `cargo test`.
+/// A build script belongs to no test target, and this extraction has a second,
+/// independent implementation in `release.yml` — the edge cases are worth
+/// pinning on at least this side.
+#[cfg(test)]
+#[path = "../build_support.rs"]
+mod build_support;
