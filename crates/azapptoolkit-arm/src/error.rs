@@ -1,69 +1,21 @@
-use thiserror::Error;
+//! ARM client errors.
+//!
+//! The taxonomy is generated from [`azapptoolkit_core::http_error_enum`] — one
+//! definition shared with `GraphError` and `KeyVaultError`. `ui_hint` stays
+//! hand-written: it is the one method that genuinely differs per crate, naming
+//! this API's Azure RBAC role from the capabilities catalog.
 
 pub type Result<T> = std::result::Result<T, ArmError>;
 
-#[derive(Debug, Error)]
-pub enum ArmError {
-    #[error("unauthorized (401)")]
-    Unauthorized,
-
-    #[error("forbidden (403): {0}")]
-    Forbidden(String),
-
-    #[error("not found (404): {0}")]
-    NotFound(String),
-
-    #[error("throttled (429); retry after {retry_after_secs:?}s")]
-    Throttled { retry_after_secs: Option<u64> },
-
-    #[error("arm error ({status}): {body}")]
-    Api { status: u16, body: String },
-
-    #[error("server error ({status}): {body}")]
-    Server { status: u16, body: String },
-
-    #[error("network: {0}")]
-    Network(String),
-
-    #[error("deserialize: {0}")]
-    Deserialize(String),
-
-    #[error("token: {0}")]
-    Token(azapptoolkit_core::token::TokenError),
-
-    /// Client-side contract violation — e.g. a paging `nextLink` pointing off
-    /// the ARM origin, which is refused before the bearer is attached.
-    #[error("protocol: {0}")]
-    Protocol(String),
+azapptoolkit_core::http_error_enum! {
+    /// Every failure mode of an Azure Resource Manager call.
+    pub enum ArmError {
+        api_display = "arm error ({status}): {body}",
+        api_code = "arm_error",
+    }
 }
 
 impl ArmError {
-    /// Delegates to the shared policy — see
-    /// [`azapptoolkit_core::http_retry::is_retryable_code`]. `ui_code` below is
-    /// this crate's only variant-to-class table.
-    pub fn is_retryable(&self) -> bool {
-        azapptoolkit_core::http_retry::is_retryable_code(self.ui_code())
-    }
-
-    pub fn ui_code(&self) -> &'static str {
-        match self {
-            ArmError::Unauthorized => "unauthorized",
-            ArmError::Forbidden(_) => "forbidden",
-            ArmError::NotFound(_) => "not_found",
-            ArmError::Throttled { .. } => "throttled",
-            ArmError::Api { .. } => "arm_error",
-            ArmError::Server { .. } => "server_error",
-            ArmError::Network(_) => "network_error",
-            ArmError::Deserialize(_) => "deserialize_error",
-            // Pass an auth classification through instead of flattening it:
-            // `is_reauth_fatal` is what stops a long-running fan-out.
-            ArmError::Token(t) => {
-                azapptoolkit_core::reauth::passthrough_code(&t.code).unwrap_or("token_error")
-            }
-            ArmError::Protocol(_) => "protocol_error",
-        }
-    }
-
     /// Actionable role guidance appended to the raw message when surfacing the
     /// error (mirrors `ExchangeError::ui_hint`). A 403 on an ARM call means the
     /// signed-in user's Azure RBAC role is insufficient — sourced from the

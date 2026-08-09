@@ -3,7 +3,7 @@ use crate::bindings::exchange as exchange_bindings;
 use crate::bindings::exchange::PrincipalPermission;
 use crate::bindings::graph_roles;
 use crate::bindings::permissions as permissions_bindings;
-use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
+use crate::components::exchange_scoping_section::ExchangeScopingSection;
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
 use crate::components::orgwide_scope_callout::OrgwideScopeCallout;
 use crate::components::permission_picker::PickerSelection;
@@ -233,13 +233,15 @@ pub(super) fn PermissionsContent(
                                 view! {
                                     <ExchangeScopingSection
                                         app_id=app_id
-                                        target=Signal::derive(move || {
-                                            ExchangeScopeTarget::ServicePrincipal {
-                                                sp_object_id: sp_id.get(),
-                                                display_name: display_name.get(),
-                                                mail_permissions: mail_values.clone(),
-                                                is_managed_identity: false,
-                                            }
+                                        target=Signal::derive(move || ScopeTarget {
+                                            object_id: None,
+                                            sp_object_id: sp_id.get(),
+                                            app_id: app_id.get(),
+                                            display_name: display_name.get(),
+                                            is_managed_identity: false,
+                                        })
+                                        mail_permissions=Signal::derive(move || {
+                                            mail_values.clone()
                                         })
                                         on_changed=Callback::new(move |()| {
                                             reload.update(|n| *n += 1)

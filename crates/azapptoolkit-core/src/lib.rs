@@ -8,6 +8,10 @@ pub mod constants;
 // Pure data types (no fs I/O), so ungated — the wasm frontend uses them as the
 // IPC payload for get/set_tenant_defaults. Persistence lives in `settings`.
 pub mod defaults;
+// Both are server-side only: the macro's generated `is_retryable` calls into
+// `http_retry`, and no WASM surface constructs a client error.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod http_error;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod http_retry;
 pub mod identity;

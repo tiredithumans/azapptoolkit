@@ -17,7 +17,7 @@ use crate::bindings::managed_identity::{self, AppRoleGrantDto, ManagedIdentityDt
 use crate::components::app_site_access_panel::AppSiteAccessPanel;
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
 use crate::components::detail_header::DetailHeader;
-use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
+use crate::components::exchange_scoping_section::ExchangeScopingSection;
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
 use crate::components::orgwide_scope_callout::OrgwideScopeCallout;
 use crate::components::permission_picker::PickerSelection;
@@ -181,6 +181,7 @@ pub fn ManagedIdentityDetailPane(
                 {move || {
                     let mi_sp_id = mi_id_for_table.clone();
                     let mi_app_id_row = mi_app_id_for_scope.clone();
+                    let mi_app_id_target = mi_app_id_for_scope.clone();
                     let mi_app_id_sites = mi_app_id_for_scope.clone();
                     let mi_name_row = mi_name_for_scope.clone();
                     Suspend::new(async move {
@@ -250,13 +251,15 @@ pub fn ManagedIdentityDetailPane(
                                     view! {
                                         <ExchangeScopingSection
                                             app_id=Signal::derive(move || mi_app_id_row.clone())
-                                            target=Signal::derive(move || {
-                                                ExchangeScopeTarget::ServicePrincipal {
-                                                    sp_object_id: mi_sp_id.clone(),
-                                                    display_name: mi_name_row.clone(),
-                                                    mail_permissions: mail_values.clone(),
-                                                    is_managed_identity: true,
-                                                }
+                                            target=Signal::derive(move || ScopeTarget {
+                                                object_id: None,
+                                                sp_object_id: mi_sp_id.clone(),
+                                                app_id: mi_app_id_target.clone(),
+                                                display_name: mi_name_row.clone(),
+                                                is_managed_identity: true,
+                                            })
+                                            mail_permissions=Signal::derive(move || {
+                                                mail_values.clone()
                                             })
                                             on_changed=Callback::new(move |()| {
                                                 reload.update(|n| *n += 1)

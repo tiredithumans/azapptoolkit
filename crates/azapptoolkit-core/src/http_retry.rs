@@ -139,31 +139,79 @@ where
     F: FnMut(u32) -> Fut,
     Fut: std::future::Future<Output = Attempt<T, E>>,
 {
-    let mut n = 0u32;
-    let mut delay_ms = BASE_DELAY_MS;
+    let mut budget = RetryBudget::new();
     loop {
-        match attempt(n).await {
+        match attempt(budget.attempt()).await {
             Attempt::Done(result) => return result,
             Attempt::Retry {
                 retry_after_secs,
                 err,
             } => {
-                if n >= MAX_RETRIES {
+                if !budget.may_retry() {
                     return Err(err);
                 }
                 tracing::warn!(
-                    attempt = n,
+                    attempt = budget.attempt(),
                     label,
                     retry_after_secs = ?retry_after_secs,
                     "transient failure; retrying"
                 );
-                // An explicit `Retry-After` is honored exactly; only the
-                // no-header path uses jittered exponential backoff.
-                sleep_before_retry(retry_after_secs, delay_ms).await;
-                n += 1;
-                delay_ms = next_backoff_ms(delay_ms);
+                budget.wait(retry_after_secs).await;
             }
         }
+    }
+}
+
+/// The retry *schedule*: how many attempts remain and how long the next wait is.
+///
+/// [`with_retries`] covers the common shape — one operation, retried whole — but
+/// Graph's `$batch` retries only the **throttled sub-requests** of a partial
+/// response, so its loop carries state across attempts and cannot be expressed
+/// as `FnMut(u32) -> Future<Attempt<T, E>>`. It therefore open-coded the
+/// schedule against the raw primitives: its own `attempt` counter, its own
+/// `delay_ms`, its own `attempt < MAX_RETRIES` comparison. Same policy, second
+/// implementation — so a change to the budget or the backoff curve reached the
+/// four unified clients and not the batch path.
+///
+/// This is the piece both shapes genuinely share. `with_retries` is now a thin
+/// wrapper over it, and the batch loop drives the same type.
+pub struct RetryBudget {
+    attempt: u32,
+    delay_ms: u64,
+}
+
+impl Default for RetryBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RetryBudget {
+    pub fn new() -> Self {
+        Self {
+            attempt: 0,
+            delay_ms: BASE_DELAY_MS,
+        }
+    }
+
+    /// Zero-based number of the attempt about to run (or running).
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
+    /// Whether another attempt is allowed. Does **not** consume the budget —
+    /// call [`Self::wait`] to do that.
+    pub fn may_retry(&self) -> bool {
+        self.attempt < MAX_RETRIES
+    }
+
+    /// Sleeps out the backoff, then advances to the next attempt. An explicit
+    /// `Retry-After` is honored exactly; only the no-header path uses jittered
+    /// exponential backoff.
+    pub async fn wait(&mut self, retry_after_secs: Option<u64>) {
+        sleep_before_retry(retry_after_secs, self.delay_ms).await;
+        self.attempt += 1;
+        self.delay_ms = next_backoff_ms(self.delay_ms);
     }
 }
 
