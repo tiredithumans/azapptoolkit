@@ -7,6 +7,29 @@
 use azapptoolkit_core::audit::MailPermissionScope;
 use serde::{Deserialize, Serialize};
 
+/// One application permission a principal holds, **with the resource that
+/// exposes it** — the input to `get_mail_scopes_for_principal`.
+///
+/// The resource is not decoration. Mailbox permissions live on two resources
+/// (Microsoft Graph and the legacy Office 365 Exchange Online), both expose
+/// appRoles literally named `Mail.*`, and only Graph's are confinable — plus the
+/// EWS `full_access_as_app` scope, which exists *only* on the Office 365
+/// resource. So neither "assume Graph" nor "match on the value" is right.
+///
+/// This crossed IPC as a bare `Vec<String>`, with the backend re-deriving
+/// scopability from the value alone. Both front-end callers happened to
+/// pre-filter resource-aware, so the shipped behaviour was correct — but the
+/// command is a public IPC entry point, and the value-only gate would have
+/// accepted an Office 365 `Mail.Read` as scopable and reported a mailbox
+/// confinement that does not exist for it. AGENTS.md: carry the resource, never
+/// the bare value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrincipalPermission {
+    pub resource_app_id: String,
+    pub value: String,
+}
+
 /// The effective Exchange-mailbox scoping verdict for one Graph mail permission
 /// an application declares. Returned by `get_mail_permission_scopes` so the
 /// Permissions tab can show whether each mailbox permission
@@ -216,6 +239,15 @@ pub struct AapMigrationReport {
     pub dry_run: bool,
     pub items: Vec<AapMigrationItem>,
     pub failures: Vec<String>,
+    /// The run stopped before every app was processed — the operator cancelled,
+    /// or the session died partway.
+    ///
+    /// A whole-tenant migration that stopped early has left some apps on their
+    /// legacy policies, so a report without this flag reads as "every app is
+    /// migrated" when it means "the apps listed are". Same rule the audit and DR
+    /// reports follow: a partial run is never presented as a complete one.
+    #[serde(default)]
+    pub incomplete: bool,
 }
 
 #[cfg(test)]

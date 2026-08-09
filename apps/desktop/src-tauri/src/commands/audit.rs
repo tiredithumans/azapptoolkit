@@ -106,6 +106,16 @@ pub async fn run_audit(
     // replaced it. (RAII guard shared with the bulk fan-out commands.)
     let _observer_guard = ThrottleGuard::attach(client.clone(), tracker.clone());
 
+    // Claimed BEFORE the prefetch below, not after it. `claim()` takes a fresh
+    // generation and `cancel()` stamps whatever generation is current at the
+    // moment it runs, so a token claimed *after* the six-way join carries a
+    // HIGHER generation than the cancel the operator issued during it — and
+    // `is_cancelled()` compares `cancelled >= generation`, so that cancel was
+    // silently discarded. The prefetch is the longest phase of a large run, so
+    // this was the most likely moment for an operator to press Cancel and the
+    // one window where it did nothing.
+    let cancel = state.audit_cancel.claim();
+
     // Effective Exchange mailbox-scoping is resolved on every run so a mail
     // permission confined to specific mailboxes scores below an org-wide one.
     let exo = audit_exchange_client(&state, &tenant_id);
@@ -262,7 +272,6 @@ pub async fn run_audit(
         sign_in_map,
     });
     let done = Arc::new(Mutex::new(0usize));
-    let cancel = state.audit_cancel.claim();
 
     let mut items: Vec<AuditItem> = Vec::with_capacity(total);
     // A dead session makes every remaining app fail identically, so the run must

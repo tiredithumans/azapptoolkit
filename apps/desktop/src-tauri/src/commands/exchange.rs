@@ -17,6 +17,7 @@ use tauri::State;
 use azapptoolkit_core::audit::ResourcePermission;
 use azapptoolkit_core::audit::{MailPermissionScope, ScopeMechanism};
 use azapptoolkit_core::cache::{Cache, CacheKind};
+use azapptoolkit_core::scoping::exchange_role_for_resource_permission;
 use azapptoolkit_core::scoping::{
     is_blanket_mailbox_grant, is_scopable_exchange_resource_permission,
 };
@@ -30,18 +31,26 @@ use azapptoolkit_exchange::targets::{
     plan_role_assignments, policies_safe_to_remove, require_scopable_targets, rewritable_scope_dns,
     scope_groups_in_filter, targets_from_declared, targets_from_grants, targets_safe_to_strip,
 };
+// `exchange_role_for_permission` is deprecated and stays that way; the three
+// uses left in this file resolve roles for permission sets a resource-aware gate
+// has ALREADY vetted (see each `#[allow(deprecated)]` for which gate). The
+// import is allowed here so the attribute keeps firing for anyone who adds a
+// fourth use without doing that vetting.
+#[allow(deprecated)]
+use azapptoolkit_exchange::exchange_role_for_permission;
 use azapptoolkit_exchange::{
-    ExchangeClient, ExchangeError, SourceGroupRead, exchange_role_for_permission,
-    group_policies_for_migration, member_of_group_filter, plan_source_membership, source_member,
-    unverified_members,
+    ExchangeClient, ExchangeError, SourceGroupRead, group_policies_for_migration,
+    member_of_group_filter, plan_source_membership, source_member, unverified_members,
 };
 use azapptoolkit_graph::GraphClient;
 
 use crate::commands::applications::{invalidate_app_detail_state, invalidate_app_lists};
+use crate::commands::dispatch::SessionDead;
 use crate::commands::graph_roles::{
     ResourceRoles, mailbox_resource_roles, resolve_grant, resolve_value,
 };
 use crate::dto::UiError;
+use crate::dto::exchange::PrincipalPermission;
 use crate::dto::exchange::{
     AapMigrationItem, AapMigrationReport, ExchangeAccessRemovalResult, ExchangeAccessResult,
     ExchangeGroupMemberDto, ExchangeGroupRef, ExchangeMemberFailure, ExchangeMemberMutationResult,
@@ -826,6 +835,12 @@ pub(crate) async fn resolve_mail_scopes(
     orgwide_granted: &HashSet<String>,
     enrich: bool,
 ) -> Result<HashMap<String, MailPermissionScope>, ExchangeError> {
+    // Callers vet the resource before reaching here — `targets_from_declared`
+    // for the manifest paths, the (resource, value) gate in
+    // `get_mail_scopes_for_principal` for the held-permission path — so the
+    // value-only lookup is resolving an already-proven-scopable set, not
+    // deciding scopability. The deprecation stands for new callers.
+    #[allow(deprecated)]
     let scopable: Vec<(&String, &'static str)> = graph_perms
         .iter()
         .filter_map(|p| exchange_role_for_permission(p).map(|role| (p, role)))
@@ -954,6 +969,9 @@ pub(crate) async fn resolve_mail_scopes_audit_cached(
 ) -> Result<HashMap<String, MailPermissionScope>, ExchangeError> {
     // Nothing scopable ⇒ no probe and no cache entry (matches
     // `resolve_mail_scopes` and the Permissions-tab commands).
+    // Pre-vetted by the audit's `declared_values` (resource-aware). See
+    // `resolve_mail_scopes`.
+    #[allow(deprecated)]
     let mut scopable: Vec<&str> = graph_perms
         .iter()
         .filter(|p| exchange_role_for_permission(p).is_some())
@@ -1047,6 +1065,8 @@ pub async fn get_mail_permission_scopes(
     let exo = exchange_client_checked(&state, &tenant_id).await?;
     let scopes = resolve_mail_scopes(&exo, &app.app_id, &scopable, &orgwide, true).await?;
 
+    // `scopable` is `targets_from_declared` output — already resource-vetted.
+    #[allow(deprecated)]
     let entries: Vec<MailScopeEntry> = scopable
         .into_iter()
         .filter_map(|p| {
@@ -1078,21 +1098,36 @@ pub async fn get_mail_scopes_for_principal(
     state: State<'_, AppState>,
     tenant_id: String,
     app_id: String,
-    permissions: Vec<String>,
+    permissions: Vec<PrincipalPermission>,
 ) -> Result<Vec<MailScopeEntry>, UiError> {
-    // Nothing scopable ⇒ no Exchange call (and no needless consent prompt).
-    if !permissions
+    // Resolve each held permission against the resource that exposes it, and
+    // keep only the confinable ones. The value-only gate this replaces would
+    // accept an Office 365 Exchange Online `Mail.Read` — a permission no
+    // management scope can confine — and go on to report a mailbox scoping
+    // verdict for it. Both callers already filtered this way client-side, but a
+    // command is only as safe as its own gate.
+    let scopable: Vec<(String, &'static str)> = permissions
         .iter()
-        .any(|p| exchange_role_for_permission(p).is_some())
-    {
+        .filter_map(|p| {
+            exchange_role_for_resource_permission(&p.resource_app_id, &p.value)
+                .map(|role| (p.value.clone(), role))
+        })
+        .collect();
+    // Nothing scopable ⇒ no Exchange call (and no needless consent prompt).
+    if scopable.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Same cache as `get_mail_permission_scopes`, keyed on the *held*
-    // permission set (caller-supplied), so the same app viewed as an app
-    // registration (declared manifest) and as a bare principal can't collide.
+    // Same cache as `get_mail_permission_scopes`, keyed on the *held* permission
+    // set (caller-supplied), so the same app viewed as an app registration
+    // (declared manifest) and as a bare principal can't collide. Keyed on
+    // resource|value pairs now, so two principals differing only in which
+    // resource exposes a same-named permission get different entries.
     let cache_key = {
-        let mut sorted = permissions.clone();
+        let mut sorted: Vec<String> = permissions
+            .iter()
+            .map(|p| format!("{}|{}", p.resource_app_id, p.value))
+            .collect();
         sorted.sort();
         mail_scopes_key(&tenant_id, &format!("held|{app_id}|{}", sorted.join(",")))
     };
@@ -1112,21 +1147,25 @@ pub async fn get_mail_scopes_for_principal(
     };
 
     let exo = exchange_client_checked(&state, &tenant_id).await?;
-    let scopes = resolve_mail_scopes(&exo, &app_id, &permissions, &orgwide, true).await?;
+    // The vetted values only. Value-keyed output is unambiguous here because the
+    // two confinable sets are disjoint: Microsoft Graph contributes the `Mail.*`
+    // / `Calendars.*` / `Contacts.*` / `MailboxSettings.*` family, Office 365
+    // Exchange Online contributes `full_access_as_app` and nothing else.
+    let values: Vec<String> = scopable.iter().map(|(v, _)| v.clone()).collect();
+    let scopes = resolve_mail_scopes(&exo, &app_id, &values, &orgwide, true).await?;
 
-    let entries: Vec<MailScopeEntry> = permissions
+    let entries: Vec<MailScopeEntry> = scopable
         .into_iter()
-        .filter_map(|p| {
-            let role = exchange_role_for_permission(&p)?;
+        .map(|(value, role)| {
             let scope = scopes
-                .get(&p)
+                .get(&value)
                 .cloned()
                 .unwrap_or(MailPermissionScope::Unknown);
-            Some(MailScopeEntry {
-                graph_permission: p,
+            MailScopeEntry {
+                graph_permission: value,
                 exchange_role: role.to_string(),
                 scope,
-            })
+            }
         })
         .collect();
     state.cache.put(CacheKind::Lists, cache_key, &entries);
@@ -2022,8 +2061,30 @@ pub async fn migrate_application_access_policies(
 
     let (batches, mut failures) = group_policies_for_migration(policies);
 
+    // This loop runs once per APP IN THE TENANT, each iteration doing several
+    // multi-second Exchange and Entra round trips — the same shape as the audit
+    // and DR fan-outs, and it had neither of their stop conditions. The operator
+    // could not stop a whole-tenant migration once started, and a session that
+    // died on the first app still burned through every remaining one, producing
+    // an identical "failed" line per app that read as a tenant rejecting the
+    // writes. Shares `audit_cancel` with the security audit and bulk actions
+    // (AGENTS.md), claimed ONCE here so a cancel can't be lost at a boundary.
+    let cancel = state.audit_cancel.claim();
+    let session = SessionDead::new();
+    let mut cancelled = false;
+
     let mut items = Vec::new();
     for (policy_app_id, batch) in batches {
+        if cancel.is_cancelled() {
+            cancelled = true;
+            break;
+        }
+        // A dead session makes every remaining app fail identically. Stop and
+        // report what was already migrated rather than manufacturing N failures.
+        if session.is_dead() {
+            cancelled = true;
+            break;
+        }
         match migrate_one(
             &graph,
             &exo,
@@ -2037,7 +2098,12 @@ pub async fn migrate_application_access_policies(
         .await
         {
             Ok(item) => items.push(item),
-            Err(msg) => failures.push(format!("{policy_app_id}: {msg}")),
+            Err(err) => {
+                // `note_code` keeps `UiError::is_reauth_fatal` the single
+                // definition of which codes end the run.
+                session.note_code(&err.code);
+                failures.push(format!("{policy_app_id}: {}", err.message));
+            }
         }
     }
 
@@ -2056,6 +2122,7 @@ pub async fn migrate_application_access_policies(
         dry_run,
         items,
         failures,
+        incomplete: cancelled,
     })
 }
 
@@ -2069,17 +2136,27 @@ async fn migrate_one(
     scope_override: Option<&str>,
     tenant_defaults: &TenantDefaults,
     dry_run: bool,
-) -> Result<AapMigrationItem, String> {
+) -> Result<AapMigrationItem, UiError> {
     let identities: Vec<String> = policies.iter().filter_map(|p| p.identity.clone()).collect();
     let mut warnings = Vec::new();
 
     // Resolve the Entra service principal (needed for the EXO pointer ObjectId
     // and to remove the unscoped grants).
+    //
+    // `UiError`, not `String`: this is the boundary AGENTS.md says must carry
+    // the auth classification. Flattening a GraphError/ExchangeError into a
+    // formatted string destroyed the `refresh_missing` / `not_signed_in` /
+    // `consent_required` code, so the caller's `SessionDead` latch could never
+    // fire and a dead session looked like N independent per-app failures.
     let entra_sp = graph
         .get_service_principal_by_app_id(app_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("no Entra service principal for this app")?;
+        .await?
+        .ok_or_else(|| {
+            UiError::not_found(
+                "service_principal_not_found",
+                "no Entra service principal for this app",
+            )
+        })?;
 
     // Resolve EVERY policy's scoping group to its DistinguishedName: the app's
     // one management scope has to span all of them, because that union is what
@@ -2092,15 +2169,21 @@ async fn migrate_one(
             .scope_name
             .clone()
             .or_else(|| policy.scope_identity.clone())
-            .ok_or("policy has no scope group (ScopeName)")?;
-        let group = exo
-            .get_group(&scope_group)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("scope group '{scope_group}' not found"))?;
-        let dn = group
-            .distinguished_name
-            .ok_or_else(|| format!("scope group '{scope_group}' has no distinguished name"))?;
+            .ok_or_else(|| {
+                UiError::validation("no_scope_group", "policy has no scope group (ScopeName)")
+            })?;
+        let group = exo.get_group(&scope_group).await?.ok_or_else(|| {
+            UiError::not_found(
+                "scope_group_not_found",
+                format!("scope group '{scope_group}' not found"),
+            )
+        })?;
+        let dn = group.distinguished_name.ok_or_else(|| {
+            UiError::validation(
+                "scope_group_no_dn",
+                format!("scope group '{scope_group}' has no distinguished name"),
+            )
+        })?;
         if !dns.contains(&dn) {
             dns.push(dn);
         }
@@ -2132,10 +2215,7 @@ async fn migrate_one(
     // AND Office 365 Exchange Online, so a policy confining the EWS
     // `full_access_as_app` scope migrates to `Application EWS.AccessAsApp`
     // instead of being silently dropped.
-    let assignments = graph
-        .list_app_role_assignments(&entra_sp.id)
-        .await
-        .map_err(|e| e.to_string())?;
+    let assignments = graph.list_app_role_assignments(&entra_sp.id).await?;
     let targets = targets_from_grants(&assignments, resources);
     // An empty target set only means "this policy governs nothing" if we
     // actually looked at every resource an AAP can constrain. See
@@ -2192,8 +2272,7 @@ async fn migrate_one(
 
     // 1. management scope, 2. service principal pointer.
     exo.ensure_management_scope(&scope_name, &scope_filter)
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
     // `ensure_management_scope` is create-only, so a RE-RUN (or a scope left by
     // an earlier partial migration) would keep an old filter and silently drop
     // the consolidation. Repoint it — but only a scope this tenant's pattern
@@ -2203,15 +2282,12 @@ async fn migrate_one(
         repoint_scope_if_stale(exo, &scope_name, &scope_filter, &mut warnings).await;
     }
     exo.ensure_service_principal(app_id, &entra_sp.id, &entra_sp.display_name)
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
 
     // 3. scoped role assignments (idempotent). Track which targets ended up
     //    scoped so step 4 only strips the org-wide grant for those.
     let (roles_assigned, _roles_skipped, scoped) =
-        assign_scoped_roles(exo, app_id, &scope_name, &targets, &mut warnings)
-            .await
-            .map_err(|e| e.message)?;
+        assign_scoped_roles(exo, app_id, &scope_name, &targets, &mut warnings).await?;
 
     // 4. remove the unscoped Entra grants so scoping is effective — but only for
     //    permissions whose scoped role actually landed (never strand the app).
