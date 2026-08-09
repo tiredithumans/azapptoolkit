@@ -102,6 +102,24 @@ impl ExchangeClient {
         name: &str,
         recipient_restriction_filter: &str,
     ) -> Result<ExoManagementScope> {
+        // Refuse an unrestricting filter before the write, not after.
+        //
+        // `member_of_group_filter(&[])` yields an empty OPATH string, and the
+        // post-write proof below compares group DN *sets* — so an empty filter
+        // would compare {} to {}, pass, and be reported as a verified success
+        // while the scope had been widened. No caller can currently supply one
+        // (each fails closed first), but "no caller does" is not a property this
+        // function can rely on: it is the single mutator for a filter that
+        // governs every role assignment on the scope.
+        let wanted_groups = crate::targets::scope_groups_in_filter(recipient_restriction_filter);
+        if recipient_restriction_filter.trim().is_empty() || wanted_groups.dns.is_empty() {
+            return Err(crate::error::ExchangeError::Protocol(format!(
+                "refusing to set management scope '{name}' to a filter that confines nothing \
+                 (names no MemberOfGroup clause). Repointing a scope at an empty filter widens \
+                 every role assignment using it to the whole organization."
+            )));
+        }
+
         let values = self
             .invoke_command(
                 "Set-ManagementScope",
@@ -137,19 +155,35 @@ impl ExchangeClient {
         // would reject filters that applied perfectly. The DN set is the
         // property that decides reach, and it is what every caller of this
         // function is actually asserting.
-        let wanted = crate::targets::group_dns_in_filter(recipient_restriction_filter);
+        //
+        // Via `scope_groups_in_filter`, not `group_dns_in_filter`: the latter
+        // throws away `ScopeGroups::complete`, and an incomplete parse yields a
+        // *partial* DN set. Comparing two partial sets can report equal when the
+        // unparsed remainders differ — the type's own doc says an incomplete
+        // answer must never be read as a definite one, and this is the proof
+        // that decides whether a widening write is reported as success.
         let landed = scope
             .recipient_filter
             .as_deref()
-            .map(crate::targets::group_dns_in_filter)
-            .unwrap_or_default();
-        if wanted != landed {
+            .map(crate::targets::scope_groups_in_filter)
+            .unwrap_or(crate::targets::ScopeGroups {
+                dns: Default::default(),
+                complete: true,
+            });
+        if !wanted_groups.complete || !landed.complete {
+            return Err(crate::error::ExchangeError::Protocol(format!(
+                "management scope '{name}' has a recipient filter this client cannot fully \
+                 read, so it cannot prove the filter it just wrote took effect. The scope may \
+                 or may not have been repointed; inspect it in Exchange before relying on it."
+            )));
+        }
+        if wanted_groups.dns != landed.dns {
             return Err(crate::error::ExchangeError::Protocol(format!(
                 "management scope '{name}' did not take the filter it was given: asked for \
                  {} group(s), Exchange reports {}. The scope was NOT repointed as requested; \
                  role assignments using it still reach the previous group set.",
-                wanted.len(),
-                landed.len(),
+                wanted_groups.dns.len(),
+                landed.dns.len(),
             )));
         }
         Ok(scope)

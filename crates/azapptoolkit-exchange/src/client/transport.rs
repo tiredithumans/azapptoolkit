@@ -65,8 +65,33 @@ impl ExchangeClient {
         let mut out: Vec<serde_json::Value> = Vec::new();
         let mut target = url;
         for page in 1..=MAX_PAGES {
-            let bytes = self.send_core(cmdlet, &target, &body).await?;
+            let bytes = match self.send_core(cmdlet, &target, &body).await {
+                Ok(bytes) => bytes,
+                // A failure while following an `@odata.nextLink` is not "this
+                // object does not exist" — pages of it have already been read.
+                // Reclassifying here is what stops `invoke_optional` mapping a
+                // mid-pagination `NotFound` to an empty collection, which every
+                // caller reads as proof of absence. A short list widens access
+                // on the consolidation and reverse-scope paths, so this must
+                // fail rather than truncate.
+                Err(err) if page > 1 => {
+                    return Err(ExchangeError::Protocol(format!(
+                        "{cmdlet} failed on page {page} while following @odata.nextLink \
+                         ({err}); refusing to return a truncated collection"
+                    )));
+                }
+                Err(err) => return Err(err),
+            };
             if bytes.is_empty() {
+                if page > 1 {
+                    // The previous page promised a continuation, so an empty
+                    // body here is a broken response, not the end of the
+                    // collection.
+                    return Err(ExchangeError::Protocol(format!(
+                        "{cmdlet} returned an empty body for page {page} after an \
+                         @odata.nextLink; refusing to return a truncated collection"
+                    )));
+                }
                 return Ok(out);
             }
             let env: Envelope = serde_json::from_slice(&bytes)
@@ -88,6 +113,12 @@ impl ExchangeClient {
     /// Like [`Self::invoke_command`] but maps a "not found" cmdlet error (the
     /// EXO `Get-*` cmdlets throw when an `-Identity` doesn't resolve) to an
     /// empty result, so callers can treat a missing object as `None`.
+    ///
+    /// Only a **first-page** `NotFound` can reach these arms:
+    /// [`Self::invoke_command`] reclassifies any mid-pagination failure as
+    /// `Protocol`. Without that, a continuation that 404'd turned a partially
+    /// read collection into "this object has nothing", which the consolidation
+    /// planner and the reverse scope lookup both read as proof of absence.
     pub(crate) async fn invoke_optional(
         &self,
         cmdlet: &str,

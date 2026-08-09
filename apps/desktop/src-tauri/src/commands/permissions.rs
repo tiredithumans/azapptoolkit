@@ -571,19 +571,58 @@ pub async fn grant_single_permission(
     permission_id: String,
     kind: PermissionKind,
 ) -> Result<GrantResult, UiError> {
-    let entry_type = match kind {
-        PermissionKind::Application => "Role",
-        PermissionKind::Delegated => "Scope",
-        PermissionKind::Unknown => {
-            return Err(UiError::validation(
-                "invalid_permission_kind",
-                "permission kind must be Application or Delegated",
-            ));
-        }
-    };
-
     let client = state.graph_for(&tenant_id);
-    let mut app = client.get_application(&object_id).await?;
+    let (result, sp_created) =
+        grant_single_permission_core(&client, &object_id, &resource_app_id, &permission_id, kind)
+            .await?;
+
+    // A first grant that materializes the app's SP adds an Enterprise App row /
+    // search-index entry, so bust the full list caches; otherwise detail+audit.
+    if sp_created {
+        super::applications::invalidate_app_lists(&state.cache, &tenant_id);
+    } else {
+        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
+    }
+    Ok(result)
+}
+
+/// The manifest entry type a permission kind declares, or a validation error for
+/// `Unknown`.
+///
+/// Split out so the mapping is testable without a session: `Unknown` reaching
+/// Graph would declare a `requiredResourceAccess` entry with a meaningless type.
+fn entry_type_for(kind: PermissionKind) -> Result<&'static str, UiError> {
+    match kind {
+        PermissionKind::Application => Ok("Role"),
+        PermissionKind::Delegated => Ok("Scope"),
+        PermissionKind::Unknown => Err(UiError::validation(
+            "invalid_permission_kind",
+            "permission kind must be Application or Delegated",
+        )),
+    }
+}
+
+/// Shared core of [`grant_single_permission`]: manifest patch + runtime grant,
+/// with no `State` and no cache side effects. Returns the result and whether the
+/// grant materialized the app's service principal (which decides how far the
+/// caller must invalidate).
+///
+/// Extracted for the reason `grant_admin_consent_core` and
+/// `grant_managed_identity_roles_core` already were: behind a `#[tauri::command]`
+/// taking `State`, the idempotence rules below (an already-assigned app role is a
+/// skip, a scope id the resource does not expose is a structured failure rather
+/// than an error) were only reachable from a signed-in app.
+pub(crate) async fn grant_single_permission_core(
+    client: &azapptoolkit_graph::GraphClient,
+    object_id: &str,
+    resource_app_id: &str,
+    permission_id: &str,
+    kind: PermissionKind,
+) -> Result<(GrantResult, bool), UiError> {
+    let entry_type = entry_type_for(kind)?;
+    let resource_app_id = resource_app_id.to_string();
+    let permission_id = permission_id.to_string();
+    let mut app = client.get_application(object_id).await?;
 
     // 1) Patch requiredResourceAccess if the (resource, permission, kind)
     //    triple isn't already declared. Empty resource entry with the right
@@ -598,7 +637,7 @@ pub async fn grant_single_permission(
             required_resource_access: Some(app.required_resource_access.clone()),
             ..Default::default()
         };
-        client.update_application(&object_id, &patch).await?;
+        client.update_application(object_id, &patch).await?;
     }
 
     // 2) Create the runtime grant. Errors stay structured so the UI can
@@ -684,20 +723,16 @@ pub async fn grant_single_permission(
         PermissionKind::Unknown => unreachable!("guarded above"),
     }
 
-    // A first grant that materializes the app's SP adds an Enterprise App row /
-    // search-index entry, so bust the full list caches; otherwise detail+audit.
-    if sp_created {
-        super::applications::invalidate_app_lists(&state.cache, &tenant_id);
-    } else {
-        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
-    }
-    Ok(GrantResult {
-        client_service_principal_id: client_sp.id,
-        role_assignments_created,
-        role_assignments_skipped,
-        scope_grants_upserted,
-        failures,
-    })
+    Ok((
+        GrantResult {
+            client_service_principal_id: client_sp.id,
+            role_assignments_created,
+            role_assignments_skipped,
+            scope_grants_upserted,
+            failures,
+        },
+        sp_created,
+    ))
 }
 
 /// Declares a single permission in `object_id`'s `requiredResourceAccess`
@@ -814,19 +849,59 @@ pub async fn downgrade_application_permission(
     broad_value: String,
     narrow_value: String,
 ) -> Result<DowngradeOutcome, UiError> {
-    if !azapptoolkit_core::audit::downgrade_alternatives(&broad_value)
-        .contains(&narrow_value.as_str())
-    {
+    let client = state.graph_for(&tenant_id);
+    let (outcome, error) = downgrade_application_permission_core(
+        &client,
+        &object_id,
+        &resource_app_id,
+        &broad_value,
+        &narrow_value,
+    )
+    .await?;
+
+    if outcome.narrow_granted || outcome.broad_revoked || outcome.declaration_swapped {
+        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
+    }
+    if let Some(e) = error {
+        return Err(e);
+    }
+    Ok(outcome)
+}
+
+/// True when `narrow_value` is a documented narrower alternative of
+/// `broad_value`.
+///
+/// The request arrives from the UI, so it is re-validated here rather than
+/// trusted: the pair table is the only thing that makes this action a
+/// *downgrade* rather than an arbitrary permission swap.
+fn is_documented_downgrade(broad_value: &str, narrow_value: &str) -> bool {
+    azapptoolkit_core::audit::downgrade_alternatives(broad_value).contains(&narrow_value)
+}
+
+/// Shared core of [`downgrade_application_permission`]: grant-before-strip, then
+/// the declaration swap. No `State`, no cache side effects.
+///
+/// Returns `(outcome, error)` rather than `Result<outcome>` because a failure
+/// *after* the first mutation still has real writes to report — the caller must
+/// invalidate on the partial success before surfacing the error, which is
+/// exactly the ordering the command layer used to inline.
+pub(crate) async fn downgrade_application_permission_core(
+    client: &azapptoolkit_graph::GraphClient,
+    object_id: &str,
+    resource_app_id: &str,
+    broad_value: &str,
+    narrow_value: &str,
+) -> Result<(DowngradeOutcome, Option<UiError>), UiError> {
+    if !is_documented_downgrade(broad_value, narrow_value) {
         return Err(UiError::validation(
             "not_a_downgrade",
             format!("{narrow_value} is not a documented narrower alternative of {broad_value}"),
         ));
     }
 
-    let client = state.graph_for(&tenant_id);
-    let app = client.get_application(&object_id).await?;
+    let app = client.get_application(object_id).await?;
     let resource_sp = client
-        .resolve_resource_sp(&resource_app_id)
+        .resolve_resource_sp(resource_app_id)
         .await?
         .ok_or_else(|| {
             UiError::not_found(
@@ -841,13 +916,13 @@ pub async fn downgrade_application_permission(
             .find(|r| r.value == value && r.is_enabled != Some(false))
             .map(|r| r.id.clone())
     };
-    let Some(broad_id) = role_id(&broad_value) else {
+    let Some(broad_id) = role_id(broad_value) else {
         return Err(UiError::validation(
             "unknown_permission",
             format!("{broad_value} is not an app role on this resource"),
         ));
     };
-    let Some(narrow_id) = role_id(&narrow_value) else {
+    let Some(narrow_id) = role_id(narrow_value) else {
         return Err(UiError::validation(
             "unknown_permission",
             format!("this resource does not expose {narrow_value}, so it cannot be swapped in"),
@@ -890,25 +965,19 @@ pub async fn downgrade_application_permission(
     // manifest keeps matching the live grants (both still present).
     if error.is_none() {
         let mut next = app.required_resource_access.clone();
-        if swap_declared_role(&mut next, &resource_app_id, &broad_id, &narrow_id) {
+        if swap_declared_role(&mut next, resource_app_id, &broad_id, &narrow_id) {
             let patch = azapptoolkit_graph::client::AppPatch {
                 required_resource_access: Some(next),
                 ..Default::default()
             };
-            match client.update_application(&object_id, &patch).await {
+            match client.update_application(object_id, &patch).await {
                 Ok(_) => outcome.declaration_swapped = true,
                 Err(e) => error = Some(e.into()),
             }
         }
     }
 
-    if outcome.narrow_granted || outcome.broad_revoked || outcome.declaration_swapped {
-        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
-    }
-    if let Some(e) = error {
-        return Err(e);
-    }
-    Ok(outcome)
+    Ok((outcome, error))
 }
 
 // ---------------- Revoke ----------------
@@ -985,6 +1054,42 @@ mod tests {
             value: value.into(),
             is_enabled: enabled,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_application_and_delegated_declare_a_manifest_entry() {
+        // `Unknown` reaching Graph would PATCH `requiredResourceAccess` with a
+        // meaningless entry type, which is not something the portal can show or
+        // a later grant can match. It is rejected before any round trip.
+        assert_eq!(entry_type_for(PermissionKind::Application).unwrap(), "Role");
+        assert_eq!(entry_type_for(PermissionKind::Delegated).unwrap(), "Scope");
+        let err = entry_type_for(PermissionKind::Unknown).expect_err("Unknown must be refused");
+        assert_eq!(err.code, "invalid_permission_kind");
+    }
+
+    #[test]
+    fn a_downgrade_is_only_a_downgrade_if_the_table_says_so() {
+        // The request comes from the UI, so the pair is re-validated here. Without
+        // this the action would swap any permission for any other while still
+        // being presented to the operator as "downgrade to least privilege".
+        let broad = "Mail.ReadWrite";
+        let narrower = azapptoolkit_core::audit::downgrade_alternatives(broad);
+        assert!(
+            !narrower.is_empty(),
+            "fixture assumes {broad} has documented alternatives"
+        );
+        for n in narrower {
+            assert!(is_documented_downgrade(broad, n));
+        }
+        // Not a documented pair, and not the reverse direction either.
+        assert!(!is_documented_downgrade(broad, "Directory.ReadWrite.All"));
+        assert!(!is_documented_downgrade(broad, broad));
+        for n in azapptoolkit_core::audit::downgrade_alternatives(broad) {
+            assert!(
+                !is_documented_downgrade(n, broad),
+                "{n} -> {broad} widens access and must never validate as a downgrade"
+            );
         }
     }
 

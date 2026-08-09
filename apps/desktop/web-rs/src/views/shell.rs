@@ -59,11 +59,36 @@ pub fn AppShell(children: Children) -> impl IntoView {
         if let Some(t) = tenant.get() {
             signing_out.set(true);
             leptos::task::spawn_local(async move {
-                let _ = crate::bindings::auth::sign_out(&t).await;
+                // A failed sign-out means the backend did NOT clear the OS
+                // keyring, so the refresh token is still on disk. Discarding the
+                // result and clearing the tenant anyway made "signed out" a
+                // claim the app had never verified — and on a shared workstation
+                // that claim is the entire point of the button.
+                //
+                // So the local session is cleared only on success. Staying put
+                // is the honest state (the operator IS still signed in) and it
+                // is also the only way the error can be seen: `ToastHost` mounts
+                // inside this tenant-gated shell, so a toast pushed on the way
+                // out would unmount before it rendered.
+                let outcome = crate::bindings::auth::sign_out(&t).await;
                 // Reset before the tenant clears: that unmounts this shell, and
                 // writing to a signal after its owner is disposed is an error.
                 signing_out.set(false);
-                session.set_active_tenant(None);
+                match outcome {
+                    Ok(()) => session.set_active_tenant(None),
+                    Err(e) => {
+                        session.toast_error(
+                            format!(
+                                "Sign-out failed, so you are still signed in and the stored \
+                                 credentials were not cleared: {}. Try again — if it keeps \
+                                 failing, remove the azapptoolkit entry from your OS credential \
+                                 store.",
+                                e.message
+                            ),
+                            None,
+                        );
+                    }
+                }
             });
         } else {
             session.set_active_tenant(None);

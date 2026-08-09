@@ -52,18 +52,28 @@ struct SearchRow {
 /// One half of the corpus, degrading a failed index read to no rows for that
 /// half instead of failing the search. Named rather than a closure because the
 /// two halves hold different element types.
+///
+/// Returns whether the half actually loaded. The caller **must** carry that
+/// through: degrading the current query is the documented contract, but caching
+/// the degraded result is not. An empty half is indistinguishable from a tenant
+/// with no such objects once it is stored, so a single transient Graph error
+/// used to hide every app registration (or every enterprise app) from search for
+/// the whole `Lists` TTL — pinned, so LRU could not evict it either.
 fn corpus_half<T>(
     index: Result<Arc<Vec<T>>, azapptoolkit_graph::GraphError>,
     which: &str,
-) -> Arc<Vec<T>> {
-    index.unwrap_or_else(|err| {
-        tracing::info!(
-            ?err,
-            index = which,
-            "global search: corpus half unavailable"
-        );
-        Arc::new(Vec::new())
-    })
+) -> (Arc<Vec<T>>, bool) {
+    match index {
+        Ok(v) => (v, true),
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                index = which,
+                "global search: corpus half unavailable — serving partial results, not caching"
+            );
+            (Arc::new(Vec::new()), false)
+        }
+    }
 }
 
 /// Returns the tenant's typed-cached search corpus, building it from the SP +
@@ -121,8 +131,8 @@ async fn search_corpus(
         crate::commands::applications::app_name_index_cached(state, client, tenant_id),
     )
     .await;
-    let sps = corpus_half(sps, "service_principals");
-    let apps = corpus_half(apps, "applications");
+    let (sps, sps_ok) = corpus_half(sps, "service_principals");
+    let (apps, apps_ok) = corpus_half(apps, "applications");
 
     let mut rows: Vec<SearchRow> = Vec::with_capacity(sps.len() + apps.len());
     for a in apps.iter() {
@@ -154,10 +164,20 @@ async fn search_corpus(
     }
     let corpus = Arc::new(rows);
     // Pinned: rebuilding this corpus costs two full directory scans. Stored
-    // only if this key was not invalidated since `watch` — see above.
-    state
-        .cache
-        .put_typed_index_if_current(watch, Arc::clone(&corpus));
+    // only if this key was not invalidated since `watch` (see above) AND both
+    // halves loaded — a partial corpus is served to this caller but never
+    // cached, so the next keystroke retries the failed half instead of reading
+    // a silent all-clear for the rest of the TTL.
+    if sps_ok && apps_ok {
+        state
+            .cache
+            .put_typed_index_if_current(watch, Arc::clone(&corpus));
+    } else {
+        tracing::warn!(
+            tenant_id,
+            "global search: corpus incomplete — serving it without caching"
+        );
+    }
     corpus
 }
 

@@ -301,3 +301,10 @@ pub(crate) fn config_directory() -> std::path::PathBuf {
     }
     std::path::PathBuf::from(".")
 }
+
+/// `build.rs`'s pure parsers, mounted so their tests run in `cargo test`.
+/// A build script belongs to no test target, so this is the only way to cover
+/// the `.env` parsing that decides the shipped client/tenant id.
+#[cfg(test)]
+#[path = "../build_support.rs"]
+mod build_support;

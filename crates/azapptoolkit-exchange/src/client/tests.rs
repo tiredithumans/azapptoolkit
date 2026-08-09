@@ -638,6 +638,77 @@ async fn a_single_page_response_makes_exactly_one_request() {
 }
 
 #[tokio::test]
+async fn an_empty_body_mid_pagination_fails_instead_of_truncating() {
+    // The previous page promised a continuation, so an empty body here is a
+    // broken response — not the end of the collection. Returning the pages read
+    // so far as `Ok` handed the consolidation planner a short list, and a short
+    // list is what its "unverified == 0" check reads as "nothing left to
+    // verify". A truncated collection widens access, so it has to fail.
+    let server = MockServer::start().await;
+    let page2 = format!("{}/page2", server.uri());
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [{ "Name": "scope-a", "RecipientFilter": "MemberOfGroup -eq 'CN=a'" }],
+            "@odata.nextLink": page2,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/page2"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(Vec::new()))
+        .mount(&server)
+        .await;
+
+    match make_client(&server.uri()).list_management_scopes().await {
+        Err(ExchangeError::Protocol(msg)) => {
+            assert!(
+                msg.contains("truncated"),
+                "the error must say why it refused: {msg}"
+            );
+        }
+        other => panic!("expected a Protocol refusal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_not_found_mid_pagination_is_not_reported_as_an_absent_object() {
+    // `invoke_optional` maps `NotFound` to an empty collection so a missing
+    // `-Identity` reads as `None`. That is only sound on the FIRST page: a 404
+    // while following an `@odata.nextLink` means the continuation expired or
+    // broke, and mapping it to empty turned "I read half of this object's
+    // scopes" into "this object has none".
+    let server = MockServer::start().await;
+    let page2 = format!("{}/page2", server.uri());
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [{ "Name": "scope-a", "RecipientFilter": "MemberOfGroup -eq 'CN=a'" }],
+            "@odata.nextLink": page2,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/page2"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": { "code": "ResourceNotFound", "message": "not found" }
+        })))
+        .mount(&server)
+        .await;
+
+    match make_client(&server.uri()).list_management_scopes().await {
+        Err(ExchangeError::Protocol(msg)) => {
+            assert!(
+                msg.contains("page 2"),
+                "should name the failing page: {msg}"
+            );
+            assert!(msg.contains("truncated"), "and why it refused: {msg}");
+        }
+        other => panic!("a mid-pagination 404 must not become an empty collection: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn an_empty_next_link_terminates_rather_than_looping() {
     // A present-but-blank link is treated as "no more pages", not as a URL to
     // POST to — otherwise one malformed response spins until MAX_PAGES.

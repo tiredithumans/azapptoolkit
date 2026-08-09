@@ -366,9 +366,26 @@ pub fn downgrade_alternatives(value: &str) -> Vec<&'static str> {
     alts
 }
 
-/// The redundant application permissions among `values`: each `(narrower,
+/// The redundant application permissions among `grants`: each `(narrower,
 /// covered_by)` pair is a held permission whose access the held `covered_by`
 /// permissions already fully grant (per [`subsuming_app_permissions`]).
+///
+/// **Pairs only within one resource.** Mailbox and SharePoint permissions live
+/// on two resources each, and both Microsoft Graph and the legacy Office 365
+/// resources expose appRoles literally named `Sites.*` / `Mail.*`. Keyed on the
+/// bare value, this reported a Graph `Sites.Read.All` as "covered by"
+/// `Sites.ReadWrite.All` held on Office 365 SharePoint Online — two grants that
+/// authorize against different resources and cover nothing of each other. The
+/// one-click fix never acted on such a pair (`plan_redundant_removals` builds
+/// its `value_to_id` per resource and requires the broader grant live on the
+/// *same* `resource_app_id`), so this was advisory text disagreeing with the
+/// remediation beside it — an operator reading "covered by" and revoking by hand
+/// would have removed real access.
+///
+/// A grant whose `resource_app_id` is `None` pairs with nothing: an unresolved
+/// resource cannot be *proven* to be the same one, and under-reporting a
+/// redundancy is a missing suggestion, while over-reporting one is advice to
+/// remove access that is not in fact covered.
 ///
 /// `broader_is_confined` lets the caller veto a broader permission whose
 /// effective reach is *narrower than the permission name implies* — e.g. a
@@ -376,26 +393,32 @@ pub fn downgrade_alternatives(value: &str) -> Vec<&'static str> {
 /// cover an org-wide `Mail.Read`, so the pair must not be flagged. Callers
 /// without scoping data pass `|_| false`.
 ///
-/// Duplicate values (the same permission declared on more than one resource)
-/// are reported once.
+/// A value redundant on more than one resource is reported once.
 pub fn redundant_app_permissions(
-    values: &[String],
+    grants: &[ResourcePermission],
     broader_is_confined: impl Fn(&str) -> bool,
 ) -> Vec<(String, Vec<String>)> {
-    let held: std::collections::HashSet<&str> = values.iter().map(|s| s.as_str()).collect();
+    // (resource_app_id, value) — the pair that actually authorizes something.
+    let held: std::collections::HashSet<(&str, &str)> = grants
+        .iter()
+        .filter_map(|g| Some((g.resource_app_id.as_deref()?, g.value.as_str())))
+        .collect();
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for v in values {
-        if !seen.insert(v.as_str()) {
+    for g in grants {
+        let Some(resource) = g.resource_app_id.as_deref() else {
+            continue;
+        };
+        if !seen.insert(g.value.as_str()) {
             continue;
         }
-        let covered_by: Vec<String> = subsuming_app_permissions(v)
+        let covered_by: Vec<String> = subsuming_app_permissions(&g.value)
             .iter()
-            .filter(|b| held.contains(**b) && !broader_is_confined(b))
+            .filter(|b| held.contains(&(resource, **b)) && !broader_is_confined(b))
             .map(|b| (*b).to_string())
             .collect();
         if !covered_by.is_empty() {
-            out.push((v.clone(), covered_by));
+            out.push((g.value.clone(), covered_by));
         }
     }
     out
@@ -487,7 +510,13 @@ mod tests {
 
     #[test]
     fn redundant_app_permissions_pairs_held_subsumed_values() {
-        let values = |vs: &[&str]| vs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Every case here holds its permissions on Microsoft Graph; the
+        // cross-resource behaviour has its own test below.
+        let values = |vs: &[&str]| {
+            vs.iter()
+                .map(|v| ResourcePermission::graph(*v))
+                .collect::<Vec<_>>()
+        };
         let unconfined = |_: &str| false;
 
         // (held values, expected (narrower, covered_by) pairs)
@@ -559,6 +588,53 @@ mod tests {
             unconfined,
         );
         assert_eq!(got.len(), 1);
+
+        // A permission is NOT covered by a same-named broader one held on a
+        // DIFFERENT resource. Both Microsoft Graph and the legacy Office 365
+        // resources expose appRoles called `Sites.*`, and a grant on one
+        // authorizes nothing on the other — but keyed on the bare value this
+        // paired them and told the operator to remove live access. The one-click
+        // fix always re-planned per resource and did nothing here, so the
+        // advisory text and the remediation beside it disagreed.
+        let cross_resource = vec![
+            ResourcePermission {
+                resource_app_id: Some(
+                    crate::scoping::OFFICE365_SHAREPOINT_ONLINE_APP_ID.to_string(),
+                ),
+                value: "Sites.ReadWrite.All".to_string(),
+            },
+            ResourcePermission::graph("Sites.Read.All"),
+        ];
+        assert!(
+            redundant_app_permissions(&cross_resource, unconfined).is_empty(),
+            "a Graph Sites.Read.All is not covered by an Office 365 Sites.ReadWrite.All"
+        );
+
+        // ...and the same two values on ONE resource still pair, so the fix did
+        // not simply disable the rule.
+        let same_resource = values(&["Sites.ReadWrite.All", "Sites.Read.All"]);
+        assert_eq!(
+            redundant_app_permissions(&same_resource, unconfined),
+            vec![(
+                "Sites.Read.All".to_string(),
+                vec!["Sites.ReadWrite.All".to_string()]
+            )]
+        );
+
+        // An unresolved resource pairs with nothing: it cannot be proven to be
+        // the same resource, and over-reporting here is advice to remove access
+        // that is not in fact covered.
+        let unresolved = vec![
+            ResourcePermission {
+                resource_app_id: None,
+                value: "Mail.ReadWrite".to_string(),
+            },
+            ResourcePermission {
+                resource_app_id: None,
+                value: "Mail.Read".to_string(),
+            },
+        ];
+        assert!(redundant_app_permissions(&unresolved, unconfined).is_empty());
 
         // A confined broader permission is vetoed as a coverer.
         let got = redundant_app_permissions(&values(&["Mail.ReadWrite", "Mail.Read"]), |b| {

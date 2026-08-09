@@ -10,6 +10,81 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+### Fixed
+
+- **A bulk action no longer burns through the rest of your selection after the
+  session dies.** The expired-credential sweep, the delete sweep and the
+  consent-grant sweep each fanned out without checking whether the session was
+  still alive, so an expired refresh token mid-run produced one identical
+  failure per remaining app — a wall of "permission denied" that reads as the
+  tenant rejecting the writes rather than as a session that ended on app 40 of
+  900. All three now stop at the next dispatch boundary and report that the run
+  was cut short; the writes that already landed still bust the caches, so the
+  list you come back to is accurate.
+- **Cancelling a long-running run can no longer be silently undone by starting
+  another one.** The cancel flag was a bare boolean that every run reset at its
+  start, so a second command beginning cleared a cancellation the first had not
+  yet noticed and that run carried on writing. Cancellation is now per-run:
+  starting a run says nothing about any other, and a run that has been cancelled
+  stays cancelled. A tenant backup also claimed a second time partway through,
+  which dropped a Cancel pressed during its first phase at the phase boundary.
+- **Global search no longer hides a whole entity class for an hour after one
+  transient error.** A failed read of either half of the search corpus degraded
+  to an empty list — and that half-empty corpus was then cached and pinned, out
+  of the cache's own eviction reach, so every app registration (or every
+  enterprise app) stayed missing from search for the full list TTL. A partial
+  corpus is still served to the query in flight, but never cached, so the next
+  keystroke retries.
+- **A cache entry invalidated while an index was being stored can no longer
+  survive the store.** The generation guard released its watch *before* taking
+  the bucket lock, leaving a window where an invalidation found no watch to bump
+  and no entry to remove — and the pre-mutation snapshot then landed, pinned.
+  The watch is now held across the store and the write rolled back if anything
+  invalidated the key meanwhile.
+- **The Exchange admin API no longer returns a truncated collection as a
+  complete one.** An empty body or a "not found" while following an
+  `@odata.nextLink` was reported as success (or, worse, as an absent object) for
+  the pages read so far. Both now fail: the consolidation planner and the
+  reverse scope lookup treat a short list as proof of absence, so a truncated
+  read widens access.
+- **Signing out now tells you when it did not work.** The result was discarded
+  and the app returned to the sign-in screen regardless, so "signed out" was a
+  claim it had never checked — while the refresh token was still in the OS
+  credential store. A failed sign-out now keeps you signed in and says why.
+- **A scoped-mailbox grant no longer half-applies when Exchange's role
+  assignments cannot be read.** The pre-read defaulted to an empty list on
+  failure, so every role was re-assigned, every duplicate assignment failed, and
+  no org-wide grant was safe to strip — leaving the app with neither a working
+  scope nor a narrowed grant, repeatably. An unreadable snapshot is now an
+  error.
+- **The audit's "already covered by" advice no longer pairs permissions across
+  resources.** Both Microsoft Graph and the legacy Office 365 resources expose
+  app roles named `Sites.*` and `Mail.*`, and the redundancy rule matched on the
+  name alone — so a Graph `Sites.Read.All` was reported as covered by an Office
+  365 `Sites.ReadWrite.All`, which authorizes nothing of it. The one-click fix
+  always re-planned per resource and did nothing here, so the advice disagreed
+  with the remediation beside it; an operator following the text by hand would
+  have removed live access.
+- **A mailbox permission is resolved to the resource that can actually scope
+  it**, rather than to whichever resource happened to come first in the list.
+- **A management scope cannot be repointed at a filter that confines nothing,**
+  and the post-write proof no longer accepts a filter it could not fully read.
+  A group whose distinguished name contains the text `memberofgroup` also no
+  longer makes a filter this app generated unrewritable.
+
+### Changed
+
+- Retry policy (budget, backoff, `Retry-After`) is now one loop in
+  `azapptoolkit-core::http_retry` instead of four near-identical copies across
+  the Graph, ARM, Key Vault and Exchange clients. Behaviour is unchanged; the
+  clients still classify their own HTTP statuses.
+- `repo_invariants` is split per concern (fan-out, cache, cancel, commands,
+  release), and its dead-session rule is checked per `dispatch_capped` **call
+  site** rather than per file — the file-level form reported full coverage over
+  the three ungated bulk fan-outs above, which is worse than no check.
+- Local test coverage for the `.env` and CHANGELOG parsers in both `build.rs`
+  files, and for the SAML claims editor's DTO conversion.
+
 ## [0.25.0] - 2026-08-07
 
 ### Added

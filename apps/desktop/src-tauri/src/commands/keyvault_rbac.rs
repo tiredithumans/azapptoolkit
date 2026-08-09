@@ -87,8 +87,6 @@ pub async fn sweep_key_vault_access(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<KeyVaultSweepResult, UiError> {
-    state.sweep_cancel.reset();
-
     // Acquire the ARM token up front so a missing-consent rejection surfaces as
     // the typed `consent_required` code (the UI offers a consent button)
     // instead of a generic error deep inside the ARM client.
@@ -144,7 +142,7 @@ pub async fn sweep_key_vault_access(
 
     // Phase 2 — role assignments directly on each vault (bounded, cancellable).
     let done = Arc::new(Mutex::new(0usize));
-    let cancel = state.sweep_cancel.clone();
+    let cancel = state.sweep_cancel.claim();
     let mut pairs: Vec<(KeyVaultResource, Vec<RoleAssignment>)> = Vec::new();
     let mut vaults_scanned = 0usize;
     let mut vaults_failed = 0usize;

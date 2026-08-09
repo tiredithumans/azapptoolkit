@@ -381,8 +381,6 @@ pub async fn sweep_site_permissions(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<SiteSweepResult, UiError> {
-    state.sweep_cancel.reset();
-
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
 
     let sites = client
@@ -401,7 +399,7 @@ pub async fn sweep_site_permissions(
         },
     );
 
-    let cancel = state.sweep_cancel.clone();
+    let cancel = state.sweep_cancel.claim();
 
     // Adaptive throttling, like the audit and DR fan-outs. `/sites/*` is the
     // throttle-happiest endpoint family in the transport, and this sweep

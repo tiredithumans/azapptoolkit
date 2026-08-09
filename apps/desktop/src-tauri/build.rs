@@ -1,5 +1,10 @@
 use std::path::{Path, PathBuf};
 
+// The pure parsers live in their own file so `src/lib.rs` can mount the same
+// source under `#[cfg(test)]` — a build script is compiled into no test target,
+// so anything defined here is untestable.
+include!("build_support.rs");
+
 fn main() {
     bake_client_config();
     tauri_build::build()
@@ -45,30 +50,4 @@ fn read_env_file(path: &Path) -> Vec<(String, String)> {
         return Vec::new();
     };
     contents.lines().filter_map(parse_env_line).collect()
-}
-
-fn parse_env_line(line: &str) -> Option<(String, String)> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
-    let (key, raw) = line.split_once('=')?;
-    let key = key.trim();
-    if key.is_empty() {
-        return None;
-    }
-    let value = strip_quotes(raw.trim());
-    Some((key.to_string(), value.to_string()))
-}
-
-fn strip_quotes(s: &str) -> &str {
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2
-        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
-            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
-    {
-        &s[1..s.len() - 1]
-    } else {
-        s
-    }
 }

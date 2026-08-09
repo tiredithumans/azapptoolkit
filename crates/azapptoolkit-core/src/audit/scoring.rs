@@ -621,14 +621,17 @@ fn rule_external_exposure(
 /// redundancy list for the RemoveRedundantPermissions remediation.
 fn rule_redundant_permissions(
     perms: &AppPermissions,
-    values: &[String],
 ) -> (RuleContribution, Vec<(String, Vec<String>)>) {
     let mut c = RuleContribution::default();
     // `value_fully_scoped`, not `is_scoped`: the broader permission only
     // confines the narrower one if EVERY grant of that name is confined. A
     // `Mail.ReadWrite` scoped on Graph while its unscopable legacy Exchange
     // Online namesake survives still reaches every mailbox.
-    let redundant = redundant_app_permissions(values, |b| perms.value_fully_scoped(b));
+    // The GRANTS, not `perms.app_role_values()`: stripping the resource here
+    // let a Graph permission pair with a same-named one on the legacy Office 365
+    // resource, which covers nothing of it. See `redundant_app_permissions`.
+    let redundant =
+        redundant_app_permissions(&perms.app_role_grants, |b| perms.value_fully_scoped(b));
     if !redundant.is_empty() {
         let listing = redundant
             .iter()
@@ -880,7 +883,7 @@ pub fn score_application(
         !secrets.is_empty(),
     )); // Rules 14-17
 
-    let (redundant_contrib, redundant) = rule_redundant_permissions(perms, &values); // Rule 18
+    let (redundant_contrib, redundant) = rule_redundant_permissions(perms); // Rule 18
     acc.merge(redundant_contrib);
     acc.merge(rule_external_exposure(
         app,

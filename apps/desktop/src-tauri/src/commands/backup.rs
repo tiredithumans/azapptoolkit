@@ -40,7 +40,7 @@ use crate::dto::backup::{
 };
 use crate::dto::bulk::BulkProgress;
 use crate::dto::managed_identity::MiSubtype;
-use crate::state::{AppState, CancelFlag};
+use crate::state::{AppState, CancelToken};
 
 /// Objects per `$batch` POST. Graph's hard cap is 20 sub-requests per batch, so
 /// each dispatched chunk is one POST per batched read.
@@ -69,7 +69,6 @@ pub async fn backup_tenant(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<TenantBackup, UiError> {
-    state.dr_cancel.reset();
     let client = state.graph_for(&tenant_id);
 
     // Adaptive in-flight concurrency: every 429 (including the per-sub-request
@@ -119,7 +118,7 @@ pub async fn backup_tenant(
     // Carried onto the manifest so a short backup says so — see
     // `TenantBackup::skipped`.
     let mut skipped: Vec<SkippedObject> = Vec::new();
-    let cancel = state.dr_cancel.clone();
+    let cancel = state.dr_cancel.claim();
     let session = SessionDead::new();
     let cancelled = dispatch_capped(
         app_chunks,
@@ -160,7 +159,7 @@ pub async fn backup_tenant(
     if session.is_dead() {
         return Err(session.err("the tenant backup"));
     }
-    if cancelled || state.dr_cancel.is_cancelled() {
+    if cancelled || cancel.is_cancelled() {
         return Err(cancelled_err());
     }
 
@@ -188,12 +187,11 @@ pub async fn backup_tenant(
         .map(<[_]>::to_vec)
         .collect();
     let mut enterprise_apps: Vec<EnterpriseAppBackup> = Vec::with_capacity(ent_total);
-    let ent_cancel = state.dr_cancel.clone();
     let ent_cancelled = dispatch_capped(
         ent_chunks,
         || throttle.current_limit(),
         |chunk| {
-            if ent_cancel.is_cancelled() || session.is_dead() {
+            if cancel.is_cancelled() || session.is_dead() {
                 return None;
             }
             let client = client.clone();
@@ -229,7 +227,7 @@ pub async fn backup_tenant(
     if session.is_dead() {
         return Err(session.err("the tenant backup"));
     }
-    if ent_cancelled || state.dr_cancel.is_cancelled() {
+    if ent_cancelled || cancel.is_cancelled() {
         return Err(cancelled_err());
     }
 
@@ -240,7 +238,7 @@ pub async fn backup_tenant(
     let managed_identities = backup_managed_identities(
         &client,
         &managed,
-        &state.dr_cancel,
+        &cancel,
         &app_handle,
         &done,
         total,
@@ -671,7 +669,7 @@ fn assemble_enterprise_backup(
 async fn backup_managed_identities(
     client: &GraphClient,
     managed: &[ServicePrincipal],
-    cancel: &CancelFlag,
+    cancel: &CancelToken,
     app_handle: &AppHandle,
     done: &Mutex<usize>,
     total: usize,

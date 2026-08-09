@@ -98,8 +98,6 @@ pub async fn run_audit(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<AuditRunResult, UiError> {
-    state.audit_cancel.reset();
-
     let client = state.graph_for(&tenant_id);
     let tracker = Arc::new(ConcurrencyThrottle::new(INITIAL_CONCURRENCY));
     // Detach the observer however the run exits — an early `?` return (e.g. app
@@ -264,7 +262,7 @@ pub async fn run_audit(
         sign_in_map,
     });
     let done = Arc::new(Mutex::new(0usize));
-    let cancel = state.audit_cancel.clone();
+    let cancel = state.audit_cancel.claim();
 
     let mut items: Vec<AuditItem> = Vec::with_capacity(total);
     // A dead session makes every remaining app fail identically, so the run must

@@ -385,6 +385,19 @@ impl IndexWatch<'_> {
         &self.key
     }
 
+    /// The key's live counter **without** giving up the reference, or `None`
+    /// when this guard never held a watch.
+    ///
+    /// Exists so [`Cache::store_if_current`] can check currency while still
+    /// holding the watch: releasing it first removes the last reference, and a
+    /// concurrent invalidation then has nothing to bump.
+    fn current(&self) -> Option<u64> {
+        if !self.holds_ref {
+            return None;
+        }
+        self.cache.peek_watch(self.kind, &self.key)
+    }
+
     /// Consumes the guard, releasing its reference and returning
     /// `(kind, key, since, current)` — where `current` is the key's live
     /// counter, or `None` when this guard never held a watch.
@@ -653,25 +666,38 @@ impl Cache {
     where
         T: serde::Serialize,
     {
-        match Self::still_current(watch) {
-            Some((kind, key)) => {
-                self.put_inner(kind, key, value, true);
-                true
-            }
-            None => false,
-        }
+        self.store_if_current(watch, |cache, kind, key| {
+            cache.put_inner(kind, key, value, true)
+        })
     }
 
-    /// Consumes `watch`, returning its `(kind, key)` when the key survived
-    /// untouched — and releasing it either way.
+    /// Stores through `store` only if `watch`'s key was never invalidated —
+    /// including during the store itself.
     ///
-    /// A key that is not (or is no longer) watched cannot be proven current, so
-    /// it refuses: that covers both the table-full case and a second store
-    /// against an already-consumed watch.
-    fn still_current(watch: IndexWatch<'_>) -> Option<(CacheKind, String)> {
-        let (kind, key, since, current) = watch.release();
-        match current {
-            Some(now) if now == since => Some((kind, key)),
+    /// The watch is deliberately held **across** `store` and released after.
+    /// Releasing first (the obvious reading of "check, then write") left a real
+    /// window: `release_watch` drops the last reference and *removes* the watch
+    /// entry, so an `invalidate` landing between the check and the bucket lock
+    /// found no watch to bump and no entry to remove — and the pre-mutation
+    /// snapshot then landed, pinned, beyond LRU's reach for the whole TTL.
+    /// Holding the reference means that invalidation has something to bump, and
+    /// the post-store comparison sees it and undoes the write.
+    ///
+    /// Lock order is unchanged (watches, then bucket, never both at once), so
+    /// this adds no deadlock risk — only a second look.
+    fn store_if_current(
+        &self,
+        watch: IndexWatch<'_>,
+        store: impl FnOnce(&Self, CacheKind, String),
+    ) -> bool {
+        let (kind, key, since) = (watch.kind, watch.key.clone(), watch.since);
+
+        // Pre-check: cheap, and it keeps the common lost-race case from paying
+        // for a serialize + insert it is only going to undo. A key that is not
+        // watched at all cannot be proven current — that covers both the
+        // table-full case and a second store against a consumed watch.
+        match watch.current() {
+            Some(now) if now == since => {}
             other => {
                 tracing::debug!(
                     %key,
@@ -679,7 +705,27 @@ impl Cache {
                     since,
                     "key invalidated during the index fetch (or never watched); not storing"
                 );
-                None
+                return false; // `watch` releases on drop
+            }
+        }
+
+        store(self, kind, key.clone());
+
+        // Second look, now that the store has landed. `watch` still held its
+        // reference throughout, so any invalidation in the window bumped the
+        // counter rather than passing through unseen.
+        let (_, _, _, after) = watch.release();
+        match after {
+            Some(now) if now == since => true,
+            other => {
+                tracing::debug!(
+                    %key,
+                    watched = ?other,
+                    since,
+                    "key invalidated while the index store was in flight; rolling it back"
+                );
+                self.buckets[kind.idx()].lock().remove(&key);
+                false
             }
         }
     }
@@ -756,13 +802,9 @@ impl Cache {
         watch: IndexWatch<'_>,
         value: Arc<T>,
     ) -> bool {
-        match Self::still_current(watch) {
-            Some((kind, key)) => {
-                self.put_typed_inner(kind, key, value, true);
-                true
-            }
-            None => false,
-        }
+        self.store_if_current(watch, move |cache, kind, key| {
+            cache.put_typed_inner(kind, key, value, true)
+        })
     }
 
     fn put_typed_inner<T: Send + Sync + 'static>(
@@ -889,6 +931,14 @@ impl Cache {
     /// removing the entry once the last holder lets go. `None` means the key
     /// was not watched at all, which callers treat as "cannot prove this is
     /// current" and therefore refuse.
+    /// The live counter for a watched key, leaving the watch in place.
+    fn peek_watch(&self, kind: CacheKind, key: &str) -> Option<u64> {
+        self.watches
+            .lock()
+            .get(&(kind.idx(), key.to_string()))
+            .map(|w| w.counter)
+    }
+
     fn release_watch(&self, kind: CacheKind, key: &str) -> Option<u64> {
         let mut watches = self.watches.lock();
         let id = (kind.idx(), key.to_string());
@@ -1125,6 +1175,62 @@ mod tests {
             cache.put_typed_index_if_current(watch, Arc::new(vec![1u8])),
             "an exhausted watch table would have refused this store forever"
         );
+    }
+
+    #[test]
+    fn an_invalidation_landing_during_the_store_rolls_the_store_back() {
+        // The window the release-then-store order left open, and the reason the
+        // watch is now held ACROSS the store.
+        //
+        // Old order: release the watch (which removes the entry, since this is
+        // the last reference), compare, then take the bucket lock and insert.
+        // An `invalidate` interleaving there found no watch to bump — so the
+        // comparison had already passed — and no entry to remove, because the
+        // insert had not happened yet. The pre-mutation snapshot then landed
+        // *pinned*, i.e. beyond LRU's reach, and served stale authorization
+        // data for the whole `Lists` TTL.
+        //
+        // `store_if_current`'s callback is the exact instant that used to be
+        // unprotected, so invalidating from inside it reproduces the race
+        // deterministically rather than by thread timing.
+        let cache = Cache::new();
+        let key = "t1|sp_index".to_string();
+
+        let watch = cache.generation_for(CacheKind::Lists, &key);
+        let stored = cache.store_if_current(watch, |c, kind, k| {
+            // A mutation lands while this store is in flight.
+            c.invalidate(CacheKind::Lists, "t1|sp_index");
+            c.put_inner(kind, k, &vec![1u8], true);
+        });
+
+        assert!(
+            !stored,
+            "a store that raced an invalidation must report that it lost"
+        );
+        assert!(
+            cache.get::<Vec<u8>>(CacheKind::Lists, &key).is_none(),
+            "the pre-mutation snapshot must not survive — pinned, it would outlive LRU"
+        );
+        assert_eq!(cache.watch_count(), 0, "the watch is released either way");
+    }
+
+    #[test]
+    fn an_unraced_store_still_lands_and_stays_pinned() {
+        // The other half of the rollback: the guard must not have become so
+        // conservative that the healthy path refuses. A refusal here is not
+        // visible as an error — it is a full tenant rescan on every read.
+        let cache = Cache::new();
+        let key = "t1|sp_index".to_string();
+
+        let watch = cache.generation_for(CacheKind::Lists, &key);
+        assert!(cache.put_typed_index_if_current(watch, Arc::new(vec![7u8])));
+        assert_eq!(
+            cache
+                .get_typed::<Vec<u8>>(CacheKind::Lists, &key)
+                .as_deref(),
+            Some(&vec![7u8])
+        );
+        assert_eq!(cache.watch_count(), 0);
     }
 
     #[test]

@@ -780,3 +780,166 @@ fn TransformRowView(
         </div>
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Building rows allocates signals, which need an owner.
+    fn with_owner<T>(f: impl FnOnce() -> T) -> T {
+        let owner = Owner::new();
+        let out = owner.with(f);
+        owner.cleanup();
+        out
+    }
+
+    fn schema_row(source: &str, attribute: &str, value: &str, saml: &str) -> SchemaRow {
+        SchemaRow {
+            key: 0,
+            source: RwSignal::new(source.to_string()),
+            attribute: RwSignal::new(attribute.to_string()),
+            extension_id: RwSignal::new(String::new()),
+            value: RwSignal::new(value.to_string()),
+            saml_claim_type: RwSignal::new(saml.to_string()),
+            jwt_claim_type: RwSignal::new(String::new()),
+            saml_name_form: RwSignal::new(String::new()),
+        }
+    }
+
+    #[test]
+    fn a_blank_schema_row_produces_no_dto_entry() {
+        // The editor always keeps a trailing empty row for typing into. Emitting
+        // it would PATCH a claims-mapping policy with a claim that names nothing.
+        with_owner(|| {
+            assert!(schema_row_to_dto(schema_row("user", "", "", "")).is_none());
+            assert!(schema_row_to_dto(schema_row("", "", "", "")).is_none());
+        });
+    }
+
+    #[test]
+    fn a_constant_claim_carries_its_value_and_drops_the_source() {
+        // `constant` is not a directory source: Graph rejects an entry that
+        // carries both, so the converter must send `value` alone.
+        with_owner(|| {
+            let dto = schema_row_to_dto(schema_row("constant", "ignored", "acme", "urn:x"))
+                .expect("a constant with a value is a real entry");
+            assert_eq!(dto.value.as_deref(), Some("acme"));
+            assert!(dto.source.is_none(), "constant has no directory source");
+            assert!(dto.id.is_none(), "the attribute column is not a source id");
+            assert_eq!(dto.saml_claim_type.as_deref(), Some("urn:x"));
+        });
+    }
+
+    #[test]
+    fn an_extension_id_is_dropped_for_a_transformation_source() {
+        // Extension attributes only apply to directory sources; carrying one on
+        // a transformation row sends a claim Graph cannot resolve.
+        with_owner(|| {
+            let mut row = schema_row("transformation", "t1", "", "urn:x");
+            row.extension_id = RwSignal::new("extension_abc_dept".to_string());
+            let dto = schema_row_to_dto(row).expect("transformation row is real");
+            assert!(dto.extension_id.is_none());
+
+            let mut user_row = schema_row("user", "", "", "urn:x");
+            user_row.extension_id = RwSignal::new("extension_abc_dept".to_string());
+            let dto = schema_row_to_dto(user_row).expect("user row is real");
+            assert_eq!(dto.extension_id.as_deref(), Some("extension_abc_dept"));
+        });
+    }
+
+    #[test]
+    fn schema_values_are_trimmed() {
+        with_owner(|| {
+            let dto = schema_row_to_dto(schema_row("user", "  mail  ", "", " urn:x "))
+                .expect("real entry");
+            assert_eq!(dto.id.as_deref(), Some("mail"));
+            assert_eq!(dto.saml_claim_type.as_deref(), Some("urn:x"));
+        });
+    }
+
+    fn transform_row(id: &str, method: &str) -> TransformRow {
+        TransformRow {
+            key: 0,
+            id: RwSignal::new(id.to_string()),
+            method: RwSignal::new(method.to_string()),
+            inputs: RwSignal::new(Vec::new()),
+            params: RwSignal::new(Vec::new()),
+            outputs: RwSignal::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn a_transform_row_with_neither_id_nor_method_is_dropped() {
+        with_owner(|| {
+            assert!(transform_row_to_dto(transform_row("", "   ")).is_none());
+            // One of the two is enough to mean the operator started a row.
+            assert!(transform_row_to_dto(transform_row("t1", "")).is_some());
+            assert!(transform_row_to_dto(transform_row("", "Join")).is_some());
+        });
+    }
+
+    #[test]
+    fn blank_transform_inputs_params_and_outputs_are_dropped() {
+        // Each sub-list keeps its own trailing blank row in the editor.
+        with_owner(|| {
+            let row = transform_row("t1", "Join");
+            row.inputs.set(vec![
+                TInputRow {
+                    key: 0,
+                    reference_id: RwSignal::new("  ".to_string()),
+                    claim_type: RwSignal::new(String::new()),
+                    multi: RwSignal::new(false),
+                },
+                TInputRow {
+                    key: 1,
+                    reference_id: RwSignal::new(" ref1 ".to_string()),
+                    claim_type: RwSignal::new(String::new()),
+                    multi: RwSignal::new(true),
+                },
+            ]);
+            row.params.set(vec![TParamRow {
+                key: 0,
+                id: RwSignal::new(String::new()),
+                value: RwSignal::new(String::new()),
+            }]);
+            let dto = transform_row_to_dto(row).expect("real transform");
+            assert_eq!(dto.input_claims.len(), 1);
+            assert_eq!(dto.input_claims[0].claim_type_reference_id, "ref1");
+            assert_eq!(
+                dto.input_claims[0].treat_as_multi_value,
+                Some(true),
+                "false is sent as None so the payload stays minimal"
+            );
+            assert!(dto.input_parameters.is_empty());
+            assert!(dto.output_claims.is_empty());
+        });
+    }
+
+    #[test]
+    fn seeding_a_basic_override_fills_a_user_sourced_row_from_the_table() {
+        // The "override this basic claim" buttons are the only writers of these
+        // rows, and a wrong SAML URI silently produces a claim the relying party
+        // never sees.
+        with_owner(|| {
+            let schema = RwSignal::new(Vec::<SchemaRow>::new());
+            let seq = RwSignal::new(0usize);
+            let (_, saml_uri, attribute, _) = BASIC_CLAIM_SET[0];
+            seed_basic_override(schema, seq, attribute, saml_uri);
+
+            let dto = schema
+                .with_untracked(|rows| {
+                    assert_eq!(rows.len(), 1);
+                    schema_row_to_dto(rows[0])
+                })
+                .expect("a seeded override is a real entry");
+            assert_eq!(dto.source.as_deref(), Some("user"));
+            assert_eq!(dto.id.as_deref(), Some(attribute));
+            assert_eq!(dto.saml_claim_type.as_deref(), Some(saml_uri));
+            assert!(dto.value.is_none(), "an override is not a constant");
+
+            // Keys stay unique so removing one row cannot take out another.
+            seed_basic_override(schema, seq, attribute, saml_uri);
+            schema.with_untracked(|rows| assert_ne!(rows[0].key, rows[1].key));
+        });
+    }
+}
