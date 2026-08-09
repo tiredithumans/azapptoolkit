@@ -74,36 +74,65 @@ fn every_long_running_command_claims_exactly_one_cancel_token() {
     );
 }
 
-/// The audit claims its token **before** the tenant-wide prefetch, not after.
+/// Every long-running command claims its token **before its first `await`**.
 ///
 /// `claim()` takes a fresh generation and `cancel()` stamps whatever generation
 /// is current when it runs, so a token claimed after a long phase carries a
 /// higher generation than a cancel issued during that phase —
 /// `is_cancelled()` compares `cancelled >= generation`, so the cancel is
-/// silently discarded. The six-way prefetch is the longest phase of a large
-/// audit, which made it both the likeliest moment for an operator to press
-/// Cancel and the one window where pressing it did nothing.
+/// silently discarded.
 ///
-/// Pinned positionally because that is exactly what went wrong: the claim was
-/// present, correct in isolation, and in the wrong place.
+/// Pinned positionally because that is exactly what goes wrong: the claim is
+/// present, correct in isolation, and in the wrong place. The sibling rule above
+/// pins that a claim EXISTS, which is what let both known instances through CI.
+///
+/// This rule was `run_audit`-shaped for one run — it looked for that command's
+/// `futures::join!` prefetch by name, so it could only ever catch the one bug it
+/// was written against. `migrate_application_access_policies` claimed after
+/// three tenant-wide reads (an Exchange client handshake, the mailbox resource
+/// roles, and a walk of every Application Access Policy in the tenant) and the
+/// rule had nothing to say about it. The subject is now every long-running
+/// command, and the boundary is the first `.await` rather than one command's
+/// particular prefetch: any await can be the long one, so the only position
+/// that is right for all of them is "before all of them".
 #[test]
-fn the_audit_claims_its_token_before_the_prefetch() {
-    let audit = super::sources::commands()
-        .into_iter()
-        .find(|c| c.name == "run_audit")
-        .expect("commands/audit.rs no longer defines run_audit");
-    let claim = audit
-        .body
-        .find(".claim()")
-        .expect("run_audit no longer claims a CancelToken");
-    let prefetch = audit
-        .body
-        .find("futures::join!")
-        .expect("run_audit no longer uses a join! prefetch — re-check this rule still applies");
+fn every_long_running_command_claims_before_its_first_await() {
+    let mut late: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+
+    for cmd in super::sources::commands() {
+        let Some(claim) = cmd.body.find(".claim()") else {
+            // Absent entirely is the sibling rule's finding, not this one's.
+            continue;
+        };
+        checked += 1;
+        let Some(first_await) = cmd.body.find(".await") else {
+            continue;
+        };
+        if claim > first_await {
+            let preceding = cmd.body[..first_await]
+                .rsplit(['\n', ';'])
+                .find(|s| !s.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            late.push(format!(
+                "{}::{} claims after `{preceding}.await`",
+                cmd.module, cmd.name
+            ));
+        }
+    }
+
     assert!(
-        claim < prefetch,
-        "run_audit claims its CancelToken AFTER the tenant-wide prefetch join!. A cancel pressed \
-         during the prefetch stamps a lower generation than the token, so `is_cancelled()` never \
-         sees it and the run scores the whole tenant anyway. Move the claim above the join!."
+        checked >= 5,
+        "only {checked} command(s) claim a CancelToken at all — the source walk is broken, and a \
+         rule that scans nothing passes vacuously"
+    );
+    assert!(
+        late.is_empty(),
+        "command(s) that claim a CancelToken AFTER their first await: {late:#?}\n\
+         A cancel pressed during that await stamps a LOWER generation than the token, so \
+         `is_cancelled()` (`cancelled >= generation`) never sees it and the run carries on. Move \
+         `let cancel = state.<flag>_cancel.claim();` above the first `.await` in the body."
     );
 }
