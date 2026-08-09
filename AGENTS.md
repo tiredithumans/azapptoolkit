@@ -142,7 +142,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **The `BearerProvider` boundary carries the auth classification.** `core::token::TokenError { code, message }` — not a bare `String` — so a dead session survives into `GraphError/ExchangeError/KeyVaultError/ArmError::Token` and `ui_code()` passes `refresh_missing`/`not_signed_in` through. Flattening it to `token_error` made `is_reauth_fatal` unfirable for every client call. Sole mapping: `token_adapter::token_error`.
 
-- **Long-running writes stop on a dead session via `dispatch::SessionDead`.** Fan-outs gate `dispatch_capped`'s `spawn` on `is_dead()` and return `session.err(..)`, never a partial result; sequential flows (restore) break each pass and flag the report instead, having already mutated. Feed failures in via `note`/`note_code`/`note_fatal`. Both shapes pinned in `repo_invariants.rs`, which asserts `KNOWN_GAPS` stays empty.
+- **Long-running writes stop on a dead session via `dispatch::SessionDead`.** Fan-outs gate `dispatch_capped`'s `spawn` on `is_dead()` and return `session.err(..)`, never a partial result; sequential flows (restore) break each pass and flag the report instead, having already mutated. Feed failures in via `note`/`note_code`/`note_fatal`. Pinned per `dispatch_capped` **call site**; `KNOWN_GAPS` stays empty.
 
 - **Re-auth-fatal codes have ONE definition: `core::reauth::REAUTH_FATAL_CODES`.** `UiError`/`TokenError::is_reauth_fatal()` both read it (agreement is tested). Adding a code = editing that slice; every long-running loop stops on it.
 
@@ -152,7 +152,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Audit signals — structured, not text.** Facets/cards/finding groups key off `AuditItem` fields, not free-text. A `cancelled`/`truncated`/`degraded` run is **never cached** nor shown as an all-clear; a backup records what it missed in `TenantBackup::skipped`.
 
-- **Shared `audit_cancel` flag.** Security-audit and Bulk-actions both poll `AppState.audit_cancel`; new long-running commands must `reset()` at the top. Resource Access polls `sweep_cancel`; DR backup/restore uses `dr_cancel`. Tested in `state.rs`.
+- **Shared `audit_cancel` flag.** Security-audit and Bulk-actions share `AppState.audit_cancel`; a long-running command `claim()`s a `CancelToken` **once** and polls that, so a run can't un-cancel another. Resource Access uses `sweep_cancel`; DR `dr_cancel`. Pinned in `repo_invariants/cancel.rs`.
 
 - **Batched Graph fan-out + adaptive throttle.** Heavy fan-outs use Graph JSON batching (20 GETs/POST) + the shared `ConcurrencyThrottle` via `ThrottleGuard::attach`; whole-batch failures degrade to per-object reads through `dispatch::batch_or_serial`. Never hand-roll a tracker or a per-item loop. `$count`/`$orderby` belong to `$search` alone — `$expand` + advanced query fails *silently*. Details: [caching-and-search.md](docs/architecture/caching-and-search.md).
 
@@ -184,7 +184,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **The audit also scores SP-only principals (no local app registration) — and those rows are NOT bulk targets.** Phase 2 of `run_audit` scores foreign enterprise apps / MIs / orphaned SPs from their **granted** roles. `AuditItem.principal_kind` drives routing; SP rows' Fixes call the SP-only cores, **never** `remediate_scope_*` (they `get_application` first → 404), render no checkbox, and are excluded from select-all. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
-- **Bulk remediations reuse the single-app cores, sequentially** via `run_bulk_seq` — **not** `dispatch_capped` (those cores take `State`, not `Send`). They `reset()` + poll `audit_cancel`, degrade to a per-app structured `BulkError`, and stop on a re-auth-fatal code. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
+- **Bulk remediations reuse the single-app cores, sequentially** via `run_bulk_seq` — **not** `dispatch_capped` (those cores take `State`, not `Send`). They `claim()` a `CancelToken`, degrade to a per-app structured `BulkError`, and stop on a re-auth-fatal code. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
 - **Build-time config baking.** `build.rs` reads `.env` → `AZAPPTOOLKIT_BUILD_*`; env vars override.
 
