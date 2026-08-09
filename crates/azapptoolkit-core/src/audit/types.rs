@@ -2,7 +2,7 @@
 //! (see the boundary note on [`AuditItem`]) — plus the stable [`issue`]
 //! markers the UI facets key off.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -285,6 +285,52 @@ pub struct AppPermissions {
 }
 
 impl AppPermissions {
+    /// The same permissions with duplicate grants collapsed, keyed on
+    /// **`(resource, value)`** — the pair that actually authorizes something.
+    ///
+    /// The risk rules multiply their point constants by the *length* of the
+    /// matching grant vector, so a permission listed twice scored twice. An
+    /// app's `requiredResourceAccess` can legitimately carry the same
+    /// `resourceAppId` in more than one block, and nothing between Graph and the
+    /// scorer collapsed them, so a manifest quirk could push an app across the
+    /// 25 / 15 / 8 risk-level thresholds operators rank by — two tenants with
+    /// identical effective access could score differently.
+    ///
+    /// Keyed on the pair and not the value: `Mail.Read` on Microsoft Graph and
+    /// `Mail.Read` on Office 365 Exchange Online are different permissions with
+    /// different reach, and only Graph's is confinable. Collapsing those two
+    /// would under-count real access, which is the mirror-image mistake.
+    ///
+    /// Applied by [`score_application`] and [`score_service_principal`] rather
+    /// than by their callers, so no future caller can forget it.
+    ///
+    /// [`score_application`]: crate::audit::score_application
+    /// [`score_service_principal`]: crate::audit::score_service_principal
+    #[must_use]
+    pub fn deduped(&self) -> Self {
+        let mut seen = HashSet::new();
+        let app_role_grants = self
+            .app_role_grants
+            .iter()
+            .filter(|g| seen.insert((g.resource_app_id.clone(), g.value.clone())))
+            .cloned()
+            .collect();
+        // Delegated scopes carry no resource here, so the value alone is the key.
+        let mut seen_scopes = HashSet::new();
+        let scope_values = self
+            .scope_values
+            .iter()
+            .filter(|v| seen_scopes.insert((*v).clone()))
+            .cloned()
+            .collect();
+        Self {
+            app_role_grants,
+            scope_values,
+            has_admin_consent: self.has_admin_consent,
+            mail_scopes: self.mail_scopes.clone(),
+        }
+    }
+
     /// The app-role permission *values*, resource stripped — for the rules that
     /// classify by permission name alone (the risk tables, redundancy,
     /// SharePoint). Resolved once per scoring pass and threaded through, rather
