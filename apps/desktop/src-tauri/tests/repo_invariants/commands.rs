@@ -73,58 +73,6 @@ fn inline_notice_markup_lives_only_in_the_callout_primitive() {
     );
 }
 
-/// Every command module, for the source-scanning invariants above.
-pub(crate) const COMMAND_SOURCES: &[(&str, &str)] = &[
-    (
-        "commands/applications/mod.rs",
-        include_str!("../../src/commands/applications/mod.rs"),
-    ),
-    (
-        "commands/applications/credentials.rs",
-        include_str!("../../src/commands/applications/credentials.rs"),
-    ),
-    (
-        "commands/applications/owners.rs",
-        include_str!("../../src/commands/applications/owners.rs"),
-    ),
-    (
-        "commands/permissions.rs",
-        include_str!("../../src/commands/permissions.rs"),
-    ),
-    (
-        "commands/exchange.rs",
-        include_str!("../../src/commands/exchange.rs"),
-    ),
-    (
-        "commands/sharepoint.rs",
-        include_str!("../../src/commands/sharepoint.rs"),
-    ),
-    (
-        "commands/enterprise_application.rs",
-        include_str!("../../src/commands/enterprise_application.rs"),
-    ),
-    (
-        "commands/expose_api.rs",
-        include_str!("../../src/commands/expose_api.rs"),
-    ),
-    (
-        "commands/remediation.rs",
-        include_str!("../../src/commands/remediation.rs"),
-    ),
-    (
-        "commands/bulk.rs",
-        include_str!("../../src/commands/bulk.rs"),
-    ),
-    (
-        "commands/restore.rs",
-        include_str!("../../src/commands/restore.rs"),
-    ),
-    (
-        "commands/app_roles.rs",
-        include_str!("../../src/commands/app_roles.rs"),
-    ),
-];
-
 /// A scope remediation must be gated on a POSITIVE "this resource can be
 /// confined" test, never on the negation of a legacy/unscopable test.
 ///
