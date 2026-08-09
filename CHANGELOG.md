@@ -12,6 +12,30 @@ Older releases (**0.19.2 and earlier**) live in
 
 ### Fixed
 
+- **Risk scores no longer depend on how an app's manifest happens to be
+  written.** The scorer multiplied each risk band's points by the *number* of
+  matching permissions, counting a permission twice if the manifest listed it
+  twice — which Entra allows, since the same API can appear in more than one
+  block of an app's required permissions. Two apps with identical effective
+  access could land in different risk bands. **Some applications will therefore
+  score lower than they did before, and a few may drop a risk level.** Nothing
+  about their access changed; the earlier number was inflated. The same value
+  held on two *different* APIs is still two permissions, and still scores as
+  two — those grant genuinely different access.
+- **"Remove redundant permissions" no longer reports success while leaving
+  redundant access in place.** A permission redundant on *both* Microsoft Graph
+  and Office 365 Exchange Online produced a single finding, so the one-click fix
+  removed the grant that finding named, said it was done, and left the other
+  standing — where the next audit found it again. Each is now reported and fixed
+  separately, naming the API it belongs to. Tenants holding mail permissions on
+  both resources will see more redundancy findings than before; each is a real
+  grant that was previously hidden behind another.
+- **The over-privilege banner on a service principal now says which API each
+  permission belongs to.** It listed bare names, so an identity holding
+  `Mail.ReadWrite` on both Microsoft Graph and Office 365 Exchange Online showed
+  one name and left you to work out which of the two rows below it meant — and
+  only the Graph one can be confined to specific mailboxes.
+
 - **The legacy-policy migration no longer confines an app to a management scope
   that confines nothing.** If a management scope already existed for the app but
   carried no recipient restriction filter, the migration accepted it silently,

@@ -122,19 +122,35 @@ const RISKY_DELEGATED_SCOPE_PREFIXES: &[&str] = &[
     "RoleManagement.",
 ];
 
-/// Splits a set of application-permission `value`s into `(high_risk, medium_risk)`
-/// hits using [`HIGH_RISK_APP_PERMISSIONS`] / [`MEDIUM_RISK_APP_PERMISSIONS`].
+/// Splits held application permissions into `(high_risk, medium_risk)` hits
+/// using [`HIGH_RISK_APP_PERMISSIONS`] / [`MEDIUM_RISK_APP_PERMISSIONS`].
 /// Reusable for auditing the application permissions *held* by managed
 /// identities and enterprise-app service principals (not just app registrations).
-pub fn classify_app_permission_risk(values: &[String]) -> (Vec<String>, Vec<String>) {
-    let high = values
+///
+/// Takes whole [`ResourcePermission`]s, not bare values. AGENTS.md: permissions
+/// travel as `ResourcePermission` and operator-facing text names the resource —
+/// `Mail.ReadWrite` on Microsoft Graph and on Office 365 Exchange Online are
+/// different grants with different reach, and only Graph's is confinable, so a
+/// banner naming one without saying which leaves the operator to guess. The
+/// previous `&[String]` signature made that impossible for its caller to get
+/// right, whatever it wanted to do.
+///
+/// Matching is still on the value alone, so this is behaviour-preserving: an
+/// app-role of the same name on an unrelated API is still counted. Whether it
+/// *should* be is a separate question about the risk model — over-reporting is
+/// the safe direction for a security tool, and narrowing it would need a
+/// deliberate decision rather than a refactor.
+pub fn classify_app_permission_risk(
+    grants: &[ResourcePermission],
+) -> (Vec<ResourcePermission>, Vec<ResourcePermission>) {
+    let high = grants
         .iter()
-        .filter(|v| HIGH_RISK_APP_PERMISSIONS.contains(&v.as_str()))
+        .filter(|g| HIGH_RISK_APP_PERMISSIONS.contains(&g.value.as_str()))
         .cloned()
         .collect();
-    let medium = values
+    let medium = grants
         .iter()
-        .filter(|v| MEDIUM_RISK_APP_PERMISSIONS.contains(&v.as_str()))
+        .filter(|g| MEDIUM_RISK_APP_PERMISSIONS.contains(&g.value.as_str()))
         .cloned()
         .collect();
     (high, medium)
@@ -414,7 +430,6 @@ pub fn redundant_app_permissions(
     // (resource, value): the same grant listed twice is one redundancy, but the
     // same value on two DIFFERENT resources is two independent questions.
     let mut examined = std::collections::HashSet::new();
-    let mut reported = std::collections::HashSet::new();
     let mut out = Vec::new();
     for g in grants {
         let Some(resource) = g.resource_app_id.as_deref() else {
@@ -431,11 +446,15 @@ pub fn redundant_app_permissions(
         if covered_by.is_empty() {
             continue;
         }
-        // Report a value once, having actually looked at every resource it is
-        // held on.
-        if !reported.insert(g.value.as_str()) {
-            continue;
-        }
+        // One finding per (resource, value) — NOT per value. `examined` above
+        // already keys on the pair, so this loop reaches each pair once; a
+        // second set keyed on the bare value used to collapse those back
+        // together, emitting one finding for a permission that was redundant on
+        // BOTH mailbox resources. The one-click Fix then removed the grant it
+        // named and left the other standing, reporting success, and the next
+        // audit found the survivor again. `Mail.Read` on Microsoft Graph and on
+        // Office 365 Exchange Online are two separate grants of two separate
+        // kinds of access; removing one says nothing about the other.
         out.push(RedundantPermission {
             resource_app_id: resource.to_string(),
             value: g.value.clone(),
@@ -511,19 +530,44 @@ mod tests {
 
     #[test]
     fn classify_app_permission_risk_splits_high_and_medium() {
-        let values: Vec<String> = [
+        let grants: Vec<ResourcePermission> = [
             "Directory.ReadWrite.All", // high
             "Mail.Send",               // high
             "User.Read.All",           // medium
             "openid",                  // neither
         ]
         .iter()
-        .map(|s| s.to_string())
+        .map(|v| ResourcePermission::graph(*v))
         .collect();
-        let (high, medium) = classify_app_permission_risk(&values);
+        let (high, medium) = classify_app_permission_risk(&grants);
         assert_eq!(high.len(), 2);
-        assert!(high.contains(&"Directory.ReadWrite.All".to_string()));
-        assert_eq!(medium, vec!["User.Read.All".to_string()]);
+        assert!(high.iter().any(|g| g.value == "Directory.ReadWrite.All"));
+        assert_eq!(medium.len(), 1);
+        assert_eq!(medium[0].value, "User.Read.All");
+    }
+
+    /// The classifier carries the resource through, so a caller can name it.
+    ///
+    /// It used to take `&[String]`, which made that impossible for the
+    /// held-permissions panel however it wanted to render — and AGENTS.md
+    /// requires operator-facing text to name the resource, because `Mail.Send`
+    /// on Microsoft Graph and on Office 365 Exchange Online are different
+    /// grants and only Graph's is confinable.
+    #[test]
+    fn classify_app_permission_risk_keeps_the_resource_on_each_hit() {
+        let grants = vec![
+            ResourcePermission::graph("Mail.Send"),
+            ResourcePermission::exchange_online("Mail.Send"),
+        ];
+        let (high, _) = classify_app_permission_risk(&grants);
+        assert_eq!(high.len(), 2, "the same value on two resources is two hits");
+        let resources: Vec<Option<&str>> =
+            high.iter().map(|g| g.resource_app_id.as_deref()).collect();
+        assert!(
+            resources.contains(&Some(crate::scoping::MICROSOFT_GRAPH_APP_ID))
+                && resources.contains(&Some(crate::scoping::OFFICE365_EXCHANGE_ONLINE_APP_ID)),
+            "both resources must survive classification: {resources:?}"
+        );
     }
 
     #[test]
@@ -728,6 +772,51 @@ mod tests {
             b == "Mail.ReadWrite"
         });
         assert!(got.is_empty(), "scoped broader must not cover: {got:?}");
+    }
+
+    /// Redundant on BOTH mailbox resources ⇒ TWO findings, not one.
+    ///
+    /// The loop keys `examined` on `(resource, value)` and so reaches each pair
+    /// once — but a second set keyed on the bare VALUE then collapsed the two
+    /// back together and emitted a single finding. The one-click Fix removed
+    /// the grant that finding named, reported success, and left the other
+    /// standing; the next audit found the survivor again. `Mail.Read` on
+    /// Microsoft Graph and on Office 365 Exchange Online are two separate
+    /// grants of two separate kinds of access, and only Graph's is confinable —
+    /// removing one says nothing about the other.
+    #[test]
+    fn a_value_redundant_on_both_resources_is_reported_for_each() {
+        let unconfined = |_: &str| false;
+        let ews = crate::scoping::OFFICE365_EXCHANGE_ONLINE_APP_ID.to_string();
+        let graph = crate::scoping::MICROSOFT_GRAPH_APP_ID.to_string();
+        let both = vec![
+            ResourcePermission::graph("Mail.ReadWrite"),
+            ResourcePermission::graph("Mail.Read"),
+            ResourcePermission {
+                resource_app_id: Some(ews.clone()),
+                value: "Mail.ReadWrite".to_string(),
+            },
+            ResourcePermission {
+                resource_app_id: Some(ews.clone()),
+                value: "Mail.Read".to_string(),
+            },
+        ];
+        let got = redundant_app_permissions(&both, unconfined);
+        assert_eq!(
+            got.len(),
+            2,
+            "one finding per (resource, value); a single finding leaves real redundant access \
+             behind after the Fix reports success: {got:?}"
+        );
+        let resources: Vec<&str> = got.iter().map(|r| r.resource_app_id.as_str()).collect();
+        assert!(
+            resources.contains(&graph.as_str()) && resources.contains(&ews.as_str()),
+            "both resources must be named so each Fix targets the right grant: {resources:?}"
+        );
+        assert!(
+            got.iter().all(|r| r.value == "Mail.Read"),
+            "only the narrower permission is redundant: {got:?}"
+        );
     }
 
     #[test]

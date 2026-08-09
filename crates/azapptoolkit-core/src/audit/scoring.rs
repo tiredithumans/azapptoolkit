@@ -853,6 +853,14 @@ pub fn score_application(
     perms: &AppPermissions,
     now: DateTime<Utc>,
 ) -> AuditItem {
+    // Collapse duplicate grants on (resource, value) BEFORE any rule counts
+    // them: the risk rules scale their point constants by the length of the
+    // matching grant vector, so a permission listed twice in the manifest
+    // scored twice and could cross a risk-level threshold. Done here rather
+    // than in each caller so none can forget it. See `AppPermissions::deduped`.
+    let deduped = perms.deduped();
+    let perms = &deduped;
+
     // Each rule is a focused `rule_*` helper; `acc` folds their contributions
     // in call order, so the issue / recommendation ordering is preserved by
     // construction (pinned by the characterization tests).
@@ -1002,6 +1010,11 @@ pub fn score_service_principal(
     perms: &AppPermissions,
     now: DateTime<Utc>,
 ) -> AuditItem {
+    // Same normalization as `score_application` — an SP's granted roles can
+    // repeat too, and the risk rules count them the same way.
+    let deduped = perms.deduped();
+    let perms = &deduped;
+
     let mut acc = RuleContribution::default();
     acc.merge(rule_app_permission_risk(perms)); // Rules 1 & 2
     acc.merge(rule_admin_consent(perms)); // Rule 3
@@ -3085,6 +3098,68 @@ mod tests {
             item.issues
                 .iter()
                 .any(|i| i.starts_with("SharePoint access scoped to selected sites"))
+        );
+    }
+
+    // ---- (resource, value) is the key everywhere ---------------------------
+
+    /// A permission listed twice is one permission, and must score once.
+    ///
+    /// The risk rules multiply their point constants by the LENGTH of the
+    /// matching grant vector, so a duplicate entry doubled the contribution. An
+    /// app's `requiredResourceAccess` can carry the same `resourceAppId` in more
+    /// than one block, and nothing between Graph and the scorer collapsed them —
+    /// so a manifest quirk could push an app across the 25 / 15 / 8 thresholds
+    /// operators rank by, and two tenants with identical effective access could
+    /// score differently.
+    #[test]
+    fn a_duplicated_grant_does_not_score_twice() {
+        let once = AppPermissions {
+            app_role_grants: vec![ResourcePermission::graph("Mail.ReadWrite")],
+            ..Default::default()
+        };
+        let twice = AppPermissions {
+            app_role_grants: vec![
+                ResourcePermission::graph("Mail.ReadWrite"),
+                ResourcePermission::graph("Mail.ReadWrite"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            score_application(&base_app(), Some(true), &twice, now()).risk_score,
+            score_application(&base_app(), Some(true), &once, now()).risk_score,
+            "a grant listed twice must score once"
+        );
+        // Same rule for an SP's granted roles.
+        assert_eq!(
+            score_service_principal(&base_sp(), &twice, now()).risk_score,
+            score_service_principal(&base_sp(), &once, now()).risk_score
+        );
+    }
+
+    /// ...but the SAME VALUE on two DIFFERENT resources is two permissions.
+    ///
+    /// The mirror-image mistake: `Mail.ReadWrite` on Microsoft Graph and on
+    /// Office 365 Exchange Online grant different access, and only Graph's is
+    /// confinable by RBAC. Collapsing them would under-count real reach, which
+    /// for a security tool is the worse direction to be wrong in.
+    #[test]
+    fn the_same_value_on_two_resources_is_not_a_duplicate() {
+        let one = AppPermissions {
+            app_role_grants: vec![ResourcePermission::graph("Mail.ReadWrite")],
+            ..Default::default()
+        };
+        let both = AppPermissions {
+            app_role_grants: vec![
+                ResourcePermission::graph("Mail.ReadWrite"),
+                ResourcePermission::exchange_online("Mail.ReadWrite"),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            score_application(&base_app(), Some(true), &both, now()).risk_score
+                > score_application(&base_app(), Some(true), &one, now()).risk_score,
+            "two resources means two grants, and must score higher than one"
         );
     }
 }

@@ -14,7 +14,10 @@
 
 use std::collections::HashMap;
 
-use azapptoolkit_core::audit::{MailPermissionScope, classify_app_permission_risk};
+use azapptoolkit_core::audit::{
+    MailPermissionScope, ResourcePermission, classify_app_permission_risk,
+};
+use azapptoolkit_core::scoping::resource_label;
 use azapptoolkit_dto::managed_identity::AppRoleGrantDto;
 use azapptoolkit_dto::permissions::PermissionKind;
 use leptos::prelude::*;
@@ -70,12 +73,31 @@ pub fn HeldPermissionsPanel(
     #[prop(optional, into)]
     busy: Signal<bool>,
 ) -> impl IntoView {
-    // Over-privilege banner over the granted values.
-    let values: Vec<String> = permissions
+    // Over-privilege banner over the granted permissions. Carries the RESOURCE,
+    // not just the value: `Mail.ReadWrite` on Microsoft Graph and on Office 365
+    // Exchange Online are different grants with different reach, and only
+    // Graph's is confinable — a banner naming one without saying which leaves
+    // the operator to guess which of two rows in the table below it means.
+    let grants: Vec<ResourcePermission> = permissions
         .iter()
-        .filter_map(|p| p.app_role_value.clone())
+        .filter_map(|p| {
+            Some(ResourcePermission {
+                resource_app_id: p.resource_app_id.clone(),
+                value: p.app_role_value.clone()?,
+            })
+        })
         .collect();
-    let (high, medium) = classify_app_permission_risk(&values);
+    let (high, medium) = classify_app_permission_risk(&grants);
+    /// `Value (Resource)` per hit, so each names the grant it came from.
+    fn label(hits: &[ResourcePermission]) -> String {
+        hits.iter()
+            .map(|g| match g.resource_app_id.as_deref() {
+                Some(r) => format!("{} ({})", g.value, resource_label(r)),
+                None => g.value.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
     let banner = (!high.is_empty() || !medium.is_empty()).then(|| {
         let (tone, msg) = if !high.is_empty() {
             (
@@ -83,7 +105,7 @@ pub fn HeldPermissionsPanel(
                 format!(
                     "Holds {} high-risk application permission(s): {}",
                     high.len(),
-                    high.join(", "),
+                    label(&high),
                 ),
             )
         } else {
@@ -92,7 +114,7 @@ pub fn HeldPermissionsPanel(
                 format!(
                     "Holds {} medium-risk application permission(s): {}",
                     medium.len(),
-                    medium.join(", "),
+                    label(&medium),
                 ),
             )
         };
