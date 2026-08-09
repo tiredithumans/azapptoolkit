@@ -1045,6 +1045,45 @@ mod tests {
 
     const TODAY: &str = "2026-01-01";
 
+    /// The Key Vault secret NAME derived from a credential's display name.
+    ///
+    /// Untested despite feeding a Key Vault write, and beside a test module
+    /// that covered only the expiry maths. Key Vault accepts `[0-9a-zA-Z-]`
+    /// only, so everything else has to go — and the empty result has to become
+    /// a valid fallback rather than a rejected request.
+    #[test]
+    fn secret_names_are_reduced_to_what_key_vault_accepts() {
+        // Already valid: unchanged.
+        assert_eq!(sanitize_secret_name("api-prod-2026"), "api-prod-2026");
+        // Spaces, dots, underscores and slashes are DROPPED, not replaced — so
+        // two names differing only in punctuation collapse to the same secret
+        // name, and the second write versions the first rather than creating a
+        // sibling. Pinned because it is the surprising half of the behaviour.
+        assert_eq!(sanitize_secret_name("My App / prod_v1.2"), "MyAppprodv12");
+        assert_eq!(sanitize_secret_name("a.b"), sanitize_secret_name("ab"));
+        // A hyphen already in the name survives.
+        assert_eq!(sanitize_secret_name("api prod-2026"), "apiprod-2026");
+        // Non-ASCII is dropped rather than transliterated — a name that is
+        // entirely non-ASCII therefore reduces to empty, which is the case the
+        // fallback exists for.
+        assert_eq!(sanitize_secret_name("Zurich"), "Zurich");
+        assert_eq!(sanitize_secret_name("\u{4f60}\u{597d}"), "client-secret");
+        // Empty and punctuation-only both fall back rather than producing a
+        // name Key Vault would reject.
+        assert_eq!(sanitize_secret_name(""), "client-secret");
+        assert_eq!(sanitize_secret_name("   "), "client-secret");
+        assert_eq!(sanitize_secret_name("!!!"), "client-secret");
+        // The output is always a legal Key Vault secret name.
+        for input in ["", "  ", "a b", "\u{e9}\u{e8}", "ok-1"] {
+            let out = sanitize_secret_name(input);
+            assert!(!out.is_empty(), "{input:?} produced an empty name");
+            assert!(
+                out.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                "{input:?} produced {out:?}, which Key Vault rejects"
+            );
+        }
+    }
+
     #[test]
     fn presets_map_to_lifetime_days() {
         for (preset, _) in EXPIRES_PRESETS.iter().filter(|(p, _)| *p != CUSTOM_PRESET) {
