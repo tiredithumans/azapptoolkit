@@ -3,16 +3,23 @@
 //! so a stale audit snapshot can never drive a destructive change against the
 //! wrong (e.g. since-rotated) credential.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use tauri::State;
 
-use azapptoolkit_core::audit::{expired_password_key_ids, is_expired, subsuming_app_permissions};
+use azapptoolkit_core::audit::{
+    MailPermissionScope, expired_password_key_ids, is_expired, subsuming_app_permissions,
+};
 use azapptoolkit_core::models::{Application, RequiredResourceAccess};
+use azapptoolkit_core::scoping::{
+    MICROSOFT_GRAPH_APP_ID, is_scopable_exchange_resource_permission,
+};
 
 use crate::commands::applications::{invalidate_app_credentials, invalidate_app_lists};
-use crate::commands::exchange::grant_exchange_mailbox_access;
+use crate::commands::exchange::{
+    exchange_client, grant_exchange_mailbox_access, resolve_mail_scopes,
+};
 use crate::commands::permissions::remove_declared_access;
 use crate::commands::sharepoint::convert_site_access_to_selected;
 use crate::dto::UiError;
@@ -206,10 +213,26 @@ struct RedundantRemoval {
 ///   app. Such values land in `skipped` (second return).
 /// - An **ungranted** narrower declaration is removable whenever the broader is
 ///   declared: declarations authorize nothing, so nothing live can break.
+/// - A broader permission that is itself **confined** (Exchange RBAC / a legacy
+///   Application Access Policy) covers nothing org-wide, so it cannot justify
+///   removing the narrower one. `broader_is_confined` is the same veto the
+///   scorer applies in `redundant_app_permissions`.
+///
+/// That last rule is why the veto is a parameter rather than the scorer's
+/// business alone. The scorer refuses to flag `Mail.Read` when the covering
+/// `Mail.ReadWrite` is confined to a handful of mailboxes — correctly, since the
+/// confined grant does not cover an org-wide read. The handler re-plans from
+/// live state by design (a grant scoped since the audit ran must be honoured),
+/// but re-planning without the veto meant the Fix would remove a permission the
+/// finding never offered to remove: an operator clicking "Remove 1 redundant
+/// permission" on some *other* row's finding could revoke live, uncovered
+/// mailbox access. Re-planning has to reproduce the scorer's whole decision, not
+/// the convenient half of it.
 fn plan_redundant_removals(
     required: &[RequiredResourceAccess],
     role_indexes: &HashMap<String, HashMap<String, String>>,
     granted: &HashMap<String, HashMap<String, String>>,
+    broader_is_confined: impl Fn(&str, &str) -> bool,
 ) -> (Vec<RedundantRemoval>, Vec<String>) {
     let empty = HashMap::new();
     let mut removals = Vec::new();
@@ -231,6 +254,7 @@ fn plan_redundant_removals(
                 .iter()
                 .copied()
                 .filter(|b| value_to_id.contains_key(*b))
+                .filter(|b| !broader_is_confined(&resource.resource_app_id, b))
                 .collect();
             if broaders.is_empty() {
                 continue;
@@ -336,8 +360,56 @@ pub async fn remediate_remove_redundant_permissions(
         None => None,
     };
 
-    let (plan, skipped) =
-        plan_redundant_removals(&app.required_resource_access, &role_indexes, &granted);
+    // The scorer's `broader_is_confined` veto, reproduced against live state.
+    //
+    // Only Exchange-scopable Graph mail permissions can be confined, and only
+    // `mail_scopes` knows whether they are — exactly the gate
+    // `AppPermissions::scope_mechanism` applies. Anything else is unconfinable,
+    // so it can never veto.
+    //
+    // FAIL CLOSED on `Unknown` and on Exchange being unreachable: "we could not
+    // determine whether the covering permission is confined" must skip the
+    // removal, not permit it. Permitting it is how a Fix removes live,
+    // uncovered mailbox access; skipping it costs the operator a re-run once
+    // Exchange answers, and the value shows up in `skipped` saying so.
+    let mail_scopes: HashMap<String, MailPermissionScope> =
+        match exchange_client(&state, &tenant_id) {
+            Ok(exo) => {
+                let graph_mail: Vec<String> = app
+                    .required_resource_access
+                    .iter()
+                    .filter(|r| r.resource_app_id == MICROSOFT_GRAPH_APP_ID)
+                    .flat_map(|r| {
+                        role_indexes
+                            .get(&r.resource_app_id)
+                            .into_iter()
+                            .flat_map(|ix| {
+                                r.resource_access
+                                    .iter()
+                                    .filter(|a| a.r#type == "Role")
+                                    .filter_map(|a| ix.get(&a.id).cloned())
+                            })
+                    })
+                    .collect();
+                resolve_mail_scopes(&exo, &app.app_id, &graph_mail, &HashSet::new(), false)
+                    .await
+                    .unwrap_or_default()
+            }
+            Err(_) => HashMap::new(),
+        };
+    let broader_is_confined = |resource_app_id: &str, broader: &str| {
+        if !is_scopable_exchange_resource_permission(Some(resource_app_id), broader) {
+            return false;
+        }
+        !matches!(mail_scopes.get(broader), Some(MailPermissionScope::OrgWide))
+    };
+
+    let (plan, skipped) = plan_redundant_removals(
+        &app.required_resource_access,
+        &role_indexes,
+        &granted,
+        broader_is_confined,
+    );
 
     let mut outcome = RedundantPermissionsOutcome {
         removed: Vec::new(),
@@ -499,7 +571,7 @@ mod tests {
         let required = vec![declared(GRAPH, &["Mail.ReadWrite", "Mail.Read"])];
         let idx = index(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
         let granted = grants(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
-        let (plan, skipped) = plan_redundant_removals(&required, &idx, &granted);
+        let (plan, skipped) = plan_redundant_removals(&required, &idx, &granted, |_, _| false);
         assert!(skipped.is_empty());
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].value, "Mail.Read");
@@ -515,7 +587,7 @@ mod tests {
         let required = vec![declared(GRAPH, &["Mail.ReadWrite", "Mail.Read"])];
         let idx = index(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
         let granted = grants(GRAPH, &["Mail.Read"]);
-        let (plan, skipped) = plan_redundant_removals(&required, &idx, &granted);
+        let (plan, skipped) = plan_redundant_removals(&required, &idx, &granted, |_, _| false);
         assert!(plan.is_empty());
         assert_eq!(skipped, vec!["Mail.Read".to_string()]);
     }
@@ -526,7 +598,8 @@ mod tests {
         // redundant narrower one is removable with no assignment to revoke.
         let required = vec![declared(GRAPH, &["Mail.ReadWrite", "Mail.Read"])];
         let idx = index(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
-        let (plan, skipped) = plan_redundant_removals(&required, &idx, &HashMap::new());
+        let (plan, skipped) =
+            plan_redundant_removals(&required, &idx, &HashMap::new(), |_, _| false);
         assert!(skipped.is_empty());
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].value, "Mail.Read");
@@ -544,7 +617,8 @@ mod tests {
         ];
         let mut idx = index(GRAPH, &["Mail.ReadWrite"]);
         idx.extend(index(exo, &["Mail.Read"]));
-        let (plan, skipped) = plan_redundant_removals(&required, &idx, &HashMap::new());
+        let (plan, skipped) =
+            plan_redundant_removals(&required, &idx, &HashMap::new(), |_, _| false);
         assert!(
             plan.is_empty(),
             "cross-resource pair must not plan a removal"
@@ -556,7 +630,8 @@ mod tests {
     fn plan_skips_unresolvable_resources_and_non_subsumed_values() {
         // No role index for the resource → values can't be classified → skip.
         let required = vec![declared(GRAPH, &["Mail.ReadWrite", "Mail.Read"])];
-        let (plan, skipped) = plan_redundant_removals(&required, &HashMap::new(), &HashMap::new());
+        let (plan, skipped) =
+            plan_redundant_removals(&required, &HashMap::new(), &HashMap::new(), |_, _| false);
         assert!(plan.is_empty());
         assert!(skipped.is_empty());
 
@@ -567,7 +642,7 @@ mod tests {
         )];
         let idx = index(GRAPH, &["Sites.FullControl.All", "Sites.Selected"]);
         let granted = grants(GRAPH, &["Sites.FullControl.All", "Sites.Selected"]);
-        let (plan, _) = plan_redundant_removals(&required, &idx, &granted);
+        let (plan, _) = plan_redundant_removals(&required, &idx, &granted, |_, _| false);
         assert!(plan.is_empty());
     }
 }

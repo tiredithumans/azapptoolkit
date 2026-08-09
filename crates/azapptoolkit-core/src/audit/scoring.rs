@@ -14,6 +14,7 @@ use super::permissions::{
     PTS_HIGH_RISK_APP_PERM, PTS_LONG_LIVED, PTS_MEDIUM_RISK_APP_PERM, PTS_MIXED_EXPIRED,
     PTS_MIXED_EXPIRING, PTS_MULTITENANT_EXPOSURE, PTS_SCOPED_HIGH_RISK_MAIL,
     PTS_SCOPED_MEDIUM_RISK_MAIL, PTS_SP_DISABLED, PTS_STALE_APP, PTS_UNVERIFIED_PUBLISHER,
+    RedundantPermission,
 };
 
 /// Builds an [`AuditItem`] for `app`. All inputs must be pre-resolved: the
@@ -621,7 +622,7 @@ fn rule_external_exposure(
 /// redundancy list for the RemoveRedundantPermissions remediation.
 fn rule_redundant_permissions(
     perms: &AppPermissions,
-) -> (RuleContribution, Vec<(String, Vec<String>)>) {
+) -> (RuleContribution, Vec<RedundantPermission>) {
     let mut c = RuleContribution::default();
     // `value_fully_scoped`, not `is_scoped`: the broader permission only
     // confines the narrower one if EVERY grant of that name is confined. A
@@ -633,10 +634,20 @@ fn rule_redundant_permissions(
     let redundant =
         redundant_app_permissions(&perms.app_role_grants, |b| perms.value_fully_scoped(b));
     if !redundant.is_empty() {
+        // Name the resource: `Mail.Read` exists on Microsoft Graph AND on the
+        // legacy Office 365 Exchange Online resource, and only the pair on ONE
+        // of them is redundant. "Mail.Read (covered by Mail.ReadWrite)" left the
+        // operator to guess which grant to remove — and guessing wrong removes
+        // access nothing covers.
         let listing = redundant
             .iter()
-            .map(|(narrower, covered_by)| {
-                format!("{narrower} (covered by {})", covered_by.join(", "))
+            .map(|r| {
+                format!(
+                    "{} on {} (covered by {})",
+                    r.value,
+                    crate::scoping::resource_label(&r.resource_app_id),
+                    r.covered_by.join(", ")
+                )
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -654,16 +665,36 @@ fn rule_redundant_permissions(
 /// score): names the concrete narrower alternative for each risk-flagged
 /// permission so the Rule-1/2 advice is actionable. Admin-judged, so never a
 /// one-click remediation.
-fn rule_downgrade_pointers(values: &[String]) -> RuleContribution {
+/// Takes the GRANTS, not bare values. It was the last rule reading
+/// `perms.app_role_values()`, and stripping the resource made it wrong twice
+/// over: the narrower alternatives in [`SUBSUMED_APP_PERMISSIONS`] are Microsoft
+/// Graph permissions, so pointing an Office 365 Exchange Online `Mail.Read` at
+/// "Mail.ReadBasic" named a permission that resource does not expose; and a
+/// grant already confined via Exchange RBAC does not need a narrower
+/// alternative, so the advice fired on permissions the operator had already
+/// dealt with.
+fn rule_downgrade_pointers(
+    grants: &[ResourcePermission],
+    is_confined: impl Fn(&ResourcePermission) -> bool,
+) -> RuleContribution {
     let mut c = RuleContribution::default();
     let downgrades: Vec<String> = {
         let mut seen = std::collections::HashSet::new();
-        values
+        grants
             .iter()
+            // A downgrade alternative is only meaningful on the resource that
+            // actually exposes it. The subsumption table is Graph's.
+            .filter(|g| {
+                g.resource_app_id.as_deref() == Some(crate::scoping::MICROSOFT_GRAPH_APP_ID)
+            })
+            // Already confined ⇒ the broader capability is not org-wide, so
+            // "narrower alternatives exist" is advice for a problem that has
+            // been solved by a different mechanism.
+            .filter(|g| !is_confined(g))
+            .map(|g| g.value.as_str())
             .filter(|v| {
-                (HIGH_RISK_APP_PERMISSIONS.contains(&v.as_str())
-                    || MEDIUM_RISK_APP_PERMISSIONS.contains(&v.as_str()))
-                    && seen.insert(v.as_str())
+                (HIGH_RISK_APP_PERMISSIONS.contains(v) || MEDIUM_RISK_APP_PERMISSIONS.contains(v))
+                    && seen.insert(*v)
             })
             .filter_map(|v| {
                 let alts = downgrade_alternatives(v);
@@ -699,7 +730,7 @@ fn build_remediations(
     mailbox_unscoped: &[&ResourcePermission],
     mailbox_legacy: &[&ResourcePermission],
     sharepoint_orgwide: &[&ResourcePermission],
-    redundant: &[(String, Vec<String>)],
+    redundant: &[RedundantPermission],
     owner_count: Option<usize>,
 ) -> Vec<RemediationAction> {
     let mut remediations: Vec<RemediationAction> = Vec::new();
@@ -774,11 +805,15 @@ fn build_remediations(
                 "Removes: {}",
                 redundant
                     .iter()
-                    .map(|(narrower, _)| narrower.as_str())
+                    .map(|r| format!(
+                        "{} on {}",
+                        r.value,
+                        crate::scoping::resource_label(&r.resource_app_id)
+                    ))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            targets: redundant.iter().map(|(n, _)| n.clone()).collect(),
+            targets: redundant.iter().map(|r| r.value.clone()).collect(),
         });
     }
     match owner_count {
@@ -861,11 +896,10 @@ pub fn score_application(
     let days_since_created = app.created_date_time.map(|c| (now - c).num_days());
     acc.merge(rule_stale_app(days_since_created));
 
-    // Resource-stripped values, resolved once: the rules that classify by
-    // permission *name* alone (SharePoint, redundancy, downgrade pointers) take
-    // these, while the mailbox and risk rules read `app_role_grants` directly
-    // because they must gate on the grant's own resource.
-    let values = perms.app_role_values();
+    // (No resource-stripped value list any more: `rule_downgrade_pointers` was
+    // the last rule reading one, and it now takes the grants. Every rule in
+    // `score_application` classifies from `app_role_grants`, so the resource is
+    // available at every decision — which is the invariant, not an optimization.)
 
     // Rules 11, 12, 18 also return the sets the remediation block keys off.
     let (mail_contrib, mailbox_unscoped, mailbox_legacy) = rule_mailbox_advisory(perms);
@@ -890,7 +924,11 @@ pub fn score_application(
         has_app_permissions,
         has_credentials,
     )); // Rules 19 & 20
-    acc.merge(rule_downgrade_pointers(&values)); // least-privilege downgrade pointers
+    // The grants, not `values`: the alternatives are Graph-only, and an
+    // already-confined grant needs no downgrade advice. See the rule's doc.
+    acc.merge(rule_downgrade_pointers(&perms.app_role_grants, |g| {
+        perms.is_scoped(g)
+    })); // least-privilege downgrade pointers
 
     let permission_count = (perms.app_role_grants.len() + perms.scope_values.len()) as u32;
 
@@ -2413,7 +2451,7 @@ mod tests {
                 "App instance property lock is not fully enabled — credentials could be added to the service principal to abuse its permissions",
                 "Public client flows are enabled and credentials are present — if this app is used only as a public/installed client, the credentials should be removed",
                 "Uses client secret(s) — less secure than certificates or federated credentials",
-                "Redundant application permissions: Mail.Read (covered by Mail.ReadWrite), User.Read.All (covered by Directory.ReadWrite.All)",
+                "Redundant application permissions: Mail.Read on Microsoft Graph (covered by Mail.ReadWrite), User.Read.All on Microsoft Graph (covered by Directory.ReadWrite.All)",
             ]
         );
         assert_eq!(
@@ -2463,13 +2501,19 @@ mod tests {
                 "Uses client secret(s) — less secure than certificates or federated credentials",
             ]
         );
+        // NOTE: no "Narrower alternatives exist …" line for `Mail.ReadWrite`,
+        // and that is the point of this fixture. The grant is confined via RBAC
+        // for Applications (the issues above say so), so the broader capability
+        // is not org-wide and a downgrade pointer is advice for a problem the
+        // operator has already solved by another mechanism.
+        // `rule_downgrade_pointers` used to read resource-stripped values and
+        // had no way to know.
         assert_eq!(
             as_strs(&item.recommendations),
             vec![
                 "Plan credential renewal for expiring certificates/secrets",
                 "Assign a second owner to avoid losing management access if the sole owner leaves",
                 "Prefer a certificate or federated identity credential over client secrets where possible",
-                "Narrower alternatives exist if the broader capability is unused: Mail.ReadWrite → Mail.Read / Mail.ReadBasic / Mail.ReadBasic.All",
             ]
         );
         assert_eq!(
@@ -2611,7 +2655,7 @@ mod tests {
             item.issues
                 .iter()
                 .any(|i| i.starts_with(issue::REDUNDANT_APP_PERMS)
-                    && i.contains("Mail.Read (covered by Mail.ReadWrite)"))
+                    && i.contains("Mail.Read on Microsoft Graph (covered by Mail.ReadWrite)"))
         );
 
         let r = item

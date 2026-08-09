@@ -42,6 +42,23 @@ pub const EWS_FULL_ACCESS_AS_APP: &str = "full_access_as_app";
 /// RBAC-for-Applications role backing [`EWS_FULL_ACCESS_AS_APP`].
 const EWS_ACCESS_AS_APP_ROLE: &str = "Application EWS.AccessAsApp";
 
+/// A human-readable name for one of the three resources whose appRoles collide
+/// by value, falling back to the raw app id for anything else.
+///
+/// Exists so operator-facing text can say *which* `Mail.Read` or `Sites.Read.All`
+/// it means. The same permission name on Microsoft Graph and on the legacy
+/// Office 365 resources authorizes against different APIs, and only Graph's is
+/// confinable — so a finding or a Fix that names the value alone is ambiguous
+/// exactly where the consequences differ.
+pub fn resource_label(resource_app_id: &str) -> &str {
+    match resource_app_id {
+        MICROSOFT_GRAPH_APP_ID => "Microsoft Graph",
+        OFFICE365_EXCHANGE_ONLINE_APP_ID => "Office 365 Exchange Online",
+        OFFICE365_SHAREPOINT_ONLINE_APP_ID => "Office 365 SharePoint Online",
+        other => other,
+    }
+}
+
 /// The Exchange application role for a **Microsoft Graph** mail/calendar/contacts
 /// application permission. This set is exactly the Graph permission list
 /// Application Access Policies supported, so an AAP migration can always map
@@ -111,6 +128,17 @@ pub fn exchange_role_for_resource_permission(
 ///
 /// Use [`exchange_role_for_resource_permission`] wherever the resource is
 /// known — which is every gate, and nearly every caller.
+///
+/// Marked `#[deprecated]` rather than merely documented: its sibling
+/// [`is_scopable_exchange_permission`] carries the attribute and had no callers
+/// left, while this one carried only prose calling itself "the wrong answer for
+/// a gate" — and still had five, including two on mutation paths. Prose does not
+/// stop the next caller; the attribute does.
+#[deprecated(
+    note = "resource-blind: resolves the Microsoft Graph reading first, so an Office 365 Exchange \
+            Online Mail.* grant is reported as scopable when RBAC for Applications cannot confine \
+            it. Use exchange_role_for_resource_permission(resource_app_id, value)."
+)]
 pub fn exchange_role_for_permission(value: &str) -> Option<&'static str> {
     graph_mail_role(value).or(exchange_role_for_resource_permission(
         OFFICE365_EXCHANGE_ONLINE_APP_ID,
@@ -141,6 +169,8 @@ pub fn exchange_role_for_permission(value: &str) -> Option<&'static str> {
     note = "resource-blind: answers true for unscopable Office 365 Exchange Online appRoles.             Use is_scopable_exchange_resource_permission with the grant's resource_app_id."
 )]
 pub fn is_scopable_exchange_permission(value: &str) -> bool {
+    // One deprecated form delegating to another; the attribute is for callers.
+    #[allow(deprecated)]
     exchange_role_for_permission(value).is_some()
 }
 
@@ -368,7 +398,10 @@ impl ScopeKind {
 /// Use [`scope_kind_for`] anywhere the answer decides whether an apply action
 /// is offered.
 pub fn scope_kind(value: &str) -> Option<ScopeKind> {
-    if exchange_role_for_permission(value).is_some() {
+    // Deliberate: this IS the resource-blind form, documented as such above.
+    #[allow(deprecated)]
+    let exchange = exchange_role_for_permission(value).is_some();
+    if exchange {
         Some(ScopeKind::Exchange)
     } else if value == "Sites.Selected" || is_sharepoint_orgwide(value) {
         Some(ScopeKind::SharePoint)
