@@ -635,14 +635,34 @@ impl Cache {
     where
         T: for<'de> serde::Deserialize<'de>,
     {
-        // Refcount bump under the lock, not a deep clone of the JSON tree.
-        let raw = self.lookup(kind, key, |e| Arc::clone(&e.value))?;
+        // Refcount bump under the lock, not a deep clone of the JSON tree. The
+        // `typed` flag rides along because it decides whether a decode failure
+        // means "this entry is poisoned" or "this caller used the wrong door".
+        let (raw, typed) = self.lookup(kind, key, |e| (Arc::clone(&e.value), e.typed.is_some()))?;
         // Deserialize by BORROWING the Arc'd value (`&Value: Deserializer`), so
         // the tree is walked once and never copied.
         match <T as serde::Deserialize>::deserialize(&*raw) {
             Ok(value) => {
                 self.record(kind, true);
                 Some(value)
+            }
+            Err(err) if typed => {
+                // A `put_typed` entry stores `Value::Null` as its untyped body
+                // (the payload lives in `typed`), so an untyped `get` against
+                // one ALWAYS fails to decode. Removing it here turned the
+                // documented "plain `get` = silent miss + rescan" footgun into
+                // a permanent eviction of a pinned tenant-wide index: one read
+                // through the wrong accessor destroyed the very entry pinning
+                // exists to protect, and every surface then paid for a full
+                // directory scan. The entry is not poisoned — the caller should
+                // be using `get_typed` / the `sp_index_*` / `app_name_index_*`
+                // accessors — so leave it alone and just miss.
+                tracing::warn!(
+                    ?err,
+                    "untyped `get` against a typed cache entry; use `get_typed`. Entry kept."
+                );
+                self.record(kind, false);
+                None
             }
             Err(err) => {
                 tracing::warn!(?err, "cache value failed to deserialize; dropping entry");
@@ -1583,6 +1603,48 @@ mod tests {
         // A value stored via the untyped `put` has no typed slot → typed miss.
         cache.put(CacheKind::Lists, "u".into(), &Sample("v".into()));
         assert!(cache.get_typed::<Sample>(CacheKind::Lists, "u").is_none());
+    }
+
+    /// An untyped `get` against a typed index MISSES. It must not evict.
+    ///
+    /// `put_typed` stores `Value::Null` as the untyped body, so an untyped
+    /// `get::<T>` can never decode one — and the decode-failure path used to
+    /// `remove(key)`. That turned the documented "plain `get` = silent miss +
+    /// rescan" footgun into a permanent eviction of a PINNED tenant-wide index:
+    /// a single read through the wrong accessor destroyed the entry that
+    /// pinning exists to protect, and the next visit to every surface reading
+    /// it paid for a fresh directory scan.
+    #[test]
+    fn an_untyped_get_against_a_typed_index_misses_without_evicting_it() {
+        let cache = Cache::new();
+        cache.put_typed_index(CacheKind::Lists, "t1|sp_index".into(), Arc::new(vec![7u32]));
+
+        // The wrong door: misses, as documented.
+        assert!(
+            cache
+                .get::<Vec<u32>>(CacheKind::Lists, "t1|sp_index")
+                .is_none()
+        );
+
+        // ...and the entry is STILL THERE, through the right one. This is the
+        // assertion the old guard test lacked: it checked only that the untyped
+        // read returned `None`, which a delete also satisfies.
+        assert_eq!(
+            cache
+                .get_typed::<Vec<u32>>(CacheKind::Lists, "t1|sp_index")
+                .as_deref(),
+            Some(&vec![7u32]),
+            "an untyped read must not evict the pinned index it failed to decode"
+        );
+
+        // A genuinely poisoned UNTYPED entry is still dropped — the fix must not
+        // have turned the decode-failure path into a no-op for everyone.
+        cache.put(CacheKind::Lists, "u".into(), &Sample("v".into()));
+        assert!(cache.get::<Vec<u32>>(CacheKind::Lists, "u").is_none());
+        assert!(
+            cache.get::<Sample>(CacheKind::Lists, "u").is_none(),
+            "an undecodable untyped entry is still evicted rather than re-failing every read"
+        );
     }
 
     #[test]

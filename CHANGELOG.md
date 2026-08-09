@@ -41,6 +41,23 @@ Older releases (**0.19.2 and earlier**) live in
   quoted value hit a character boundary mid-way and panicked. Operator-authored
   filters reach this from three places, and a filter pasted from a document is
   enough to trigger it.
+- **A security audit that could not read an API's permissions no longer reports
+  itself as clean.** When the toolkit failed to look up the permission
+  definitions for a resource — Microsoft Graph itself, most consequentially —
+  every application declaring permissions against it was scored as though it
+  declared none. Those apps stayed in the results looking spotless, the run
+  reported no coverage gaps, and it was then cached as an authoritative scan, so
+  re-opening Security showed the same false all-clear without re-running. The
+  failure is now reported alongside the other coverage gaps, which means the run
+  is neither cached nor shown as complete. The lookup is also shared across
+  applications now instead of being repeated once per app on a cold run.
+- **A cache read through the wrong accessor no longer discards the tenant-wide
+  index it was looking for.** Reading one of the pinned indexes with the plain
+  untyped accessor is documented to cost a miss and a rescan; it in fact
+  *deleted* the entry, because the decode failure looked identical to a
+  corrupted value. One such read anywhere threw away the index every list,
+  search and audit surface shares, and the next visit to any of them paid for a
+  full directory scan.
 - **The legacy-policy migration can now be stopped, and a stopped run says so.**
   Migrating Application Access Policies across a whole tenant looped over every
   affected app doing Exchange and Entra writes with no Cancel and no

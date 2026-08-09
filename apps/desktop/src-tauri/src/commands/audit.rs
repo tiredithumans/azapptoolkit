@@ -352,6 +352,14 @@ pub async fn run_audit(
         degraded.push(AuditCoverageGap::PerPrincipalScoring);
     }
 
+    // Same rule one level down: a resource whose permission index could not be
+    // resolved makes every app declaring permissions against it score as though
+    // it declared none — a quieter hole than a dropped app, because the app IS
+    // in `items`, just with an empty permission set and therefore no findings.
+    if ctx.resolver.had_unresolved() {
+        degraded.push(AuditCoverageGap::PermissionResolution);
+    }
+
     // Before phase 2 and before any cache write: a partial audit served as
     // authoritative is worse than a failed one, because a risk report silently
     // missing apps reads as clean.
@@ -1065,7 +1073,23 @@ fn sp_audit_candidates(
 
 struct ResourceResolver {
     client: Arc<GraphClient>,
-    cache: Mutex<HashMap<String, Arc<ResourceIndex>>>,
+    /// Per-run memo. The value is a `OnceCell` rather than the index itself so
+    /// N scoring tasks that all want the same resource share ONE round trip: on
+    /// a cold cache every task raced to `resolve_resource_sp` for the same
+    /// ~1500-permission Microsoft Graph index, because the map was only
+    /// consulted before the fetch and written after it.
+    cache: Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Arc<ResourceIndex>>>>>,
+    /// Set when a resource's permission index could not be resolved.
+    ///
+    /// A failed resolve yields an EMPTY index, and `resolve_permissions` skips
+    /// every permission it cannot map — so the affected apps score as though
+    /// they declared nothing at all. Without this flag the run finished with
+    /// `degraded` empty and was cached as an authoritative clean scan, which is
+    /// the one thing AGENTS.md says a degraded run must never be. The empty
+    /// index is still memoized (a persistently unresolvable resource must not
+    /// cost one failed round trip per app); the flag is what stops the result
+    /// being mistaken for a complete one.
+    unresolved: AtomicBool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1079,7 +1103,15 @@ impl ResourceResolver {
         Self {
             client,
             cache: Mutex::new(HashMap::new()),
+            unresolved: AtomicBool::new(false),
         }
+    }
+
+    /// True when at least one resource's permission index could not be
+    /// resolved, so some declared permissions were skipped and the apps holding
+    /// them scored below the truth.
+    fn had_unresolved(&self) -> bool {
+        self.unresolved.load(Ordering::Relaxed)
     }
 
     /// Returns a SHARED handle, not a copy. The Microsoft Graph resource index
@@ -1088,31 +1120,62 @@ impl ResourceResolver {
     /// tens of millions of strings for a read-only lookup table, inside the
     /// spawned scoring tasks (so it saturated every worker, not one).
     async fn index(&self, resource_app_id: &str) -> Arc<ResourceIndex> {
-        {
-            let cache = self.cache.lock().await;
-            if let Some(hit) = cache.get(resource_app_id) {
-                return Arc::clone(hit);
-            }
-        }
+        // Take (or create) this resource's cell under the lock, then release it
+        // before awaiting: holding it across the fetch would serialize resources
+        // that are independent, and not holding a per-key cell at all let every
+        // concurrent task issue the same request.
+        let cell = {
+            let mut cache = self.cache.lock().await;
+            Arc::clone(
+                cache
+                    .entry(resource_app_id.to_string())
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+            )
+        };
 
         // Permission definitions are resolved live from Graph (cached under
         // `CacheKind::Permissions`, and again per-run in `self.cache`); the
         // bundled catalog is only a resource directory and carries no
         // per-permission data.
-        let mut index = ResourceIndex::default();
-        if let Ok(Some(sp)) = self.client.resolve_resource_sp(resource_app_id).await {
-            for r in &sp.app_roles {
-                index.by_id.insert(r.id.clone(), r.value.clone());
-            }
-            for s in &sp.oauth2_permission_scopes {
-                index.by_id.insert(s.id.clone(), s.value.clone());
-            }
-        }
-
-        let index = Arc::new(index);
-        let mut cache = self.cache.lock().await;
-        cache.insert(resource_app_id.to_string(), Arc::clone(&index));
-        index
+        Arc::clone(
+            cell.get_or_init(|| async {
+                let mut index = ResourceIndex::default();
+                match self.client.resolve_resource_sp(resource_app_id).await {
+                    Ok(Some(sp)) => {
+                        for r in &sp.app_roles {
+                            index.by_id.insert(r.id.clone(), r.value.clone());
+                        }
+                        for s in &sp.oauth2_permission_scopes {
+                            index.by_id.insert(s.id.clone(), s.value.clone());
+                        }
+                    }
+                    // BOTH arms are a coverage gap, not an empty resource. An
+                    // `Err` is a failed read; `Ok(None)` is a resource whose
+                    // service principal does not exist in this tenant, and in
+                    // either case every permission declared against it is
+                    // dropped by `resolve_permissions` and the app scores as
+                    // though it held nothing. Recorded rather than swallowed:
+                    // the run must not be cached or shown as an all-clear.
+                    other => {
+                        if let Err(err) = &other {
+                            tracing::warn!(
+                                ?err,
+                                resource_app_id,
+                                "audit could not resolve a resource's permission index"
+                            );
+                        } else {
+                            tracing::warn!(
+                                resource_app_id,
+                                "audit found no service principal for a declared resource"
+                            );
+                        }
+                        self.unresolved.store(true, Ordering::Relaxed);
+                    }
+                }
+                Arc::new(index)
+            })
+            .await,
+        )
     }
 }
 
