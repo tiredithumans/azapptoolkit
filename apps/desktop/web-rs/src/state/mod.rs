@@ -290,7 +290,6 @@ pub struct Session {
     pub toast_seq: RwSignal<u64>,
 }
 
-
 /// Provide a fresh `Session` into the current Leptos context. Call once at
 /// the root.
 pub fn provide_session() {

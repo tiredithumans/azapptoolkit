@@ -110,8 +110,12 @@ pub fn ManagedIdentityDetailWindow(
                 .filter_map(|p| {
                     let value = p.app_role_value.clone()?;
                     let resource_app_id = p.resource_app_id.clone()?;
-                    is_exchange_scopable_on(Some(&resource_app_id), &value)
-                        .then_some(PrincipalPermission { resource_app_id, value })
+                    is_exchange_scopable_on(Some(&resource_app_id), &value).then_some(
+                        PrincipalPermission {
+                            resource_app_id,
+                            value,
+                        },
+                    )
                 })
                 .collect();
             if mail_values.is_empty() {

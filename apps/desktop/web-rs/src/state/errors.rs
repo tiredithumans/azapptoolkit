@@ -68,4 +68,5 @@ impl Session {
         if !self.report_if_session_dead(e) {
             self.toast_error(e.message.clone(), None);
         }
-    }}
+    }
+}

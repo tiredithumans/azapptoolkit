@@ -191,7 +191,6 @@ impl BulkAction {
     fn is_destructive(self) -> bool {
         self.spec().destructive
     }
-
 }
 
 #[component]

@@ -12,6 +12,49 @@ Older releases (**0.19.2 and earlier**) live in
 
 ### Fixed
 
+- **The legacy-policy migration can now be stopped, and a stopped run says so.**
+  Migrating Application Access Policies across a whole tenant looped over every
+  affected app doing Exchange and Entra writes with no Cancel and no
+  dead-session check: pressing Cancel did nothing, and a session that expired on
+  the first app still worked through all of them, producing one identical
+  failure line per app that reads as the tenant refusing the writes. It now
+  stops on either, and the report is marked incomplete so the apps it never
+  reached are not mistaken for migrated ones.
+- **Cancel now works during the slowest part of a security audit.** The audit
+  took its cancellation handle *after* the tenant-wide prefetch that dominates a
+  large run, so a Cancel pressed during that phase — the likeliest moment —
+  was discarded and the run scored the whole tenant anyway.
+- **Cancelling a restore now stops it.** Cancel was only checked while the app
+  shells were being created; once that finished, the remaining four passes
+  (wiring, consent, enterprise apps, managed identities) ran to completion
+  regardless.
+- **A redundant permission held on two resources is no longer missed.** The
+  audit decided redundancy from whichever grant it happened to see first, so a
+  `Mail.Read` on Microsoft Graph could silently suppress the genuinely redundant
+  `Mail.Read` on Office 365 Exchange Online sitting beside a `Mail.ReadWrite`.
+  Two tenants with identical grants could score differently. Findings now name
+  which resource the pair lives on, rather than leaving you to guess which
+  `Mail.Read` to remove.
+- **The "Remove redundant permissions" fix can no longer revoke access nothing
+  covers.** The audit deliberately does not flag a narrower permission when the
+  broader one covering it is confined to specific mailboxes — a confined
+  `Mail.ReadWrite` does not cover an org-wide `Mail.Read`. The one-click fix
+  re-planned from live state without that rule and would have removed it. It
+  now applies the same rule, and skips the removal when Exchange cannot confirm
+  the scope rather than guessing.
+- **Least-privilege suggestions stop pointing at the wrong resource.** They
+  offered Microsoft Graph alternatives for Office 365 Exchange Online grants
+  (which do not exist there) and fired for permissions already confined via
+  Exchange RBAC.
+- **A whole-tenant migration is no longer split in two by GUID casing.** Policies
+  for one app were grouped case-sensitively, so the same application appearing
+  with differently-cased ids became two batches — the exact failure the
+  one-batch-per-app rule exists to prevent.
+- **A cached tenant-wide index is no longer evicted by a write that lost a
+  race.** Two concurrent refreshes could end with the loser deleting the
+  winner's freshly-validated index, costing a full re-scan on the next read with
+  nothing to explain it.
+
 - **A bulk action no longer burns through the rest of your selection after the
   session dies.** The expired-credential sweep, the delete sweep and the
   consent-grant sweep each fanned out without checking whether the session was
@@ -74,6 +117,18 @@ Older releases (**0.19.2 and earlier**) live in
 
 ### Changed
 
+- The security audit's redundant-permission findings and its one-click fix now
+  name the resource alongside the permission (`Mail.Read on Microsoft Graph`),
+  since the same name on the legacy Office 365 resource is a different grant.
+  No score or ranking changes.
+- Least-privilege downgrade suggestions are no longer offered for permissions
+  already confined via Exchange RBAC.
+- `verify-full` now runs the frontend shard-size gate, so it matches CI; a check
+  derives the gate list from `ci.yml` so the two cannot drift again.
+- The Graph, ARM and Key Vault error taxonomies come from one definition in
+  `azapptoolkit-core::http_error` instead of three identical hand-maintained
+  copies, and Graph's `$batch` retry now shares the same budget and backoff as
+  every other client instead of re-deriving them.
 - Retry policy (budget, backoff, `Retry-After`) is now one loop in
   `azapptoolkit-core::http_retry` instead of four near-identical copies across
   the Graph, ARM, Key Vault and Exchange clients. Behaviour is unchanged; the

@@ -691,3 +691,18 @@ by appId, tagged with `TypeChip`). It exercises the same live primitives the gra
 lacks Exchange-admin rights: the Entra layer answers alone (with the AAP caveat) before falling
 back to an `unknown` verdict (never a hard error); SharePoint reuses the `sharepoint` consent
 flow.
+
+
+## Repointing a management scope (fail-closed)
+
+`ensure_management_scope` is **create-only**. `set_management_scope_filter` is
+the sole filter mutator, and Exchange applies a filter change to **every** role
+assignment on that scope — so repointing is never incidental to another
+operation.
+
+A filter may only be rewritten once `targets::rewritable_scope_dns` proves it a
+pure `MemberOfGroup` OR-chain; anything it cannot fully read is unrewritable.
+`plan_consolidation` owns the rest of the decision. Both refuse rather than fall
+back: a scope that cannot be *proved* safe to narrow keeps its original groups,
+because an integration that silently stops seeing a mailbox reports "not found",
+not "denied" — the hardest kind of outage to trace to a permission change.

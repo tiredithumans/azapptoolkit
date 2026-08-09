@@ -171,6 +171,23 @@ footgun, with the reset enforced **by structure, not vigilance**:
 
 ## Security workbench layout
 
+Filtering has exactly **two** homes: the Findings accordion and the All-apps
+`audit_severity` control. Anything else that filters is a third home and will
+drift out of step with them.
+
+`BulkActionBar` is the single home of bulk command-calling. There is **no Grant
+consent on audit surfaces** — consent is a Permissions-tab action, and offering
+it beside a finding invites granting the very permission the finding is about.
+
+A row shows only its own section's Fix and tab (`GroupSpec`); `on_remediated`
+clears just that remediation kind, so fixing one finding does not blank the row's
+unrelated findings.
+
+**Load-bearing asymmetry:** `scoped_mailbox` matches
+`.contains(SCOPED_VIA_RBAC)` while its siblings use `.starts_with`. That is
+deliberate, not an oversight — pinned by the `filter.rs` tests.
+
+
 The Security tab is a findings-first workbench: one controller, one strip, four panes. (Finding
 *semantics* — the group catalog, key matching, and bulk-action pairing — live in
 [scoping-and-audit.md](./scoping-and-audit.md); this section is the view structure.)
@@ -194,3 +211,34 @@ The Security tab is a findings-first workbench: one controller, one strip, four 
   Registrations list, and on the Bulk Actions page. **No Grant consent on audit surfaces.**
   "Fix all N" only seeds `selected_audit_ids` with the group's *eligible* (Application-kind) ids —
   the bar's typed-confirm / target forms still gate execution.
+
+## Browser GUI tests: sharding and its constraints
+
+`just web-itest` mounts real Leptos views in a headless browser with the Tauri
+IPC mocked. It is the frontend's only behavioural gate, and CI runs it
+unconditionally.
+
+Tests are `tests/gui/<view>.rs` **modules**, grouped into shard binaries
+(`tests/gui_N.rs`) via `#[path] mod`; the harness lives in
+`web-rs/src/test_support/`.
+
+**Why shards.** One merged binary exceeds what headless Chrome will instantiate.
+`just web-itest-size` enforces the per-shard wasm ceiling and prints how to
+split when a shard grows past it. It runs in CI and in `just verify-full`.
+
+**Grouping rule.** Group modules by the **view subtree they mount**, not by
+count — the linker keeps only referenced views, so a shard's size tracks the
+subtree it pulls in rather than the number of tests in it.
+
+**What makes the ceiling reachable.** `[profile.test] strip = "debuginfo"` plus
+`opt-level = 1`. Never `strip = true`: it removes the `name` section, and every
+panic trace becomes anonymous.
+
+**Do NOT make `test_support::reset()` clear `document.body`.** The runner
+scrapes results from the page DOM, so wiping it makes the shard report nothing —
+a green run that tested nothing.
+
+**Renaming breaks tests silently at edit time.** A CSS class, `aria-label`, or
+on-screen string a GUI test references is part of that test's contract.
+`web-test-strings-check.sh` warns when an edit removes one; `just verify`
+catches it locally given a browser, `just verify-ui` always.
