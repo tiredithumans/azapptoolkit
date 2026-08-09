@@ -97,6 +97,17 @@ pub enum AuditCoverageGap {
     /// disproportionately the interesting ones: a scoring failure usually means
     /// a Graph or Exchange probe failed on that specific principal.
     PerPrincipalScoring,
+    /// A resource's permission index could not be resolved, so the permissions
+    /// declared against it were skipped.
+    ///
+    /// Quieter than [`AuditCoverageGap::PerPrincipalScoring`] and worse to
+    /// miss: the affected apps are still present in `items`, scored, and shown
+    /// — just with an empty permission set, so they read as holding nothing
+    /// rather than as unexamined. A failed resolve is memoized for the run, so
+    /// one transient failure on the Microsoft Graph resource silently emptied
+    /// the permissions of every app in the tenant while the run reported itself
+    /// complete and cached itself as authoritative.
+    PermissionResolution,
     /// A gap recorded by a newer build than the one reading it back.
     #[serde(other)]
     Other,
@@ -115,6 +126,9 @@ impl AuditCoverageGap {
             }
             AuditCoverageGap::PerPrincipalScoring => {
                 "Some applications could not be scored and are missing from these results,                  so a risk this run does not show may simply not have been looked at."
+            }
+            AuditCoverageGap::PermissionResolution => {
+                "The permissions an application programming interface defines could not be                  read, so applications holding those permissions were scored as though they                  held none — they may look clean here while holding high-risk access."
             }
             AuditCoverageGap::Other => {
                 "Part of this run's tenant-wide analysis could not be completed."
