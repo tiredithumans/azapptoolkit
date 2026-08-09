@@ -1,9 +1,17 @@
-//! Shared retry knobs and timing helpers used by the Graph, Key Vault, and
-//! Exchange HTTP clients. The full retry *loop* is still owned by each crate
-//! because they map HTTP status -> their own error enum differently and each
-//! has its own observer hooks. This module only consolidates the pieces that
-//! were copied verbatim across all three: the budget constants and the
-//! jittered sleep / backoff helpers.
+//! Shared retry policy for the Graph, ARM, Key Vault and Exchange HTTP clients:
+//! the budget constants, the jittered sleep / backoff helpers, and the loop
+//! itself ([`with_retries`]).
+//!
+//! The loop used to be owned by each crate, on the grounds that they map HTTP
+//! status to their own error enums differently and Graph has a throttle
+//! observer. That difference is real, but it is per-*attempt* classification —
+//! it does not require re-deriving the budget comparison, the sleep call and the
+//! backoff advance in four files, where three of them can drift without anything
+//! noticing. [`Attempt`] is the seam: the caller classifies, this module decides
+//! whether and when to go round again.
+//!
+//! Graph keeps one loop of its own on top, for the CAE claims-challenge re-mint,
+//! which is deliberately *outside* the transient budget.
 
 /// The single definition of which failure classes are worth retrying, keyed by
 /// the `ui_code()` every client error exposes.
@@ -97,6 +105,68 @@ pub async fn sleep_with_jitter(base_ms: u64) {
     tokio::time::sleep(Duration::from_millis(total)).await;
 }
 
+/// How one attempt ended, as the calling client classifies it.
+///
+/// The classification stays in the caller because mapping an HTTP status to a
+/// crate's own error enum is genuinely per-crate; deciding *how many* times to
+/// retry and *how long* to wait is not.
+pub enum Attempt<T, E> {
+    /// Terminal, success or failure. Returned to the caller as-is.
+    Done(Result<T, E>),
+    /// Transient. Retried while budget remains; once exhausted, `err` is
+    /// returned. `retry_after_secs` comes from the response header, honored
+    /// exactly (see [`sleep_before_retry`]).
+    Retry {
+        retry_after_secs: Option<u64>,
+        err: E,
+    },
+}
+
+/// Runs `attempt` under the shared retry budget and backoff policy.
+///
+/// The four HTTP clients each open-coded this loop over the very primitives in
+/// this module — same `MAX_RETRIES` comparison, same `sleep_before_retry`, same
+/// `next_backoff_ms`, same `attempt += 1` — differing only in how they turned a
+/// status into their own error and, for Graph, a throttle-observer callback.
+/// Retry *semantics* are a policy, and a policy re-derived in four places is one
+/// that can silently diverge in three of them.
+///
+/// `attempt` receives the zero-based attempt number (for its own logging) and
+/// does its own send, status mapping and body reading; everything about
+/// *whether and when to go round again* lives here.
+pub async fn with_retries<T, E, F, Fut>(label: &str, mut attempt: F) -> Result<T, E>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = Attempt<T, E>>,
+{
+    let mut n = 0u32;
+    let mut delay_ms = BASE_DELAY_MS;
+    loop {
+        match attempt(n).await {
+            Attempt::Done(result) => return result,
+            Attempt::Retry {
+                retry_after_secs,
+                err,
+            } => {
+                if n >= MAX_RETRIES {
+                    return Err(err);
+                }
+                tracing::warn!(
+                    attempt = n,
+                    label,
+                    retry_after_secs = ?retry_after_secs,
+                    "transient failure; retrying"
+                );
+                // An explicit `Retry-After` is honored exactly; only the
+                // no-header path uses jittered exponential backoff.
+                sleep_before_retry(retry_after_secs, delay_ms).await;
+                n += 1;
+                delay_ms = next_backoff_ms(delay_ms);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +245,109 @@ mod tests {
         // The jittered fallback IS bounded by MAX_DELAY_MS (unlike Retry-After).
         let capped = virtual_elapsed(sleep_before_retry(None, MAX_DELAY_MS * 2)).await;
         assert_eq!(capped, MAX_DELAY_MS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn with_retries_returns_a_terminal_outcome_without_waiting() {
+        let mut calls = 0;
+        let out: Result<&str, &str> = with_retries("test", |_| {
+            calls += 1;
+            async { Attempt::Done(Ok("ok")) }
+        })
+        .await;
+        assert_eq!(out, Ok("ok"));
+        assert_eq!(calls, 1, "a terminal outcome must not retry");
+
+        // A terminal *failure* is equally final — only `Retry` goes round again.
+        let mut calls = 0;
+        let out: Result<&str, &str> = with_retries("test", |_| {
+            calls += 1;
+            async { Attempt::Done(Err("forbidden")) }
+        })
+        .await;
+        assert_eq!(out, Err("forbidden"));
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn with_retries_stops_after_max_retries_and_returns_the_last_error() {
+        let mut calls = 0;
+        let out: Result<(), &str> = with_retries("test", |n| {
+            calls += 1;
+            async move {
+                Attempt::Retry {
+                    retry_after_secs: None,
+                    err: if n >= MAX_RETRIES {
+                        "last"
+                    } else {
+                        "transient"
+                    },
+                }
+            }
+        })
+        .await;
+        assert_eq!(out, Err("last"));
+        // The budget is MAX_RETRIES *retries*, so MAX_RETRIES + 1 attempts.
+        assert_eq!(calls, MAX_RETRIES + 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn with_retries_backs_off_exponentially_and_honors_retry_after() {
+        // Without a header: BASE, then doubling. With one: exactly the header.
+        let waited = virtual_elapsed(async {
+            let _: Result<(), ()> = with_retries("test", |_| async {
+                Attempt::Retry {
+                    retry_after_secs: None,
+                    err: (),
+                }
+            })
+            .await;
+        })
+        .await;
+        // 1000 + 2000 + 4000, each plus up to 10% jitter.
+        let base = BASE_DELAY_MS + 2 * BASE_DELAY_MS + 4 * BASE_DELAY_MS;
+        assert!(
+            (base..=base + base / 10).contains(&waited),
+            "expected ~{base} ms of backoff, waited {waited}"
+        );
+
+        let waited = virtual_elapsed(async {
+            let _: Result<(), ()> = with_retries("test", |_| async {
+                Attempt::Retry {
+                    retry_after_secs: Some(7),
+                    err: (),
+                }
+            })
+            .await;
+        })
+        .await;
+        assert_eq!(
+            waited,
+            3 * 7_000,
+            "an explicit Retry-After is honored exactly on every attempt"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn with_retries_can_succeed_on_a_later_attempt() {
+        let mut calls = 0;
+        let out: Result<&str, &str> = with_retries("test", |_| {
+            calls += 1;
+            let attempt = calls;
+            async move {
+                if attempt < 3 {
+                    Attempt::Retry {
+                        retry_after_secs: None,
+                        err: "transient",
+                    }
+                } else {
+                    Attempt::Done(Ok("recovered"))
+                }
+            }
+        })
+        .await;
+        assert_eq!(out, Ok("recovered"));
+        assert_eq!(calls, 3);
     }
 
     #[test]

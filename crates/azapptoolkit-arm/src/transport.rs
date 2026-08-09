@@ -8,10 +8,7 @@ use std::sync::Arc;
 use reqwest::Method;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
-use azapptoolkit_core::http_retry::{
-    BASE_DELAY_MS, MAX_RETRIES, next_backoff_ms, parse_retry_after_seconds, sleep_before_retry,
-    sleep_with_jitter,
-};
+use azapptoolkit_core::http_retry::{Attempt, parse_retry_after_seconds, with_retries};
 use azapptoolkit_core::token::{BearerProvider, TokenError};
 
 use crate::error::{ArmError, Result};
@@ -39,77 +36,77 @@ pub(crate) async fn send_with_retry(
             .map_err(|e| ArmError::Token(TokenError::opaque(e.to_string())))?,
     );
 
-    let mut attempt = 0u32;
-    let mut delay_ms = BASE_DELAY_MS;
-    loop {
-        let mut req = http
-            .request(method.clone(), url)
-            .headers(headers.clone())
-            .query(query);
-        if let Some(b) = body {
-            req = req.json(b);
-        }
-        let resp = match req.send().await {
-            Ok(r) => r,
-            Err(err) => {
-                if attempt < MAX_RETRIES {
-                    tracing::warn!(%attempt, ?err, "{label} transport error; retrying");
-                    sleep_with_jitter(delay_ms).await;
-                    attempt += 1;
-                    delay_ms = next_backoff_ms(delay_ms);
-                    continue;
-                }
-                return Err(ArmError::Network(err.to_string()));
+    // Retry budget, backoff and `Retry-After` handling all live in
+    // `http_retry::with_retries`; this closure only classifies one attempt.
+    with_retries(label, |_| {
+        let http = http.clone();
+        let headers = headers.clone();
+        let method = method.clone();
+        async move {
+            let mut req = http.request(method, url).headers(headers).query(query);
+            if let Some(b) = body {
+                req = req.json(b);
             }
-        };
-        let status = resp.status();
-        if status.is_success() {
-            return resp
-                .bytes()
-                .await
-                .map_err(|e| ArmError::Network(e.to_string()));
-        }
-        let retry_after = parse_retry_after_seconds(
-            resp.headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok()),
-        );
-        let body_text = resp.text().await.unwrap_or_default();
-        let code = status.as_u16();
+            let resp = match req.send().await {
+                Ok(r) => r,
+                // No response means no `Retry-After` to honor — the shared loop
+                // falls back to jittered exponential backoff.
+                Err(err) => {
+                    return Attempt::Retry {
+                        retry_after_secs: None,
+                        err: ArmError::Network(err.to_string()),
+                    };
+                }
+            };
+            let status = resp.status();
+            if status.is_success() {
+                return Attempt::Done(
+                    resp.bytes()
+                        .await
+                        .map_err(|e| ArmError::Network(e.to_string())),
+                );
+            }
+            let retry_after = parse_retry_after_seconds(
+                resp.headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
+            );
+            let body_text = resp.text().await.unwrap_or_default();
+            let code = status.as_u16();
 
-        if code == 401 {
-            return Err(ArmError::Unauthorized);
-        }
-        if code == 403 {
-            return Err(ArmError::Forbidden(body_text));
-        }
-        if code == 404 {
-            return Err(ArmError::NotFound(body_text));
-        }
-        if (400..500).contains(&code) && code != 429 {
-            return Err(ArmError::Api {
-                status: code,
-                body: body_text,
-            });
-        }
-        if attempt < MAX_RETRIES {
-            // An explicit `Retry-After` is honored exactly; only the
-            // no-header path uses jittered exponential backoff.
-            tracing::warn!(%attempt, status = %status, retry_after_secs = ?retry_after, "{label} transient; retrying");
-            sleep_before_retry(retry_after, delay_ms).await;
-            attempt += 1;
-            delay_ms = next_backoff_ms(delay_ms);
-            continue;
-        }
-        return if code == 429 {
-            Err(ArmError::Throttled {
+            // 401/403/404 are typed; any other non-429 4xx is terminal → `Api`
+            // (which lets a Logs `query` treat a 400 "table absent" as a probe
+            // miss rather than a hard failure).
+            let terminal = match code {
+                401 => Some(ArmError::Unauthorized),
+                403 => Some(ArmError::Forbidden(body_text.clone())),
+                404 => Some(ArmError::NotFound(body_text.clone())),
+                c if (400..500).contains(&c) && c != 429 => Some(ArmError::Api {
+                    status: code,
+                    body: body_text.clone(),
+                }),
+                _ => None,
+            };
+            if let Some(err) = terminal {
+                return Attempt::Done(Err(err));
+            }
+
+            // 429 and 5xx: retryable, and this is the error the shared loop
+            // surfaces once the budget is spent.
+            Attempt::Retry {
                 retry_after_secs: retry_after,
-            })
-        } else {
-            Err(ArmError::Server {
-                status: code,
-                body: body_text,
-            })
-        };
-    }
+                err: if code == 429 {
+                    ArmError::Throttled {
+                        retry_after_secs: retry_after,
+                    }
+                } else {
+                    ArmError::Server {
+                        status: code,
+                        body: body_text,
+                    }
+                },
+            }
+        }
+    })
+    .await
 }

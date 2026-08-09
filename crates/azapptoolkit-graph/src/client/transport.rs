@@ -450,72 +450,135 @@ impl GraphClient {
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         }
 
-        let mut attempt = 0u32;
-        let mut delay_ms = BASE_DELAY_MS;
+        /// What one Graph attempt produced. The CAE branch is a success as far
+        /// as the *transient* retry policy is concerned — it is a token problem,
+        /// not service pressure — so it travels as an outcome rather than an
+        /// error and never spends retry budget.
+        enum Outcome {
+            Body(bytes::Bytes),
+            /// A 401 carrying an `insufficient_claims` challenge.
+            ClaimsChallenge(String),
+        }
+
         // CAE: set once we've re-minted in response to a claims challenge, so a
-        // persistent 401 can't loop (the re-mint is outside the transient budget).
+        // persistent 401 can't loop (the re-mint is outside the transient
+        // budget, which is why it is an outer loop around `with_retries` rather
+        // than another `Attempt` variant).
         let mut cae_retried = false;
         loop {
-            let mut req = self
-                .http
-                .request(method.clone(), url)
-                .headers(headers.clone())
-                .query(query);
-            if let Some(b) = body_bytes.as_ref() {
-                req = req.body(b.clone());
-            }
-            let resp = req.send().await;
-            let resp = match resp {
-                Ok(r) => r,
-                Err(err) => {
-                    if attempt < MAX_RETRIES {
-                        tracing::warn!(%attempt, ?err, "transport error; retrying");
-                        sleep_with_jitter(delay_ms).await;
-                        attempt += 1;
-                        delay_ms = next_backoff_ms(delay_ms);
-                        continue;
+            // Retry budget, backoff and `Retry-After` handling live in
+            // `http_retry::with_retries`; this closure only classifies one
+            // attempt. `headers` is read fresh per call, so the re-minted bearer
+            // below is picked up on the next pass.
+            let outcome = with_retries("graph", |_| {
+                let http = self.http.clone();
+                let headers = headers.clone();
+                let method = method.clone();
+                let body_bytes = body_bytes.clone();
+                let observer = self.throttle_observer.read().clone();
+                async move {
+                    let mut req = http.request(method, url).headers(headers).query(query);
+                    if let Some(b) = body_bytes.as_ref() {
+                        req = req.body(b.clone());
                     }
-                    return Err(GraphError::Network(err.to_string()));
+                    let resp = match req.send().await {
+                        Ok(r) => r,
+                        // No response means no `Retry-After` to honor — the
+                        // shared loop falls back to jittered backoff.
+                        Err(err) => {
+                            return Attempt::Retry {
+                                retry_after_secs: None,
+                                err: GraphError::Network(err.to_string()),
+                            };
+                        }
+                    };
+
+                    let status = resp.status();
+                    if status.is_success() {
+                        return Attempt::Done(
+                            resp.bytes()
+                                .await
+                                .map(Outcome::Body)
+                                .map_err(|e| GraphError::Network(e.to_string())),
+                        );
+                    }
+
+                    let retry_after = parse_retry_after_seconds(
+                        resp.headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|v| v.to_str().ok()),
+                    );
+                    // Capture the CAE challenge header before the body consumes `resp`.
+                    let www_authenticate = resp
+                        .headers()
+                        .get(reqwest::header::WWW_AUTHENTICATE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    let body_text = resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "<no body>".to_string());
+                    let code = status.as_u16();
+
+                    if code == 401 {
+                        // Hand the challenge back to the outer loop, which owns
+                        // the re-mint and the once-only guard.
+                        if let Some(challenge) =
+                            www_authenticate.as_deref().and_then(parse_claims_challenge)
+                        {
+                            return Attempt::Done(Ok(Outcome::ClaimsChallenge(challenge)));
+                        }
+                        return Attempt::Done(Err(GraphError::Unauthorized));
+                    }
+                    let terminal = match code {
+                        403 => Some(GraphError::Forbidden(body_text.clone())),
+                        404 => Some(GraphError::NotFound(body_text.clone())),
+                        c if (400..500).contains(&c) && c != 429 => Some(GraphError::Api {
+                            status: code,
+                            body: body_text.clone(),
+                        }),
+                        _ => None,
+                    };
+                    if let Some(err) = terminal {
+                        return Attempt::Done(Err(err));
+                    }
+
+                    // 429 always notifies the observer, whether or not we end up
+                    // retrying successfully — the signal is about service pressure.
+                    if code == 429
+                        && let Some(observer) = observer.as_ref()
+                    {
+                        observer.on_throttle(retry_after);
+                    }
+
+                    Attempt::Retry {
+                        retry_after_secs: retry_after,
+                        err: if code == 429 {
+                            GraphError::Throttled {
+                                retry_after_secs: retry_after,
+                            }
+                        } else {
+                            GraphError::Server {
+                                status: code,
+                                body: body_text,
+                            }
+                        },
+                    }
                 }
-            };
+            })
+            .await?;
 
-            let status = resp.status();
-            if status.is_success() {
-                let bytes = resp
-                    .bytes()
-                    .await
-                    .map_err(|e| GraphError::Network(e.to_string()))?;
-                return Ok(bytes);
-            }
-
-            let retry_after = parse_retry_after_seconds(
-                resp.headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok()),
-            );
-            // Capture the CAE challenge header before the body consumes `resp`.
-            let www_authenticate = resp
-                .headers()
-                .get(reqwest::header::WWW_AUTHENTICATE)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string);
-            let body_text = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "<no body>".to_string());
-            let code = status.as_u16();
-
-            // CAE: a 401 carrying an `insufficient_claims` challenge means the
-            // resource now requires a fresher token (e.g. after a revocation or
-            // policy change). Re-mint once with the challenge and retry — separate
-            // from the transient-retry budget. A non-CAE provider can't satisfy it
-            // (its `bearer_with_claims` falls back), so the single-retry guard
-            // prevents a loop.
-            if code == 401 {
-                if !cae_retried
-                    && let Some(challenge) =
-                        www_authenticate.as_deref().and_then(parse_claims_challenge)
-                {
+            match outcome {
+                Outcome::Body(bytes) => return Ok(bytes),
+                // CAE: the resource now requires a fresher token (e.g. after a
+                // revocation or policy change). Re-mint once with the challenge
+                // and retry. A non-CAE provider can't satisfy it (its
+                // `bearer_with_claims` falls back), so the once-only guard
+                // prevents a loop.
+                Outcome::ClaimsChallenge(challenge) => {
+                    if cae_retried {
+                        return Err(GraphError::Unauthorized);
+                    }
                     match provider.bearer_with_claims(&challenge).await {
                         Ok(bearer) => {
                             headers.insert(
@@ -525,57 +588,17 @@ impl GraphClient {
                                 )?,
                             );
                             cae_retried = true;
-                            continue;
                         }
-                        Err(e) => tracing::info!(
-                            detail = %e,
-                            "CAE claims challenge could not be satisfied silently; re-auth needed"
-                        ),
+                        Err(e) => {
+                            tracing::info!(
+                                detail = %e,
+                                "CAE claims challenge could not be satisfied silently; re-auth needed"
+                            );
+                            return Err(GraphError::Unauthorized);
+                        }
                     }
                 }
-                return Err(GraphError::Unauthorized);
             }
-            if code == 403 {
-                return Err(GraphError::Forbidden(body_text));
-            }
-            if code == 404 {
-                return Err(GraphError::NotFound(body_text));
-            }
-            if (400..500).contains(&code) && code != 429 {
-                return Err(GraphError::Api {
-                    status: code,
-                    body: body_text,
-                });
-            }
-
-            // 429 always notifies the observer, whether or not we end up
-            // retrying successfully — the signal is about service pressure.
-            if code == 429
-                && let Some(observer) = self.throttle_observer.read().as_ref()
-            {
-                observer.on_throttle(retry_after);
-            }
-
-            // Retryable (429, 5xx). An explicit `Retry-After` is waited exactly
-            // (no jitter / no 30s clamp); only the no-header path uses backoff.
-            if attempt < MAX_RETRIES {
-                tracing::warn!(%attempt, status = %status, retry_after_secs = ?retry_after, "transient error; retrying");
-                sleep_before_retry(retry_after, delay_ms).await;
-                attempt += 1;
-                delay_ms = next_backoff_ms(delay_ms);
-                continue;
-            }
-
-            return if code == 429 {
-                Err(GraphError::Throttled {
-                    retry_after_secs: retry_after,
-                })
-            } else {
-                Err(GraphError::Server {
-                    status: code,
-                    body: body_text,
-                })
-            };
         }
     }
 }

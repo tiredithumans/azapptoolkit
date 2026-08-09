@@ -16,10 +16,7 @@ use azapptoolkit_core::models::{
     ServicePrincipal, ServicePrincipalSignInActivity, Site, SitePermission, SynchronizationJob,
 };
 
-use azapptoolkit_core::http_retry::{
-    BASE_DELAY_MS, MAX_RETRIES, next_backoff_ms, parse_retry_after_seconds, sleep_before_retry,
-    sleep_with_jitter,
-};
+use azapptoolkit_core::http_retry::{Attempt, parse_retry_after_seconds, with_retries};
 use azapptoolkit_core::net::same_origin;
 use azapptoolkit_core::token::BearerProvider;
 
