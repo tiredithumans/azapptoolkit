@@ -272,10 +272,15 @@ verify: _verify-core web-itest-auto
 verify-ui: _verify-core web-itest
 
 # Full CI parity: the core gates + both RustSec scans + both deny policies + the
-# browser GUI tests. web-itest runs LAST because it needs a local browser +
-# matching WebDriver (see its recipe) — the machine-independent gates fail
-# first on a box without one.
-verify-full: _verify-core audit web-audit deny web-deny web-itest
+# browser GUI tests + the per-shard wasm ceiling. web-itest runs LAST because it
+# needs a local browser + matching WebDriver (see its recipe) — the
+# machine-independent gates fail first on a box without one.
+#
+# `web-itest-size` is here because ci.yml runs it and this recipe claims CI
+# parity. It was missing, so a shard that had grown past the ceiling passed
+# `just verify-full` locally and failed in CI — the exact failure mode the
+# recipe exists to prevent.
+verify-full: _verify-core audit web-audit deny web-deny web-itest web-itest-size
 
 # --- Dependency policy (CI audit/deny jobs) ---------------------------------
 

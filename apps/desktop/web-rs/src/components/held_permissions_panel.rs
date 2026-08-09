@@ -27,7 +27,7 @@ use crate::components::permission_picker::{MICROSOFT_GRAPH_APP_ID, PickerSelecti
 use crate::components::scope_badge::{
     app_permission_risk_badge, is_sharepoint_orgwide, permission_scope_cell,
 };
-use crate::components::ui::{DataTable, IconButton};
+use crate::components::ui::{Callout, DataTable, IconButton};
 
 /// Whether an already-held permission can be restricted in place *per row* (and so
 /// should offer a "Scope…" action): an org-wide `Sites.*` (excluding
@@ -77,9 +77,9 @@ pub fn HeldPermissionsPanel(
         .collect();
     let (high, medium) = classify_app_permission_risk(&values);
     let banner = (!high.is_empty() || !medium.is_empty()).then(|| {
-        let (cls, msg) = if !high.is_empty() {
+        let (tone, msg) = if !high.is_empty() {
             (
-                "alert alert--warn",
+                "warn",
                 format!(
                     "Holds {} high-risk application permission(s): {}",
                     high.len(),
@@ -88,7 +88,7 @@ pub fn HeldPermissionsPanel(
             )
         } else {
             (
-                "alert",
+                "info",
                 format!(
                     "Holds {} medium-risk application permission(s): {}",
                     medium.len(),
@@ -96,7 +96,7 @@ pub fn HeldPermissionsPanel(
                 ),
             )
         };
-        view! { <div class=cls>{msg}</div> }
+        view! { <Callout tone=tone>{msg}</Callout> }
     });
 
     // Legacy Office 365 Exchange Online mail grants can't be scoped and override

@@ -17,7 +17,7 @@ use crate::bindings::applications::{
 };
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::CopyableId;
+use crate::components::ui::{Callout, CopyableId};
 use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -639,13 +639,9 @@ pub fn CredentialsTab(
                     expired_result
                         .get()
                         .map(|r| {
-                            let class = if r.failures.is_empty() {
-                                "alert alert--ok"
-                            } else {
-                                "alert alert--warn"
-                            };
+                            let tone = if r.failures.is_empty() { "ok" } else { "warn" };
                             view! {
-                                <div class=class>
+                                <Callout tone=tone>
                                     {format!(
                                         "Removed {} expired secret(s){}",
                                         r.removed_key_ids.len(),
@@ -655,7 +651,7 @@ pub fn CredentialsTab(
                                             String::new()
                                         },
                                     )}
-                                </div>
+                                </Callout>
                             }
                         })
                 }}
@@ -663,11 +659,7 @@ pub fn CredentialsTab(
                     rotate_result
                         .get()
                         .map(|r| {
-                            let class = if r.warnings.is_empty() {
-                                "alert alert--ok"
-                            } else {
-                                "alert alert--warn"
-                            };
+                            let tone = if r.warnings.is_empty() { "ok" } else { "warn" };
                             let msg = format!(
                                 "Rotated into Key Vault “{}” as secret “{}”; new credential created, {} old removed{}.",
                                 r.vault_name,
@@ -679,7 +671,7 @@ pub fn CredentialsTab(
                                     format!(", {} warning(s)", r.warnings.len())
                                 },
                             );
-                            view! { <div class=class>{msg}</div> }
+                            view! { <Callout tone=tone>{msg}</Callout> }
                         })
                 }}
             </section>

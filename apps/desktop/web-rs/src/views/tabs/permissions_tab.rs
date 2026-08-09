@@ -13,7 +13,7 @@ use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::exchange;
 use crate::bindings::permissions::{self, GrantResult};
-use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
+use crate::components::exchange_scoping_section::ExchangeScopingSection;
 use crate::components::icon::IconName;
 use crate::components::legacy_exchange_grants_callout::{
     AppPermissionRow, LegacyExchangeGrantsCallout,
@@ -619,8 +619,13 @@ pub fn PermissionsTab(
                                 app_id=Signal::derive(move || {
                                     detail.with(|d| d.application.app_id.clone())
                                 })
-                                target=Signal::derive(move || ExchangeScopeTarget::Application {
-                                    object_id: detail.with(|d| d.application.id.clone()),
+                                target=Signal::derive(move || ScopeTarget {
+                                    object_id: Some(detail.with(|d| d.application.id.clone())),
+                                    sp_object_id: String::new(),
+                                    app_id: detail.with(|d| d.application.app_id.clone()),
+                                    display_name: detail
+                                        .with(|d| d.application.display_name.clone()),
+                                    is_managed_identity: false,
                                 })
                                 on_changed=on_changed
                             />

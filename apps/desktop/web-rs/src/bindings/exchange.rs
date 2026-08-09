@@ -186,16 +186,22 @@ pub async fn get_mail_permission_scopes(
 struct PrincipalScopeArgs<'a> {
     tenant_id: &'a str,
     app_id: &'a str,
-    permissions: &'a [String],
+    permissions: &'a [PrincipalPermission],
 }
 
 /// Effective mailbox scoping for a service principal (by `app_id`) given the
-/// Graph permission values it holds — used for principals with no app
+/// application permissions it holds — used for principals with no app
 /// registration manifest, notably managed identities. Degrades to `Unknown`.
+///
+/// Each permission carries the resource that exposes it: `Mail.*` exists on both
+/// Microsoft Graph and the legacy Office 365 Exchange Online resource and only
+/// Graph's is confinable, while the EWS `full_access_as_app` scope exists only
+/// on the Office 365 one. The backend re-derives scopability from the pair, so
+/// callers no longer have to pre-filter correctly for the answer to be right.
 pub async fn get_mail_scopes_for_principal(
     tenant_id: &str,
     app_id: &str,
-    permissions: &[String],
+    permissions: &[PrincipalPermission],
 ) -> Result<Vec<MailScopeEntry>, UiError> {
     invoke_result(
         "get_mail_scopes_for_principal",

@@ -187,6 +187,14 @@ pub async fn restore_tenant(
 
     // ---- Pass 2: wire references + regenerate secrets (per created app) ----
     for c in &created {
+        // Both stop conditions, in every pass. Passes 2-5 once checked only
+        // `is_dead()`, so Cancel stopped mattering the moment Pass 1 finished:
+        // the operator pressed it and watched the restore keep wiring, granting
+        // consent and re-binding roles for every remaining app.
+        if cancel.is_cancelled() {
+            report.cancelled = true;
+            break;
+        }
         if session.is_dead() {
             break;
         }
@@ -197,6 +205,10 @@ pub async fn restore_tenant(
 
     // ---- Pass 3: re-consent (after all apps wired, so resources exist) ----
     for (idx, c) in created.iter().enumerate() {
+        if cancel.is_cancelled() {
+            report.cancelled = true;
+            break;
+        }
         if session.is_dead() {
             break;
         }
@@ -229,6 +241,10 @@ pub async fn restore_tenant(
     // were recreated by the app-reg restore above. Foreign/gallery apps — and
     // paired apps that weren't restored — become runbook entries.
     for ent in &backup.enterprise_apps {
+        if cancel.is_cancelled() {
+            report.cancelled = true;
+            break;
+        }
         if session.is_dead() {
             break;
         }
@@ -239,7 +255,9 @@ pub async fn restore_tenant(
     // MIs are Azure resources — they can't be created here. Re-bind Graph
     // app-roles to any MI already recreated (matched by name); Azure RBAC and
     // not-yet-recreated MIs become runbook entries.
-    if !backup.managed_identities.is_empty() && !session.is_dead() {
+    if cancel.is_cancelled() {
+        report.cancelled = true;
+    } else if !backup.managed_identities.is_empty() && !session.is_dead() {
         restore_managed_identities(&client, &backup.managed_identities, &mut report).await;
     }
 

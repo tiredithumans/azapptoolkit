@@ -124,6 +124,13 @@ struct Entry {
     // fresh tenant scan. Pinned entries still expire on TTL and are still
     // dropped by explicit/tenant invalidation — they are only invisible to LRU.
     pinned: bool,
+    // Identity of the `insert` that produced THIS entry, so a caller holding a
+    // stamp can prove the entry under a key is still its own before removing it.
+    //
+    // Distinct from `last_access` on purpose: `touch` bumps that on every read,
+    // so it identifies the most recent *access*, not the write. A rollback keyed
+    // on it would be defeated by any read landing in the window.
+    stamp: u64,
 }
 
 struct Bucket {
@@ -145,6 +152,11 @@ struct Bucket {
     /// narrowed on plain removal, so it is a conservative *lower* bound — at
     /// worst it buys one unnecessary sweep, never a missed one.
     oldest_insert: Option<Instant>,
+    /// Source of [`Entry::stamp`]. Only [`Bucket::insert`] advances it, and it
+    /// is deliberately NOT reset by [`Bucket::clear`] — reusing a stamp after a
+    /// clear would let a stale rollback match a brand-new entry, which is the
+    /// bug the stamp exists to prevent.
+    next_stamp: u64,
 }
 
 impl Bucket {
@@ -154,6 +166,7 @@ impl Bucket {
             lru: BTreeMap::new(),
             tick: 0,
             oldest_insert: None,
+            next_stamp: 0,
         }
     }
 
@@ -168,16 +181,18 @@ impl Bucket {
         }
     }
 
-    /// Inserts (or replaces) an entry, keeping the LRU index in step.
+    /// Inserts (or replaces) an entry, keeping the LRU index in step. Returns
+    /// the new entry's [`Entry::stamp`], which identifies *this* insert.
     fn insert(
         &mut self,
         key: String,
         value: Arc<serde_json::Value>,
         typed: Option<TypedValue>,
         pinned: bool,
-    ) {
+    ) -> u64 {
         self.tick += 1;
-        let tick = self.tick;
+        self.next_stamp += 1;
+        let (tick, stamp) = (self.tick, self.next_stamp);
         let inserted = Instant::now();
         self.oldest_insert.get_or_insert(inserted);
         let entry = Entry {
@@ -186,11 +201,13 @@ impl Bucket {
             inserted,
             last_access: tick,
             pinned,
+            stamp,
         };
         if let Some(previous) = self.entries.insert(key.clone(), entry) {
             self.lru.remove(&previous.last_access);
         }
         self.lru.insert(tick, key);
+        stamp
     }
 
     /// Removes one entry, keeping the LRU index in step.
@@ -201,6 +218,19 @@ impl Bucket {
                 true
             }
             None => false,
+        }
+    }
+
+    /// Removes `key` **only if** the entry under it is still the one that
+    /// `insert` returned `stamp` for. Returns whether it removed anything.
+    ///
+    /// The compare is the whole point. A rollback that removes by key name
+    /// alone will happily delete a *newer* entry that a different writer stored
+    /// in the meantime — see [`Cache::store_if_current`].
+    fn remove_if_stamp(&mut self, key: &str, stamp: u64) -> bool {
+        match self.entries.get(key) {
+            Some(entry) if entry.stamp == stamp => self.remove(key),
+            _ => false,
         }
     }
 
@@ -685,10 +715,18 @@ impl Cache {
     ///
     /// Lock order is unchanged (watches, then bucket, never both at once), so
     /// this adds no deadlock risk — only a second look.
+    ///
+    /// `store` returns the [`Entry::stamp`] of what it wrote, and the rollback
+    /// is a compare-and-remove against it. Removing by key name alone was a
+    /// second, opposite race: A stores → an invalidation bumps the counter → B
+    /// takes a fresh watch, fetches, and stores a *valid* index → A's second
+    /// look fails and A deletes B's entry. Both writers behaved correctly and
+    /// the tenant-wide index vanished anyway, costing a full rescan on the next
+    /// read with nothing in the logs to explain it.
     fn store_if_current(
         &self,
         watch: IndexWatch<'_>,
-        store: impl FnOnce(&Self, CacheKind, String),
+        store: impl FnOnce(&Self, CacheKind, String) -> Option<u64>,
     ) -> bool {
         let (kind, key, since) = (watch.kind, watch.key.clone(), watch.since);
 
@@ -709,7 +747,7 @@ impl Cache {
             }
         }
 
-        store(self, kind, key.clone());
+        let stamp = store(self, kind, key.clone());
 
         // Second look, now that the store has landed. `watch` still held its
         // reference throughout, so any invalidation in the window bumped the
@@ -724,29 +762,43 @@ impl Cache {
                     since,
                     "key invalidated while the index store was in flight; rolling it back"
                 );
-                self.buckets[kind.idx()].lock().remove(&key);
+                // Compare-and-remove: undo OUR write, never someone else's. A
+                // `None` stamp means the store declined (disabled kind, or a
+                // serialization failure), so there is nothing to undo.
+                if let Some(stamp) = stamp {
+                    let removed = self.buckets[kind.idx()].lock().remove_if_stamp(&key, stamp);
+                    if !removed {
+                        tracing::debug!(
+                            %key,
+                            "rollback skipped: a newer entry replaced ours, and it is not ours to \
+                             evict"
+                        );
+                    }
+                }
                 false
             }
         }
     }
 
-    fn put_inner<T>(&self, kind: CacheKind, key: String, value: &T, pinned: bool)
+    /// Returns the stored entry's [`Entry::stamp`], or `None` when the store was
+    /// declined (caching disabled for the kind, or the value failed to
+    /// serialize). Only [`Cache::store_if_current`] reads it.
+    fn put_inner<T>(&self, kind: CacheKind, key: String, value: &T, pinned: bool) -> Option<u64>
     where
         T: serde::Serialize,
     {
-        let Some((max_size, ttl)) = self.limits_if_enabled(kind) else {
-            return;
-        };
+        let (max_size, ttl) = self.limits_if_enabled(kind)?;
         let json = match serde_json::to_value(value) {
             Ok(v) => v,
             Err(err) => {
                 tracing::warn!(?err, "cache put serialization failed; skipping");
-                return;
+                return None;
             }
         };
         let mut bucket = self.buckets[kind.idx()].lock();
-        bucket.insert(key, Arc::new(json), None, pinned);
+        let stamp = bucket.insert(key, Arc::new(json), None, pinned);
         bucket.evict_if_needed(ttl, max_size);
+        Some(stamp)
     }
 
     /// Effective per-kind entry cap and TTL, or `None` when caching is
@@ -807,19 +859,19 @@ impl Cache {
         })
     }
 
+    /// See [`Cache::put_inner`] for the returned stamp.
     fn put_typed_inner<T: Send + Sync + 'static>(
         &self,
         kind: CacheKind,
         key: String,
         value: Arc<T>,
         pinned: bool,
-    ) {
-        let Some((max_size, ttl)) = self.limits_if_enabled(kind) else {
-            return;
-        };
+    ) -> Option<u64> {
+        let (max_size, ttl) = self.limits_if_enabled(kind)?;
         let mut bucket = self.buckets[kind.idx()].lock();
-        bucket.insert(key, Arc::new(serde_json::Value::Null), Some(value), pinned);
+        let stamp = bucket.insert(key, Arc::new(serde_json::Value::Null), Some(value), pinned);
         bucket.evict_if_needed(ttl, max_size);
+        Some(stamp)
     }
 
     /// Returns the typed value (a refcount clone — no deserialize) when present,
@@ -1200,7 +1252,7 @@ mod tests {
         let stored = cache.store_if_current(watch, |c, kind, k| {
             // A mutation lands while this store is in flight.
             c.invalidate(CacheKind::Lists, "t1|sp_index");
-            c.put_inner(kind, k, &vec![1u8], true);
+            c.put_inner(kind, k, &vec![1u8], true)
         });
 
         assert!(
@@ -1212,6 +1264,70 @@ mod tests {
             "the pre-mutation snapshot must not survive — pinned, it would outlive LRU"
         );
         assert_eq!(cache.watch_count(), 0, "the watch is released either way");
+    }
+
+    #[test]
+    fn a_losing_writer_does_not_evict_the_winner_that_replaced_it() {
+        // The opposite race from `an_invalidation_landing_during_the_store_...`,
+        // and the one the by-name rollback got wrong.
+        //
+        // A stores → an invalidation bumps the counter → B takes a FRESH watch,
+        // fetches, and stores a perfectly valid post-mutation index → A's second
+        // look fails and A rolls back. Removing by key name deleted B's entry:
+        // both writers behaved correctly, and the tenant-wide index vanished
+        // anyway. Not stale data — a silent miss plus a multi-second rescan on
+        // the next read, with nothing in the logs pointing at the cause.
+        //
+        // Driven from inside A's store callback so the interleaving is
+        // deterministic rather than a thread race.
+        let cache = Cache::new();
+        let key = "t1|sp_index".to_string();
+
+        let a_watch = cache.generation_for(CacheKind::Lists, &key);
+        let a_stored = cache.store_if_current(a_watch, |c, kind, k| {
+            let stamp = c.put_inner(kind, k.clone(), &vec![1u8], true);
+            // A's write has landed. Now the world moves on without A.
+            c.invalidate(CacheKind::Lists, &k);
+            let b_watch = c.generation_for(CacheKind::Lists, &k);
+            assert!(
+                c.put_index_if_current(b_watch, &vec![2u8]),
+                "B took its watch after the invalidation, so B must be allowed to store"
+            );
+            stamp
+        });
+
+        assert!(
+            !a_stored,
+            "A raced an invalidation and must report the loss"
+        );
+        assert_eq!(
+            cache.get::<Vec<u8>>(CacheKind::Lists, &key),
+            Some(vec![2u8]),
+            "A's rollback must not evict B's newer, already-validated index — B's entry is the \
+             current one and is not A's to remove"
+        );
+        assert_eq!(cache.watch_count(), 0, "both watches released");
+    }
+
+    #[test]
+    fn a_rolled_back_store_still_removes_its_own_entry() {
+        // The compare-and-remove must not have made the rollback a no-op: when
+        // the entry under the key IS still ours, it has to go.
+        let cache = Cache::new();
+        let key = "t1|sp_index".to_string();
+
+        let watch = cache.generation_for(CacheKind::Lists, &key);
+        let stored = cache.store_if_current(watch, |c, kind, k| {
+            let stamp = c.put_inner(kind, k.clone(), &vec![1u8], true);
+            c.invalidate(CacheKind::Lists, &k);
+            stamp
+        });
+
+        assert!(!stored);
+        assert!(
+            cache.get::<Vec<u8>>(CacheKind::Lists, &key).is_none(),
+            "nothing replaced our entry, so the pre-mutation snapshot must still be rolled back"
+        );
     }
 
     #[test]

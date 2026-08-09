@@ -14,6 +14,7 @@ use azapptoolkit_core::audit::MailPermissionScope;
 
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
 use crate::bindings::exchange as exchange_bindings;
+use crate::bindings::exchange::PrincipalPermission;
 use crate::bindings::graph_roles;
 use crate::bindings::managed_identity;
 use crate::bindings::permissions as permissions_bindings;
@@ -100,16 +101,22 @@ pub fn ManagedIdentityDetailWindow(
                 return Ok(HashMap::new());
             };
             let app_id = mi.app_id;
-            let mail_values: Vec<String> = permissions
+            // Carry the resource across IPC: the backend re-derives scopability
+            // from (resource, value), so this no longer has to be the only gate.
+            let mail_values: Vec<PrincipalPermission> = permissions
                 .await
                 .unwrap_or_default()
                 .iter()
-                .filter(|p| {
-                    p.app_role_value
-                        .as_deref()
-                        .is_some_and(|v| is_exchange_scopable_on(p.resource_app_id.as_deref(), v))
+                .filter_map(|p| {
+                    let value = p.app_role_value.clone()?;
+                    let resource_app_id = p.resource_app_id.clone()?;
+                    is_exchange_scopable_on(Some(&resource_app_id), &value).then_some(
+                        PrincipalPermission {
+                            resource_app_id,
+                            value,
+                        },
+                    )
                 })
-                .filter_map(|p| p.app_role_value.clone())
                 .collect();
             if mail_values.is_empty() {
                 return Ok(HashMap::new());

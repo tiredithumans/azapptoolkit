@@ -677,3 +677,69 @@ fn demo_banner() -> impl IntoView {
         ().into_any()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `ActiveView` gets a breadcrumb, and every breadcrumb sits under one
+    /// of the four nav groups.
+    ///
+    /// `topbar_labels` is a total match, so a NEW variant fails to compile here
+    /// — but a variant added with a placeholder, or moved between nav groups
+    /// without the sidebar following, compiles fine and ships a wrong or blank
+    /// breadcrumb. shell.rs is 679 lines with no inline tests at all; this is
+    /// the pure logic in it.
+    #[test]
+    fn every_view_has_a_breadcrumb_in_a_known_group() {
+        const GROUPS: [&str; 4] = ["Inventory", "Security", "Account", "Operations"];
+        let views = [
+            ActiveView::Home,
+            ActiveView::Apps,
+            ActiveView::EnterpriseApps,
+            ActiveView::ManagedIdentities,
+            ActiveView::Security,
+            ActiveView::PermissionTester,
+            ActiveView::ResourceAccess,
+            ActiveView::Readiness,
+            ActiveView::Settings,
+            ActiveView::BulkActions,
+            ActiveView::DisasterRecovery,
+            ActiveView::KeyVault,
+        ];
+        for view in views {
+            let (group, leaf) = topbar_labels(view);
+            assert!(
+                GROUPS.contains(&group),
+                "{view:?} is filed under unknown nav group {group:?}"
+            );
+            assert!(!leaf.is_empty(), "{view:?} has a blank breadcrumb leaf");
+        }
+    }
+
+    /// Two destinations sharing a leaf label are indistinguishable in the
+    /// breadcrumb. `Security` is the one deliberate self-titled case (the group
+    /// and the page are the same thing); everything else must be unique.
+    #[test]
+    fn breadcrumb_leaves_are_unique() {
+        let mut seen: Vec<&str> = Vec::new();
+        for view in [
+            ActiveView::Home,
+            ActiveView::Apps,
+            ActiveView::EnterpriseApps,
+            ActiveView::ManagedIdentities,
+            ActiveView::Security,
+            ActiveView::PermissionTester,
+            ActiveView::ResourceAccess,
+            ActiveView::Readiness,
+            ActiveView::Settings,
+            ActiveView::BulkActions,
+            ActiveView::DisasterRecovery,
+            ActiveView::KeyVault,
+        ] {
+            let (_, leaf) = topbar_labels(view);
+            assert!(!seen.contains(&leaf), "duplicate breadcrumb leaf {leaf:?}");
+            seen.push(leaf);
+        }
+    }
+}

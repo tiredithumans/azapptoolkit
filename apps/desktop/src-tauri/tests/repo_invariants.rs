@@ -14,6 +14,7 @@
 //! Cargo only compiles top-level `tests/*.rs` as test binaries, so the
 //! `repo_invariants/` directory is picked up through these declarations alone.
 //!
+//! - [`sources`] — the command layer as data: the source walk every rule reads
 //! - [`fanout`] — dead-session gating in the long-running fan-outs
 //! - [`cache`] — invalidate-on-`Ok`, pinned indexes, watch-before-fetch
 //! - [`cancel`] — one `CancelToken` claim per long-running command
@@ -30,3 +31,5 @@ mod commands;
 mod fanout;
 #[path = "repo_invariants/release.rs"]
 mod release;
+#[path = "repo_invariants/sources.rs"]
+mod sources;

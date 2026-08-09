@@ -197,3 +197,182 @@ fn every_manifest_states_the_same_version() {
          ships an empty panel"
     );
 }
+
+/// The two CHANGELOG section extractors agree.
+///
+/// There are two, in different languages, and the Rust one's own header comment
+/// says they "are expected to produce identical text for a release; nothing
+/// checks that". This is that check.
+///
+/// * Rust — `web-rs/build_support.rs::section_for`, bakes the in-app
+///   "What's new" panel at compile time.
+/// * PowerShell — `release.yml`, fills the updater manifest's `notes` field,
+///   which is what the update splash shows.
+///
+/// So the same release can describe itself two ways: one text in the installed
+/// app, a different one in the update prompt that offered it. They drifted
+/// apart in tolerance already — PowerShell matches `^##\s+\[` (any run of
+/// whitespace) while Rust requires the exact `## [`, so a header written
+/// `##  [1.2.3]` yields notes from one and silence from the other.
+///
+/// This pins agreement rather than removing the duplication: single-sourcing
+/// would mean the release workflow shelling out to a Rust binary across the
+/// 3-OS matrix, which costs more than it saves. `powershell_semantics` below is
+/// a faithful port of the workflow's loop — if you change the workflow's
+/// extraction, change this with it, and the differential over the real
+/// CHANGELOG will tell you whether the two still match.
+#[test]
+fn both_changelog_extractors_produce_the_same_notes() {
+    /// The Rust parser, mirroring `web-rs/build_support.rs::section_for`.
+    fn rust_semantics(changelog: &str, version: &str) -> Option<String> {
+        let header = format!("## [{version}]");
+        let mut lines = changelog.lines().skip_while(|l| !l.starts_with(&header));
+        lines.next()?;
+        let body = lines
+            .take_while(|l| !l.starts_with("## ["))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+        (!body.is_empty()).then_some(body)
+    }
+
+    /// A port of `release.yml`'s loop: skip until the target header, collect
+    /// until the next `## [` header, trim. Empty ⇒ the workflow substitutes its
+    /// own fallback sentence, which is `None` here.
+    fn powershell_semantics(changelog: &str, version: &str) -> Option<String> {
+        fn is_header(l: &str) -> Option<&str> {
+            let t = l.strip_prefix("##")?;
+            if !t.starts_with(char::is_whitespace) {
+                return None;
+            }
+            let rest = t.trim_start();
+            rest.starts_with('[').then_some(rest)
+        }
+        let mut collecting = false;
+        let mut buf: Vec<&str> = Vec::new();
+        for line in changelog.lines() {
+            if let Some(rest) = is_header(line) {
+                if collecting {
+                    break;
+                }
+                if rest.starts_with(&format!("[{version}]")) {
+                    collecting = true;
+                }
+                continue;
+            }
+            if collecting {
+                buf.push(line);
+            }
+        }
+        let body = buf.join("\n").trim().to_string();
+        (!body.is_empty()).then_some(body)
+    }
+
+    let changelog = include_str!("../../../../../CHANGELOG.md");
+
+    // Every released version in the repo's own CHANGELOG, plus the shapes that
+    // have historically differed.
+    let mut versions: Vec<String> = changelog
+        .lines()
+        .filter_map(|l| l.strip_prefix("## ["))
+        .filter_map(|r| r.split_once(']'))
+        .map(|(v, _)| v.to_string())
+        .collect();
+    assert!(
+        versions.len() > 3,
+        "found {} version headers — the differential would be near-vacuous",
+        versions.len()
+    );
+    versions.push("9.9.9-absent".into());
+
+    for v in &versions {
+        assert_eq!(
+            rust_semantics(changelog, v),
+            powershell_semantics(changelog, v),
+            "the in-app 'What's new' panel and the updater's release notes would show DIFFERENT \
+             text for {v}. One is baked by web-rs/build_support.rs, the other by release.yml — \
+             reconcile them."
+        );
+    }
+
+    // The known tolerance gap, pinned as a fixture so it stays a deliberate
+    // decision rather than a surprise: a two-space header is legal to the
+    // workflow and invisible to the bake. `changelog_headers_match_what_both_
+    // parsers_require` is what keeps it out of the real file.
+    let sloppy = "##  [1.2.3] - 2026-01-01\n\n- note\n";
+    assert_eq!(rust_semantics(sloppy, "1.2.3"), None);
+    assert_eq!(
+        powershell_semantics(sloppy, "1.2.3"),
+        Some("- note".to_string()),
+        "if this stops differing, the header-format rule can be relaxed"
+    );
+}
+
+/// `verify-full` runs every gate CI runs.
+///
+/// The recipe's own comment promises "full CI parity", and it is what a
+/// contributor runs before opening a PR. It was missing `web-itest-size` — the
+/// per-shard wasm ceiling the whole GUI-test sharding strategy depends on — so a
+/// shard that had grown past the limit passed locally and failed in CI, which is
+/// precisely the round trip the recipe exists to avoid.
+///
+/// Derived from `ci.yml` rather than listed here, so adding a gate to CI without
+/// adding it to `verify-full` fails immediately instead of at someone's next PR.
+#[test]
+fn verify_full_runs_every_gate_ci_runs() {
+    let justfile = include_str!("../../../../../justfile");
+    let ci = include_str!("../../../../../.github/workflows/ci.yml");
+
+    /// The dependency list on a recipe's header line: `name: dep1 dep2`.
+    fn deps<'a>(justfile: &'a str, recipe: &str) -> Vec<&'a str> {
+        justfile
+            .lines()
+            .find(|l| l.starts_with(&format!("{recipe}:")))
+            .and_then(|l| l.split_once(':'))
+            .map(|(_, rest)| rest.split_whitespace().collect())
+            .unwrap_or_default()
+    }
+
+    let mut covered: Vec<&str> = deps(justfile, "verify-full");
+    assert!(
+        !covered.is_empty(),
+        "verify-full has no dependencies — did the recipe move or get renamed?"
+    );
+    // One level of expansion is enough: `_verify-core` is the only aggregate
+    // `verify-full` depends on.
+    for agg in covered.clone() {
+        covered.extend(deps(justfile, agg));
+    }
+
+    // Recipes CI invokes that are not gates `verify-full` should run.
+    // `triggered` is the change-detection helper, not a check.
+    const NOT_A_GATE: &[&str] = &["triggered"];
+
+    let mut missing: Vec<&str> = Vec::new();
+    for line in ci.lines() {
+        let Some(rest) = line.split_once("just ") else {
+            continue;
+        };
+        let recipe: &str = rest
+            .1
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches(|c: char| !(c.is_alphanumeric() || c == '-'));
+        if recipe.is_empty() || NOT_A_GATE.contains(&recipe) {
+            continue;
+        }
+        if !covered.contains(&recipe) && !missing.contains(&recipe) {
+            missing.push(recipe);
+        }
+    }
+    missing.sort_unstable();
+    assert!(
+        missing.is_empty(),
+        "ci.yml runs gate(s) `verify-full` does not: {missing:?}\n\
+         `verify-full` documents itself as full CI parity and is what contributors run before \
+         opening a PR. Add them to the recipe, or add them to NOT_A_GATE with a reason if they \
+         are helpers rather than checks."
+    );
+}

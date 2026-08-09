@@ -15,9 +15,7 @@ use reqwest::Method;
 use serde::de::DeserializeOwned;
 
 use azapptoolkit_core::BearerProvider;
-use azapptoolkit_core::http_retry::{
-    BASE_DELAY_MS, MAX_RETRIES, next_backoff_ms, parse_retry_after_seconds, sleep_before_retry,
-};
+use azapptoolkit_core::http_retry::{RetryBudget, parse_retry_after_seconds};
 use azapptoolkit_core::models::Paged;
 
 use super::GraphClient;
@@ -190,8 +188,10 @@ impl GraphClient {
         // `pending` holds the original chunk indices still awaiting a non-retry
         // response; the sub-request `id` is the index so order is preserved.
         let mut pending: Vec<usize> = (0..urls.len()).collect();
-        let mut attempt = 0u32;
-        let mut delay_ms = BASE_DELAY_MS;
+        // The SAME schedule the four unified clients use — this loop retries
+        // only the throttled sub-requests, so it can't be `with_retries`, but
+        // the budget and the backoff curve are not its to re-derive.
+        let mut budget = RetryBudget::new();
 
         while !pending.is_empty() {
             let requests: Vec<serde_json::Value> = pending
@@ -236,7 +236,7 @@ impl GraphClient {
                 }
                 // Retry inner 429s while we still have budget; otherwise let
                 // map_batch_response surface them as `Throttled`.
-                if sub.status == 429 && attempt < MAX_RETRIES {
+                if sub.status == 429 && budget.may_retry() {
                     let ra = sub.retry_after_secs();
                     max_retry_after = match (max_retry_after, ra) {
                         (Some(a), Some(b)) => Some(a.max(b)),
@@ -254,9 +254,7 @@ impl GraphClient {
             if let Some(obs) = self.throttle_observer.read().as_ref() {
                 obs.on_throttle(max_retry_after);
             }
-            sleep_before_retry(max_retry_after, delay_ms).await;
-            delay_ms = next_backoff_ms(delay_ms);
-            attempt += 1;
+            budget.wait(max_retry_after).await;
             pending = throttled;
         }
 

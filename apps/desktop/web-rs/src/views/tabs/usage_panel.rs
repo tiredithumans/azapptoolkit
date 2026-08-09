@@ -15,6 +15,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::auth;
 use crate::bindings::usage;
+use crate::components::ui::Callout;
 use crate::state::use_session;
 
 #[component]
@@ -102,9 +103,9 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
                 error
                     .get()
                     .map(|e| {
-                        let class = if unavailable.get() { "alert" } else { "alert alert--warn" };
+                        let tone = if unavailable.get() { "info" } else { "warn" };
                         view! {
-                            <div class=class>
+                            <Callout tone=tone>
                                 <Body1>{e}</Body1>
                                 {consent_needed
                                     .get()
@@ -120,7 +121,7 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
                                             </div>
                                         }
                                     })}
-                            </div>
+                            </Callout>
                         }
                     })
             }}

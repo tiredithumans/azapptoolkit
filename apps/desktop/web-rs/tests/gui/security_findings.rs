@@ -387,6 +387,7 @@ async fn legacy_policy_fix_plans_before_it_migrates() {
         "migrate_application_access_policies",
         &AapMigrationReport {
             dry_run: true,
+            incomplete: false,
             items: vec![AapMigrationItem {
                 app_id: "Legacy Policy App-appid".to_string(),
                 source_policy_identities: vec!["policy-1".to_string()],

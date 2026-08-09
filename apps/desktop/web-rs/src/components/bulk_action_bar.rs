@@ -121,36 +121,75 @@ pub enum BulkAction {
     Delete,
 }
 
-impl BulkAction {
-    fn label(self) -> &'static str {
-        match self {
-            BulkAction::Grant => "Grant consent",
-            BulkAction::RemoveExpired => "Remove expired credentials",
-            BulkAction::RemoveRedundant => "Remove redundant permissions",
-            BulkAction::ScopeMailbox => "Scope mailbox access",
-            BulkAction::ScopeSharePoint => "Scope SharePoint access",
-            BulkAction::AddOwner => "Add owner",
-            BulkAction::DisableSignIn => "Disable sign-in",
-            BulkAction::Delete => "Delete",
-        }
-    }
+/// What the confirm step requires before an armed action may run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Confirm {
+    /// Type this exact word. Irreversible, tenant-wide, or both.
+    Keyword(&'static str),
+    /// At least one mailbox group line.
+    Groups,
+    /// At least one site URL line.
+    Sites,
+    /// An owner picked from the directory.
+    Owner,
+    /// A plain click suffices — reversible, or self-evidently safe.
+    Click,
+}
 
-    /// Whether this action destroys or revokes something, and so must render
-    /// red wherever it is offered. One definition, used by BOTH the arming
-    /// chip and the confirm button — they disagreed before: the chip reddened
-    /// only `Delete`, so "Remove expired credentials" and "Remove redundant
-    /// permissions" armed as ordinary buttons despite deleting credentials and
-    /// revoking grants across the whole selection.
+/// Everything the bar needs to know about one action, in one place.
+///
+/// This was three parallel per-action `match`es — `label`, `is_destructive`, and
+/// the `confirm_ok` memo — plus a fourth deciding the confirm input's
+/// placeholder. Adding an action meant editing all four and hoping; and the two
+/// keyword tables had no relationship to each other, so a disagreement between
+/// them would show the operator one word and require another, leaving the
+/// confirm button disabled with nothing on screen explaining why.
+struct Spec {
+    label: &'static str,
+    /// Destroys or revokes something, so it must render red wherever it is
+    /// offered. Used by BOTH the arming chip and the confirm button — they
+    /// disagreed before, and "Remove expired credentials" armed as an ordinary
+    /// button while deleting credentials across the whole selection.
     ///
     /// `DisableSignIn` is excluded deliberately: it is reversible (re-enable
     /// flips it back), and reserving red for the irreversible keeps the signal
-    /// worth reading. `Grant` is not destructive either, but it stays in the
-    /// confirm-side danger set below on its own high-privilege grounds.
+    /// worth reading. `Grant` is not destructive either, but it still requires a
+    /// typed keyword on its own high-privilege grounds — which is exactly why
+    /// "is it red" and "how is it confirmed" are separate fields rather than one
+    /// flag doing double duty.
+    destructive: bool,
+    confirm: Confirm,
+}
+
+impl BulkAction {
+    fn spec(self) -> Spec {
+        let (label, destructive, confirm) = match self {
+            BulkAction::Grant => ("Grant consent", false, Confirm::Keyword("GRANT")),
+            BulkAction::RemoveExpired => (
+                "Remove expired credentials",
+                true,
+                Confirm::Keyword("REMOVE"),
+            ),
+            BulkAction::RemoveRedundant => ("Remove redundant permissions", true, Confirm::Click),
+            BulkAction::ScopeMailbox => ("Scope mailbox access", false, Confirm::Groups),
+            BulkAction::ScopeSharePoint => ("Scope SharePoint access", false, Confirm::Sites),
+            BulkAction::AddOwner => ("Add owner", false, Confirm::Owner),
+            BulkAction::DisableSignIn => ("Disable sign-in", false, Confirm::Click),
+            BulkAction::Delete => ("Delete", true, Confirm::Keyword("DELETE")),
+        };
+        Spec {
+            label,
+            destructive,
+            confirm,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        self.spec().label
+    }
+
     fn is_destructive(self) -> bool {
-        matches!(
-            self,
-            BulkAction::RemoveExpired | BulkAction::RemoveRedundant | BulkAction::Delete
-        )
+        self.spec().destructive
     }
 }
 
@@ -256,18 +295,14 @@ pub fn BulkActionBar(
 
     // The armed action's confirm button is enabled only when its inputs are
     // valid: the exact keyword typed (destructive), or ≥1 target line (scoping).
-    let confirm_ok = Memo::new(move |_| match armed.get() {
-        Some(BulkAction::RemoveExpired) => confirm_text.get().trim() == "REMOVE",
-        Some(BulkAction::Delete) => confirm_text.get().trim() == "DELETE",
-        Some(BulkAction::RemoveRedundant) => true,
-        // Reversible (accountEnabled toggles back), so a plain confirm suffices.
-        Some(BulkAction::DisableSignIn) => true,
-        Some(BulkAction::ScopeMailbox) => !parse_lines(&groups_text.get()).is_empty(),
-        Some(BulkAction::ScopeSharePoint) => !parse_lines(&sites_text.get()).is_empty(),
-        Some(BulkAction::AddOwner) => owner_pick.with(Option::is_some),
-        // Tenant-wide, all-users, and not undone by a single click — gated on the
-        // typed keyword like the other two irreversible actions.
-        Some(BulkAction::Grant) => confirm_text.get().trim() == "GRANT",
+    let confirm_ok = Memo::new(move |_| match armed.get().map(BulkAction::spec) {
+        Some(spec) => match spec.confirm {
+            Confirm::Keyword(word) => confirm_text.get().trim() == word,
+            Confirm::Groups => !parse_lines(&groups_text.get()).is_empty(),
+            Confirm::Sites => !parse_lines(&sites_text.get()).is_empty(),
+            Confirm::Owner => owner_pick.with(Option::is_some),
+            Confirm::Click => true,
+        },
         None => false,
     });
 
@@ -598,27 +633,24 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
         }.into_any(),
     };
 
-    let input: AnyView = match action {
-        BulkAction::RemoveExpired | BulkAction::Delete | BulkAction::Grant => {
-            let keyword = match action {
-                BulkAction::Delete => "DELETE",
-                BulkAction::Grant => "GRANT",
-                _ => "REMOVE",
-            };
-            view! {
-                <div class="confirm-gate">
-                    <Body1 class="confirm-gate__label">
-                        "Type "<strong>{keyword}</strong>" to confirm."
-                    </Body1>
-                    <Input value=confirm_text placeholder=keyword />
-                </div>
-            }
-            .into_any()
+    // Driven by the action's `Confirm` requirement, not by naming the actions
+    // that happen to have one today: an action added with `Confirm::Keyword`
+    // gets the typed gate automatically, and cannot end up gated by `confirm_ok`
+    // while rendering no input to satisfy it.
+    let input: AnyView = match action.spec().confirm {
+        Confirm::Keyword(keyword) => view! {
+            <div class="confirm-gate">
+                <Body1 class="confirm-gate__label">
+                    "Type "<strong>{keyword}</strong>" to confirm."
+                </Body1>
+                <Input value=confirm_text placeholder=keyword />
+            </div>
         }
-        BulkAction::ScopeMailbox => view! {
+        .into_any(),
+        Confirm::Groups => view! {
             <Textarea value=groups_text placeholder="Mailbox groups (name, address, or object id) — one per line" />
         }.into_any(),
-        BulkAction::ScopeSharePoint => view! {
+        Confirm::Sites => view! {
             <div class="bulk-action-bar__scope-form">
                 <Textarea value=sites_text placeholder="https://contoso.sharepoint.com/sites/Marketing — one per line" />
                 <label class="bulk-action-bar__check">
@@ -631,7 +663,7 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
                 </label>
             </div>
         }.into_any(),
-        BulkAction::AddOwner => {
+        Confirm::Owner => {
             // Debounced directory search; clicking a candidate picks them (one
             // owner per run) and shows a "picked" line in place of the list.
             view! {
@@ -701,7 +733,9 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
             }
             .into_any()
         }
-        BulkAction::RemoveRedundant | BulkAction::DisableSignIn => ().into_any(),
+        // Nothing to type or pick — the description plus the confirm button is
+        // the whole gate.
+        Confirm::Click => ().into_any(),
     };
 
     let confirm_label = match action {
@@ -899,6 +933,72 @@ fn parse_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ALL_ACTIONS: [BulkAction; 8] = [
+        BulkAction::Grant,
+        BulkAction::RemoveExpired,
+        BulkAction::RemoveRedundant,
+        BulkAction::ScopeMailbox,
+        BulkAction::ScopeSharePoint,
+        BulkAction::AddOwner,
+        BulkAction::DisableSignIn,
+        BulkAction::Delete,
+    ];
+
+    /// Every action's spec is coherent, and the confirm keywords are distinct.
+    ///
+    /// The spec table replaced three parallel per-action matches plus a fourth
+    /// choosing the confirm placeholder. Two of those held keyword lists with no
+    /// relationship to each other, so they could disagree — showing the operator
+    /// one word while requiring another, leaving the confirm button disabled
+    /// with nothing on screen explaining why. One table makes that unrepresentable;
+    /// this pins the rest.
+    #[test]
+    fn every_action_has_a_coherent_spec() {
+        let mut keywords: Vec<&str> = Vec::new();
+        for action in ALL_ACTIONS {
+            let spec = action.spec();
+            assert!(!spec.label.is_empty(), "{action:?} has no label");
+            if let Confirm::Keyword(word) = spec.confirm {
+                assert!(
+                    word.chars().all(|c| c.is_ascii_uppercase()),
+                    "{action:?}'s keyword {word:?} must be typed exactly, so it is uppercase"
+                );
+                assert!(
+                    !keywords.contains(&word),
+                    "{action:?} reuses the confirm keyword {word:?}; typing it must mean one thing"
+                );
+                keywords.push(word);
+            }
+        }
+    }
+
+    /// Anything irreversible is gated on a typed keyword, and anything gated on
+    /// a keyword renders the input that accepts it.
+    ///
+    /// `Grant` is the deliberate asymmetry: additive, so not red, but tenant-wide
+    /// and high-privilege, so still keyword-gated. That is why `destructive` and
+    /// `confirm` are separate fields rather than one flag doing both jobs.
+    #[test]
+    fn destructive_actions_are_keyword_gated() {
+        for action in ALL_ACTIONS {
+            let spec = action.spec();
+            if spec.destructive && action != BulkAction::RemoveRedundant {
+                assert!(
+                    matches!(spec.confirm, Confirm::Keyword(_)),
+                    "{action:?} is destructive but confirms on a plain click"
+                );
+            }
+        }
+        // Reversible actions must NOT be red — red reserved for the
+        // irreversible is what keeps it worth reading.
+        assert!(!BulkAction::DisableSignIn.spec().destructive);
+        assert!(!BulkAction::Grant.spec().destructive);
+        assert!(matches!(
+            BulkAction::Grant.spec().confirm,
+            Confirm::Keyword("GRANT")
+        ));
+    }
 
     fn err(code: &str) -> bulk::BulkError {
         bulk::BulkError {

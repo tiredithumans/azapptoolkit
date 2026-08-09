@@ -40,6 +40,13 @@ use crate::models::{ExoApplicationAccessPolicy, ExoGroupMember};
 ///   policy's group was silently dropped — `ensure_management_scope` keeps the
 ///   existing scope — after which both policies were deleted and those mailboxes
 ///   lost access.
+///
+/// Batching is **case-insensitive on the AppId**. Exchange echoes the value back
+/// in whatever case it stored, and a GUID differing only in case is the same
+/// application — so a case-sensitive grouping splits one app into two batches
+/// and reproduces exactly the failure the second rule exists to prevent. Every
+/// other comparison in this module already casefolds (`AccessRight`,
+/// `SourceMember::key`); this one did not.
 pub fn group_policies_for_migration(
     policies: Vec<ExoApplicationAccessPolicy>,
 ) -> (Vec<(String, Vec<ExoApplicationAccessPolicy>)>, Vec<String>) {
@@ -71,7 +78,10 @@ pub fn group_policies_for_migration(
                 continue;
             }
         }
-        match batches.iter_mut().find(|(a, _)| *a == policy_app_id) {
+        match batches
+            .iter_mut()
+            .find(|(a, _)| a.eq_ignore_ascii_case(&policy_app_id))
+        {
             Some((_, batch)) => batch.push(policy),
             None => batches.push((policy_app_id, vec![policy])),
         }

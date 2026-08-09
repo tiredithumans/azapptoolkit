@@ -1,71 +1,26 @@
-use thiserror::Error;
+//! Key Vault client errors.
+//!
+//! The taxonomy is generated from [`azapptoolkit_core::http_error_enum`] — one
+//! definition shared with `GraphError` and `ArmError`. `InvalidName` is
+//! genuinely this crate's own (client-side vault/secret name validation), and
+//! `ui_hint` stays hand-written for the same reason it does in ARM.
 
 pub type Result<T> = std::result::Result<T, KeyVaultError>;
 
-#[derive(Debug, Error)]
-pub enum KeyVaultError {
-    #[error("unauthorized (401)")]
-    Unauthorized,
-
-    #[error("forbidden (403): {0}")]
-    Forbidden(String),
-
-    #[error("not found (404): {0}")]
-    NotFound(String),
-
-    #[error("throttled (429); retry after {retry_after_secs:?}s")]
-    Throttled { retry_after_secs: Option<u64> },
-
-    #[error("vault error ({status}): {body}")]
-    Api { status: u16, body: String },
-
-    #[error("server error ({status}): {body}")]
-    Server { status: u16, body: String },
-
-    #[error("network: {0}")]
-    Network(String),
-
-    #[error("deserialize: {0}")]
-    Deserialize(String),
-
-    #[error("token: {0}")]
-    Token(azapptoolkit_core::token::TokenError),
-
-    #[error("invalid name: {0}")]
-    InvalidName(String),
-
-    #[error("protocol: {0}")]
-    Protocol(String),
+azapptoolkit_core::http_error_enum! {
+    /// Every failure mode of an Azure Key Vault data-plane call.
+    pub enum KeyVaultError {
+        api_display = "vault error ({status}): {body}",
+        api_code = "vault_error",
+        extra {
+            /// Rejected before any request: vault and secret names have a fixed
+            /// charset, so a bad one is a caller bug, not a 400 to round-trip.
+            InvalidName(String) => "invalid_name", display = "invalid name: {0}",
+        }
+    }
 }
 
 impl KeyVaultError {
-    /// Delegates to the shared policy — see
-    /// [`azapptoolkit_core::http_retry::is_retryable_code`]. `ui_code` below is
-    /// this crate's only variant-to-class table.
-    pub fn is_retryable(&self) -> bool {
-        azapptoolkit_core::http_retry::is_retryable_code(self.ui_code())
-    }
-
-    pub fn ui_code(&self) -> &'static str {
-        match self {
-            KeyVaultError::Unauthorized => "unauthorized",
-            KeyVaultError::Forbidden(_) => "forbidden",
-            KeyVaultError::NotFound(_) => "not_found",
-            KeyVaultError::Throttled { .. } => "throttled",
-            KeyVaultError::Api { .. } => "vault_error",
-            KeyVaultError::Server { .. } => "server_error",
-            KeyVaultError::Network(_) => "network_error",
-            KeyVaultError::Deserialize(_) => "deserialize_error",
-            // Pass an auth classification through instead of flattening it:
-            // `is_reauth_fatal` is what stops a long-running fan-out.
-            KeyVaultError::Token(t) => {
-                azapptoolkit_core::reauth::passthrough_code(&t.code).unwrap_or("token_error")
-            }
-            KeyVaultError::InvalidName(_) => "invalid_name",
-            KeyVaultError::Protocol(_) => "protocol_error",
-        }
-    }
-
     /// Actionable role guidance appended to the raw message when surfacing the
     /// error (mirrors `ExchangeError::ui_hint`). A 403 means the signed-in user
     /// lacks an Azure RBAC data-plane role on the vault — sourced from the

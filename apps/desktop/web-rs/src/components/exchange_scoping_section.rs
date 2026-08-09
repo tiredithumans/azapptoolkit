@@ -24,37 +24,35 @@ use crate::components::aap_migration_report::AapMigrationReportView;
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
 use crate::components::retired_scope_groups::RetiredScopeGroups;
+use crate::components::scope_wizard::ScopeTarget;
 use crate::components::ui::{Callout, DataTable};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::parse_lines;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
-/// How the "scope all mail permissions" grant addresses the principal.
-#[derive(Clone, PartialEq)]
-pub enum ExchangeScopeTarget {
-    /// App registration: the backend derives the mail roles from the app's
-    /// manifest (`grant_exchange_mailbox_access` with `permissions = None`).
-    Application { object_id: String },
-    /// Bare service principal (enterprise app **or** managed identity): scope the
-    /// explicitly-held mail permission values
-    /// (`grant_managed_identity_scoped_exchange_access`). `is_managed_identity`
-    /// picks the right noun in the copy ("managed identity" vs "application") and
-    /// hides the AAP-migration sub-section (which never applies to a MI).
-    ServicePrincipal {
-        sp_object_id: String,
-        display_name: String,
-        mail_permissions: Vec<String>,
-        is_managed_identity: bool,
-    },
-}
+// The principal this section addresses is a `ScopeTarget` — the SAME model the
+// scoping wizard uses, and the one this file already imported for other reasons.
+//
+// It previously also defined its own `ExchangeScopeTarget::{Application,
+// ServicePrincipal}` enum carrying the identical app-vs-SP distinction, so all
+// three call sites built two values from one set of facts and kept them in
+// step by hand. `ScopeTarget::object_id` already encodes the distinction
+// (`Some` = app registration, whose roles come from the manifest; `None` = bare
+// service principal, whose roles come from the permissions it holds), so the
+// enum was a second spelling of a field that was already there.
 
 #[component]
 pub fn ExchangeScopingSection(
     /// appId (client id) — keys the role-assignment list and AAP migration.
     #[prop(into)]
     app_id: Signal<String>,
-    #[prop(into)] target: Signal<ExchangeScopeTarget>,
+    #[prop(into)] target: Signal<ScopeTarget>,
+    /// Mail permission values the principal HOLDS. Used only on the bare-SP
+    /// path (an app registration's roles are derived from its manifest server
+    /// side), so an app-registration caller passes an empty vec.
+    #[prop(into, optional)]
+    mail_permissions: Signal<Vec<String>>,
     /// Fired after a mutation (grant, or a non-dry-run migration with no
     /// failures). The caller's reload rebuilds this whole section, so durable
     /// success feedback rides a toast — inline notes here only survive on the
@@ -71,35 +69,20 @@ pub fn ExchangeScopingSection(
     // "application", and `is_mi` hides the AAP-migration block (never relevant
     // to a managed identity).
     let noun = Signal::derive(move || {
-        target.with(|t| match t {
-            ExchangeScopeTarget::ServicePrincipal {
-                is_managed_identity: true,
-                ..
-            } => "managed identity",
-            _ => "application",
-        })
+        if target.with(|t| t.is_managed_identity) {
+            "managed identity"
+        } else {
+            "application"
+        }
     });
     let derivation = Signal::derive(move || {
-        target.with(|t| match t {
-            ExchangeScopeTarget::Application { .. } => {
-                "Roles are derived from the app's declared Mail/Calendars/Contacts permissions."
-            }
-            ExchangeScopeTarget::ServicePrincipal { .. } => {
-                "Roles are derived from the Mail/Calendars/Contacts permissions it holds."
-            }
-        })
+        if target.with(|t| t.object_id.is_some()) {
+            "Roles are derived from the app's declared Mail/Calendars/Contacts permissions."
+        } else {
+            "Roles are derived from the Mail/Calendars/Contacts permissions it holds."
+        }
     });
-    let is_mi = Signal::derive(move || {
-        target.with(|t| {
-            matches!(
-                t,
-                ExchangeScopeTarget::ServicePrincipal {
-                    is_managed_identity: true,
-                    ..
-                }
-            )
-        })
-    });
+    let is_mi = Signal::derive(move || target.with(|t| t.is_managed_identity));
 
     let groups_text = RwSignal::new(String::new());
     // Drives the shared-core grant flow (`run_grant`).
@@ -216,6 +199,7 @@ pub fn ExchangeScopingSection(
             return;
         }
         let target = target.get();
+        let held = mail_permissions.get();
         let app = app_id.get();
         grant_result.set(None);
         grant_cmd.run(
@@ -237,8 +221,11 @@ pub fn ExchangeScopingSection(
                 }
             },
             move |tenant_id| async move {
-                match &target {
-                    ExchangeScopeTarget::Application { object_id } => {
+                // `object_id` IS the app-vs-SP distinction: an app
+                // registration lets the backend read the manifest, a bare
+                // service principal must be told which values it holds.
+                match &target.object_id {
+                    Some(object_id) => {
                         exchange::grant_exchange_mailbox_access(
                             &tenant_id,
                             object_id,
@@ -248,18 +235,13 @@ pub fn ExchangeScopingSection(
                         )
                         .await
                     }
-                    ExchangeScopeTarget::ServicePrincipal {
-                        sp_object_id,
-                        display_name,
-                        mail_permissions,
-                        ..
-                    } => {
+                    None => {
                         exchange::grant_managed_identity_scoped_exchange_access(
                             &tenant_id,
-                            sp_object_id,
+                            &target.sp_object_id,
                             &app,
-                            display_name,
-                            mail_permissions,
+                            &target.display_name,
+                            &held,
                             &groups,
                             remove_unscoped,
                         )

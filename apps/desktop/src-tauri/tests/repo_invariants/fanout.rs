@@ -5,62 +5,98 @@
 //! complete. Checked per `dispatch_capped` **call site** — see [`call_sites`]
 //! for why the whole-file form was unsound.
 
-/// Command modules that drive a long-running fan-out. Kept as literal
-/// `include_str!`s because a test binary has no reliable source-tree walk.
-const FAN_OUT_MODULES: &[(&str, &str)] = &[
-    (
-        "commands/audit.rs",
-        include_str!("../../src/commands/audit.rs"),
-    ),
-    (
-        "commands/bulk.rs",
-        include_str!("../../src/commands/bulk.rs"),
-    ),
-    (
-        "commands/backup.rs",
-        include_str!("../../src/commands/backup.rs"),
-    ),
-    (
-        "commands/sharepoint.rs",
-        include_str!("../../src/commands/sharepoint.rs"),
-    ),
-    (
-        "commands/keyvault_rbac.rs",
-        include_str!("../../src/commands/keyvault_rbac.rs"),
-    ),
-    (
-        "commands/permission_tester.rs",
-        include_str!("../../src/commands/permission_tester.rs"),
-    ),
+// The module list this file used to carry is gone: the fan-out modules are now
+// whichever modules actually contain a `dispatch_capped` call site, read from
+// the source tree by `sources::command_modules()`. A hand-maintained list could
+// only ever check the files someone remembered to add.
+
+/// Reads that enumerate **every object of a kind in the tenant**. A loop over
+/// one of these runs once per app/SP/site, not once per sub-object of a single
+/// app, and that is the whole difference between "bounded by one object the
+/// operator is editing" and "a run the operator needs to be able to stop".
+const TENANT_WIDE_READS: &[&str] = &[
+    "list_applications_all(",
+    "list_service_principals_all(",
+    "get_application_access_policies(",
+    "list_managed_identities_all(",
+    "sp_index_cached(",
+    "app_name_index_cached(",
+    "indexes_cached(",
+    "list_all_sites(",
 ];
 
-/// Long-running **sequential** flows: many writes in a row, each degrading to a
-/// per-item failure or warning rather than aborting.
-///
-/// Held separately from [`FAN_OUT_MODULES`] because the rename-guard differs —
-/// these dispatch nothing, so `dispatch_capped(`/`run_bulk_seq(` never appears
-/// in them — but the hazard is identical and arguably worse: a dead session
-/// mid-restore produced one indistinguishable failure per remaining item, so a
-/// report full of "permission denied" read as a tenant rejecting the writes
-/// rather than as a session that had expired on the first one.
-const SEQUENTIAL_WRITE_MODULES: &[(&str, &str)] = &[(
-    "commands/restore.rs",
-    include_str!("../../src/commands/restore.rs"),
-)];
+/// Method-call fragments that mutate tenant state.
+const WRITE_CALLS: &[&str] = &[
+    ".create_",
+    ".delete_",
+    ".patch_",
+    ".add_",
+    ".remove_",
+    ".set_",
+    ".assign_",
+    ".grant_",
+    ".revoke_",
+    ".upsert_",
+    ".new_management_scope",
+    "migrate_one(",
+];
 
-/// The sequential counterpart to [`every_fan_out_command_honours_is_reauth_fatal`].
+/// A command that enumerates the tenant and then **writes once per result** must
+/// be stoppable, both by the operator and by a dead session.
+///
+/// This replaces a one-element `SEQUENTIAL_WRITE_MODULES` list containing only
+/// `commands/restore.rs`. That list was the mechanism by which
+/// `migrate_application_access_policies` — added in the very PR that introduced
+/// the pin — shipped a whole-tenant Exchange + Entra write loop with no cancel
+/// token and no dead-session latch, and passed CI: the rule simply never looked
+/// at `commands/exchange.rs`.
+///
+/// The rule now derives its own subject. "Tenant-wide writer" is expressed as
+/// what the code *does* — reads a tenant-wide collection, then writes inside a
+/// loop — so a new command is in scope the moment it is written, and there is no
+/// allowlist to forget. Deliberately no escape hatch: the two shapes that look
+/// like violations but are not (a loop over one app's own credentials, a loop
+/// that only reads) are excluded by the rule itself, not by naming them.
 #[test]
-fn every_sequential_write_flow_stops_on_a_dead_session() {
-    for (name, src) in SEQUENTIAL_WRITE_MODULES {
-        assert!(
-            src.contains("SessionDead") && src.contains("session.is_dead()"),
-            "{name} performs a long sequence of writes but never latches or gates on a dead \
-             session. Construct a `SessionDead`, note each failure through it (`note_code` keeps \
-             `UiError::is_reauth_fatal` the single definition), and break out of each pass when \
-             `is_dead()` — otherwise every remaining item fails identically and the report reads \
-             as a tenant rejection rather than an expired session."
-        );
+fn every_tenant_wide_writer_is_cancellable() {
+    let mut offenders: Vec<String> = Vec::new();
+    for cmd in super::sources::commands() {
+        if !TENANT_WIDE_READS.iter().any(|r| cmd.body.contains(r)) {
+            continue;
+        }
+        let writes_per_result = super::sources::loops(&cmd.body).iter().any(|(_, block)| {
+            block.contains(".await") && WRITE_CALLS.iter().any(|w| block.contains(w))
+        });
+        if !writes_per_result {
+            continue;
+        }
+        // Two accepted shapes, matching the two drivers in `commands/dispatch.rs`:
+        // a fan-out gates its spawn closure, a sequential flow breaks on the
+        // latch. Both must ALSO claim a cancel token — a dead session is not the
+        // same event as an operator pressing Cancel, and only the token answers
+        // the second.
+        let cancellable = cmd.body.contains(".claim()");
+        let stops_on_dead = cmd.body.contains("is_dead()")
+            || cmd.body.contains("dispatch_capped(")
+            || cmd.body.contains("run_bulk_seq(");
+        if !(cancellable && stops_on_dead) {
+            offenders.push(format!(
+                "{}::{} (claims a token: {cancellable}, stops on a dead session: {stops_on_dead})",
+                cmd.module, cmd.name
+            ));
+        }
     }
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "tenant-wide write loop(s) the operator cannot stop: {offenders:#?}\n\
+         This command reads a tenant-wide collection and then writes once per result, so it runs \
+         for as long as the tenant is large. Claim a `CancelToken` once before the first write \
+         (`state.<flag>_cancel.claim()`), construct a `SessionDead`, and break the loop on both \
+         `cancel.is_cancelled()` and `session.is_dead()` — noting failures through `note_code` so \
+         `UiError::is_reauth_fatal` stays the single definition. Flag the result as incomplete: a \
+         run that stopped early must never render as a finished one."
+    );
 }
 
 /// Fan-outs that still lack the branch. **Empty, and it must stay that way** —
@@ -148,25 +184,33 @@ fn call_sites<'a>(src: &'a str, callee: &str) -> Vec<&'a str> {
 /// "Long-running loops must stop on it".
 ///
 /// Checked **per `dispatch_capped` call site**, not per file: see [`call_sites`]
-/// for why the file-level form was unsound.
+/// for why the file-level form was unsound. The set of modules is now read from
+/// the source tree rather than listed here, so a new fan-out is in scope the
+/// moment it compiles.
 #[test]
 fn every_fan_out_command_honours_is_reauth_fatal() {
     let mut missing: Vec<String> = Vec::new();
-    let mut stale: Vec<&str> = Vec::new();
+    let stale: Vec<&str> = Vec::new();
+    let mut checked = 0usize;
 
-    for (name, src) in FAN_OUT_MODULES {
-        // Guard against a module being renamed out from under this list.
-        assert!(
-            src.contains("dispatch_capped(") || src.contains("run_bulk_seq("),
-            "{name} no longer drives a fan-out — drop it from FAN_OUT_MODULES"
-        );
+    for (name, src) in super::sources::command_modules() {
+        let name = name.as_str();
+        // The driver module DEFINES `dispatch_capped`; it has no session to
+        // gate on and its own doc comments name the call.
+        if name == "commands/dispatch.rs" {
+            continue;
+        }
+        if !(src.contains("dispatch_capped(") || src.contains("run_bulk_seq(")) {
+            continue;
+        }
+        checked += 1;
 
         // `run_bulk_seq` gates centrally, in the driver — every caller inherits
         // it, and `a_dead_session_halts_the_run_instead_of_burning_the_selection`
         // covers it. A module that only drives the sequential path is handled by
         // that, so it has no call sites to check here.
-        let sites = call_sites(src, "dispatch_capped");
-        let handled_by_driver = sites.is_empty() && src.contains("run_bulk_seq(");
+        let sites = call_sites(&src, "dispatch_capped");
+        let _handled_by_driver = sites.is_empty() && src.contains("run_bulk_seq(");
 
         for (n, site) in sites.iter().enumerate() {
             // Two accepted shapes. Either the spawn closure gates on the shared
@@ -179,15 +223,14 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
                 missing.push(format!("{name} (dispatch_capped call #{})", n + 1));
             }
         }
-
-        let handled = handled_by_driver || !sites.is_empty();
-        match (handled, KNOWN_GAPS.contains(name)) {
-            (false, false) => missing.push(format!("{name} (no recognised fan-out driver)")),
-            (true, true) => stale.push(name),
-            _ => {}
-        }
     }
 
+    assert!(
+        checked >= 5,
+        "only {checked} fan-out module(s) found by the source walk — expected at least the audit, \
+         bulk, backup, sharepoint and permission-tester drivers. A rule that scans nothing passes \
+         vacuously."
+    );
     assert!(
         missing.is_empty(),
         "fan-out call site(s) with no dead-session gate: {missing:?}\n\
@@ -214,6 +257,69 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
          listing it — a fan-out that warns through a dead session returns a partial \
          result the UI presents as complete."
     );
+}
+
+/// The tenant-wide-writer rule must actually FIRE on the shape it exists to
+/// catch. Without this, the rule passes for two indistinguishable reasons —
+/// "every writer is gated" and "the detector matches nothing" — and the second
+/// is how the rule it replaced came to be worthless.
+///
+/// The unguarded case below is `migrate_application_access_policies` as it
+/// shipped: enumerate every Application Access Policy in the tenant, then write
+/// per app, with no token and no latch.
+#[test]
+fn the_tenant_wide_writer_rule_fires_on_an_ungated_loop() {
+    fn violates(body: &str) -> bool {
+        let reads_tenant = TENANT_WIDE_READS.iter().any(|r| body.contains(r));
+        let writes_per_result = super::sources::loops(body)
+            .iter()
+            .any(|(_, b)| b.contains(".await") && WRITE_CALLS.iter().any(|w| b.contains(w)));
+        let gated = body.contains(".claim()")
+            && (body.contains("is_dead()")
+                || body.contains("dispatch_capped(")
+                || body.contains("run_bulk_seq("));
+        reads_tenant && writes_per_result && !gated
+    }
+
+    let unguarded = r#"{
+        let policies = exo.get_application_access_policies().await?;
+        for (app_id, batch) in group(policies) {
+            exo.remove_application_access_policy(id).await?;
+        }
+    }"#;
+    assert!(violates(unguarded), "the rule must catch an ungated writer");
+
+    let guarded = r#"{
+        let policies = exo.get_application_access_policies().await?;
+        let cancel = state.audit_cancel.claim();
+        let session = SessionDead::new();
+        for (app_id, batch) in group(policies) {
+            if cancel.is_cancelled() || session.is_dead() { break; }
+            exo.remove_application_access_policy(id).await?;
+        }
+    }"#;
+    assert!(!violates(guarded), "a gated writer must pass");
+
+    // A loop over ONE app's own sub-collection is bounded by that app, not by
+    // the tenant, and must not be dragged in — this is the shape 25 of the 26
+    // awaited write loops in `commands/` actually have.
+    let bounded = r#"{
+        let app = graph.get_application(&object_id).await?;
+        for cred in &app.password_credentials {
+            graph.remove_password(&object_id, &cred.key_id).await?;
+        }
+    }"#;
+    assert!(
+        !violates(bounded),
+        "a per-app loop is not a tenant-wide run"
+    );
+
+    // Reading the tenant without writing per result is a listing, not a run.
+    let read_only = r#"{
+        let sps = sp_index_cached(&cache, &client, &tenant_id).await;
+        for sp in &sps { rows.push(project(sp)); }
+    }"#;
+    assert!(!violates(read_only), "a tenant-wide READ is not a writer");
 }
 
 /// `call_sites` is load-bearing for the rule above, so it gets its own cover.

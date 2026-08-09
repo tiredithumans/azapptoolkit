@@ -14,12 +14,10 @@ use std::collections::{HashMap, HashSet};
 
 use tauri::State;
 
-use azapptoolkit_core::audit::ResourcePermission;
 use azapptoolkit_core::audit::{MailPermissionScope, ScopeMechanism};
 use azapptoolkit_core::cache::{Cache, CacheKind};
-use azapptoolkit_core::scoping::{
-    is_blanket_mailbox_grant, is_scopable_exchange_resource_permission,
-};
+use azapptoolkit_core::scoping::exchange_role_for_resource_permission;
+use azapptoolkit_core::scoping::is_scopable_exchange_resource_permission;
 use azapptoolkit_exchange::models::ExoGroupMember;
 use azapptoolkit_exchange::models::{
     ExoApplicationAccessPolicy, ExoAuthorizationResult, ExoManagementScope,
@@ -30,18 +28,32 @@ use azapptoolkit_exchange::targets::{
     plan_role_assignments, policies_safe_to_remove, require_scopable_targets, rewritable_scope_dns,
     scope_groups_in_filter, targets_from_declared, targets_from_grants, targets_safe_to_strip,
 };
+// `exchange_role_for_permission` is deprecated and stays that way; the three
+// uses left in this file resolve roles for permission sets a resource-aware gate
+// has ALREADY vetted (see each `#[allow(deprecated)]` for which gate). The
+// import is allowed here so the attribute keeps firing for anyone who adds a
+// fourth use without doing that vetting.
+#[allow(deprecated)]
+use azapptoolkit_exchange::exchange_role_for_permission;
+// The pure mailbox-scope decisions now live in the crate, where they are
+// unit-testable without a Tauri `State`. This file keeps the I/O around them.
+use azapptoolkit_exchange::verdict::{
+    aap_verdict_for, reconcile_orgwide_grant, row_grants_permission, scope_from_rbac_error,
+    verdict_from_rows,
+};
 use azapptoolkit_exchange::{
-    ExchangeClient, ExchangeError, SourceGroupRead, exchange_role_for_permission,
-    group_policies_for_migration, member_of_group_filter, plan_source_membership, source_member,
-    unverified_members,
+    ExchangeClient, ExchangeError, SourceGroupRead, group_policies_for_migration,
+    member_of_group_filter, plan_source_membership, source_member, unverified_members,
 };
 use azapptoolkit_graph::GraphClient;
 
 use crate::commands::applications::{invalidate_app_detail_state, invalidate_app_lists};
+use crate::commands::dispatch::SessionDead;
 use crate::commands::graph_roles::{
     ResourceRoles, mailbox_resource_roles, resolve_grant, resolve_value,
 };
 use crate::dto::UiError;
+use crate::dto::exchange::PrincipalPermission;
 use crate::dto::exchange::{
     AapMigrationItem, AapMigrationReport, ExchangeAccessRemovalResult, ExchangeAccessResult,
     ExchangeGroupMemberDto, ExchangeGroupRef, ExchangeMemberFailure, ExchangeMemberMutationResult,
@@ -563,62 +575,6 @@ pub async fn list_exchange_role_assignments(
 /// `AllowedResourceScope` with a `*RecipientScope` type. We treat an empty /
 /// "Not Applicable" `AllowedResourceScope` as org-wide too, and default to
 /// org-wide (the conservative, never-under-report choice) when unsure.
-pub(crate) fn is_org_wide_auth_row(r: &ExoAuthorizationResult) -> bool {
-    let allowed = r.allowed_resource_scope.as_deref().unwrap_or("").trim();
-    if allowed.is_empty() || allowed.eq_ignore_ascii_case("Not Applicable") {
-        return true;
-    }
-    matches!(
-        r.scope_type
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "" | "notapplicable" | "organizationconfig" | "organizationscope" | "organization"
-    )
-}
-
-/// True when a `Test-ServicePrincipalAuthorization` row confers `value` — either
-/// because it *is* that permission's dedicated role, or because it's one of the
-/// **composite** roles that bundle several permissions (`Application Mail Full
-/// Access` → `Mail.ReadWrite` + `Mail.Send`; `Application Exchange Full Access`
-/// → five permissions).
-///
-/// Matching `RoleName` alone missed every composite role, so a correctly scoped
-/// app produced no matching row and read `OrgWide`. The cmdlet reports the
-/// bundle in `GrantedPermissions`, so that is the authoritative field; the
-/// role-name check stays as the fast path and as a fallback for a row that omits
-/// the list.
-fn row_grants_permission(row: &ExoAuthorizationResult, role: &str, value: &str) -> bool {
-    if row.role_name.as_deref() == Some(role) {
-        return true;
-    }
-    row.granted_permissions
-        .as_deref()
-        .is_some_and(|granted| granted.split(',').any(|g| g.trim() == value))
-}
-
-/// Folds the authorization rows for one Exchange role into a single verdict:
-/// no row → `OrgWide` (queried OK, no scoped restriction); any org-wide row →
-/// `OrgWide` (it unions to tenant-wide reach); otherwise `Scoped` to the named
-/// management scope.
-fn verdict_from_rows(rows: &[&ExoAuthorizationResult]) -> MailPermissionScope {
-    if rows.is_empty() || rows.iter().any(|r| is_org_wide_auth_row(r)) {
-        return MailPermissionScope::OrgWide;
-    }
-    let scope_name = rows
-        .iter()
-        .find_map(|r| r.allowed_resource_scope.clone())
-        .filter(|s| !s.trim().is_empty());
-    MailPermissionScope::Scoped {
-        scope_name,
-        recipient_filter: None,
-        group_count: None,
-        mechanism: ScopeMechanism::Rbac,
-    }
-}
-
 /// Resolves whether a legacy Application Access Policy confines `app_id`'s
 /// mailbox access. An AAP applies to the whole application (not per-permission),
 /// so a single lookup covers every permission. Only a `RestrictAccess` policy
@@ -629,131 +585,6 @@ fn verdict_from_rows(rows: &[&ExoAuthorizationResult]) -> MailPermissionScope {
 async fn legacy_aap_scope(exo: &ExchangeClient, app_id: &str) -> Option<MailPermissionScope> {
     let policies = exo.get_application_access_policies().await.ok()?;
     aap_verdict_for(&policies, app_id)
-}
-
-/// Pure decision behind [`legacy_aap_scope`]: does any legacy Application Access
-/// Policy *confine* `app_id`'s mailbox access? Only a `RestrictAccess` policy
-/// scopes access to its group; a `DenyAccess` policy is a blocklist (access to
-/// everything *except* the group), which is still effectively org-wide, so it is
-/// not reported as scoped.
-pub(crate) fn aap_verdict_for(
-    policies: &[ExoApplicationAccessPolicy],
-    app_id: &str,
-) -> Option<MailPermissionScope> {
-    let policy = policies.iter().find(|p| {
-        p.app_id.as_deref() == Some(app_id)
-            && p.access_right
-                .as_deref()
-                .is_some_and(|r| r.eq_ignore_ascii_case("RestrictAccess"))
-    })?;
-    Some(MailPermissionScope::Scoped {
-        scope_name: policy
-            .scope_name
-            .clone()
-            .or_else(|| policy.scope_identity.clone()),
-        recipient_filter: policy.description.clone(),
-        group_count: None,
-        mechanism: ScopeMechanism::LegacyApplicationAccessPolicy,
-    })
-}
-
-/// Folds a legacy Application Access Policy verdict over the lean (audit-path)
-/// RBAC verdicts for one principal — the bulk-run equivalent of the per-app
-/// `aap_override` [`resolve_mail_scopes`] applies on the enriched detail path.
-///
-/// Applied by the caller, **after** the cached probe, so
-/// `resolve_mail_scopes_audit_cached` keeps caching the pure RBAC verdict and
-/// the two surfaces' cache warmth stays independent (see its doc comment).
-///
-/// Two shapes get the override, matching the detail path's two rules:
-/// - a permission RBAC reports `OrgWide` — a `RestrictAccess` policy genuinely
-///   confines the org-wide Entra grant, which is why `reconcile_orgwide_grant`
-///   exempts it;
-/// - a permission with **no** verdict at all — the probe failed or never ran
-///   (Exchange unavailable, breaker open, managed identity absent from the
-///   Exchange SP store). A policy keyed on this exact appId is stronger
-///   evidence than a failed probe, the same call `scope_from_rbac_error` makes.
-///
-/// A `Scoped` RBAC verdict is never overwritten: that app already migrated.
-///
-/// Takes the grants with their resources attached, not bare values: Office 365
-/// Exchange Online exposes its own `Mail.*` appRoles (retired Outlook REST) that
-/// an Application Access Policy cannot confine either, and a value-keyed test
-/// answers `true` for them because it can only see the name. That handed the
-/// legacy namesake a scoped verdict and dropped a genuinely org-wide grant out
-/// of the mailbox findings at the reduced weight.
-pub(crate) fn apply_legacy_policy_verdict(
-    scopes: &mut HashMap<String, MailPermissionScope>,
-    grants: &[ResourcePermission],
-    verdict: Option<&MailPermissionScope>,
-) {
-    let Some(verdict) = verdict else { return };
-    for grant in grants {
-        if !is_scopable_exchange_resource_permission(grant.resource_app_id.as_deref(), &grant.value)
-        {
-            continue;
-        }
-        match scopes.get(&grant.value) {
-            Some(MailPermissionScope::Scoped { .. }) => {}
-            _ => {
-                scopes.insert(grant.value.clone(), verdict.clone());
-            }
-        }
-    }
-}
-
-/// Per-app mailbox-scope fallback when `Test-ServicePrincipalAuthorization`
-/// itself fails (detail/enrich path only). An AAP confines the *whole* app (see
-/// [`legacy_aap_scope`]), so the verdict applies to every scopable permission.
-/// A `RestrictAccess` AAP keyed on this exact appId is stronger evidence than a
-/// failed probe, so it wins even over a 403. A principal Exchange can't resolve
-/// (the managed-identity case — it isn't in Exchange's SP store) has no RBAC
-/// scope, so absent an AAP its org-wide Graph grant reaches every mailbox =>
-/// `OrgWide`. Any other failure (403/401/network) is genuinely indeterminate and
-/// is surfaced to the caller so the UI can explain *why*.
-fn scope_from_rbac_error(
-    err: ExchangeError,
-    aap: Option<MailPermissionScope>,
-) -> Result<MailPermissionScope, ExchangeError> {
-    if let Some(scoped) = aap {
-        return Ok(scoped);
-    }
-    if err.is_missing_object() {
-        return Ok(MailPermissionScope::OrgWide);
-    }
-    Err(err)
-}
-
-/// Reconciles one permission's scope verdict against the org-wide Entra grants
-/// the principal still holds. A scoped **RBAC** verdict for a permission whose
-/// org-wide grant was never removed unions to tenant-wide reach, so it becomes
-/// `OrgWide` (what `Test-ServicePrincipalAuthorization` alone misses — it can't
-/// see Entra grants). A legacy Application Access Policy is exempt: it genuinely
-/// confines an org-wide grant. Org-wide / unknown verdicts pass through.
-///
-/// A **blanket** grant (the EWS `full_access_as_app` scope) vetoes the scope of
-/// *every* permission, not just its own name: it reaches every mailbox with full
-/// access, so a `Mail.Read` confined to one group is still effectively org-wide
-/// while it survives.
-fn reconcile_orgwide_grant(
-    verdict: MailPermissionScope,
-    perm: &str,
-    orgwide_granted: &HashSet<String>,
-) -> MailPermissionScope {
-    let scoped_via_rbac = matches!(
-        verdict,
-        MailPermissionScope::Scoped {
-            mechanism: ScopeMechanism::Rbac,
-            ..
-        }
-    );
-    let defeated = orgwide_granted.contains(perm)
-        || orgwide_granted.iter().any(|g| is_blanket_mailbox_grant(g));
-    if scoped_via_rbac && defeated {
-        MailPermissionScope::OrgWide
-    } else {
-        verdict
-    }
 }
 
 /// Mailbox permission **values** that `sp_object_id` holds as **org-wide Entra
@@ -826,6 +657,12 @@ pub(crate) async fn resolve_mail_scopes(
     orgwide_granted: &HashSet<String>,
     enrich: bool,
 ) -> Result<HashMap<String, MailPermissionScope>, ExchangeError> {
+    // Callers vet the resource before reaching here — `targets_from_declared`
+    // for the manifest paths, the (resource, value) gate in
+    // `get_mail_scopes_for_principal` for the held-permission path — so the
+    // value-only lookup is resolving an already-proven-scopable set, not
+    // deciding scopability. The deprecation stands for new callers.
+    #[allow(deprecated)]
     let scopable: Vec<(&String, &'static str)> = graph_perms
         .iter()
         .filter_map(|p| exchange_role_for_permission(p).map(|role| (p, role)))
@@ -954,6 +791,9 @@ pub(crate) async fn resolve_mail_scopes_audit_cached(
 ) -> Result<HashMap<String, MailPermissionScope>, ExchangeError> {
     // Nothing scopable ⇒ no probe and no cache entry (matches
     // `resolve_mail_scopes` and the Permissions-tab commands).
+    // Pre-vetted by the audit's `declared_values` (resource-aware). See
+    // `resolve_mail_scopes`.
+    #[allow(deprecated)]
     let mut scopable: Vec<&str> = graph_perms
         .iter()
         .filter(|p| exchange_role_for_permission(p).is_some())
@@ -1047,6 +887,8 @@ pub async fn get_mail_permission_scopes(
     let exo = exchange_client_checked(&state, &tenant_id).await?;
     let scopes = resolve_mail_scopes(&exo, &app.app_id, &scopable, &orgwide, true).await?;
 
+    // `scopable` is `targets_from_declared` output — already resource-vetted.
+    #[allow(deprecated)]
     let entries: Vec<MailScopeEntry> = scopable
         .into_iter()
         .filter_map(|p| {
@@ -1078,21 +920,36 @@ pub async fn get_mail_scopes_for_principal(
     state: State<'_, AppState>,
     tenant_id: String,
     app_id: String,
-    permissions: Vec<String>,
+    permissions: Vec<PrincipalPermission>,
 ) -> Result<Vec<MailScopeEntry>, UiError> {
-    // Nothing scopable ⇒ no Exchange call (and no needless consent prompt).
-    if !permissions
+    // Resolve each held permission against the resource that exposes it, and
+    // keep only the confinable ones. The value-only gate this replaces would
+    // accept an Office 365 Exchange Online `Mail.Read` — a permission no
+    // management scope can confine — and go on to report a mailbox scoping
+    // verdict for it. Both callers already filtered this way client-side, but a
+    // command is only as safe as its own gate.
+    let scopable: Vec<(String, &'static str)> = permissions
         .iter()
-        .any(|p| exchange_role_for_permission(p).is_some())
-    {
+        .filter_map(|p| {
+            exchange_role_for_resource_permission(&p.resource_app_id, &p.value)
+                .map(|role| (p.value.clone(), role))
+        })
+        .collect();
+    // Nothing scopable ⇒ no Exchange call (and no needless consent prompt).
+    if scopable.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Same cache as `get_mail_permission_scopes`, keyed on the *held*
-    // permission set (caller-supplied), so the same app viewed as an app
-    // registration (declared manifest) and as a bare principal can't collide.
+    // Same cache as `get_mail_permission_scopes`, keyed on the *held* permission
+    // set (caller-supplied), so the same app viewed as an app registration
+    // (declared manifest) and as a bare principal can't collide. Keyed on
+    // resource|value pairs now, so two principals differing only in which
+    // resource exposes a same-named permission get different entries.
     let cache_key = {
-        let mut sorted = permissions.clone();
+        let mut sorted: Vec<String> = permissions
+            .iter()
+            .map(|p| format!("{}|{}", p.resource_app_id, p.value))
+            .collect();
         sorted.sort();
         mail_scopes_key(&tenant_id, &format!("held|{app_id}|{}", sorted.join(",")))
     };
@@ -1112,21 +969,25 @@ pub async fn get_mail_scopes_for_principal(
     };
 
     let exo = exchange_client_checked(&state, &tenant_id).await?;
-    let scopes = resolve_mail_scopes(&exo, &app_id, &permissions, &orgwide, true).await?;
+    // The vetted values only. Value-keyed output is unambiguous here because the
+    // two confinable sets are disjoint: Microsoft Graph contributes the `Mail.*`
+    // / `Calendars.*` / `Contacts.*` / `MailboxSettings.*` family, Office 365
+    // Exchange Online contributes `full_access_as_app` and nothing else.
+    let values: Vec<String> = scopable.iter().map(|(v, _)| v.clone()).collect();
+    let scopes = resolve_mail_scopes(&exo, &app_id, &values, &orgwide, true).await?;
 
-    let entries: Vec<MailScopeEntry> = permissions
+    let entries: Vec<MailScopeEntry> = scopable
         .into_iter()
-        .filter_map(|p| {
-            let role = exchange_role_for_permission(&p)?;
+        .map(|(value, role)| {
             let scope = scopes
-                .get(&p)
+                .get(&value)
                 .cloned()
                 .unwrap_or(MailPermissionScope::Unknown);
-            Some(MailScopeEntry {
-                graph_permission: p,
+            MailScopeEntry {
+                graph_permission: value,
                 exchange_role: role.to_string(),
                 scope,
-            })
+            }
         })
         .collect();
     state.cache.put(CacheKind::Lists, cache_key, &entries);
@@ -2022,8 +1883,30 @@ pub async fn migrate_application_access_policies(
 
     let (batches, mut failures) = group_policies_for_migration(policies);
 
+    // This loop runs once per APP IN THE TENANT, each iteration doing several
+    // multi-second Exchange and Entra round trips — the same shape as the audit
+    // and DR fan-outs, and it had neither of their stop conditions. The operator
+    // could not stop a whole-tenant migration once started, and a session that
+    // died on the first app still burned through every remaining one, producing
+    // an identical "failed" line per app that read as a tenant rejecting the
+    // writes. Shares `audit_cancel` with the security audit and bulk actions
+    // (AGENTS.md), claimed ONCE here so a cancel can't be lost at a boundary.
+    let cancel = state.audit_cancel.claim();
+    let session = SessionDead::new();
+    let mut cancelled = false;
+
     let mut items = Vec::new();
     for (policy_app_id, batch) in batches {
+        if cancel.is_cancelled() {
+            cancelled = true;
+            break;
+        }
+        // A dead session makes every remaining app fail identically. Stop and
+        // report what was already migrated rather than manufacturing N failures.
+        if session.is_dead() {
+            cancelled = true;
+            break;
+        }
         match migrate_one(
             &graph,
             &exo,
@@ -2037,7 +1920,12 @@ pub async fn migrate_application_access_policies(
         .await
         {
             Ok(item) => items.push(item),
-            Err(msg) => failures.push(format!("{policy_app_id}: {msg}")),
+            Err(err) => {
+                // `note_code` keeps `UiError::is_reauth_fatal` the single
+                // definition of which codes end the run.
+                session.note_code(&err.code);
+                failures.push(format!("{policy_app_id}: {}", err.message));
+            }
         }
     }
 
@@ -2056,6 +1944,7 @@ pub async fn migrate_application_access_policies(
         dry_run,
         items,
         failures,
+        incomplete: cancelled,
     })
 }
 
@@ -2069,17 +1958,27 @@ async fn migrate_one(
     scope_override: Option<&str>,
     tenant_defaults: &TenantDefaults,
     dry_run: bool,
-) -> Result<AapMigrationItem, String> {
+) -> Result<AapMigrationItem, UiError> {
     let identities: Vec<String> = policies.iter().filter_map(|p| p.identity.clone()).collect();
     let mut warnings = Vec::new();
 
     // Resolve the Entra service principal (needed for the EXO pointer ObjectId
     // and to remove the unscoped grants).
+    //
+    // `UiError`, not `String`: this is the boundary AGENTS.md says must carry
+    // the auth classification. Flattening a GraphError/ExchangeError into a
+    // formatted string destroyed the `refresh_missing` / `not_signed_in` /
+    // `consent_required` code, so the caller's `SessionDead` latch could never
+    // fire and a dead session looked like N independent per-app failures.
     let entra_sp = graph
         .get_service_principal_by_app_id(app_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("no Entra service principal for this app")?;
+        .await?
+        .ok_or_else(|| {
+            UiError::not_found(
+                "service_principal_not_found",
+                "no Entra service principal for this app",
+            )
+        })?;
 
     // Resolve EVERY policy's scoping group to its DistinguishedName: the app's
     // one management scope has to span all of them, because that union is what
@@ -2092,15 +1991,21 @@ async fn migrate_one(
             .scope_name
             .clone()
             .or_else(|| policy.scope_identity.clone())
-            .ok_or("policy has no scope group (ScopeName)")?;
-        let group = exo
-            .get_group(&scope_group)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("scope group '{scope_group}' not found"))?;
-        let dn = group
-            .distinguished_name
-            .ok_or_else(|| format!("scope group '{scope_group}' has no distinguished name"))?;
+            .ok_or_else(|| {
+                UiError::validation("no_scope_group", "policy has no scope group (ScopeName)")
+            })?;
+        let group = exo.get_group(&scope_group).await?.ok_or_else(|| {
+            UiError::not_found(
+                "scope_group_not_found",
+                format!("scope group '{scope_group}' not found"),
+            )
+        })?;
+        let dn = group.distinguished_name.ok_or_else(|| {
+            UiError::validation(
+                "scope_group_no_dn",
+                format!("scope group '{scope_group}' has no distinguished name"),
+            )
+        })?;
         if !dns.contains(&dn) {
             dns.push(dn);
         }
@@ -2132,10 +2037,7 @@ async fn migrate_one(
     // AND Office 365 Exchange Online, so a policy confining the EWS
     // `full_access_as_app` scope migrates to `Application EWS.AccessAsApp`
     // instead of being silently dropped.
-    let assignments = graph
-        .list_app_role_assignments(&entra_sp.id)
-        .await
-        .map_err(|e| e.to_string())?;
+    let assignments = graph.list_app_role_assignments(&entra_sp.id).await?;
     let targets = targets_from_grants(&assignments, resources);
     // An empty target set only means "this policy governs nothing" if we
     // actually looked at every resource an AAP can constrain. See
@@ -2192,8 +2094,7 @@ async fn migrate_one(
 
     // 1. management scope, 2. service principal pointer.
     exo.ensure_management_scope(&scope_name, &scope_filter)
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
     // `ensure_management_scope` is create-only, so a RE-RUN (or a scope left by
     // an earlier partial migration) would keep an old filter and silently drop
     // the consolidation. Repoint it — but only a scope this tenant's pattern
@@ -2203,15 +2104,12 @@ async fn migrate_one(
         repoint_scope_if_stale(exo, &scope_name, &scope_filter, &mut warnings).await;
     }
     exo.ensure_service_principal(app_id, &entra_sp.id, &entra_sp.display_name)
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
 
     // 3. scoped role assignments (idempotent). Track which targets ended up
     //    scoped so step 4 only strips the org-wide grant for those.
     let (roles_assigned, _roles_skipped, scoped) =
-        assign_scoped_roles(exo, app_id, &scope_name, &targets, &mut warnings)
-            .await
-            .map_err(|e| e.message)?;
+        assign_scoped_roles(exo, app_id, &scope_name, &targets, &mut warnings).await?;
 
     // 4. remove the unscoped Entra grants so scoping is effective — but only for
     //    permissions whose scoped role actually landed (never strand the app).
@@ -2901,75 +2799,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_policy_verdict_fills_org_wide_and_missing_but_never_an_rbac_scope() {
-        let legacy = aap_verdict_for(&[aap("app-1", "RestrictAccess", Some("Sales"))], "app-1")
-            .expect("legacy verdict");
-        let rbac = MailPermissionScope::Scoped {
-            scope_name: Some("app_scope_app-1".into()),
-            recipient_filter: None,
-            group_count: Some(1),
-            mechanism: ScopeMechanism::Rbac,
-        };
-        let mut scopes = HashMap::from([
-            ("Mail.Read".to_string(), MailPermissionScope::OrgWide),
-            ("Mail.Send".to_string(), rbac.clone()),
-        ]);
-        let grants = [
-            ResourcePermission::graph("Mail.Read"),
-            ResourcePermission::graph("Mail.Send"),
-            // No verdict at all (probe failed / never ran) — the policy answers.
-            ResourcePermission::graph("Calendars.Read"),
-            // Not Exchange-scopable: a policy can't confine it, so it must not
-            // gain a scoped verdict (that would under-report its reach).
-            ResourcePermission::graph("Directory.Read.All"),
-            // Same NAME as a scopable Graph permission, different resource. An
-            // Application Access Policy cannot confine Office 365 Exchange
-            // Online's retired Outlook REST appRoles, so this must not lend the
-            // legacy grant a scoped verdict — the value-keyed test could not
-            // tell the two apart and did exactly that.
-            ResourcePermission::exchange_online("Contacts.Read"),
-            // An unresolvable resource is never treated as scoped.
-            ResourcePermission {
-                resource_app_id: None,
-                value: "MailboxSettings.Read".to_string(),
-            },
-        ];
-
-        apply_legacy_policy_verdict(&mut scopes, &grants, Some(&legacy));
-
-        assert_eq!(scopes.get("Mail.Read"), Some(&legacy), "org-wide → legacy");
-        assert_eq!(
-            scopes.get("Calendars.Read"),
-            Some(&legacy),
-            "no verdict → legacy"
-        );
-        assert_eq!(
-            scopes.get("Mail.Send"),
-            Some(&rbac),
-            "an app that already migrated keeps its RBAC verdict"
-        );
-        assert!(!scopes.contains_key("Directory.Read.All"));
-        assert!(
-            !scopes.contains_key("Contacts.Read"),
-            "an AAP cannot confine Office 365 Exchange Online's own Contacts.Read, so it must \
-             not earn a scoped verdict — scoring it at the reduced weight hides org-wide reach"
-        );
-        assert!(
-            !scopes.contains_key("MailboxSettings.Read"),
-            "an unresolved resource must be scored conservatively, never as scoped"
-        );
-
-        // No policy for this app ⇒ untouched (today's behavior).
-        let mut untouched =
-            HashMap::from([("Mail.Read".to_string(), MailPermissionScope::OrgWide)]);
-        apply_legacy_policy_verdict(&mut untouched, &grants, None);
-        assert_eq!(
-            untouched.get("Mail.Read"),
-            Some(&MailPermissionScope::OrgWide)
-        );
-    }
-
-    #[test]
     fn migration_keeps_the_policy_while_any_grant_is_still_org_wide() {
         // The policy is the ONLY thing constraining a surviving org-wide grant, so
         // deleting it widens the app's reach to every mailbox — the regression that
@@ -3038,60 +2867,5 @@ mod tests {
             MICROSOFT_GRAPH_APP_ID
         )]));
         assert!(!mailbox_resources_complete(&[]));
-    }
-
-    #[test]
-    fn rbac_error_restrict_access_aap_wins_even_over_forbidden() {
-        // A RestrictAccess AAP keyed on this appId is authoritative regardless of
-        // why the probe failed — it confines the whole app.
-        let aap = aap_verdict_for(&[aap("app-1", "RestrictAccess", Some("Sales"))], "app-1");
-        match scope_from_rbac_error(
-            ExchangeError::Forbidden {
-                detail: "nope".into(),
-                had_diagnostics: false,
-            },
-            aap,
-        )
-        .expect("AAP should resolve the verdict")
-        {
-            MailPermissionScope::Scoped {
-                mechanism: ScopeMechanism::LegacyApplicationAccessPolicy,
-                ..
-            } => {}
-            other => panic!("expected legacy-AAP Scoped, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn rbac_missing_object_without_aap_is_org_wide() {
-        // The managed-identity case: the principal isn't in Exchange's SP store,
-        // so it has no RBAC scope — its org-wide Graph grant reaches every mailbox.
-        for err in [
-            ExchangeError::NotFound("object couldn't be found".into()),
-            ExchangeError::Api {
-                status: 400,
-                body: "[Test-ServicePrincipalAuthorization] couldn't be found".into(),
-            },
-        ] {
-            assert_eq!(
-                scope_from_rbac_error(err, None).expect("missing object => org-wide"),
-                MailPermissionScope::OrgWide,
-            );
-        }
-    }
-
-    #[test]
-    fn rbac_genuine_forbidden_without_aap_propagates() {
-        // Not a missing object — the caller can't run the cmdlet, so scoping is
-        // genuinely indeterminate. Surface it (caller shows a consent/403 banner).
-        let err = scope_from_rbac_error(
-            ExchangeError::Forbidden {
-                detail: "RBAC denied".into(),
-                had_diagnostics: true,
-            },
-            None,
-        )
-        .expect_err("genuine 403 must propagate");
-        assert!(matches!(err, ExchangeError::Forbidden { .. }));
     }
 }

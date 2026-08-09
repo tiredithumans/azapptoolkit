@@ -1,8 +1,9 @@
 use super::*;
 use crate::bindings::exchange as exchange_bindings;
+use crate::bindings::exchange::PrincipalPermission;
 use crate::bindings::graph_roles;
 use crate::bindings::permissions as permissions_bindings;
-use crate::components::exchange_scoping_section::{ExchangeScopeTarget, ExchangeScopingSection};
+use crate::components::exchange_scoping_section::ExchangeScopingSection;
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
 use crate::components::orgwide_scope_callout::OrgwideScopeCallout;
 use crate::components::permission_picker::PickerSelection;
@@ -61,16 +62,22 @@ pub(super) fn PermissionsContent(
             // Resource-aware: the EWS `full_access_as_app` scope on Office 365
             // Exchange Online counts, that resource's own `Mail.Read` family
             // (retired Outlook REST, no RBAC role) does not.
-            let mail_values: Vec<String> = granted
+            // Carry the resource across IPC: the backend re-derives scopability
+            // from (resource, value), so this no longer has to be the only gate.
+            let mail_values: Vec<PrincipalPermission> = granted
                 .await
                 .unwrap_or_default()
                 .iter()
-                .filter(|p| {
-                    p.app_role_value
-                        .as_deref()
-                        .is_some_and(|v| is_exchange_scopable_on(p.resource_app_id.as_deref(), v))
+                .filter_map(|p| {
+                    let value = p.app_role_value.clone()?;
+                    let resource_app_id = p.resource_app_id.clone()?;
+                    is_exchange_scopable_on(Some(&resource_app_id), &value).then_some(
+                        PrincipalPermission {
+                            resource_app_id,
+                            value,
+                        },
+                    )
                 })
-                .filter_map(|p| p.app_role_value.clone())
                 .collect();
             if mail_values.is_empty() {
                 return Ok(HashMap::new());
@@ -230,13 +237,15 @@ pub(super) fn PermissionsContent(
                                 view! {
                                     <ExchangeScopingSection
                                         app_id=app_id
-                                        target=Signal::derive(move || {
-                                            ExchangeScopeTarget::ServicePrincipal {
-                                                sp_object_id: sp_id.get(),
-                                                display_name: display_name.get(),
-                                                mail_permissions: mail_values.clone(),
-                                                is_managed_identity: false,
-                                            }
+                                        target=Signal::derive(move || ScopeTarget {
+                                            object_id: None,
+                                            sp_object_id: sp_id.get(),
+                                            app_id: app_id.get(),
+                                            display_name: display_name.get(),
+                                            is_managed_identity: false,
+                                        })
+                                        mail_permissions=Signal::derive(move || {
+                                            mail_values.clone()
                                         })
                                         on_changed=Callback::new(move |()| {
                                             reload.update(|n| *n += 1)

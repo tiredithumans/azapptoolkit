@@ -35,11 +35,11 @@ Adding a command? `src-tauri/src/lib.rs` + `web-rs/src/bindings/`. New dependenc
 
 ```
 crates/                              # shared Rust libraries
-├── azapptoolkit-core/               # domain models, cache (LRU+TTL), audit/risk scoring
+├── azapptoolkit-core/               # models, cache (LRU+TTL), audit scoring, scoping, http_error/_retry
 ├── azapptoolkit-dto/                # serializable IPC boundary types (backend + frontend)
 ├── azapptoolkit-auth/               # Entra OAuth2 PKCE, token cache, OS keyring
 ├── azapptoolkit-graph/              # typed Microsoft Graph client (retry/backoff)
-├── azapptoolkit-exchange/           # Exchange Online Admin API (RBAC for Applications)
+├── azapptoolkit-exchange/           # Exchange Admin API; `verdict.rs` = pure mailbox-scope decisions
 ├── azapptoolkit-keyvault/           # Azure Key Vault secrets client
 ├── azapptoolkit-arm/                # ARM + Azure Monitor Logs query (managed-identity)
 └── azapptoolkit-permissions/        # bundled permissions catalog (data/) + Graph fallback
@@ -142,17 +142,15 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **The `BearerProvider` boundary carries the auth classification.** `core::token::TokenError { code, message }` — not a bare `String` — so a dead session survives into `GraphError/ExchangeError/KeyVaultError/ArmError::Token` and `ui_code()` passes `refresh_missing`/`not_signed_in` through. Flattening it to `token_error` made `is_reauth_fatal` unfirable for every client call. Sole mapping: `token_adapter::token_error`.
 
-- **Long-running writes stop on a dead session via `dispatch::SessionDead`.** Fan-outs gate `dispatch_capped`'s `spawn` on `is_dead()` and return `session.err(..)`, never a partial result; sequential flows (restore) break each pass and flag the report instead, having already mutated. Feed failures in via `note`/`note_code`/`note_fatal`. Pinned per `dispatch_capped` **call site**; `KNOWN_GAPS` stays empty.
+- **Long-running writes stop on Cancel AND on a dead session.** A command reading a tenant-wide collection then writing per result `claim()`s a `CancelToken` **once** — before the first write and before any long prefetch (`claim()` after it discards a cancel issued during it) — latches `dispatch::SessionDead`, breaks on both, and flags its result incomplete. Fan-outs gate `dispatch_capped`'s `spawn` on `is_dead()` and return `session.err(..)`, never a partial result; sequential flows (restore, AAP migration) break each pass and flag the report, having already mutated. Feed failures in via `note`/`note_code`/`note_fatal`. Flags: `audit_cancel` (audit + bulk), `sweep_cancel`, `dr_cancel`. Pinned per **call site** and derived from the source tree — not an allowlist — in `repo_invariants/{cancel,fanout}.rs` via `sources.rs`; `KNOWN_GAPS` stays empty.
 
-- **Re-auth-fatal codes have ONE definition: `core::reauth::REAUTH_FATAL_CODES`.** `UiError`/`TokenError::is_reauth_fatal()` both read it (agreement is tested). Adding a code = editing that slice; every long-running loop stops on it.
+- **Re-auth-fatal codes have ONE definition: `core::reauth::REAUTH_FATAL_CODES`.** `UiError`/`TokenError::is_reauth_fatal()` both read it (agreement tested in `azapptoolkit-dto`). Adding a code = editing that slice; every long-running loop stops on it.
 
 - **Force re-auth in place when the session is dead — don't sign the user out.** A dead refresh token (`InvalidGrant`/`RefreshTokenMissing` → **`refresh_missing`**; `NotSignedIn` → **`not_signed_in`**) can't be re-minted silently; `reauthenticate` runs ONE interactive round trip and restores the session **without** dropping data caches. Details: [auth-and-consent.md](docs/architecture/auth-and-consent.md).
 
 - **Role/scope catalog.** Three auth planes (Entra, Azure RBAC, Exchange) share one capabilities catalog. Adding a privileged feature → add a catalog entry instead of hardcoding role strings; splice its remediation into a 403 via `graph_err::forbidden_remediation`. Access Readiness enumerates only **direct** Azure role assignments (conservative supersets, never a false "Missing"). Details: [auth-and-consent.md](docs/architecture/auth-and-consent.md).
 
 - **Audit signals — structured, not text.** Facets/cards/finding groups key off `AuditItem` fields, not free-text. A `cancelled`/`truncated`/`degraded` run is **never cached** nor shown as an all-clear; a backup records what it missed in `TenantBackup::skipped`.
-
-- **Shared `audit_cancel` flag.** Security-audit and Bulk-actions share `AppState.audit_cancel`; a long-running command `claim()`s a `CancelToken` **once** and polls that, so a run can't un-cancel another. Resource Access uses `sweep_cancel`; DR `dr_cancel`. Pinned in `repo_invariants/cancel.rs`.
 
 - **Batched Graph fan-out + adaptive throttle.** Heavy fan-outs use Graph JSON batching (20 GETs/POST) + the shared `ConcurrencyThrottle` via `ThrottleGuard::attach`; whole-batch failures degrade to per-object reads through `dispatch::batch_or_serial`. Never hand-roll a tracker or a per-item loop. `$count`/`$orderby` belong to `$search` alone — `$expand` + advanced query fails *silently*. Details: [caching-and-search.md](docs/architecture/caching-and-search.md).
 
@@ -162,13 +160,13 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **`Sites.Selected` reach is knowable only from the site side.** No reverse `appId → sites` lookup exists, so the Resource Access sweep and the per-app "Sites this app can reach" panel share ONE tenant index; `AppSiteAccessDto::from_sweep` is the single projection (cached ⇒ backend-side, fresh ⇒ frontend), and an empty list means "no grants" only when `is_complete()`.
 
-- **Mailbox AND SharePoint permissions live on TWO resources each — carry the resource, never the bare value.** Both Graph and the legacy Office 365 resources expose `Mail.*`/`Contacts.*` and `Sites.*`; only Graph's are confinable. Permissions travel as `audit::ResourcePermission`; every gate uses the POSITIVE `is_scopable_{exchange,sharepoint}_resource_permission` / `scope_kind_for` — never a negation, never the **deprecated** value-only forms (pinned by `repo_invariants.rs`). Value-keyed shortcuts here have silently widened access. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
+- **Mailbox AND SharePoint permissions live on TWO resources each — carry the resource, never the bare value.** Both Graph and the legacy Office 365 resources expose `Mail.*`/`Contacts.*` and `Sites.*`; only Graph's are confinable. Permissions travel as `audit::ResourcePermission`; every gate uses the POSITIVE `is_scopable_{exchange,sharepoint}_resource_permission` / `scope_kind_for` — never a negation, never the **deprecated** value-only forms (pinned by `repo_invariants.rs`). Value-keyed shortcuts here have silently widened access — dedupe on `(resource, value)`, and name the resource in operator-facing text. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
 - **AAP migration is guarded, not mechanical.** `RestrictAccess` only (a `DenyAccess` blocklist inverts), one batch per **app**, policies deleted only once every grant they confined is re-scoped **and** both mailbox resources resolved; an unverifiable set fails closed. Planner: `azapptoolkit-exchange::aap` (pure, tested). Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
 - **Scoped grants reuse shared cores.** Exchange + SharePoint grant scoped access *before* stripping org-wide, so a failure never strands the principal. The Exchange scope and its backing mail-group use two distinct per-tenant patterns (`scope_name_for`/`group_name_for`) covering **every** scoping path, resolved via `load_tenant_defaults`. Membership changes **don't** invalidate caches. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
-- **Repointing a management scope is an explicit action, and fail-closed.** `ensure_management_scope` is create-only; `set_management_scope_filter` is the sole filter mutator, and Exchange applies it to **every** role assignment on that scope. A filter may only be rewritten once `targets::rewritable_scope_dns` proves it a pure `MemberOfGroup` OR-chain; `plan_consolidation` owns the rest of the decision. Both refuse rather than fall back. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
+- **Repointing a management scope is an explicit action, and fail-closed.** `ensure_management_scope` is create-only; `set_management_scope_filter` is the sole filter mutator and Exchange applies it to **every** role assignment on that scope. A filter is rewritten only once `targets::rewritable_scope_dns` proves it a pure `MemberOfGroup` OR-chain; both it and `plan_consolidation` refuse rather than fall back. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
 - **Unified "Grant access" wizard.** One button per principal (`ScopeWizard`): select permissions (full-catalog cart) → choose access → grant. `mechanism` is `Some(kind)` only when the cart is non-empty *and* every item is an Application permission of the **same** `ScopeKind` (delegated/mixed/non-scopable ⇒ org-wide). Add a mechanism = a `ScopeKind` variant + a target panel + an apply arm; nothing else branches on it. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
@@ -180,11 +178,13 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Per-list filter state lives on `Session.tenant_ui` (`TenantScopedUi`) and resets on tenant switch by structure.** Searches, drill-target facets, both bulk selections and shell dialog flags live there so outside surfaces can seed them. A new tenant-scoped signal goes INTO the substruct with a `reset()` line + an assertion in the `tenant_switch_resets_every_tenant_scoped_field` pinning test — never a bare `Session` field with a hand-added reset. Details: [frontend-workspace.md](docs/architecture/frontend-workspace.md).
 
-- **Security tab = findings-first workbench: one controller, read-only posture strip.** Filtering has exactly two homes — the Findings accordion + the All-apps `audit_severity` control. `BulkActionBar` is the single home of bulk command-calling; **no Grant consent on audit surfaces**. A row shows only its own section's Fix + tab (`GroupSpec`); `on_remediated` clears just that kind. **Load-bearing asymmetry:** `scoped_mailbox` matches `.contains(SCOPED_VIA_RBAC)` while siblings use `.starts_with` (pinned by `filter.rs` tests). Layout: [frontend-workspace.md](docs/architecture/frontend-workspace.md).
+- **Security tab = findings-first workbench: one controller, read-only posture strip.** Filtering has exactly two homes (Findings accordion + All-apps `audit_severity`); `BulkActionBar` is the single home of bulk command-calling; **no Grant consent on audit surfaces**. Details + the load-bearing `scoped_mailbox` matcher asymmetry: [frontend-workspace.md](docs/architecture/frontend-workspace.md).
 
 - **The audit also scores SP-only principals (no local app registration) — and those rows are NOT bulk targets.** Phase 2 of `run_audit` scores foreign enterprise apps / MIs / orphaned SPs from their **granted** roles. `AuditItem.principal_kind` drives routing; SP rows' Fixes call the SP-only cores, **never** `remediate_scope_*` (they `get_application` first → 404), render no checkbox, and are excluded from select-all. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
 - **Bulk remediations reuse the single-app cores, sequentially** via `run_bulk_seq` — **not** `dispatch_capped` (those cores take `State`, not `Send`). They `claim()` a `CancelToken`, degrade to a per-app structured `BulkError`, and stop on a re-auth-fatal code. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
+
+- **One definition per policy.** The Graph/ARM/Key Vault error taxonomy comes from `core::http_error_enum!`; retry budget + backoff from `core::http_retry` (`RetryBudget`, `with_retries`) — including `$batch`. A client supplies only what is genuinely its own (`ui_hint`, extra variants).
 
 - **Build-time config baking.** `build.rs` reads `.env` → `AZAPPTOOLKIT_BUILD_*`; env vars override.
 
@@ -223,7 +223,8 @@ Run the same gates CI runs before declaring a change done. `just verify` is the 
 
 Steps 1–4 are `just verify` (see **Canonical commands**); it also attempts web-itest. The CI-only additions below:
 
-5. **Frontend GUI tests** *(browser-gated)* — `just web-itest`: real Leptos views in a headless browser, Tauri IPC mocked. Tests are `tests/gui/<view>.rs` **modules** grouped into shard binaries (`tests/gui_N.rs`) via `#[path] mod`; harness in `web-rs/src/test_support/`. Shards exist because one merged binary exceeds what headless Chrome will instantiate; `just web-itest-size` enforces the per-shard ceiling (CI runs it) and says how to split. Group modules by the **view subtree they mount**, not by count — the linker keeps only referenced views. `[profile.test] strip = "debuginfo"` + `opt-level = 1` are what make that ceiling reachable; never `strip = true` (kills the `name` section → anonymous panic traces). **Do NOT make `test_support::reset()` clear `document.body`** — the runner scrapes results from the page DOM, so wiping it makes the shard report nothing. Renaming a CSS class / aria-label / on-screen text a test references fails CI — `web-test-strings-check.sh` warns at edit time; `verify` catches it locally given a browser, `verify-ui` always.
+5. **Frontend GUI tests** *(browser-gated)* — `just web-itest`: real Leptos views in a headless browser, Tauri IPC mocked; the frontend's only behavioural gate. Sharded because one binary exceeds what headless Chrome will instantiate — `just web-itest-size` enforces the ceiling. Renaming a CSS class / aria-label / on-screen text a test references fails CI. Sharding rules, the `strip` constraint and the `reset()` footgun: [frontend-workspace.md](docs/architecture/frontend-workspace.md).
+
 6. **Dependency audit + deny** *(required CI checks)* — `audit`/`web-audit` (RustSec) + `deny`/`web-deny`; all four merge-blocking, all in `verify-full`.
 7. **actionlint** *(required CI check)* — lints the workflow YAML; runs CI-side (install locally to pre-check).
 8. **CodeQL** *(GitHub-side)* — security queries, build-mode `none`. Known limitation: CodeQL 2.25.6 doesn't expand macros here (~39% calls-with-call-target); expected, non-failing. Config: `.github/codeql/codeql-config.yml`.

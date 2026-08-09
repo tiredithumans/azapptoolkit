@@ -393,23 +393,34 @@ pub fn downgrade_alternatives(value: &str) -> Vec<&'static str> {
 /// cover an org-wide `Mail.Read`, so the pair must not be flagged. Callers
 /// without scoping data pass `|_| false`.
 ///
-/// A value redundant on more than one resource is reported once.
+/// A value redundant on more than one resource is reported once — but the
+/// *first redundant* occurrence, not merely the first occurrence. The
+/// distinction is the whole of the ordering bug this signature replaced: the
+/// old code inserted into its `seen` set BEFORE computing coverage, so a value
+/// held on two resources was decided by whichever grant the iteration reached
+/// first. A `Mail.Read` on Microsoft Graph (no covering grant there) suppressed
+/// the genuinely redundant `Mail.Read` on Office 365 Exchange Online sitting
+/// beside a `Mail.ReadWrite`, and the finding vanished — order-dependently, so
+/// two tenants with identical grants could score differently.
 pub fn redundant_app_permissions(
     grants: &[ResourcePermission],
     broader_is_confined: impl Fn(&str) -> bool,
-) -> Vec<(String, Vec<String>)> {
+) -> Vec<RedundantPermission> {
     // (resource_app_id, value) — the pair that actually authorizes something.
     let held: std::collections::HashSet<(&str, &str)> = grants
         .iter()
         .filter_map(|g| Some((g.resource_app_id.as_deref()?, g.value.as_str())))
         .collect();
-    let mut seen = std::collections::HashSet::new();
+    // (resource, value): the same grant listed twice is one redundancy, but the
+    // same value on two DIFFERENT resources is two independent questions.
+    let mut examined = std::collections::HashSet::new();
+    let mut reported = std::collections::HashSet::new();
     let mut out = Vec::new();
     for g in grants {
         let Some(resource) = g.resource_app_id.as_deref() else {
             continue;
         };
-        if !seen.insert(g.value.as_str()) {
+        if !examined.insert((resource, g.value.as_str())) {
             continue;
         }
         let covered_by: Vec<String> = subsuming_app_permissions(&g.value)
@@ -417,11 +428,38 @@ pub fn redundant_app_permissions(
             .filter(|b| held.contains(&(resource, **b)) && !broader_is_confined(b))
             .map(|b| (*b).to_string())
             .collect();
-        if !covered_by.is_empty() {
-            out.push((g.value.clone(), covered_by));
+        if covered_by.is_empty() {
+            continue;
         }
+        // Report a value once, having actually looked at every resource it is
+        // held on.
+        if !reported.insert(g.value.as_str()) {
+            continue;
+        }
+        out.push(RedundantPermission {
+            resource_app_id: resource.to_string(),
+            value: g.value.clone(),
+            covered_by,
+        });
     }
     out
+}
+
+/// One redundant application permission: a held `value` on `resource_app_id`
+/// whose access the held `covered_by` permissions **on that same resource**
+/// already fully grant.
+///
+/// Carries the resource because the pairing decision is resource-keyed and the
+/// consumers need it: the advisory text has to name which resource the pair
+/// lives on (`Mail.Read` is a different permission on Graph and on Office 365
+/// Exchange Online), and the one-click removal has to target the right one.
+/// Dropping it here was how the finding text and the Fix beside it came to
+/// describe different grants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedundantPermission {
+    pub resource_app_id: String,
+    pub value: String,
+    pub covered_by: Vec<String>,
 }
 
 #[cfg(test)]
@@ -579,7 +617,11 @@ mod tests {
                     )
                 })
                 .collect();
-            assert_eq!(got, want, "held = {held:?}");
+            let got_pairs: Vec<(String, Vec<String>)> = got
+                .iter()
+                .map(|r| (r.value.clone(), r.covered_by.clone()))
+                .collect();
+            assert_eq!(got_pairs, want, "held = {held:?}");
         }
 
         // The same value declared twice (e.g. on two resources) reports once.
@@ -615,10 +657,11 @@ mod tests {
         let same_resource = values(&["Sites.ReadWrite.All", "Sites.Read.All"]);
         assert_eq!(
             redundant_app_permissions(&same_resource, unconfined),
-            vec![(
-                "Sites.Read.All".to_string(),
-                vec!["Sites.ReadWrite.All".to_string()]
-            )]
+            vec![RedundantPermission {
+                resource_app_id: crate::scoping::MICROSOFT_GRAPH_APP_ID.to_string(),
+                value: "Sites.Read.All".to_string(),
+                covered_by: vec!["Sites.ReadWrite.All".to_string()],
+            }]
         );
 
         // An unresolved resource pairs with nothing: it cannot be proven to be
@@ -635,6 +678,50 @@ mod tests {
             },
         ];
         assert!(redundant_app_permissions(&unresolved, unconfined).is_empty());
+
+        // THE ORDERING CASE: one value held on two resources, redundant on
+        // only one of them. `Mail.Read` sits on Microsoft Graph (nothing
+        // covers it there) and on Office 365 Exchange Online beside that
+        // resource's own `Mail.ReadWrite` (which does cover it).
+        //
+        // The old code inserted into its dedup set BEFORE computing coverage,
+        // so whichever grant the iteration reached first decided the answer for
+        // the value. With Graph first — the order Graph returns manifests in —
+        // the genuine Office 365 redundancy was silently suppressed. Two
+        // tenants with identical grants could score differently depending on
+        // manifest order, which is why this is a correctness case and not a
+        // presentation one.
+        let ews = crate::scoping::OFFICE365_EXCHANGE_ONLINE_APP_ID.to_string();
+        let split = vec![
+            // Graph first: the suppressing order.
+            ResourcePermission::graph("Mail.Read"),
+            ResourcePermission {
+                resource_app_id: Some(ews.clone()),
+                value: "Mail.ReadWrite".to_string(),
+            },
+            ResourcePermission {
+                resource_app_id: Some(ews.clone()),
+                value: "Mail.Read".to_string(),
+            },
+        ];
+        assert_eq!(
+            redundant_app_permissions(&split, unconfined),
+            vec![RedundantPermission {
+                resource_app_id: ews.clone(),
+                value: "Mail.Read".to_string(),
+                covered_by: vec!["Mail.ReadWrite".to_string()],
+            }],
+            "the Office 365 redundancy must be found even though the Graph grant of the same \
+             value comes first and is not redundant"
+        );
+
+        // Same grants, opposite order: the answer must not depend on it.
+        let reordered = vec![split[2].clone(), split[1].clone(), split[0].clone()];
+        assert_eq!(
+            redundant_app_permissions(&reordered, unconfined),
+            redundant_app_permissions(&split, unconfined),
+            "redundancy must be order-independent"
+        );
 
         // A confined broader permission is vetoed as a coverer.
         let got = redundant_app_permissions(&values(&["Mail.ReadWrite", "Mail.Read"]), |b| {

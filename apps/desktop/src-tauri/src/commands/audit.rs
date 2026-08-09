@@ -36,9 +36,7 @@ use azapptoolkit_graph::client::AppListQuery;
 use chrono::{DateTime, Utc};
 
 use crate::commands::dispatch::dispatch_capped;
-use crate::commands::exchange::{
-    aap_verdict_for, apply_legacy_policy_verdict, exchange_client, resolve_mail_scopes_audit_cached,
-};
+use crate::commands::exchange::{exchange_client, resolve_mail_scopes_audit_cached};
 use crate::commands::export::{csv_field, write_via_dialog};
 use crate::commands::graph_roles::graph_role_index;
 use crate::commands::progress::emit_progress;
@@ -46,6 +44,7 @@ use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
 use crate::dto::audit::{AuditCoverageGap, AuditProgress, AuditRunResult};
 use crate::state::AppState;
+use azapptoolkit_exchange::verdict::{aap_verdict_for, apply_legacy_policy_verdict};
 
 /// What the audit's per-app collector should do with one failed scoring task.
 ///
@@ -105,6 +104,16 @@ pub async fn run_audit(
     // per-tenant client, halving its cap on unrelated 429s until the next audit
     // replaced it. (RAII guard shared with the bulk fan-out commands.)
     let _observer_guard = ThrottleGuard::attach(client.clone(), tracker.clone());
+
+    // Claimed BEFORE the prefetch below, not after it. `claim()` takes a fresh
+    // generation and `cancel()` stamps whatever generation is current at the
+    // moment it runs, so a token claimed *after* the six-way join carries a
+    // HIGHER generation than the cancel the operator issued during it — and
+    // `is_cancelled()` compares `cancelled >= generation`, so that cancel was
+    // silently discarded. The prefetch is the longest phase of a large run, so
+    // this was the most likely moment for an operator to press Cancel and the
+    // one window where it did nothing.
+    let cancel = state.audit_cancel.claim();
 
     // Effective Exchange mailbox-scoping is resolved on every run so a mail
     // permission confined to specific mailboxes scores below an org-wide one.
@@ -262,7 +271,6 @@ pub async fn run_audit(
         sign_in_map,
     });
     let done = Arc::new(Mutex::new(0usize));
-    let cancel = state.audit_cancel.claim();
 
     let mut items: Vec<AuditItem> = Vec::with_capacity(total);
     // A dead session makes every remaining app fail identically, so the run must

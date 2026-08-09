@@ -11,6 +11,7 @@ use leptos::prelude::*;
 
 use crate::bindings::exchange::AapMigrationReport;
 use crate::components::retired_scope_groups::RetiredScopeGroups;
+use crate::components::ui::Callout;
 
 /// Renders a migration report: a headline that distinguishes plan / done /
 /// needs-attention, then one line per application with its scoped roles,
@@ -35,15 +36,26 @@ pub fn AapMigrationReportView(report: AapMigrationReport) -> impl IntoView {
             report.items.len(),
         ),
     };
-    let header_class = if needs_attention || !report.failures.is_empty() {
-        "alert alert--warn"
+    // A run stopped by Cancel or a dead session has left the remaining apps on
+    // their legacy policies. Never let that read as a completed migration —
+    // same rule the audit and DR reports follow for a partial run.
+    let incomplete = report.incomplete;
+    let tone = if needs_attention || incomplete || !report.failures.is_empty() {
+        "warn"
     } else {
-        "alert alert--ok"
+        "ok"
     };
     let items = report.items.clone();
     let failures = report.failures.clone();
     view! {
-        <div class=header_class>{header}</div>
+        <Callout tone=tone>{header}</Callout>
+        <Show when=move || incomplete>
+            <Callout tone="warn" role="alert">
+                "This run stopped before every app was processed — you cancelled it, or the \
+                 session expired. The apps not listed above are still on their legacy \
+                 Application Access Policies. Sign in again if needed and re-run to finish."
+            </Callout>
+        </Show>
         <ul class="warnings">
             {items
                 .into_iter()
