@@ -439,6 +439,11 @@ pub async fn find_mailbox_reachers(
     tenant_id: String,
     mailbox: String,
 ) -> Result<MailboxReachersResult, UiError> {
+    // Claimed before the first await: the Graph role index and the tenant-wide
+    // app-role-assignment read below run before the dispatch, and a token
+    // claimed after them discards a cancel issued during them. Pinned by
+    // `repo_invariants::cancel`.
+    let cancel = state.sweep_cancel.claim();
     let mailbox = mailbox.trim().to_string();
     if mailbox.is_empty() {
         return Err(UiError::validation(
@@ -578,7 +583,6 @@ pub async fn find_mailbox_reachers(
     );
 
     let done = Arc::new(Mutex::new(0usize));
-    let cancel = state.sweep_cancel.claim();
     let mailbox_shared = Arc::new(mailbox.clone());
 
     let mut rows: Vec<MailboxReacherRow> = Vec::new();

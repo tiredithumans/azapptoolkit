@@ -149,6 +149,11 @@ pub async fn bulk_remove_expired_credentials(
     tenant_id: String,
     object_ids: Option<Vec<String>>,
 ) -> Result<BulkRemoveExpiredResult, UiError> {
+    // Claimed before the first await: the tenant-wide app list below can walk
+    // 10 000 apps, and a token claimed after it carries a higher generation
+    // than a cancel issued during it, which `is_cancelled()` then discards.
+    // Pinned by `repo_invariants::cancel`.
+    let cancel = state.audit_cancel.claim();
     let client = state.graph_for(&tenant_id);
     // Project only what the sweep reads (`expired_password_key_ids` touches
     // `passwordCredentials`); the default projection drags in
@@ -193,7 +198,6 @@ pub async fn bulk_remove_expired_credentials(
     );
 
     let done = Arc::new(Mutex::new(0usize));
-    let cancel = state.audit_cancel.claim();
     let now = chrono::Utc::now();
 
     let mut summaries: Vec<AppRemovalSummary> = Vec::new();

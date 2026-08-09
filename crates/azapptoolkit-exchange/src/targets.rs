@@ -502,7 +502,13 @@ pub fn count_member_of_group(filter: &str) -> usize {
             i += KEY.len();
             continue;
         }
-        i += 1;
+        // Advance a whole CHARACTER, not a byte. `i` indexes a `str` two lines
+        // up, so a byte-at-a-time walk lands mid-sequence on the first
+        // non-ASCII character outside a quoted literal and `lower[i..]` panics
+        // on the char boundary. Operator-authored filters reach this from three
+        // call sites this crate did not generate the input for, and a smart
+        // quote or a non-breaking space pasted from a document is enough.
+        i += lower[i..].chars().next().map_or(1, char::len_utf8);
     }
     count
 }
@@ -888,6 +894,40 @@ mod tests {
         let unparsed = "MemberOfGroup -like 'CN=a,DC=x'";
         assert_eq!(count_member_of_group(unparsed), 1);
         assert!(!scope_groups_in_filter(unparsed).complete);
+    }
+
+    /// A non-ASCII character OUTSIDE a quoted literal must not panic.
+    ///
+    /// The scan walked `i` one BYTE at a time and then sliced `lower[i..]`, so
+    /// the first multi-byte character landed it mid-sequence and the slice
+    /// panicked on the char boundary. Everything here is a filter an operator
+    /// could plausibly have written or pasted, and all three call sites
+    /// (`commands/exchange.rs` twice, `client/rbac.rs`) feed this function
+    /// filters this crate did not generate.
+    #[test]
+    fn a_non_ascii_filter_is_counted_rather_than_panicking() {
+        // A smart quote pasted from a document: not the ASCII `'` that opens a
+        // literal, so it stays outside quotes — the exact shape that panicked.
+        assert_eq!(
+            count_member_of_group("Office -eq \u{2019}Zurich\u{2019}"),
+            0
+        );
+
+        // Non-ASCII outside quotes, with a real clause after it: the clause
+        // still has to be found, not merely survived.
+        let mixed = "Office -eq \u{2019}Z\u{fc}rich\u{2019} -and MemberOfGroup -eq 'CN=a,DC=x'";
+        assert_eq!(count_member_of_group(mixed), 1);
+
+        // Non-ASCII INSIDE a literal was always safe (the `!in_quotes`
+        // short-circuit skipped the slice); pin it so the fix keeps it that way.
+        let inside = crate::client::member_of_group_filter(&["CN=Z\u{fc}rich,DC=x".to_string()]);
+        assert_eq!(count_member_of_group(&inside), 1);
+        assert!(scope_groups_in_filter(&inside).complete);
+
+        // A non-breaking space, and an unterminated literal that leaves the
+        // scanner "inside quotes" at EOF — neither may panic.
+        assert_eq!(count_member_of_group("A\u{a0}-eq 'x'"), 0);
+        assert_eq!(count_member_of_group("MemberOfGroup -eq 'CN=\u{e9}"), 1);
     }
 
     #[test]

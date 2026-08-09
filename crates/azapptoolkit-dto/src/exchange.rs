@@ -248,6 +248,18 @@ pub struct AapMigrationReport {
     /// reports follow: a partial run is never presented as a complete one.
     #[serde(default)]
     pub incomplete: bool,
+    /// The `appId`s a stopped run never reached, in the order it would have
+    /// taken them.
+    ///
+    /// `incomplete` says *that* apps were missed; this says *which*. Without it
+    /// the only way to find them was to re-run the migration and see what still
+    /// had a legacy policy — on a tenant where the reason for stopping was a
+    /// dead session, that is the one action least likely to work. Empty on a
+    /// run that finished, and on a run that stopped for a reason other than
+    /// cancellation or a dead session (a per-app failure is named in
+    /// `failures`, not here — it was attempted).
+    #[serde(default)]
+    pub unattempted: Vec<String>,
 }
 
 #[cfg(test)]

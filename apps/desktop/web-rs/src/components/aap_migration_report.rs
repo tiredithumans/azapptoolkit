@@ -11,7 +11,7 @@ use leptos::prelude::*;
 
 use crate::bindings::exchange::AapMigrationReport;
 use crate::components::retired_scope_groups::RetiredScopeGroups;
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, CopyableId};
 
 /// Renders a migration report: a headline that distinguishes plan / done /
 /// needs-attention, then one line per application with its scoped roles,
@@ -47,6 +47,11 @@ pub fn AapMigrationReportView(report: AapMigrationReport) -> impl IntoView {
     };
     let items = report.items.clone();
     let failures = report.failures.clone();
+    // Name the apps a stopped run never reached rather than leaving the operator
+    // to diff the report against the tenant — on a run stopped by a dead
+    // session, re-running to find out is the action least likely to work.
+    let unattempted = report.unattempted.clone();
+    let unattempted_count = unattempted.len();
     view! {
         <Callout tone=tone>{header}</Callout>
         <Show when=move || incomplete>
@@ -55,6 +60,26 @@ pub fn AapMigrationReportView(report: AapMigrationReport) -> impl IntoView {
                  session expired. The apps not listed above are still on their legacy \
                  Application Access Policies. Sign in again if needed and re-run to finish."
             </Callout>
+        </Show>
+        <Show when=move || { unattempted_count > 0 }>
+            <details class="aap-unattempted">
+                <summary>
+                    {format!("{unattempted_count} app(s) not reached — still on legacy policies")}
+                </summary>
+                <ul class="warnings">
+                    {unattempted
+                        .clone()
+                        .into_iter()
+                        .map(|app_id| {
+                            view! {
+                                <li>
+                                    <CopyableId value=app_id label="Application ID" full=true />
+                                </li>
+                            }
+                        })
+                        .collect_view()}
+                </ul>
+            </details>
         </Show>
         <ul class="warnings">
             {items
