@@ -437,7 +437,6 @@ pub async fn find_mailbox_reachers(
     tenant_id: String,
     mailbox: String,
 ) -> Result<MailboxReachersResult, UiError> {
-    state.sweep_cancel.reset();
     let mailbox = mailbox.trim().to_string();
     if mailbox.is_empty() {
         return Err(UiError::validation(
@@ -577,7 +576,7 @@ pub async fn find_mailbox_reachers(
     );
 
     let done = Arc::new(Mutex::new(0usize));
-    let cancel = state.sweep_cancel.clone();
+    let cancel = state.sweep_cancel.claim();
     let mailbox_shared = Arc::new(mailbox.clone());
 
     let mut rows: Vec<MailboxReacherRow> = Vec::new();

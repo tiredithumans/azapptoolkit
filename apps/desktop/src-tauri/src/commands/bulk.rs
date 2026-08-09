@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 use azapptoolkit_core::audit::expired_password_key_ids;
 use azapptoolkit_graph::client::AppListQuery;
 
-use crate::commands::dispatch::dispatch_capped;
+use crate::commands::dispatch::{SessionDead, dispatch_capped};
 use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
@@ -32,7 +32,7 @@ use crate::dto::bulk::{
     BulkGrantOutcome, BulkGrantResult, BulkOwnerOutcome, BulkProgress, BulkRemoveExpiredResult,
     BulkRemoveRedundantOutcome, BulkRemoveRedundantResult, BulkScopeOutcome, BulkScopeResult,
 };
-use crate::state::{AppState, CancelFlag};
+use crate::state::{AppState, CancelToken};
 
 const CONCURRENCY: usize = 4;
 
@@ -149,8 +149,6 @@ pub async fn bulk_remove_expired_credentials(
     tenant_id: String,
     object_ids: Option<Vec<String>>,
 ) -> Result<BulkRemoveExpiredResult, UiError> {
-    state.audit_cancel.reset();
-
     let client = state.graph_for(&tenant_id);
     // Project only what the sweep reads (`expired_password_key_ids` touches
     // `passwordCredentials`); the default projection drags in
@@ -195,15 +193,16 @@ pub async fn bulk_remove_expired_credentials(
     );
 
     let done = Arc::new(Mutex::new(0usize));
-    let cancel = state.audit_cancel.clone();
+    let cancel = state.audit_cancel.claim();
     let now = chrono::Utc::now();
 
     let mut summaries: Vec<AppRemovalSummary> = Vec::new();
+    let session = SessionDead::new();
     let cancelled_early = dispatch_capped(
         apps,
         || tracker.current_limit(),
         |app| {
-            if cancel.is_cancelled() {
+            if cancel.is_cancelled() || session.is_dead() {
                 return None;
             }
             let app_handle = app_handle.clone();
@@ -211,6 +210,7 @@ pub async fn bulk_remove_expired_credentials(
             let tracker = tracker.clone();
             let done = done.clone();
             let cancel = cancel.clone();
+            let session = session.clone();
             let app_name = app.display_name.clone();
             let app_obj_id = app.id.clone();
             let expired_key_ids = expired_password_key_ids(&app, now);
@@ -221,15 +221,24 @@ pub async fn bulk_remove_expired_credentials(
                 let mut error: Option<BulkError> = None;
                 if !expired_key_ids.is_empty() {
                     for key_id in &expired_key_ids {
-                        if cancel.is_cancelled() {
+                        if cancel.is_cancelled() || session.is_dead() {
                             break;
                         }
                         match client.remove_password(&app_obj_id, key_id).await {
                             Ok(()) => removed.push(key_id.clone()),
                             Err(err) => {
                                 failed.push(key_id.clone());
+                                let ui = UiError::from(err);
+                                // Latch before converting: once the session is
+                                // dead every remaining key on every remaining
+                                // app fails identically, so this app's own loop
+                                // stops too, not just the dispatch.
+                                let fatal = session.note_code(&ui.code);
                                 if error.is_none() {
-                                    error = Some(UiError::from(err).into());
+                                    error = Some(ui.into());
+                                }
+                                if fatal {
+                                    break;
                                 }
                             }
                         }
@@ -271,9 +280,18 @@ pub async fn bulk_remove_expired_credentials(
     )
     .await;
 
+    // Invalidate BEFORE the dead-session check: the removals that already
+    // landed are real, so the list caches are stale either way. Returning the
+    // error without busting them would leave the UI showing credentials this
+    // run deleted.
     let any_removed = summaries.iter().any(|s| !s.removed_key_ids.is_empty());
     if any_removed {
         super::applications::invalidate_app_lists(&state.cache, &tenant_id);
+    }
+    // A partial sweep reads as a complete one — the caller cannot tell "no
+    // expired credentials left" from "the session died on app 40 of 900".
+    if session.is_dead() {
+        return Err(session.err("the expired-credential sweep"));
     }
     Ok(BulkRemoveExpiredResult {
         apps_scanned: total,
@@ -297,11 +315,9 @@ pub async fn bulk_delete_applications(
     tenant_id: String,
     object_ids: Vec<String>,
 ) -> Result<BulkDeleteResult, UiError> {
-    state.audit_cancel.reset();
-
     let client = state.graph_for(&tenant_id);
     let total = object_ids.len();
-    let cancel = state.audit_cancel.clone();
+    let cancel = state.audit_cancel.claim();
 
     // Bounded-concurrency fan-out with adaptive 429 backoff, replacing the old
     // serial loop + fixed 50ms pause (which slowed the healthy case yet never
@@ -314,11 +330,12 @@ pub async fn bulk_delete_applications(
 
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
+    let session = SessionDead::new();
     let cancelled_early = dispatch_capped(
         object_ids,
         || tracker.current_limit(),
         |id| {
-            if cancel.is_cancelled() {
+            if cancel.is_cancelled() || session.is_dead() {
                 return None;
             }
             let client = client.clone();
@@ -326,6 +343,7 @@ pub async fn bulk_delete_applications(
             let done = done.clone();
             let cancel = cancel.clone();
             let tracker = tracker.clone();
+            let session = session.clone();
             Some(tokio::spawn(async move {
                 let result = client.delete_application(&id).await;
                 let mut guard = done.lock().await;
@@ -341,10 +359,17 @@ pub async fn bulk_delete_applications(
                 emit_progress(&app_handle, "bulk-progress", progress);
                 match result {
                     Ok(()) => Ok(id),
-                    Err(err) => Err(BulkDeleteFailure {
-                        object_id: id,
-                        message: err.to_string(),
-                    }),
+                    Err(err) => {
+                        // `BulkDeleteFailure` carries no wire code, so the
+                        // classification has to happen here, while the typed
+                        // error still exists.
+                        let ui = UiError::from(err);
+                        session.note_code(&ui.code);
+                        Err(BulkDeleteFailure {
+                            object_id: id,
+                            message: ui.message,
+                        })
+                    }
                 }
             }))
         },
@@ -368,8 +393,13 @@ pub async fn bulk_delete_applications(
         },
     );
 
+    // Bust first: the deletions that landed are real regardless of how the run
+    // ended (see the sweep above).
     if !deleted.is_empty() {
         super::applications::invalidate_app_lists(&state.cache, &tenant_id);
+    }
+    if session.is_dead() {
+        return Err(session.err("the bulk delete"));
     }
     Ok(BulkDeleteResult {
         deleted,
@@ -389,11 +419,9 @@ pub async fn bulk_grant_permissions(
     tenant_id: String,
     object_ids: Vec<String>,
 ) -> Result<BulkGrantResult, UiError> {
-    state.audit_cancel.reset();
-
     let client = state.graph_for(&tenant_id);
     let total = object_ids.len();
-    let cancel = state.audit_cancel.clone();
+    let cancel = state.audit_cancel.claim();
 
     // Bounded-concurrency fan-out with adaptive 429 backoff, replacing the old
     // serial loop + fixed 50ms pause. Each grant is a multi-write orchestration,
@@ -407,11 +435,12 @@ pub async fn bulk_grant_permissions(
     // True if any app's grant created a brand-new SP — that adds Enterprise App
     // rows / search-index entries, so the run must bust the full list caches.
     let mut any_sp_created = false;
+    let session = SessionDead::new();
     let cancelled_early = dispatch_capped(
         object_ids,
         || tracker.current_limit(),
         |id| {
-            if cancel.is_cancelled() {
+            if cancel.is_cancelled() || session.is_dead() {
                 return None;
             }
             let client = client.clone();
@@ -419,6 +448,7 @@ pub async fn bulk_grant_permissions(
             let done = done.clone();
             let cancel = cancel.clone();
             let tracker = tracker.clone();
+            let session = session.clone();
             Some(tokio::spawn(async move {
                 let res = super::permissions::grant_admin_consent_core(&client, &id).await;
                 let mut guard = done.lock().await;
@@ -448,16 +478,19 @@ pub async fn bulk_grant_permissions(
                         },
                         sp_created,
                     ),
-                    Err(e) => (
-                        BulkGrantOutcome {
-                            object_id: id,
-                            granted: 0,
-                            skipped: 0,
-                            failed: 0,
-                            error: Some(e.into()),
-                        },
-                        false,
-                    ),
+                    Err(e) => {
+                        session.note_code(&e.code);
+                        (
+                            BulkGrantOutcome {
+                                object_id: id,
+                                granted: 0,
+                                skipped: 0,
+                                failed: 0,
+                                error: Some(e.into()),
+                            },
+                            false,
+                        )
+                    }
                 }
             }))
         },
@@ -493,6 +526,11 @@ pub async fn bulk_grant_permissions(
     } else if outcomes.iter().any(|o| o.granted > 0) {
         super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
     }
+    // Bust first (the grants that landed are real), then refuse to present the
+    // remainder as consented.
+    if session.is_dead() {
+        return Err(session.err("the bulk consent grant"));
+    }
 
     Ok(BulkGrantResult {
         outcomes,
@@ -511,8 +549,7 @@ pub async fn bulk_create_applications(
     specs: Vec<BulkCreateSpec>,
     validate_only: bool,
 ) -> Result<BulkCreateResult, UiError> {
-    state.audit_cancel.reset();
-    let cancel = state.audit_cancel.clone();
+    let cancel = state.audit_cancel.claim();
     let client = state.graph_for(&tenant_id);
 
     let (outcomes, cancelled) = run_bulk_seq(
@@ -587,8 +624,7 @@ pub async fn bulk_remove_redundant_permissions(
     tenant_id: String,
     object_ids: Vec<String>,
 ) -> Result<BulkRemoveRedundantResult, UiError> {
-    state.audit_cancel.reset();
-    let cancel = state.audit_cancel.clone();
+    let cancel = state.audit_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -646,8 +682,7 @@ pub async fn bulk_scope_mailbox_access(
     object_ids: Vec<String>,
     groups: Vec<String>,
 ) -> Result<BulkScopeResult, UiError> {
-    state.audit_cancel.reset();
-    let cancel = state.audit_cancel.clone();
+    let cancel = state.audit_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -697,8 +732,7 @@ pub async fn bulk_scope_sharepoint_access(
     site_urls: Vec<String>,
     role: String,
 ) -> Result<BulkScopeResult, UiError> {
-    state.audit_cancel.reset();
-    let cancel = state.audit_cancel.clone();
+    let cancel = state.audit_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -748,8 +782,7 @@ pub async fn bulk_add_owner(
     object_ids: Vec<String>,
     principal_id: String,
 ) -> Result<BulkAddOwnerResult, UiError> {
-    state.audit_cancel.reset();
-    let cancel = state.audit_cancel.clone();
+    let cancel = state.audit_cancel.claim();
     let client = state.graph_for(&tenant_id);
 
     let (outcomes, cancelled) = run_bulk_seq(
@@ -817,8 +850,7 @@ pub async fn bulk_disable_sign_in(
     tenant_id: String,
     object_ids: Vec<String>,
 ) -> Result<BulkDisableSignInResult, UiError> {
-    state.audit_cancel.reset();
-    let cancel = state.audit_cancel.clone();
+    let cancel = state.audit_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -864,7 +896,7 @@ pub async fn bulk_disable_sign_in(
 /// clones it (the `reset()` must stay at the command top, the AGENTS.md footgun).
 async fn run_bulk_seq<S: ProgressSink, T, O, Fut>(
     progress: &S,
-    cancel: &CancelFlag,
+    cancel: &CancelToken,
     items: Vec<T>,
     label: impl Fn(&T) -> String,
     per_item: impl Fn(T) -> Fut,
@@ -913,6 +945,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Tests build their own runs; the commands only ever hold a token.
+    use crate::state::CancelFlag;
 
     fn err(code: &str) -> BulkError {
         BulkError {
@@ -953,7 +987,7 @@ mod tests {
 
     async fn drive_with(
         rec: &Recorder,
-        cancel: &CancelFlag,
+        cancel: &CancelToken,
         items: Vec<BulkScopeOutcome>,
     ) -> (Vec<BulkScopeOutcome>, bool) {
         run_bulk_seq(
@@ -967,7 +1001,7 @@ mod tests {
     }
 
     async fn drive(
-        cancel: &CancelFlag,
+        cancel: &CancelToken,
         items: Vec<BulkScopeOutcome>,
     ) -> (Vec<BulkScopeOutcome>, bool) {
         drive_with(&Recorder::default(), cancel, items).await
@@ -975,7 +1009,7 @@ mod tests {
 
     #[tokio::test]
     async fn processes_every_item_and_reports_progress_before_each() {
-        let cancel = CancelFlag::default();
+        let cancel = CancelFlag::new().claim();
         let rec = Recorder::default();
         let (out, cancelled) = drive_with(
             &rec,
@@ -1008,8 +1042,9 @@ mod tests {
         // The flag is polled BEFORE each item, so a cancel that lands before the
         // loop starts must mutate nothing at all — the property that makes the
         // Cancel button safe on the destructive commands (delete, disable).
-        let cancel = CancelFlag::default();
-        cancel.cancel();
+        let flag = CancelFlag::new();
+        let cancel = flag.claim();
+        flag.cancel();
         let rec = Recorder::default();
         let (out, cancelled) = drive_with(&rec, &cancel, vec![scope_outcome("a", None)]).await;
         assert!(out.is_empty(), "cancelled before item 1 ⇒ nothing ran");
@@ -1023,7 +1058,7 @@ mod tests {
     async fn per_item_errors_are_collected_and_do_not_stop_the_run() {
         // An ordinary per-item failure is data, not a halt: the remaining
         // selection still gets processed.
-        let cancel = CancelFlag::default();
+        let cancel = CancelFlag::new().claim();
         let (out, cancelled) = drive(
             &cancel,
             vec![
@@ -1043,7 +1078,7 @@ mod tests {
         // `refresh_missing` means the refresh token can't be re-minted silently,
         // so every remaining item fails identically. Continuing turned one
         // recoverable "re-authenticate" into a wall of N opaque failures.
-        let cancel = CancelFlag::default();
+        let cancel = CancelFlag::new().claim();
         let rec = Recorder::default();
         let (out, cancelled) = drive_with(
             &rec,

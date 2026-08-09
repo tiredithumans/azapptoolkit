@@ -105,8 +105,6 @@ pub async fn restore_tenant(
     tenant_id: String,
     backup: TenantBackup,
 ) -> Result<RestoreReport, UiError> {
-    state.dr_cancel.reset();
-
     // A cross-cloud restore is never valid: endpoints and well-known appIds
     // differ, so the remapped permissions would point at the wrong resources.
     let dest_cloud = state.auth.cloud().as_str();
@@ -137,11 +135,15 @@ pub async fn restore_tenant(
     // One latch across all five passes: the first re-auth-fatal error stops the
     // rest instead of letting each remaining item fail the same way.
     let session = SessionDead::new();
+    // One cancel token for the whole restore, claimed before the first write.
+    // Claiming per pass would take a new generation each time and lose a cancel
+    // the operator issued during an earlier pass.
+    let cancel = state.dr_cancel.claim();
 
     // ---- Pass 1: create shells ----
     let mut done = 0;
     for app in &backup.app_registrations {
-        if state.dr_cancel.is_cancelled() {
+        if cancel.is_cancelled() {
             report.cancelled = true;
             break;
         }

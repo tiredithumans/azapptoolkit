@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
@@ -39,35 +39,85 @@ const DEFAULT_TENANT_ID: &str = "00000000-0000-0000-0000-000000000000";
 const BUILD_CLIENT_ID: Option<&str> = option_env!("AZAPPTOOLKIT_BUILD_CLIENT_ID");
 const BUILD_TENANT_ID: Option<&str> = option_env!("AZAPPTOOLKIT_BUILD_TENANT_ID");
 
+/// Shared state behind a [`CancelFlag`] and every [`CancelToken`] it issues.
+///
+/// Two counters rather than one boolean. The boolean form had no notion of
+/// *which* run it referred to, so `reset()` was a destructive write on state a
+/// concurrent run was still reading: a second command starting cleared a cancel
+/// the first had not yet observed, and that run then continued after the user
+/// had stopped it.
+#[derive(Default)]
+struct CancelInner {
+    /// Bumped by every [`CancelFlag::claim`]; the generation of the newest run.
+    current: AtomicU64,
+    /// Highest generation [`CancelFlag::cancel`] has stopped. Monotonic — it is
+    /// never cleared, which is what removes the destructive reset.
+    cancelled: AtomicU64,
+}
+
 /// A cancellation flag shared between a long-running command and its dispatch
-/// loop. Wraps an `Arc<AtomicBool>` so the correct memory ordering
-/// (`Release` on write, `Acquire` on read) lives in one place instead of at
-/// every call site, and so `reset()` — which every long-running command MUST
-/// call at the top, the AGENTS.md footgun — is a discoverable method rather
-/// than a bare `store(false)`.
+/// loop. Wraps the ordering (`Release` on write, `Acquire` on read) so it lives
+/// in one place instead of at every call site.
+///
+/// A run does not poll the flag directly — it [`claim`](Self::claim)s a
+/// [`CancelToken`] first, which is both the run's identity and the AGENTS.md
+/// "reset at the top" step, now impossible to forget because the token is the
+/// only thing that answers `is_cancelled()`.
 #[derive(Clone, Default)]
-pub struct CancelFlag(Arc<AtomicBool>);
+pub struct CancelFlag(Arc<CancelInner>);
 
 impl CancelFlag {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Clears a possibly-stale flag at the start of a run. A new long-running
-    /// command that forgets this would be cancelled by an unrelated prior run.
-    pub fn reset(&self) {
-        self.0.store(false, Ordering::Release);
+    /// Starts a run and returns its token. Replaces the old `reset()`: it takes
+    /// a fresh generation for *this* run instead of clearing a flag another run
+    /// may still be reading.
+    pub fn claim(&self) -> CancelToken {
+        // `fetch_add` returns the previous value, so the first claim is 1 and a
+        // token can never collide with the `cancelled` counter's initial 0.
+        let generation = self.0.current.fetch_add(1, Ordering::AcqRel) + 1;
+        CancelToken {
+            inner: self.0.clone(),
+            generation,
+        }
     }
 
-    /// Signals the run to stop at the next dispatch boundary.
+    /// Signals the current run — and any older run still in flight — to stop at
+    /// the next dispatch boundary.
+    ///
+    /// Cancelling older generations too is deliberate: the alternative is a
+    /// displaced run continuing to write after the operator pressed Cancel.
+    /// Stopping a run that was going to be superseded anyway is harmless; the
+    /// reverse is not.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        let current = self.0.current.load(Ordering::Acquire);
+        self.0.cancelled.fetch_max(current, Ordering::AcqRel);
     }
 
-    /// True once [`Self::cancel`] has been called (until the next
-    /// [`Self::reset`]).
+    // Deliberately no `is_cancelled()` on the flag itself. Asking without a
+    // token is the question that had no correct answer — "is *something*
+    // cancelled?" — and every command that asked it was really asking about its
+    // own run. Claim a `CancelToken` and ask that.
+}
+
+/// One long-running run's handle on a [`CancelFlag`].
+///
+/// Cloned into every spawned task. `is_cancelled()` answers for *this* run, so
+/// a later run claiming the same flag can neither un-cancel it nor be confused
+/// with it.
+#[derive(Clone)]
+pub struct CancelToken {
+    inner: Arc<CancelInner>,
+    generation: u64,
+}
+
+impl CancelToken {
+    /// True once [`CancelFlag::cancel`] has stopped this run's generation (or a
+    /// newer one — see [`CancelFlag::cancel`]).
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.inner.cancelled.load(Ordering::Acquire) >= self.generation
     }
 }
 
@@ -616,35 +666,77 @@ mod tests {
     use super::CancelFlag;
 
     #[test]
-    fn cancel_flag_reset_cancel_roundtrip() {
+    fn a_claimed_run_starts_uncancelled_and_stops_on_cancel() {
         let f = CancelFlag::new();
-        assert!(!f.is_cancelled());
+        let run = f.claim();
+        assert!(!run.is_cancelled());
         f.cancel();
-        assert!(f.is_cancelled());
-        // reset-at-top clears a stale flag (the AGENTS.md footgun: a new
-        // long-running command that forgets reset gets cancelled by a prior run).
-        f.reset();
-        assert!(!f.is_cancelled());
+        assert!(run.is_cancelled());
     }
 
     #[test]
-    fn cancel_flag_clone_shares_state() {
-        // The dispatch loop clones the flag into spawned tasks; cancelling via
-        // one handle must be visible through the clone.
+    fn a_token_clone_shares_state() {
+        // The dispatch loop clones the token into spawned tasks; cancelling via
+        // the flag must be visible through every clone.
         let f = CancelFlag::new();
-        let g = f.clone();
+        let run = f.claim();
+        let in_task = run.clone();
         f.cancel();
-        assert!(g.is_cancelled());
+        assert!(in_task.is_cancelled());
     }
 
     #[test]
     fn distinct_cancel_flags_are_independent() {
-        // The two-flag separation (audit_cancel vs sweep_cancel): cancelling a
-        // sweep must not abort a concurrent audit, and vice versa.
+        // The flag separation (audit_cancel vs sweep_cancel vs dr_cancel):
+        // cancelling a sweep must not abort a concurrent audit, and vice versa.
         let audit = CancelFlag::new();
         let sweep = CancelFlag::new();
+        let audit_run = audit.claim();
+        let sweep_run = sweep.claim();
         sweep.cancel();
-        assert!(sweep.is_cancelled());
-        assert!(!audit.is_cancelled(), "audit flag must be untouched");
+        assert!(sweep_run.is_cancelled());
+        assert!(!audit_run.is_cancelled(), "audit run must be untouched");
+    }
+
+    #[test]
+    fn a_later_run_cannot_uncancel_an_earlier_one() {
+        // The defect this type was rebuilt for. Under the old `AtomicBool`, run
+        // B's mandatory `reset()` at the top cleared a cancellation run A had
+        // not yet polled, and A carried on writing after the operator stopped
+        // it. A generation is per-run, so B starting says nothing about A.
+        let f = CancelFlag::new();
+        let a = f.claim();
+        f.cancel();
+        assert!(a.is_cancelled());
+
+        let b = f.claim();
+        assert!(
+            a.is_cancelled(),
+            "starting a second run must not resurrect a cancelled one"
+        );
+        assert!(!b.is_cancelled(), "the new run starts clean");
+    }
+
+    #[test]
+    fn cancelling_also_stops_older_runs_still_in_flight() {
+        // Conservative direction on purpose: a displaced run stopping is
+        // harmless, a cancelled run continuing to write is not. Documented on
+        // `CancelFlag::cancel`.
+        let f = CancelFlag::new();
+        let old = f.claim();
+        let new = f.claim();
+        f.cancel();
+        assert!(new.is_cancelled());
+        assert!(old.is_cancelled(), "the displaced run stops too");
+    }
+
+    #[test]
+    fn a_cancel_issued_before_any_run_does_not_kill_the_next_one() {
+        // `cancel_bulk` can fire with nothing running (a stale click, or the UI
+        // racing the command's start). That must not poison the next claim.
+        let f = CancelFlag::new();
+        f.cancel();
+        let run = f.claim();
+        assert!(!run.is_cancelled());
     }
 }
