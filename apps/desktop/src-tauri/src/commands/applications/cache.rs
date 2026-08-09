@@ -394,15 +394,30 @@ mod app_name_index_tests {
     /// with the plain `get` reads a MISS and silently pays for a full
     /// `/applications` rescan. Every reader must go through
     /// `app_name_index_hit` / `app_name_index_cached`.
+    ///
+    /// The second half is what this test used to be missing. Asserting only
+    /// `.is_none()` is satisfied just as well by a DELETE, and a delete is what
+    /// actually happened: the untyped `get` failed to decode the typed entry's
+    /// `Value::Null` body and took the poison path, evicting the pinned
+    /// tenant-wide index outright. The documented cost was "a miss and a
+    /// rescan"; the real cost was losing the index for every surface until
+    /// something rebuilt it. A guard that cannot tell a miss from an eviction
+    /// cannot guard this.
     #[test]
     fn the_index_is_not_reachable_through_the_untyped_get() {
         let cache = Cache::new();
-        app_name_index_store(&cache, "t1", vec![app("a")]);
+        let stored = app_name_index_store(&cache, "t1", vec![app("a")]);
         assert!(
             cache
                 .get::<Vec<Application>>(CacheKind::Lists, &app_name_index_key("t1"))
                 .is_none(),
             "read the typed index untyped — use app_name_index_hit instead"
+        );
+        let hit = app_name_index_hit(&cache, "t1")
+            .expect("the untyped read must MISS the pinned index, not evict it");
+        assert!(
+            std::sync::Arc::ptr_eq(&stored, &hit),
+            "the entry survived but was rebuilt — the untyped read must not disturb it at all"
         );
     }
 
