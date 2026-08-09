@@ -199,6 +199,49 @@ jobs:
           tar -xzf actionlint.tar.gz actionlint
           ./actionlint -color
 
+  scan:
+    name: secrets + hooks
+    # Deliberately NOT gated on `changes.outputs.code`. A docs-only change can
+    # still commit a key, and the hook scripts themselves live under `.claude/`,
+    # which the change detector classifies as docs — so gating this the way the
+    # compile jobs are gated would switch it off for exactly the diffs it most
+    # needs to read. Cheap enough (seconds, no toolchain) to always run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Whole history: a secret is just as leaked if it was removed in a
+          # later commit, and `gitleaks detect` reads the log, not the worktree.
+          fetch-depth: 0
+      # The eight `.claude/hooks/` scripts gate commit format, command parity,
+      # AGENTS.md staleness and secrets — locally, and only for a contributor
+      # running Claude Code with hooks installed. Nothing referenced them from
+      # CI, so `--no-verify`, a different editor, or the GitHub web UI bypassed
+      # every rule they encode. shellcheck at least keeps them executable.
+      - name: shellcheck the hooks
+        run: shellcheck --severity=warning .claude/hooks/*.sh
+      # Pinned by version + checksum, same as actionlint above (no
+      # install-action manifest entry exists for gitleaks).
+      - name: install gitleaks
+        run: |
+          curl -sSfL -o gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+      # Runs the repo's OWN scanner rather than gitleaks directly, so the policy
+      # has one definition: the same script a contributor gets locally, in the
+      # mode that fails instead of warning. It prefers gitleaks when present
+      # (installed above) and falls back to its regex set otherwise, so a
+      # contributor without gitleaks and this job disagree about coverage but
+      # never about the rule.
+      - name: scan for committed secrets
+        env:
+          SCAN_MODE: block
+          SCAN_SCOPE: all
+        run: bash .claude/hooks/secrets-scanner.sh
+
   audit:
     name: cargo-audit
     # Runs on code/dependency changes and on the weekly cron (the change-detection
