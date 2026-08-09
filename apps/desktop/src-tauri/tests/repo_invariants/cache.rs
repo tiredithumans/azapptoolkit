@@ -5,7 +5,13 @@
 //! AGENTS.md calls cross-tenant leakage "the #1 footgun"; these are the rules
 //! that keep it mechanical rather than remembered.
 
-use crate::commands::COMMAND_SOURCES;
+// No `include_str!` table here on purpose: every rule below derives its subject
+// from `sources::command_modules()`, the same source-tree walk `sources.rs` was
+// written to replace the fan-out/cancel tables with. Three hand-maintained
+// tables outlived that change in this file — `COMMAND_SOURCES`,
+// `PINNED_WRITE_SITES` and `WATCH_CAPTURE_SITES` — so these rules only ever
+// looked at the files someone had remembered to list. See `sources.rs`: "A list
+// you must remember to extend is not a ratchet."
 
 /// Cache invalidation runs **only on `Ok`** — AGENTS.md's rule, and until now
 /// prose only.
@@ -20,7 +26,7 @@ use crate::commands::COMMAND_SOURCES;
 #[test]
 fn cache_invalidation_never_runs_on_an_error_path() {
     let mut offenders: Vec<String> = Vec::new();
-    for (name, src) in COMMAND_SOURCES {
+    for (name, src) in super::sources::command_modules() {
         let lines: Vec<&str> = src.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             let trimmed = line.trim_start();
@@ -64,62 +70,96 @@ const INVALIDATORS: &[&str] = &[
     "invalidate_app_details(",
 ];
 
-/// Every module that writes a **pinned** cache entry, and how many it writes.
+/// Every pinned cache write lands on a **tenant-wide index key**, never a
+/// per-object one.
 ///
-/// Pinning exempts an entry from LRU, so a pinned per-object key is unevictable
-/// junk that crowds out the tenant-wide indexes pinning exists to protect —
-/// AGENTS.md: "Never pin a per-object key". The set of legitimately pinned keys
-/// is a fixed handful of tenant-wide indexes, so a ratchet is the right shape:
-/// adding a pin means editing this list, which is the review the rule wants.
-const PINNED_WRITE_SITES: &[(&str, &str, usize)] = &[
-    (
-        "commands/search.rs",
-        include_str!("../../src/commands/search.rs"),
-        1,
-    ),
-    (
-        "commands/gallery.rs",
-        include_str!("../../src/commands/gallery.rs"),
-        1,
-    ),
-    (
-        "commands/enterprise_application.rs",
-        include_str!("../../src/commands/enterprise_application.rs"),
-        1,
-    ),
-    (
-        "commands/applications/mod.rs",
-        include_str!("../../src/commands/applications/mod.rs"),
-        1,
-    ),
-    (
-        "commands/managed_identity.rs",
-        include_str!("../../src/commands/managed_identity.rs"),
-        1,
-    ),
-    (
-        "commands/applications/cache.rs",
-        include_str!("../../src/commands/applications/cache.rs"),
-        2,
-    ),
-];
-
+/// A pinned entry is invisible to LRU, so a pinned per-object key is
+/// unevictable junk that crowds out the indexes pinning exists to protect —
+/// AGENTS.md, "Never pin a per-object key".
+///
+/// The subject is derived, and that is the whole point of this rewrite. This
+/// rule used to iterate a hand-maintained `PINNED_WRITE_SITES` table of six
+/// `include_str!`d files with an expected count each, in the same file whose
+/// sibling module opens with "a list you must remember to extend is not a
+/// ratchet". A seventh module pinning a key was invisible to it — the rule only
+/// ever looked where someone had remembered to point it.
+///
+/// The list that remains is of *key builders that may be pinned*, which is the
+/// semantic rule rather than a place to look: a new pinned write anywhere in
+/// `src/commands` is now checked, and passes only if it pins one of these.
 #[test]
 fn pinned_cache_writes_stay_on_the_tenant_wide_indexes() {
-    for (name, src, expected) in PINNED_WRITE_SITES {
-        let found = src.matches("put_index(").count()
-            + src.matches("put_index_if_current(").count()
-            + src.matches("put_typed_index(").count()
-            + src.matches("put_typed_index_if_current(").count();
-        assert_eq!(
-            found, *expected,
-            "{name} has {found} pinned cache write(s), expected {expected}. A pinned entry is \
-             invisible to LRU, so it must be a tenant-wide INDEX (one per tenant), never a \
-             per-object key — those belong in an unpinned `put`. If this is a new tenant-wide \
-             index, update PINNED_WRITE_SITES."
-        );
+    let mut offenders: Vec<String> = Vec::new();
+    let mut found = 0usize;
+
+    for (name, src) in super::sources::command_modules() {
+        let lines: Vec<&str> = src.lines().collect();
+        for (line_no, line) in lines.iter().enumerate() {
+            if !PINNED_WRITES.iter().any(|w| line.contains(w)) {
+                continue;
+            }
+            let trimmed = line.trim_start();
+            // Skip doc links like [`Cache::put_index`] and the definitions.
+            if trimmed.starts_with("//") || trimmed.starts_with("pub fn") {
+                continue;
+            }
+            found += 1;
+            // The guarded forms take an `IndexWatch`, which was itself minted by
+            // `generation_for(kind, key)` — the key never appears here, so the
+            // watch-capture rule below is what covers those. Only the direct
+            // forms name a key at the call site.
+            if line.contains("_if_current(") {
+                continue;
+            }
+            // The key may be bound a few statements up (`let key = …_key(…)`),
+            // so search back to the top of the enclosing function rather than a
+            // fixed number of lines.
+            let names_a_pinnable_key = lines[..=line_no]
+                .iter()
+                .rev()
+                .take_while(|l| !l.starts_with("fn ") && !l.starts_with("pub"))
+                .any(|l| PINNABLE_KEYS.iter().any(|k| l.contains(k)));
+            if names_a_pinnable_key {
+                continue;
+            }
+            offenders.push(format!("{name}:{} — {trimmed}", line_no + 1));
+        }
     }
+
+    assert!(
+        found >= 5,
+        "found only {found} pinned cache write(s) across the command tree — the source walk or \
+         the call detector is broken, and a rule that scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "pinned cache write(s) on something that is not a known tenant-wide index: {offenders:#?}\n\
+         A pinned entry is invisible to LRU, so it must be a tenant-wide INDEX (one per tenant), \
+         never a per-object key — those belong in an unpinned `put`. If this really is a new \
+         tenant-wide index, add its key builder to PINNABLE_KEYS."
+    );
 }
+
+/// The pinned-write call forms.
+const PINNED_WRITES: &[&str] = &[
+    "put_index(",
+    "put_index_if_current(",
+    "put_typed_index(",
+    "put_typed_index_if_current(",
+];
+
+/// Key builders whose entries are tenant-wide indexes — one entry per tenant,
+/// costing a full directory scan to rebuild — and so may be pinned.
+///
+/// This is the rule itself, not a place to look: adding an entry means claiming
+/// a new key is tenant-wide, which is exactly the review the pin deserves.
+const PINNABLE_KEYS: &[&str] = &[
+    "sp_index_key(",
+    "app_name_index_key(",
+    "search_corpus_key(",
+    // The application gallery: a static, tenant-independent catalog.
+    "gallery_corpus_key(",
+];
 
 /// A pinned index built from a **live tenant-wide scan** must store through the
 /// `_if_current` guard.
@@ -134,52 +174,31 @@ fn pinned_cache_writes_stay_on_the_tenant_wide_indexes() {
 /// The one exemption is the application **gallery** corpus: a static,
 /// tenant-independent catalog that no mutation in this app can invalidate, so
 /// it has no race to lose.
+/// Derived like its sibling above: every module in the tree is checked, so a
+/// new unguarded pinned write cannot hide in a file no table names.
 #[test]
 fn pinned_index_writes_are_guarded_except_the_static_gallery_corpus() {
-    for (name, src, _) in PINNED_WRITE_SITES {
+    let mut offenders: Vec<String> = Vec::new();
+    for (name, src) in super::sources::command_modules() {
         // The trailing `(` is what separates these from their `_if_current`
         // siblings (and from doc links like [`Cache::put_index`]).
         let unguarded = src.matches("put_index(").count() + src.matches("put_typed_index(").count();
-        let expected = usize::from(*name == "commands/gallery.rs");
-        assert_eq!(
-            unguarded, expected,
-            "{name} has {unguarded} UNGUARDED pinned cache write(s), expected {expected}. \
-             Capture `cache.generation()` BEFORE the fetch and store through \
-             `put_index_if_current` / `put_typed_index_if_current`, so a snapshot that raced a \
-             mutation is dropped instead of re-pinned for the full TTL."
-        );
+        let expected = usize::from(name == "commands/gallery.rs");
+        if unguarded != expected {
+            offenders.push(format!(
+                "{name}: {unguarded} unguarded pinned write(s), expected {expected}"
+            ));
+        }
     }
+    assert!(
+        offenders.is_empty(),
+        "UNGUARDED pinned cache write(s): {offenders:#?}\n\
+         Capture `cache.generation_for(kind, key)` BEFORE the fetch and store through \
+         `put_index_if_current` / `put_typed_index_if_current`, so a snapshot that raced a \
+         mutation is dropped instead of re-pinned for the full TTL. The one exemption is the \
+         application gallery corpus: a static, tenant-independent catalog with no race to lose."
+    );
 }
-
-/// Modules that capture a cache watch across a live fetch. Superset of
-/// `PINNED_WRITE_SITES` — `applications/cache.rs` holds the two shared index
-/// accessors that fetch on behalf of everyone else.
-const WATCH_CAPTURE_SITES: &[(&str, &str)] = &[
-    (
-        "commands/search.rs",
-        include_str!("../../src/commands/search.rs"),
-    ),
-    (
-        "commands/enterprise_application.rs",
-        include_str!("../../src/commands/enterprise_application.rs"),
-    ),
-    (
-        "commands/applications/mod.rs",
-        include_str!("../../src/commands/applications/mod.rs"),
-    ),
-    (
-        "commands/applications/cache.rs",
-        include_str!("../../src/commands/applications/cache.rs"),
-    ),
-    (
-        "commands/managed_identity.rs",
-        include_str!("../../src/commands/managed_identity.rs"),
-    ),
-    (
-        "commands/audit.rs",
-        include_str!("../../src/commands/audit.rs"),
-    ),
-];
 
 /// The guard is only a guard if the watch is taken **before** the fetch it is
 /// meant to cover.
@@ -214,7 +233,11 @@ fn a_watch_is_captured_before_the_fetch_it_guards_not_after() {
     let mut bad: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
-    for (name, src) in WATCH_CAPTURE_SITES {
+    // Derived, like both rules above. This used to iterate a hand-maintained
+    // `WATCH_CAPTURE_SITES` table of six `include_str!`d files, so a seventh
+    // module capturing a watch across a fetch was invisible to the rule.
+    for (name, src) in super::sources::command_modules() {
+        let src = src.as_str();
         let mut from = 0usize;
         while let Some(rel) = src[from..].find("generation_for(") {
             let capture = from + rel;
