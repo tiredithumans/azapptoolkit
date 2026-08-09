@@ -40,7 +40,7 @@ use crate::commands::exchange::{exchange_client, resolve_mail_scopes_audit_cache
 use crate::commands::export::{csv_field, write_via_dialog};
 use crate::commands::graph_roles::graph_role_index;
 use crate::commands::progress::emit_progress;
-use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
+use crate::commands::throttle::FanOutMeter;
 use crate::dto::UiError;
 use crate::dto::audit::{AuditCoverageGap, AuditProgress, AuditRunResult};
 use crate::state::AppState;
@@ -98,12 +98,11 @@ pub async fn run_audit(
     tenant_id: String,
 ) -> Result<AuditRunResult, UiError> {
     let client = state.graph_for(&tenant_id);
-    let tracker = Arc::new(ConcurrencyThrottle::new(INITIAL_CONCURRENCY));
+    let meter = FanOutMeter::attach(client.clone(), INITIAL_CONCURRENCY);
     // Detach the observer however the run exits — an early `?` return (e.g. app
     // paging failure) previously left a stale tracker attached to the shared
     // per-tenant client, halving its cap on unrelated 429s until the next audit
     // replaced it. (RAII guard shared with the bulk fan-out commands.)
-    let _observer_guard = ThrottleGuard::attach(client.clone(), tracker.clone());
 
     // Claimed BEFORE the prefetch below, not after it. `claim()` takes a fresh
     // generation and `cancel()` stamps whatever generation is current at the
@@ -250,7 +249,7 @@ pub async fn run_audit(
             done: 0,
             total,
             current_app: None,
-            in_flight_cap: tracker.current_limit(),
+            in_flight_cap: meter.limit(),
             cancelled: false,
         },
     );
@@ -270,8 +269,6 @@ pub async fn run_audit(
         sign_in_available,
         sign_in_map,
     });
-    let done = Arc::new(Mutex::new(0usize));
-
     let mut items: Vec<AuditItem> = Vec::with_capacity(total);
     // A dead session makes every remaining app fail identically, so the run must
     // stop rather than warn its way to a truncated report. Two halves because
@@ -288,15 +285,14 @@ pub async fn run_audit(
     // Dynamic in-flight cap: the tracker shrinks it on 429s mid-run.
     let cancelled_before_all_dispatched = dispatch_capped(
         apps,
-        || tracker.current_limit(),
+        || meter.limit(),
         |app| {
             if cancel.is_cancelled() || reauth_fatal_spawn.load(Ordering::Relaxed) {
                 return None;
             }
             let ctx = ctx.clone();
             let app_handle = app_handle.clone();
-            let done = done.clone();
-            let tracker_for_task = tracker.clone();
+            let ticker = meter.ticker();
             let cancel_for_task = cancel.clone();
             Some(tokio::spawn(async move {
                 if cancel_for_task.is_cancelled() {
@@ -304,16 +300,14 @@ pub async fn run_audit(
                 }
                 let last_sign_in = ctx.last_sign_in_for(&app.app_id);
                 let result = score_one(&ctx, &app, last_sign_in).await;
-                let mut guard = done.lock().await;
-                *guard += 1;
+                let (done, in_flight_cap) = ticker.tick().await;
                 let progress = AuditProgress {
-                    done: *guard,
+                    done,
                     total,
                     current_app: Some(app.display_name.clone()),
-                    in_flight_cap: tracker_for_task.current_limit(),
+                    in_flight_cap,
                     cancelled: cancel_for_task.is_cancelled(),
                 };
-                drop(guard);
                 emit_progress(&app_handle, "audit-progress", progress);
                 result
             }))
@@ -372,7 +366,7 @@ pub async fn run_audit(
     // tenant-wide, so `score_sp_only` is pure scoring — no per-item Graph
     // traffic, no fan-out needed.
     if !cancelled_before_all_dispatched && !cancel.is_cancelled() {
-        let mut done_count = *done.lock().await;
+        let mut done_count = meter.done().await;
         let now = chrono::Utc::now();
         for sp in sp_candidates {
             if cancel.is_cancelled() {
@@ -394,7 +388,7 @@ pub async fn run_audit(
                     done: done_count,
                     total,
                     current_app: Some(item.application_name.clone()),
-                    in_flight_cap: tracker.current_limit(),
+                    in_flight_cap: meter.limit(),
                     cancelled: false,
                 },
             );
