@@ -18,6 +18,7 @@ pub mod error;
 pub mod models;
 pub mod roles;
 pub mod targets;
+pub mod verdict;
 
 pub use aap::{
     SourceGroupRead, SourceMember, group_policies_for_migration, plan_source_membership,

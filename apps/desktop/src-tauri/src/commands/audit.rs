@@ -36,9 +36,7 @@ use azapptoolkit_graph::client::AppListQuery;
 use chrono::{DateTime, Utc};
 
 use crate::commands::dispatch::dispatch_capped;
-use crate::commands::exchange::{
-    aap_verdict_for, apply_legacy_policy_verdict, exchange_client, resolve_mail_scopes_audit_cached,
-};
+use crate::commands::exchange::{exchange_client, resolve_mail_scopes_audit_cached};
 use crate::commands::export::{csv_field, write_via_dialog};
 use crate::commands::graph_roles::graph_role_index;
 use crate::commands::progress::emit_progress;
@@ -46,6 +44,7 @@ use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
 use crate::dto::audit::{AuditCoverageGap, AuditProgress, AuditRunResult};
 use crate::state::AppState;
+use azapptoolkit_exchange::verdict::{aap_verdict_for, apply_legacy_policy_verdict};
 
 /// What the audit's per-app collector should do with one failed scoring task.
 ///

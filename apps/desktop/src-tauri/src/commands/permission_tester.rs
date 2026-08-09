@@ -39,7 +39,9 @@ use azapptoolkit_exchange::models::{
 };
 
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
-use crate::commands::exchange::{aap_verdict_for, exchange_client, is_org_wide_auth_row};
+use azapptoolkit_exchange::verdict::{aap_verdict_for, is_org_wide_auth_row};
+
+use crate::commands::exchange::exchange_client;
 use crate::commands::graph_roles::{graph_role_index, mailbox_resource_roles, resolve_grant};
 use crate::commands::progress::emit_progress;
 use crate::dto::UiError;
