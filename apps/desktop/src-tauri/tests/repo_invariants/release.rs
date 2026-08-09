@@ -345,17 +345,29 @@ fn verify_full_runs_every_gate_ci_runs() {
         covered.extend(deps(justfile, agg));
     }
 
-    // Recipes CI invokes that are not gates `verify-full` should run.
-    // `triggered` is the change-detection helper, not a check.
-    const NOT_A_GATE: &[&str] = &["triggered"];
+    // Recipes CI invokes that are not gates `verify-full` should run. Empty:
+    // every `just` recipe CI runs is a gate contributors should be able to run
+    // too. It previously held `triggered`, which was never a recipe at all —
+    // the scan below matched `just ` anywhere on a line, so the phrase "the run
+    // it just triggered" in a comment at the top of ci.yml read as an
+    // invocation. An allowlist entry papered over a detector bug, which is the
+    // failure mode this suite exists to avoid.
+    const NOT_A_GATE: &[&str] = &[];
 
     let mut missing: Vec<&str> = Vec::new();
+    let mut invocations = 0usize;
     for line in ci.lines() {
-        let Some(rest) = line.split_once("just ") else {
+        // Only a real invocation counts: `run: just <recipe>`, or `just
+        // <recipe>` at the start of a line inside a `run: |` block. Matching
+        // `just ` anywhere also matched English.
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed
+            .strip_prefix("run: just ")
+            .or_else(|| trimmed.strip_prefix("just "))
+        else {
             continue;
         };
         let recipe: &str = rest
-            .1
             .split_whitespace()
             .next()
             .unwrap_or_default()
@@ -363,10 +375,19 @@ fn verify_full_runs_every_gate_ci_runs() {
         if recipe.is_empty() || NOT_A_GATE.contains(&recipe) {
             continue;
         }
+        invocations += 1;
         if !covered.contains(&recipe) && !missing.contains(&recipe) {
             missing.push(recipe);
         }
     }
+    assert!(
+        // fmt-check, clippy, test, web-fmt-check, web-clippy, web-test,
+        // web-build, web-itest, web-itest-size, audit, web-audit, deny,
+        // web-deny. A scan finding far fewer has stopped recognising the shape.
+        invocations >= 10,
+        "the scan found only {invocations} `just` invocation(s) in ci.yml — the recipe detector \
+         is broken, and a parity rule that sees no gates passes vacuously"
+    );
     missing.sort_unstable();
     assert!(
         missing.is_empty(),
