@@ -22,12 +22,12 @@ use azapptoolkit_core::scoping::{
 };
 use azapptoolkit_exchange::models::ExoGroupMember;
 use azapptoolkit_exchange::models::{
-    ExoApplicationAccessPolicy, ExoAuthorizationResult, ExoManagementScope, ExoRoleAssignment,
+    ExoApplicationAccessPolicy, ExoAuthorizationResult, ExoManagementScope,
 };
 use azapptoolkit_exchange::targets::{
-    ExchangeTarget, Refusal, UnrewritableFilter, count_member_of_group, exchange_target,
+    ExchangeTarget, Refusal, RoleStep, UnrewritableFilter, count_member_of_group, exchange_target,
     filter_targets_by_value, group_dns_in_filter, mailbox_resources_complete, plan_consolidation,
-    policies_safe_to_remove, require_scopable_targets, rewritable_scope_dns,
+    plan_role_assignments, policies_safe_to_remove, require_scopable_targets, rewritable_scope_dns,
     scope_groups_in_filter, targets_from_declared, targets_from_grants, targets_safe_to_strip,
 };
 use azapptoolkit_exchange::{
@@ -166,21 +166,6 @@ struct ApplyExchangeMailboxScopeParams<'a> {
     warnings: Vec<String>,
 }
 
-/// The Exchange roles already assigned to this app **and confined to
-/// `scope_name`**. Seeds the dedupe set in [`assign_scoped_roles`]; pure so the
-/// scope filter is unit-testable (an assignment on a *different* scope, or with
-/// no scope at all, must not count as in place).
-fn roles_already_scoped<'a>(
-    existing: &'a [ExoRoleAssignment],
-    scope_name: &str,
-) -> std::collections::HashSet<&'a str> {
-    existing
-        .iter()
-        .filter(|a| a.custom_resource_scope.as_deref() == Some(scope_name))
-        .filter_map(|a| a.role.as_deref())
-        .collect()
-}
-
 /// Assigns each target's Exchange role scoped to `scope_name` (idempotent),
 /// recording per-target whether the scoped role ended up in place — so the
 /// caller strips a target's org-wide Entra grant only once its scoped
@@ -189,51 +174,61 @@ fn roles_already_scoped<'a>(
 /// `roles_skipped` lists targets whose scoped role already existed. Shared by
 /// `apply_exchange_mailbox_scope` and the AAP-migration path so the
 /// strand-guard tracking lives in one place.
+///
+/// The live snapshot is read **here and propagated on failure**. It used to be
+/// `get_role_assignments(..).unwrap_or_default()`, which turned an unreadable
+/// snapshot into "this app has no scoped roles": every role was re-assigned,
+/// every duplicate `New-RoleAssignment` failed, every target was recorded as not
+/// in place, and `targets_safe_to_strip` therefore stripped nothing — so the app
+/// ended up with neither a working scope nor a removed org-wide grant, and every
+/// re-run repeated it. What to do about an unreadable snapshot is a decision, so
+/// it is now an error rather than a default.
+///
+/// The ordering rules (already-scoped, first assigner, and the several-values-to-
+/// one-role case) live in `azapptoolkit_exchange::targets::plan_role_assignments`,
+/// which is pure and unit-tested; this function is the I/O around that plan.
 async fn assign_scoped_roles(
     exo: &ExchangeClient,
     app_id: &str,
     scope_name: &str,
     targets: &[ExchangeTarget],
     warnings: &mut Vec<String>,
-) -> (Vec<String>, Vec<String>, Vec<(ExchangeTarget, bool)>) {
-    let existing = exo.get_role_assignments(app_id).await.unwrap_or_default();
-    // Roles already scoped to THIS management scope. Seeded from the live
-    // snapshot and **extended as the loop assigns**, because several permission
-    // values legitimately map to ONE Exchange role — `Mail.ReadBasic` and
-    // `Mail.ReadBasic.All` both map to `Application Mail.ReadBasic`
-    // (`scoping::graph_mail_role`). Re-reading the pre-loop snapshot made the
-    // second such target's `New-RoleAssignment` a duplicate; its `Err` marked the
-    // target unsafe to strip, so `targets_safe_to_strip` excluded it and its
-    // org-wide Entra grant survived — leaving the grant unioned with the scope,
-    // i.e. the scoping silently did not take effect, permanently (every re-run
-    // repeated the same failure).
-    let mut in_place = roles_already_scoped(&existing, scope_name);
+) -> Result<(Vec<String>, Vec<String>, Vec<(ExchangeTarget, bool)>), UiError> {
+    let existing = exo.get_role_assignments(app_id).await?;
+    let plan = plan_role_assignments(&existing, scope_name, targets);
+
     let mut roles_assigned = Vec::new();
     let mut roles_skipped = Vec::new();
     let mut scoped: Vec<(ExchangeTarget, bool)> = Vec::new();
-    for t in targets {
-        let role_in_place = if in_place.contains(t.exchange_role) {
-            roles_skipped.push(t.exchange_role.to_string());
-            true
-        } else {
-            match exo
-                .new_role_assignment(app_id, t.exchange_role, Some(scope_name))
-                .await
-            {
-                Ok(_) => {
-                    roles_assigned.push(t.exchange_role.to_string());
-                    in_place.insert(t.exchange_role);
-                    true
-                }
-                Err(err) => {
-                    warnings.push(format!("failed to assign {}: {err}", t.exchange_role));
-                    false
+    for (t, step) in targets.iter().zip(plan) {
+        let role_in_place = match step {
+            RoleStep::AlreadyScoped => {
+                roles_skipped.push(t.exchange_role.to_string());
+                true
+            }
+            // Shares an Exchange role with an earlier target in this batch, so
+            // it inherits that assignment's outcome instead of issuing a
+            // duplicate that would fail and block the strip.
+            RoleStep::SameRoleAs { mirrors } => scoped[mirrors].1,
+            RoleStep::Assign => {
+                match exo
+                    .new_role_assignment(app_id, t.exchange_role, Some(scope_name))
+                    .await
+                {
+                    Ok(_) => {
+                        roles_assigned.push(t.exchange_role.to_string());
+                        true
+                    }
+                    Err(err) => {
+                        warnings.push(format!("failed to assign {}: {err}", t.exchange_role));
+                        false
+                    }
                 }
             }
         };
         scoped.push((t.clone(), role_in_place));
     }
-    (roles_assigned, roles_skipped, scoped)
+    Ok((roles_assigned, roles_skipped, scoped))
 }
 
 /// Shared core of a scoped-mailbox grant: register the Exchange service-principal
@@ -381,7 +376,7 @@ async fn apply_exchange_mailbox_scope(
     // strip the org-wide grant for permissions that actually got a scoped
     // replacement (a failed assignment must keep its broad grant).
     let (roles_assigned, roles_skipped, scoped) =
-        assign_scoped_roles(exo, app_id, &scope_name, targets, &mut warnings).await;
+        assign_scoped_roles(exo, app_id, &scope_name, targets, &mut warnings).await?;
 
     let removed_entra_grants = if remove_unscoped {
         remove_unscoped_grants(
@@ -2214,7 +2209,9 @@ async fn migrate_one(
     // 3. scoped role assignments (idempotent). Track which targets ended up
     //    scoped so step 4 only strips the org-wide grant for those.
     let (roles_assigned, _roles_skipped, scoped) =
-        assign_scoped_roles(exo, app_id, &scope_name, &targets, &mut warnings).await;
+        assign_scoped_roles(exo, app_id, &scope_name, &targets, &mut warnings)
+            .await
+            .map_err(|e| e.message)?;
 
     // 4. remove the unscoped Entra grants so scoping is effective — but only for
     //    permissions whose scoped role actually landed (never strand the app).
@@ -3006,28 +3003,6 @@ mod tests {
             exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, "Mail.ReadBasic")
                 .is_some()
         );
-    }
-
-    #[test]
-    fn roles_already_scoped_counts_only_this_scope() {
-        let assignment = |role: &str, scope: Option<&str>| ExoRoleAssignment {
-            name: None,
-            role: Some(role.into()),
-            role_assignee_name: None,
-            custom_resource_scope: scope.map(str::to_string),
-            identity: None,
-        };
-        let existing = vec![
-            assignment("Application Mail.Read", Some("app_scope_a")),
-            // A different app's scope, and an org-wide (unscoped) assignment:
-            // neither means this app's role is confined to `app_scope_a`, and
-            // counting them would skip an assignment that must actually happen.
-            assignment("Application Mail.Send", Some("app_scope_b")),
-            assignment("Application Calendars.Read", None),
-        ];
-        let got = roles_already_scoped(&existing, "app_scope_a");
-        assert_eq!(got.len(), 1);
-        assert!(got.contains("Application Mail.Read"));
     }
 
     #[test]

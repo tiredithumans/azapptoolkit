@@ -16,9 +16,11 @@
 //! therefore carries its own `(resource, appRole id)` pair, and nothing here
 //! keys a decision on a bare permission value.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use azapptoolkit_core::models::{AppRoleAssignment, Application};
+
+use crate::models::ExoRoleAssignment;
 
 use crate::roles::{
     MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID, exchange_role_for_resource_permission,
@@ -65,18 +67,36 @@ pub fn resolve_grant<'a>(
 /// Resolves a bare permission `value` to the mailbox resource that exposes it:
 /// `(resource_app_id, resource_sp_object_id, app_role_id)`. For callers handed a
 /// permission list with no resource context (a managed-identity grant form, a
-/// caller-supplied value set). Resources are searched in order, so Microsoft
-/// Graph wins a name it shares with Office 365 Exchange Online — which is the
-/// right precedence: the Graph permission is the one RBAC for Applications can
-/// scope.
+/// caller-supplied value set).
+///
+/// Both mailbox resources expose appRoles named `Mail.*`, so a name alone does
+/// not identify a resource. The **scopable** one wins: RBAC for Applications can
+/// confine the Graph permission and cannot confine the legacy Office 365 one, so
+/// resolving to the legacy resource turns a scopable request into an
+/// unscopable one.
+///
+/// This used to be first-match-wins on list order, documented as "Graph is
+/// first, so Graph wins". Order is not something the callers guarantee — they
+/// build the list from whatever `mailbox_resource_roles` resolved, and Office
+/// 365 Exchange Online resolving first silently dropped a scopable Graph mail
+/// permission. Preferring by *scopability* makes the answer independent of how
+/// the list happened to be assembled.
 pub fn resolve_value<'a>(
     resources: &'a [ResourceRoles],
     value: &str,
 ) -> Option<(&'a str, &'a str, &'a str)> {
-    resources.iter().find_map(|r| {
+    let matches = |r: &'a ResourceRoles| {
         let role_id = r.role_id_for(value)?;
         Some((r.app_id, r.sp_object_id.as_str(), role_id))
-    })
+    };
+    resources
+        .iter()
+        .filter(|r| exchange_role_for_resource_permission(r.app_id, value).is_some())
+        .find_map(matches)
+        // Nothing scopable exposes it — fall back to any resource that does, so
+        // a non-mail permission still resolves for the callers that only need
+        // the appRole id.
+        .or_else(|| resources.iter().find_map(matches))
 }
 
 /// An Exchange permission the app declares/holds, paired with its Exchange
@@ -238,6 +258,77 @@ pub fn targets_safe_to_strip(scoped: Vec<(ExchangeTarget, bool)>) -> Vec<Exchang
         .collect()
 }
 
+/// The Exchange roles already assigned to this app **and confined to
+/// `scope_name`**.
+///
+/// An assignment on a *different* custom scope, or with no scope at all, does
+/// not count: the whole point of the scoped grant is that the role is confined,
+/// and treating an org-wide assignment as "already in place" would skip creating
+/// the confined one.
+pub fn roles_already_scoped<'a>(
+    existing: &'a [ExoRoleAssignment],
+    scope_name: &str,
+) -> HashSet<&'a str> {
+    existing
+        .iter()
+        .filter(|a| a.custom_resource_scope.as_deref() == Some(scope_name))
+        .filter_map(|a| a.role.as_deref())
+        .collect()
+}
+
+/// What the caller must do about one target's Exchange role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoleStep {
+    /// Already confined to this scope per the live snapshot — nothing to do,
+    /// and the role counts as in place.
+    AlreadyScoped,
+    /// First target in this batch needing this role: assign it.
+    Assign,
+    /// A later target that maps to the SAME Exchange role as the target at
+    /// `mirrors`. Its outcome is that assignment's outcome — it must NOT issue
+    /// its own `New-RoleAssignment`.
+    ///
+    /// Several permission values legitimately map to one role (`Mail.ReadBasic`
+    /// and `Mail.ReadBasic.All` both map to `Application Mail.ReadBasic`), so
+    /// without this the second one issued a duplicate `New-RoleAssignment`,
+    /// took the resulting `Err` as "the scoped role did not land", and was
+    /// therefore excluded from `targets_safe_to_strip` — leaving its org-wide
+    /// Entra grant in place beside the scope. The scoping silently did not take
+    /// effect, and every re-run repeated the same failure.
+    SameRoleAs { mirrors: usize },
+}
+
+/// Plans one scoped-role assignment pass: what to do for each target, given the
+/// roles already confined to `scope_name`.
+///
+/// Pure, and takes the live snapshot as an argument rather than fetching it, so
+/// the caller has to decide what a failed pre-read means. It used to be
+/// `unwrap_or_default()`, which turned an unreadable snapshot into "this app has
+/// no scoped roles" — every role was then re-assigned, every duplicate failed,
+/// and every target became unsafe to strip. A silent read failure produced a
+/// grant that was neither scoped nor stripped.
+pub fn plan_role_assignments(
+    existing: &[ExoRoleAssignment],
+    scope_name: &str,
+    targets: &[ExchangeTarget],
+) -> Vec<RoleStep> {
+    let in_place = roles_already_scoped(existing, scope_name);
+    // role -> index of the target in this batch that assigns it.
+    let mut assigner: HashMap<&str, usize> = HashMap::new();
+    let mut steps = Vec::with_capacity(targets.len());
+    for (i, t) in targets.iter().enumerate() {
+        if in_place.contains(t.exchange_role) {
+            steps.push(RoleStep::AlreadyScoped);
+        } else if let Some(&first) = assigner.get(t.exchange_role) {
+            steps.push(RoleStep::SameRoleAs { mirrors: first });
+        } else {
+            assigner.insert(t.exchange_role, i);
+            steps.push(RoleStep::Assign);
+        }
+    }
+    steps
+}
+
 /// Whether the resource resolution saw **both** mailbox-bearing resources.
 /// Gates the fail-closed branch of [`policies_safe_to_remove`]: an Application
 /// Access Policy can confine grants on either, so a partial view cannot prove a
@@ -378,8 +469,42 @@ pub fn group_dns_in_filter(filter: &str) -> HashSet<String> {
 
 /// Counts `MemberOfGroup` clauses in an OPATH recipient filter (the number of
 /// groups a management scope confines access to).
+///
+/// Occurrences **inside a quoted literal do not count** — the same rule
+/// [`member_of_group_clauses`] follows. This is what makes
+/// [`scope_groups_in_filter`]'s `complete` flag meaningful: it compares the
+/// clauses parsed against the clauses present, so a group whose DN happens to
+/// contain the text `memberofgroup` (`CN=memberofgroup-admins,…` — an ordinary
+/// name) used to inflate this count, mark a perfectly readable filter
+/// incomplete, and make `rewritable_scope_dns` refuse to rewrite a filter this
+/// crate had itself generated.
 pub fn count_member_of_group(filter: &str) -> usize {
-    filter.to_ascii_lowercase().matches("memberofgroup").count()
+    const KEY: &str = "memberofgroup";
+    let lower = filter.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut count = 0usize;
+    let mut i = 0usize;
+    let mut in_quotes = false;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            // OPATH escapes an inner quote by doubling it, so `''` inside a
+            // literal stays inside it.
+            if in_quotes && bytes.get(i + 1) == Some(&b'\'') {
+                i += 2;
+                continue;
+            }
+            in_quotes = !in_quotes;
+            i += 1;
+            continue;
+        }
+        if !in_quotes && lower[i..].starts_with(KEY) {
+            count += 1;
+            i += KEY.len();
+            continue;
+        }
+        i += 1;
+    }
+    count
 }
 
 /// Why a stored recipient filter cannot be rewritten from a list of group DNs.
@@ -698,6 +823,189 @@ mod tests {
             .collect();
         got.sort_unstable();
         assert_eq!(got, vec!["exo-sp", "graph-sp"]);
+    }
+
+    /// A target on a named Exchange role, so a batch can mix roles.
+    fn target_on(value: &str, role: &'static str) -> ExchangeTarget {
+        ExchangeTarget {
+            graph_value: value.to_string(),
+            exchange_role: role,
+            app_role_id: "role-id".to_string(),
+            resource_sp_object_id: "graph-sp".to_string(),
+        }
+    }
+
+    fn assignment(role: &str, scope: Option<&str>) -> ExoRoleAssignment {
+        ExoRoleAssignment {
+            name: None,
+            role: Some(role.to_string()),
+            role_assignee_name: None,
+            custom_resource_scope: scope.map(str::to_string),
+            identity: None,
+        }
+    }
+
+    #[test]
+    fn a_group_dn_containing_the_property_name_round_trips() {
+        // `CN=memberofgroup-admins` is an ordinary group name. Counting the bare
+        // substring saw TWO `MemberOfGroup` tokens in a one-clause filter, so
+        // `scope_groups_in_filter` marked a filter this crate had itself
+        // generated "incomplete" — and `rewritable_scope_dns` then refused to
+        // rewrite it, permanently, for that tenant's group.
+        let dn = "CN=memberofgroup-admins,OU=Groups,DC=x";
+        let filter = crate::client::member_of_group_filter(&[dn.to_string()]);
+        assert_eq!(count_member_of_group(&filter), 1);
+
+        let groups = scope_groups_in_filter(&filter);
+        assert!(
+            groups.complete,
+            "a filter we generated must parse completely"
+        );
+        assert_eq!(groups.dns, HashSet::from([dn.to_string()]));
+        assert_eq!(rewritable_scope_dns(&filter).unwrap(), vec![dn.to_string()]);
+    }
+
+    #[test]
+    fn a_quoted_literal_never_contributes_to_the_clause_count() {
+        // Same rule as `member_of_group_clauses`, which is what makes the
+        // `complete` flag a real comparison rather than two different scans.
+        let two = crate::client::member_of_group_filter(&[
+            "CN=memberofgroup-a,DC=x".to_string(),
+            "CN=b,DC=x".to_string(),
+        ]);
+        assert_eq!(count_member_of_group(&two), 2);
+
+        // An apostrophe in the DN is escaped as `''` and must not end the
+        // literal early — otherwise the rest of the DN is scanned as filter
+        // syntax.
+        let quoted =
+            crate::client::member_of_group_filter(&["CN=O'Brien memberofgroup,DC=x".to_string()]);
+        assert_eq!(count_member_of_group(&quoted), 1);
+        assert!(scope_groups_in_filter(&quoted).complete);
+
+        // A genuinely unreadable token still marks the parse incomplete — the
+        // fix must not have made `complete` unconditionally true.
+        let unparsed = "MemberOfGroup -like 'CN=a,DC=x'";
+        assert_eq!(count_member_of_group(unparsed), 1);
+        assert!(!scope_groups_in_filter(unparsed).complete);
+    }
+
+    #[test]
+    fn a_shared_permission_name_resolves_to_the_scopable_resource_whatever_the_order() {
+        // Both mailbox resources expose an appRole called `Mail.Read`. Only the
+        // Graph one can be confined by RBAC for Applications, so resolving to
+        // the legacy Office 365 resource turns a scopable request into an
+        // unscopable one — and the old first-match-wins rule made that depend on
+        // the order `mailbox_resource_roles` happened to return.
+        let forward = mailbox_resources();
+        let mut reversed = mailbox_resources();
+        reversed.reverse();
+
+        for (label, resources) in [("graph first", &forward), ("legacy first", &reversed)] {
+            let (app_id, sp, role_id) =
+                resolve_value(resources, "Mail.Read").expect("Mail.Read resolves");
+            assert_eq!(app_id, MICROSOFT_GRAPH_APP_ID, "{label}");
+            assert_eq!(sp, "graph-sp", "{label}");
+            assert_eq!(role_id, "role-Mail.Read", "{label}");
+        }
+    }
+
+    #[test]
+    fn a_value_only_the_legacy_resource_exposes_still_resolves() {
+        // `full_access_as_app` lives on Office 365 Exchange Online alone, and is
+        // scopable there — the preference must not become "always Graph".
+        let resources = mailbox_resources();
+        let (app_id, sp, _) =
+            resolve_value(&resources, EWS_FULL_ACCESS_AS_APP).expect("the EWS scope resolves");
+        assert_eq!(app_id, OFFICE365_EXCHANGE_ONLINE_APP_ID);
+        assert_eq!(sp, "exo-sp");
+    }
+
+    #[test]
+    fn a_non_mail_value_still_resolves_through_the_fallback() {
+        // Nothing scopable exposes `User.Read.All`, so the scopability filter
+        // finds no candidate; callers that only need the appRole id must still
+        // get an answer.
+        let resources = mailbox_resources();
+        let (app_id, _, role_id) =
+            resolve_value(&resources, "User.Read.All").expect("resolves via fallback");
+        assert_eq!(app_id, MICROSOFT_GRAPH_APP_ID);
+        assert_eq!(role_id, "role-User.Read.All");
+        // And an unknown value resolves nowhere.
+        assert!(resolve_value(&resources, "Nope.Nope").is_none());
+    }
+
+    #[test]
+    fn a_role_confined_to_this_scope_is_already_in_place() {
+        let existing = [assignment("Application Mail.Read", Some("app_scope_a"))];
+        let steps = plan_role_assignments(
+            &existing,
+            "app_scope_a",
+            &[target_on("Mail.Read", "Application Mail.Read")],
+        );
+        assert_eq!(steps, vec![RoleStep::AlreadyScoped]);
+    }
+
+    #[test]
+    fn a_role_on_another_scope_or_no_scope_still_needs_assigning() {
+        // The confinement is the point. An org-wide assignment (no custom
+        // scope) or one on a different app's scope must not be mistaken for
+        // this app's scoped role, or the confined assignment is never created
+        // and the org-wide grant is then stripped against nothing.
+        let existing = [
+            assignment("Application Mail.Read", None),
+            assignment("Application Mail.Send", Some("some_other_scope")),
+        ];
+        let steps = plan_role_assignments(
+            &existing,
+            "app_scope_a",
+            &[
+                target_on("Mail.Read", "Application Mail.Read"),
+                target_on("Mail.Send", "Application Mail.Send"),
+            ],
+        );
+        assert_eq!(steps, vec![RoleStep::Assign, RoleStep::Assign]);
+    }
+
+    #[test]
+    fn two_values_mapping_to_one_role_assign_once_and_share_the_outcome() {
+        // `Mail.ReadBasic` and `Mail.ReadBasic.All` both map to
+        // `Application Mail.ReadBasic`. The second used to issue its own
+        // `New-RoleAssignment`, get a duplicate error, and be recorded as "the
+        // scoped role did not land" — which excluded it from
+        // `targets_safe_to_strip`, so its org-wide grant survived beside the
+        // scope and the scoping silently did not take effect.
+        let steps = plan_role_assignments(
+            &[],
+            "app_scope_a",
+            &[
+                target_on("Mail.ReadBasic", "Application Mail.ReadBasic"),
+                target_on("Mail.ReadBasic.All", "Application Mail.ReadBasic"),
+                target_on("Mail.Send", "Application Mail.Send"),
+            ],
+        );
+        assert_eq!(
+            steps,
+            vec![
+                RoleStep::Assign,
+                RoleStep::SameRoleAs { mirrors: 0 },
+                RoleStep::Assign,
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_snapshot_plans_every_target_as_an_assignment() {
+        // Documents what a failed pre-read would have looked like, which is why
+        // the snapshot is an argument: indistinguishable from a genuinely
+        // unscoped app. The caller must propagate the read error rather than
+        // pass an empty slice.
+        let steps = plan_role_assignments(
+            &[],
+            "app_scope_a",
+            &[target_on("Mail.Read", "Application Mail.Read")],
+        );
+        assert_eq!(steps, vec![RoleStep::Assign]);
     }
 
     #[test]
