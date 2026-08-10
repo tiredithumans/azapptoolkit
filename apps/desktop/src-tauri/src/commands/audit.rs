@@ -446,8 +446,18 @@ pub(crate) fn invalidate_audit_cache(cache: &azapptoolkit_core::cache::Cache, te
 
 /// Returns the cached audit for this tenant, if one was run within the last
 /// 60 minutes.
+///
+/// **The only command that answers from cache alone**, which is why it is also
+/// the only one that has to check the session itself. Every other read reaches
+/// Graph through `graph_for`, so a tenant with no session fails at the token
+/// and never returns data. Here the `tenant_id` argument alone decided which
+/// tenant's directory data came back — a stale or wrong id from the webview
+/// (a tenant switch mid-flight is the realistic one) served the *other*
+/// tenant's audit, which is the cross-tenant leak this codebase treats as its
+/// first footgun. No session for that tenant ⇒ no cached answer.
 #[tauri::command]
 pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option<AuditRunResult> {
+    state.auth.tenant_context(&tenant_id)?;
     let key = audit_cache_key(&tenant_id);
     let items: Vec<AuditItem> = state.cache.get(CacheKind::Audit, &key)?;
     // Report availability is reconstructed from the cached items (every item

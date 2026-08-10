@@ -63,6 +63,39 @@ fn cache_invalidation_never_runs_on_an_error_path() {
     );
 }
 
+/// Searches back from `line_no` to the top of the enclosing function for a
+/// pinnable key builder. Split out from the rule so the walk itself is
+/// testable — a rule that stops firing is indistinguishable from a clean tree.
+fn back_walk_names_a_pinnable_key(lines: &[&str], line_no: usize) -> bool {
+    lines[..=line_no]
+        .iter()
+        .map(|l| l.trim_start())
+        .rev()
+        .take_while(|l| !is_fn_header(l))
+        .filter(|l| !l.starts_with("//"))
+        .any(|l| PINNABLE_KEYS.iter().any(|k| l.contains(k)))
+}
+
+/// Whether `trimmed` opens a function — at any indentation, with any
+/// combination of visibility, `async`, `const`, `unsafe` or `extern`.
+///
+/// The walk above uses this as its boundary, so anything it fails to recognise
+/// silently widens the search into the previous function.
+fn is_fn_header(trimmed: &str) -> bool {
+    let rest = trimmed
+        .strip_prefix("pub(crate) ")
+        .or_else(|| trimmed.strip_prefix("pub(super) "))
+        .or_else(|| trimmed.strip_prefix("pub "))
+        .unwrap_or(trimmed);
+    let rest = rest
+        .strip_prefix("const ")
+        .or_else(|| rest.strip_prefix("async "))
+        .or_else(|| rest.strip_prefix("unsafe "))
+        .unwrap_or(rest);
+    let rest = rest.strip_prefix("async ").unwrap_or(rest);
+    rest.starts_with("fn ")
+}
+
 const INVALIDATORS: &[&str] = &[
     "invalidate_app_lists(",
     "invalidate_app_credentials(",
@@ -114,11 +147,22 @@ fn pinned_cache_writes_stay_on_the_tenant_wide_indexes() {
             // The key may be bound a few statements up (`let key = …_key(…)`),
             // so search back to the top of the enclosing function rather than a
             // fixed number of lines.
-            let names_a_pinnable_key = lines[..=line_no]
-                .iter()
-                .rev()
-                .take_while(|l| !l.starts_with("fn ") && !l.starts_with("pub"))
-                .any(|l| PINNABLE_KEYS.iter().any(|k| l.contains(k)));
+            //
+            // Two ways this whitewashed a real offender before, both from
+            // testing the RAW line:
+            //
+            // * the boundary was `!l.starts_with("fn ")` on an untrimmed line,
+            //   so any indented `fn` — inside an `impl`, an inner module, a
+            //   nested helper — never ended the walk, and it ran back through
+            //   whole earlier functions until it found some mention of a
+            //   pinnable key;
+            // * `///` lines fail both predicates too, so a doc link such as
+            //   [`sp_index_key`] in the writer's OWN doc comment satisfied the
+            //   search. A pinned per-object write could be excused by prose.
+            //
+            // Now: trim first, stop at any function header at any depth, and
+            // read only code.
+            let names_a_pinnable_key = back_walk_names_a_pinnable_key(&lines, line_no);
             if names_a_pinnable_key {
                 continue;
             }
@@ -341,5 +385,120 @@ fn service_principal_cache_self_invalidates_in_the_client() {
          by appId and is swept by the graph client itself (`invalidate_sp_cache`); an \
          aggregator-side bust here is keyed wrong, so it silently clears nothing while reading as \
          though it covered the case."
+    );
+}
+
+/// The walk this rule depends on, on the two shapes that used to slip past it.
+///
+/// Both were found by re-reading the rule rather than the code it guards: it
+/// had been written against top-level `pub async fn` command handlers and
+/// tested only against a tree that happened to have no counter-example, so it
+/// passed while excusing exactly what it exists to catch.
+#[test]
+fn the_pinnable_key_back_walk_stops_at_the_function_it_is_in() {
+    let indented = vec![
+        "impl Foo {",
+        "    fn earlier(&self) {",
+        "        let key = sp_index_key(tenant);",
+        "    }",
+        "",
+        "    fn offender(&self) {",
+        "        cache.put_index(kind, per_object_key(id), &v);",
+    ];
+    assert!(
+        !back_walk_names_a_pinnable_key(&indented, 6),
+        "an INDENTED `fn` must end the walk — otherwise the key named in the previous \
+         function excuses this pinned write, which is how a pinned per-object key passes"
+    );
+
+    let documented = vec![
+        "fn offender() {",
+        "    /// Mirrors [`sp_index_key`] for the per-object case.",
+        "    cache.put_index(kind, per_object_key(id), &v);",
+    ];
+    assert!(
+        !back_walk_names_a_pinnable_key(&documented, 2),
+        "a doc comment naming a pinnable key is prose, not a key — it must not excuse the write"
+    );
+
+    let genuine = vec![
+        "pub async fn real_index_write() {",
+        "    let key = sp_index_key(tenant);",
+        "    cache.put_index(kind, key, &v);",
+    ];
+    assert!(
+        back_walk_names_a_pinnable_key(&genuine, 2),
+        "the rule must still accept a genuine tenant-wide index write"
+    );
+}
+
+#[test]
+fn a_function_header_is_recognised_at_any_depth_or_visibility() {
+    for header in [
+        "fn f() {",
+        "pub fn f() {",
+        "pub(crate) fn f() {",
+        "pub(super) fn f() {",
+        "async fn f() {",
+        "pub async fn f() {",
+        "const fn f() {",
+        "unsafe fn f() {",
+    ] {
+        assert!(
+            is_fn_header(header),
+            "not recognised as a function: {header}"
+        );
+    }
+    for other in ["let fn_name = 1;", "// fn f() {", "pub struct S {", "}"] {
+        assert!(!is_fn_header(other), "wrongly read as a function: {other}");
+    }
+}
+
+/// A command that answers from the cache must prove the session itself.
+///
+/// Every ordinary read reaches a service through a client factory, so a tenant
+/// with no session fails at the token and no data comes back — the session
+/// check is implicit in the round trip. A command that answers from cache alone
+/// skips that entirely, and then the `tenant_id` **argument** is the only thing
+/// deciding whose directory data is returned. A stale or wrong id from the
+/// webview (a tenant switch mid-flight is the realistic one) serves another
+/// tenant's data: the cross-tenant leak AGENTS.md calls the #1 footgun.
+///
+/// So: read the cache, and either build a client or check `tenant_context`.
+#[test]
+fn a_command_answering_from_cache_alone_checks_the_session() {
+    const CACHE_READS: [&str; 2] = ["cache.get(", "cache.get_typed"];
+    // Either proves a session: a client factory needs a token for that tenant,
+    // and `tenant_context` is `None` unless that tenant signed in this session.
+    const SESSION_PROOFS: [&str; 5] = [
+        "tenant_context(",
+        "graph_for(",
+        "exchange_for(",
+        "arm_for(",
+        "keyvault_for(",
+    ];
+
+    let mut found = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+    for cmd in super::sources::commands() {
+        if !CACHE_READS.iter().any(|r| cmd.body.contains(r)) {
+            continue;
+        }
+        found += 1;
+        if !SESSION_PROOFS.iter().any(|p| cmd.body.contains(p)) {
+            offenders.push(format!("{}::{}", cmd.module, cmd.name));
+        }
+    }
+
+    assert!(
+        found >= 1,
+        "found no cache-reading commands — the source walk or the detector is broken, and a \
+         rule that scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these commands answer from the cache without proving the tenant has a session, so the \
+         `tenant_id` argument alone decides whose data is returned:\n  {}",
+        offenders.join("\n  ")
     );
 }

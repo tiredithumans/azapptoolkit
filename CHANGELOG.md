@@ -30,6 +30,18 @@
 
 ### Fixed
 
+- **One mistaken read no longer throws away a tenant-wide index.** The two cache
+  accessors are paired with the two ways a value is stored, and reading through
+  the wrong one deleted the entry — including the pinned, tenant-wide indexes
+  that exist specifically so they survive memory pressure. Losing one sent every
+  surface into a full directory rescan. The wrong read is now simply a miss; the
+  entry is kept for the callers using the matching accessor. The other accessor
+  was fixed this way in 0.25.0 and its twin was missed.
+- **The cached security audit is no longer returned without a signed-in
+  session.** It was the one thing this app answers from cache alone, so unlike
+  every other read it never needed a token — which meant the tenant id it was
+  asked for was the only thing deciding whose data came back, and a stale one
+  (after switching tenants, say) could show the previous tenant's findings.
 - **A legacy-policy migration can no longer point an app at the wrong mailboxes
   and call it done.** If a management scope already existed for the app and
   confined access to a *different* set of groups than the migration worked out,
@@ -111,6 +123,12 @@
   **not a single Azure one**, in a tool whose entire subject is Entra
   credentials. It now recognises storage and Service Bus connection strings, SAS
   signatures, bearer tokens and Entra client secrets.
+- Two guards that could not catch what they were written for: the rule keeping
+  pinned cache writes on tenant-wide keys stopped its search only at an
+  unindented function, so a key mentioned in an *earlier* function — or merely
+  named in a doc comment — excused an offending write; and nothing checked that
+  a cache-only command proves the session. Both are now enforced and tested
+  against the shapes that slipped past.
 
 ## [0.25.1] - 2026-08-09
 
