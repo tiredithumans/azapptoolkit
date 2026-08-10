@@ -16,6 +16,7 @@ pub mod aap;
 pub mod client;
 pub mod error;
 pub mod models;
+pub mod references;
 pub mod roles;
 pub mod targets;
 pub mod verdict;
