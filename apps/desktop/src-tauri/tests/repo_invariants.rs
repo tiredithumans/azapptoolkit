@@ -20,6 +20,7 @@
 //! - [`cancel`] — one `CancelToken` claim per long-running command
 //! - [`commands`] — whole-command-layer scans, and the shared source table
 //! - [`release`] — version identity, CHANGELOG format, mirrored lint block
+//! - [`trust`] — every path that mints an authentication trust validates it
 
 #[path = "repo_invariants/cache.rs"]
 mod cache;
@@ -33,3 +34,5 @@ mod fanout;
 mod release;
 #[path = "repo_invariants/sources.rs"]
 mod sources;
+#[path = "repo_invariants/trust.rs"]
+mod trust;
