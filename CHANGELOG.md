@@ -1,17 +1,7 @@
-# Changelog
-
-All notable changes to azapptoolkit are documented here. The format
-follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
-the project adheres to
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-Older releases (**0.19.2 and earlier**) live in
-[docs/CHANGELOG-archive.md](docs/CHANGELOG-archive.md).
-
 ## [Unreleased]
 
-### Fixed
 ### Security
+
 - **Restoring a backup no longer imports sign-in trusts unchecked.** A backup
   file can carry federated identity credentials — the setting that lets an
   outside system sign in as an application **with no secret and no expiry**.
@@ -37,6 +27,9 @@ Older releases (**0.19.2 and earlier**) live in
   permits — a certificate that in practice never expires and never has to be
   re-established. Lifetimes are now bounded, and rejected before anything is
   created rather than half-way through setting up the app.
+
+### Fixed
+
 - **A legacy-policy migration can no longer point an app at the wrong mailboxes
   and call it done.** If a management scope already existed for the app and
   confined access to a *different* set of groups than the migration worked out,
@@ -98,6 +91,7 @@ Older releases (**0.19.2 and earlier**) live in
   own audience.
 
 ### Internal
+
 - **Secret scanning now blocks a merge, and knows Azure secrets.** The check ran
   on every pull request and could not stop one: it was not among the required
   checks, so a run that found a committed key was advisory. It is now required
