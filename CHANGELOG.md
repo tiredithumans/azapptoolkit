@@ -10,6 +10,7 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+### Fixed
 ### Security
 - **Restoring a backup no longer imports sign-in trusts unchecked.** A backup
   file can carry federated identity credentials — the setting that lets an
@@ -36,8 +37,6 @@ Older releases (**0.19.2 and earlier**) live in
   permits — a certificate that in practice never expires and never has to be
   re-established. Lifetimes are now bounded, and rejected before anything is
   created rather than half-way through setting up the app.
-
-### Fixed
 - **A legacy-policy migration can no longer point an app at the wrong mailboxes
   and call it done.** If a management scope already existed for the app and
   confined access to a *different* set of groups than the migration worked out,
@@ -65,11 +64,50 @@ Older releases (**0.19.2 and earlier**) live in
   widened what the app reaches; and a clause naming an empty group (`-eq ''`)
   counted as a real group, letting a filter that confines nothing pass the check
   that exists to catch exactly that. Both are now refused outright.
+- **Applications with org-wide calendar access were scored as harmless.** The
+  audit's medium-risk list named `Calendar.ReadWrite`, which is not a permission
+  Microsoft Graph defines — every calendar permission is plural. The entry could
+  therefore never match anything, and an application allowed to create, read,
+  change and delete events in *every* mailbox in the tenant scored zero and could
+  be ranked Low. **Applications holding `Calendars.ReadWrite` will now appear in
+  your findings and their risk scores will rise.** A new check compares the mail,
+  calendar and contacts entries against the scoping rules that already spell the
+  same names, so a future typo fails the build instead of silently disabling a
+  rule.
+- **Three more permissions that can compromise a tenant now score.**
+  `Application.ReadWrite.OwnedBy` (manage the credentials of apps it owns — it
+  can act as them), `EntitlementManagement.ReadWrite.All` (grant Entra roles, app
+  role assignments and API permissions to anyone including itself) and
+  `Directory.Read.All` (Microsoft describes it as the highest-privileged
+  read-only permission for Entra) all scored zero. Applications holding them will
+  now be flagged, so **expect some scores to rise on the next run.**
+- **Risky delegated permissions are advised on consistently.** The audit warned
+  about only two named delegated scopes while the consent-grant review used a
+  much broader definition that also covers mail, files, directory, group and
+  role-management scopes. An admin-consented delegated `Mail.ReadWrite` produced
+  no advisory at all. Both surfaces now use the same definition.
+- **An app whose only working credential never expires is no longer reported as
+  having none.** A credential with no expiry date counted as neither active nor
+  expired, so an application holding one expired secret alongside one that never
+  expires was described as "All credentials expired" — reading as a dead app,
+  when in fact it held a permanent credential that never rotates.
 - **Federated credentials in US Gov and China tenants used the wrong default
   audience.** The token-exchange audience differs per cloud, and the commercial
   value was used everywhere. Entra accepted the credential and it then failed at
   sign-in with nothing to indicate why. Sovereign builds now default to their
   own audience.
+
+### Internal
+- **Secret scanning now blocks a merge, and knows Azure secrets.** The check ran
+  on every pull request and could not stop one: it was not among the required
+  checks, so a run that found a committed key was advisory. It is now required
+  (8 checks, not 7) — and it always runs, including on documentation-only
+  changes, because those can commit a key too. Separately, the scanner's own
+  pattern set — used whenever `gitleaks` is not installed, which is the normal
+  local case — knew AWS, Google, GitHub, GitLab, Slack and OpenAI key shapes and
+  **not a single Azure one**, in a tool whose entire subject is Entra
+  credentials. It now recognises storage and Service Bus connection strings, SAS
+  signatures, bearer tokens and Entra client secrets.
 
 ## [0.25.1] - 2026-08-09
 

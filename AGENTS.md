@@ -229,7 +229,8 @@ Steps 1–4 are `just verify` (see **Canonical commands**); it also attempts web
 
 6. **Dependency audit + deny** *(required CI checks)* — `audit`/`web-audit` (RustSec) + `deny`/`web-deny`; all four merge-blocking, all in `verify-full`.
 7. **actionlint** *(required CI check)* — lints the workflow YAML; runs CI-side (install locally to pre-check).
-8. **CodeQL** *(GitHub-side)* — security queries, build-mode `none`. Known limitation: CodeQL 2.25.6 doesn't expand macros here (~39% calls-with-call-target); expected, non-failing. Config: `.github/codeql/codeql-config.yml`.
+8. **secrets + hooks** *(required CI check)* — shellcheck over `.claude/hooks/`, then `secrets-scanner.sh` in `block` mode over the **whole history**. Never gated on the change detector: a docs-only diff can still commit a key.
+9. **CodeQL** *(GitHub-side)* — security queries, build-mode `none`. Known limitation: CodeQL 2.25.6 doesn't expand macros here (~39% calls-with-call-target); expected, non-failing. Config: `.github/codeql/codeql-config.yml`.
 
 For behavior changes not provable by unit test, run `just dev` and exercise the view.
 
