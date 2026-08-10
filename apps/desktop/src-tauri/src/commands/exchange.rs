@@ -27,7 +27,7 @@ use azapptoolkit_exchange::targets::{
     ExchangeTarget, Refusal, RoleStep, UnrewritableFilter, count_member_of_group, exchange_target,
     filter_targets_by_value, group_dns_in_filter, mailbox_resources_complete, plan_consolidation,
     plan_role_assignments, policies_safe_to_remove, require_scopable_targets, rewritable_scope_dns,
-    targets_from_declared, targets_from_grants, targets_safe_to_strip,
+    scope_groups_in_filter, targets_from_declared, targets_from_grants, targets_safe_to_strip,
 };
 // `exchange_role_for_permission` is deprecated and stays that way; the three
 // uses left in this file resolve roles for permission sets a resource-aware gate
@@ -1554,6 +1554,99 @@ fn scope_filter_decision(
     }
 }
 
+/// Whether `current` confines access to exactly the groups `wanted` names.
+///
+/// Compares group DN **sets**, not raw strings: Exchange normalizes OPATH
+/// whitespace, quoting and parenthesization, so a byte comparison would call an
+/// identical filter divergent. A `current` this parser cannot fully read is
+/// NEVER agreement — an unstatable reach cannot be asserted equal to an intended
+/// one, and treating "cannot read" as "matches" is exactly how a stale scope
+/// would slip past the guard below.
+fn scope_filter_agrees(current: &str, wanted: &str) -> bool {
+    let g = scope_groups_in_filter(current);
+    g.complete && g.dns == group_dns_in_filter(wanted)
+}
+
+/// Establishes the recipient filter Exchange **actually has** on `scope_name`,
+/// repointing it when permitted, and refusing when it diverges and we may not.
+///
+/// This is the guard that makes the migration fail closed on a stale scope.
+/// `ensure_management_scope` is create-only, so a scope left by an earlier
+/// partial migration — or made by hand — keeps its own filter. Previously the
+/// repoint was gated on `consolidated && scope_override.is_none()`, and when
+/// that gate was false the flow simply carried on: `assign_scoped_roles` bound
+/// the app's Exchange roles to that stale scope, `remove_unscoped_grants`
+/// stripped its org-wide Entra grants, and the legacy policy was deleted. The
+/// app's live mailbox reach silently became whatever the stale scope covered —
+/// wider, narrower or simply *different* — while the report printed the filter
+/// this run had computed. A migration that reports success while redirecting an
+/// application's mailbox access is the exact outcome this product exists to
+/// prevent, so a divergence we cannot correct is fatal for that app.
+///
+/// Returns the filter in force, which the caller reports instead of its own.
+async fn reconcile_scope_filter(
+    exo: &ExchangeClient,
+    scope_name: &str,
+    existing_filter: Option<&str>,
+    wanted_filter: &str,
+    may_repoint: bool,
+    warnings: &mut Vec<String>,
+) -> Result<String, UiError> {
+    // No pre-existing scope: `ensure_management_scope` just created it with
+    // exactly this filter, so that is what is live.
+    let Some(current) = existing_filter else {
+        return Ok(wanted_filter.to_string());
+    };
+
+    // Compare the group DN SETS, not the raw strings: Exchange normalizes OPATH
+    // whitespace, quoting and parenthesization, so a byte comparison would call
+    // an identical filter divergent. An unreadable current filter is treated as
+    // divergent — we cannot claim it confines what we intend.
+    if scope_filter_agrees(current, wanted_filter) {
+        return Ok(current.to_string());
+    }
+
+    if !may_repoint {
+        return Err(UiError::validation(
+            "scope_filter_mismatch",
+            format!(
+                "a management scope “{scope_name}” already exists for this app and confines access \
+                 to a different set of groups than this migration computed. Exchange keeps the \
+                 existing scope rather than replacing it, and this run is not permitted to repoint \
+                 it — either the group consolidation could not be verified, or an explicit scope \
+                 name was supplied that may be shared with other applications. Assigning roles \
+                 against it and then removing the org-wide grants would change what this app \
+                 reaches in a way that was not asked for, so nothing was changed. Review the scope \
+                 in Exchange, or use “Move to managed group” to consolidate onto the \
+                 toolkit-managed group."
+            ),
+        ));
+    }
+
+    repoint_scope_if_stale(exo, scope_name, current, wanted_filter, warnings).await;
+
+    // PROVE the repoint landed. `repoint_scope_if_stale` is documented as never
+    // fatal — it warns and leaves the scope as it was, which is the safe
+    // direction for a caller that stops there. This caller does not stop: it
+    // goes on to assign roles and strip grants, so a warning is not enough.
+    let after = exo
+        .get_management_scope(scope_name)
+        .await?
+        .and_then(|s| s.recipient_filter);
+    match after.as_deref() {
+        Some(f) if scope_filter_agrees(f, wanted_filter) => Ok(f.to_string()),
+        _ => Err(UiError::validation(
+            "scope_filter_mismatch",
+            format!(
+                "management scope “{scope_name}” still does not confine access to the groups this \
+                 migration computed after attempting to repoint it, so the app's roles were NOT \
+                 assigned and its org-wide grants were left in place. Nothing this app can reach \
+                 has changed. Inspect the scope in Exchange."
+            ),
+        )),
+    }
+}
+
 /// Points an existing management scope at `wanted_filter` when its current
 /// filter names a different group set. A no-op when the scope is already right.
 /// Never fatal: a failed repoint leaves the scope as it was, which is the
@@ -2054,6 +2147,26 @@ async fn migrate_one(
                 "the legacy policy would be kept until every org-wide grant is re-scoped".into(),
             );
         }
+        // Say so when a scope ALREADY exists and confines something else.
+        // The plan reports the filter this run computed; `ensure_management_scope`
+        // is create-only, so on a real run that computed filter may never be
+        // applied. Without this the plan promised a confinement the migration
+        // would then refuse (or, before the refusal existed, silently not
+        // deliver) — an operator approving the plan could not see the difference.
+        if let Some(current) = existing_filter.as_deref() {
+            let current_groups = scope_groups_in_filter(current);
+            let wanted_dns = group_dns_in_filter(&scope_filter);
+            if !current_groups.complete || current_groups.dns != wanted_dns {
+                warnings.push(format!(
+                    "a management scope “{scope_name}” already exists and confines access to a \
+                     different set of groups than this plan computed. Its filter is ({current}). \
+                     Exchange keeps an existing scope rather than replacing it, so the migration \
+                     will repoint it only if the group consolidation verifies and no explicit \
+                     scope name was supplied — otherwise it will refuse this app and change \
+                     nothing."
+                ));
+            }
+        }
         return Ok(AapMigrationItem {
             app_id: app_id.to_string(),
             source_policy_identities: identities.clone(),
@@ -2080,16 +2193,19 @@ async fn migrate_one(
     exo.ensure_management_scope(&scope_name, &scope_filter)
         .await?;
     // `ensure_management_scope` is create-only, so a RE-RUN (or a scope left by
-    // an earlier partial migration) would keep an old filter and silently drop
-    // the consolidation. Repoint it — but only a scope this tenant's pattern
-    // names for THIS app: an operator-supplied `scope_override` may be shared
-    // with other apps, and rewriting that would change their reach too.
-    if let Some(current) = existing_filter.as_deref()
-        && consolidation.consolidated
-        && scope_override.is_none()
-    {
-        repoint_scope_if_stale(exo, &scope_name, current, &scope_filter, &mut warnings).await;
-    }
+    // an earlier partial migration) keeps an OLD filter. Establish what Exchange
+    // actually has before assigning any role against it — and refuse the app
+    // outright when that is not what this migration computed and we are not
+    // permitted to repoint it.
+    let live_filter = reconcile_scope_filter(
+        exo,
+        &scope_name,
+        existing_filter.as_deref(),
+        &scope_filter,
+        consolidation.consolidated && scope_override.is_none(),
+        &mut warnings,
+    )
+    .await?;
     exo.ensure_service_principal(app_id, &entra_sp.id, &entra_sp.display_name)
         .await?;
 
@@ -2173,7 +2289,13 @@ async fn migrate_one(
         app_id: app_id.to_string(),
         source_policy_identities: identities,
         scope_name: Some(scope_name),
-        scope_filter: Some(scope_filter),
+        // The filter Exchange ACTUALLY has, not the one this run computed.
+        // `ensure_management_scope` is create-only, so the two can differ — and
+        // reporting the computed one told the operator the app was confined to
+        // groups it was not. `reconcile_scope_filter` has already refused the
+        // app outright if the divergence could not be corrected, so by here this
+        // is both live and correct.
+        scope_filter: Some(live_filter),
         managed_group_name: Some(consolidation.group_name),
         members_copied: consolidation.copied,
         members_unverified: consolidation.unverified,
@@ -2770,6 +2892,51 @@ mod tests {
             MICROSOFT_GRAPH_APP_ID
         )]));
         assert!(!mailbox_resources_complete(&[]));
+    }
+
+    /// A pre-existing scope confining a DIFFERENT group set is not agreement.
+    ///
+    /// This is the comparison behind the fail-closed guard. Before it, the
+    /// migration assigned roles against whatever scope was already there
+    /// whenever it was not permitted to repoint — so the app's live mailbox
+    /// reach became that stale scope's, its org-wide grants were stripped, the
+    /// legacy policy was deleted, and the report printed the filter this run had
+    /// computed rather than the one in force.
+    #[test]
+    fn a_divergent_or_unreadable_scope_filter_is_never_agreement() {
+        let wanted =
+            azapptoolkit_exchange::client::member_of_group_filter(&["CN=Managed,DC=x".to_string()]);
+
+        // Same group set, different formatting: Exchange normalizes OPATH, so
+        // this must NOT read as divergent or every re-run would refuse.
+        assert!(scope_filter_agrees(
+            "(MemberOfGroup  -eq  'CN=Managed,DC=x')",
+            &wanted
+        ));
+
+        // A different group set is the case that used to sail through.
+        assert!(!scope_filter_agrees(
+            "MemberOfGroup -eq 'CN=SomethingElse,DC=x'",
+            &wanted
+        ));
+
+        // A superset is still divergent — wider, and still not what was asked.
+        assert!(!scope_filter_agrees(
+            "MemberOfGroup -eq 'CN=Managed,DC=x' -or MemberOfGroup -eq 'CN=Extra,DC=x'",
+            &wanted
+        ));
+
+        // Unreadable is never agreement: an unstatable reach cannot be asserted
+        // equal to an intended one.
+        assert!(!scope_filter_agrees(
+            "MemberOfGroup -like 'CN=Managed,DC=x'",
+            &wanted
+        ));
+        assert!(!scope_filter_agrees(
+            "RecipientTypeDetails -eq 'UserMailbox'",
+            &wanted
+        ));
+        assert!(!scope_filter_agrees("", &wanted));
     }
 
     /// The migration refuses a pre-existing scope that confines nothing.

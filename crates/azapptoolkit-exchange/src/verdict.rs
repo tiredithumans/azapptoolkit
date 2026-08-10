@@ -70,10 +70,28 @@ pub fn verdict_from_rows(rows: &[&ExoAuthorizationResult]) -> MailPermissionScop
     if rows.is_empty() || rows.iter().any(|r| is_org_wide_auth_row(r)) {
         return MailPermissionScope::OrgWide;
     }
-    let scope_name = rows
+    // Every DISTINCT scope named across the rows, not the first one found.
+    //
+    // A principal can hold the same Exchange role through more than one scoped
+    // assignment, and its effective reach is then the UNION of those scopes.
+    // Reporting whichever row Exchange happened to return first named one scope
+    // as *the* scope — so the operator saw a narrower confinement than the
+    // principal actually had, and the scope shown was decided by response order.
+    // Naming them all keeps the verdict a statement about reach rather than
+    // about ordering.
+    let mut names: Vec<String> = rows
         .iter()
-        .find_map(|r| r.allowed_resource_scope.clone())
-        .filter(|s| !s.trim().is_empty());
+        .filter_map(|r| r.allowed_resource_scope.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    let scope_name = match names.len() {
+        0 => None,
+        1 => names.pop(),
+        _ => Some(names.join(", ")),
+    };
     MailPermissionScope::Scoped {
         scope_name,
         recipient_filter: None,
@@ -210,6 +228,57 @@ pub fn reconcile_orgwide_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two scoped assignments mean the reach is the UNION, and the verdict must
+    /// name both rather than whichever row Exchange returned first.
+    ///
+    /// A principal can hold one Exchange role through more than one scoped
+    /// assignment. Reporting only the first named scope understated the reach
+    /// AND made the answer depend on response ordering, so the same tenant could
+    /// describe itself differently between two runs.
+    #[test]
+    fn several_distinct_scopes_are_all_named() {
+        let a = row(
+            Some("Application Mail.Read"),
+            None,
+            Some("scope_a"),
+            Some("CustomRecipientScope"),
+        );
+        let b = row(
+            Some("Application Mail.Read"),
+            None,
+            Some("scope_b"),
+            Some("CustomRecipientScope"),
+        );
+        match verdict_from_rows(&[&a, &b]) {
+            MailPermissionScope::Scoped { scope_name, .. } => {
+                let named = scope_name.expect("a scoped verdict names its scope");
+                assert!(
+                    named.contains("scope_a") && named.contains("scope_b"),
+                    "{named}"
+                );
+            }
+            other => panic!("expected Scoped, got {other:?}"),
+        }
+        // Order must not change the answer.
+        let forward = verdict_from_rows(&[&a, &b]);
+        let reverse = verdict_from_rows(&[&b, &a]);
+        assert_eq!(forward, reverse, "the verdict must not depend on row order");
+
+        // One scope repeated is still one scope, not a list.
+        let dup = row(
+            Some("Application Mail.Read"),
+            None,
+            Some("scope_a"),
+            Some("CustomRecipientScope"),
+        );
+        match verdict_from_rows(&[&a, &dup]) {
+            MailPermissionScope::Scoped { scope_name, .. } => {
+                assert_eq!(scope_name.as_deref(), Some("scope_a"));
+            }
+            other => panic!("expected Scoped, got {other:?}"),
+        }
+    }
 
     fn row(
         role: Option<&str>,
