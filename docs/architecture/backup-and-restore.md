@@ -67,12 +67,21 @@ multi-authority auth.
 `TenantBackup` is versioned (`schema_version` / `BACKUP_SCHEMA_VERSION`) and
 records the source `cloud` (`CloudEnvironment::as_str()`); restore rejects a
 **cross-cloud** manifest (endpoints and well-known appIds differ) and *warns* on
-a tenant mismatch (that mismatch is the expected DR case). Three object classes:
+a tenant mismatch (that mismatch is the expected DR case).
+
+Restore also refuses a manifest whose `schema_version` is **newer** than this
+build's (`check_manifest_schema`). A restore is not a read — it mutates the
+tenant before anyone can inspect the result — so a manifest carrying fields this
+build cannot interpret must be rejected, not partially applied. Only the future
+direction is refused: every field is `serde(default)` and additive, so an older
+manifest restores correctly, which is the DR case the version field exists for.
+
+Three object classes:
 
 - `AppRegistrationBackup` — full config: manifest (`required_resource_access`),
   Expose-an-API (`identifier_uris`, `api_scopes`, `pre_authorized_applications`),
   authentication (redirect URIs + implicit-grant flags), `federated_credentials`
-  (restorable verbatim), `owners` (by `PrincipalRef`), credential **metadata**,
+  (see below), `owners` (by `PrincipalRef`), credential **metadata**,
   and an `admin_consent_granted` flag (drives re-consent).
 - `EnterpriseAppBackup` — identity + flags + foreign-tenant info + paired
   app-registration ref; assignees and held app-roles are resource-relative.
@@ -138,12 +147,28 @@ dependencies resolve:
    first-party appIds survive, custom ones remapped, permission ids preserved),
    identifier URIs (`rewrite_identifier_uris`: `api://{old}` → `api://{new}`),
    Expose-an-API scopes (ids preserved) + pre-authorized apps (remapped),
-   authentication, federated credentials (verbatim), owners (`resolve_principal`
+   authentication, federated credentials (validated + reported, below), owners (`resolve_principal`
    by UPN / display name — unresolved are reported), and secret regeneration
    (`add_password`, show-once values into the report). Every step is
    best-effort: a failure is a per-app warning, not a run failure.
 3. **Re-consent** — `grant_admin_consent_core` per app that had consent, run
    *after* all apps are wired so a custom resource's SP + scopes already exist.
+
+**Federated identity credentials are the one thing a manifest can carry that
+grants standing access with no secret at all**: whoever controls the named
+issuer can mint tokens as the restored app, indefinitely, and there is no
+expiry to notice. A manifest is a *file*, and the operator restoring it may not
+be the person who wrote it. So pass 2 treats each one as untrusted input:
+
+- It is validated through `core::federation::validate_federated_credential` —
+  the same check the interactive editor uses, and the reason that check lives in
+  `core` rather than in one command. A rejected credential becomes a per-app
+  warning naming why; the rest of the app still restores.
+- Each one that *is* created is reported as a `ManualItem` naming its issuer and
+  subject. Graph never validates a federated identity credential (Microsoft
+  documents that a wrong issuer "is created successfully without error", failing
+  only later at token exchange), so a planted trust is otherwise invisible.
+  `wire_application` returns these alongside the `RestoredApp` for that reason.
 
 It refuses a **cross-cloud** manifest outright, resets/polls `dr_cancel` (a
 cancel stops creating *new* apps but still finishes wiring the created ones —

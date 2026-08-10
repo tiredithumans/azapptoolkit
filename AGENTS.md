@@ -19,7 +19,7 @@ warns past 28 000 bytes. **Read the linked doc before editing that subsystem.**
 
 ## Skills
 
-In `.claude/skills/`, activated by the trigger text: **ship** (`"ship"`/`"land this"` → commit → PR → CI → merge → cleanup) · **feature** (`"feature X"` → branch + command stub + binding) · **repo-review** (`"repo review"` → diff, verify gates, commit + tenant-cache checks) · **release** (`"release"` → bump the 3 manifests, finalize CHANGELOG, tag, verify draft) · **debug** (`"debug X"` → Tauri + Leptos WASM diagnosis).
+In `.claude/skills/`, activated by the trigger text: **ship** (`"ship"`/`"land this"` → commit → PR → CI → merge → cleanup) · **feature** (`"feature X"` → branch + command stub + binding) · **repo-review** (`"repo review"` → diff, verify gates, commit + tenant-cache checks) · **release** (`"release"` → bump manifests, finalize CHANGELOG, tag, verify draft) · **debug** (`"debug X"` → Tauri + Leptos WASM diagnosis).
 
 Read the deep-dive in `docs/architecture/` before editing that subsystem:
 - Auth / token / consent / re-auth → [auth-and-consent.md](docs/architecture/auth-and-consent.md)
@@ -194,14 +194,17 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Auto-update is interactive (not silent).** The front-end checks once on launch and toasts a notification whose action opens `UpdateSplash` (explicit **Update & restart**). **Don't reintroduce a silent background `download_and_install` in `lib.rs` setup** — it would race the prompt. Details: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
 
-- **Release is a 3-OS matrix → one aggregated `latest.json`.** `guard` → `build` matrix → `release` assembles one draft; a human publishes. CHANGELOG headers are `## [X.Y.Z] - YYYY-MM-DD` (**no `v` prefix, ASCII hyphen, one space**) — **two** parsers depend on it (PowerShell in `release.yml`, Rust in `web-rs/build.rs`), so `repo_invariants.rs` checks the format. Releases ≤ 0.19.2 sit in `docs/CHANGELOG-archive.md`. Matrix: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
+- **Release is a 3-OS matrix → one aggregated `latest.json`.** `guard` → `build` matrix → `release` assembles one draft; a human publishes. CHANGELOG headers are `## [X.Y.Z] - YYYY-MM-DD` (**no `v` prefix, ASCII hyphen, one space**) — **two** parsers depend on it (PowerShell in `release.yml`, Rust in `web-rs/build.rs`), so `repo_invariants.rs` checks the format. Matrix: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
 
 - **CSP governs the *webview*, not backend egress.** `connect-src` in `tauri.conf.json` restricts only WASM frontend fetches; backend reqwest calls to new hosts need no CSP change.
 
 - **Permissions catalog** is bundled at compile time from `azapptoolkit-permissions/data/`; unknown resources fall back to `resolve_resource_sp()`.
 
 
+
 - **Full-collection PATCH for `appRoles` / `oauth2PermissionScopes`.** Graph **full-replaces** these not-nullable arrays — re-read live state, mutate, write the whole array back (never merge a cached payload). Deleting an enabled entry needs two PATCHes: disable, then remove. Exposed **app roles** edit the **paired application** when one exists (else the SP) and round-trip as **raw JSON** so the `value: null` SAML default survives byte-for-byte. Bust with `invalidate_app_details` only.
+
+- **Auth trusts are validated wherever minted.** Federated credentials go through `core::federation` on **every** path (Graph accepts a bad issuer silently); SAML cert lifetimes are bounded. Pinned by `repo_invariants/trust.rs`.
 
 - **Crypto/encoding deps — no `rsa`; `rand`/`sha2`/`base64` majors pinned on purpose.** `cert.rs` uses `rcgen` on the `aws_lc_rs` backend specifically to keep `rsa` (RUSTSEC-2023-0071) out of the graph — **don't reintroduce it**. The three pins match what `oauth2` 5 + Tauri 2 + the reqwest stack resolve; bumping one nothing else follows only *adds* a duplicate major. Rationale + drop conditions live in `dependabot.yml`'s `ignore` blocks.
 
@@ -221,11 +224,11 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 Run the gates CI runs before declaring a change done, via the `/justfile` recipes — never hand-typed `cargo`. Steps 1–4 are `just verify` (which also attempts web-itest); the CI-only additions follow.
 
-5. **Frontend GUI tests** *(browser-gated)* — `just web-itest`: real Leptos views in a headless browser, Tauri IPC mocked; the frontend's only behavioural gate. Sharded because one binary exceeds what headless Chrome will instantiate — `just web-itest-size` enforces the ceiling. Renaming a CSS class / aria-label / on-screen text a test references fails CI. Sharding rules, the `strip` constraint and the `reset()` footgun: [frontend-workspace.md](docs/architecture/frontend-workspace.md).
+5. **Frontend GUI tests** *(browser-gated)* — `just web-itest`: real Leptos views in a headless browser, Tauri IPC mocked; the frontend's only behavioural gate. Sharded because one binary exceeds what headless Chrome will instantiate — `just web-itest-size` enforces the ceiling. Renaming a CSS class / aria-label / on-screen text a test references fails CI. Sharding + the `strip`/`reset()` footguns: [frontend-workspace.md](docs/architecture/frontend-workspace.md).
 
 6. **Dependency audit + deny** *(required CI checks)* — `audit`/`web-audit` (RustSec) + `deny`/`web-deny`; all four merge-blocking, all in `verify-full`.
 7. **actionlint** *(required CI check)* — lints the workflow YAML; runs CI-side (install locally to pre-check).
-8. **secrets + hooks** *(required CI check)* — shellcheck over `.claude/hooks/`, then `secrets-scanner.sh` in `block` mode over the **whole history**. Never gated on the change detector: a docs-only diff can still commit a key.
+8. **secrets + hooks** *(required CI check)* — shellcheck `.claude/hooks/`, then `secrets-scanner.sh` in `block` mode over the **whole history**. Never gated on the change detector — a docs-only diff can commit a key.
 9. **CodeQL** *(GitHub-side)* — security queries, build-mode `none`. Known limitation: CodeQL 2.25.6 doesn't expand macros here (~39% calls-with-call-target); expected, non-failing. Config: `.github/codeql/codeql-config.yml`.
 
 For behavior changes not provable by unit test, run `just dev` and exercise the view.

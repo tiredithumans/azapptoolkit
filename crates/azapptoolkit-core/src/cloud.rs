@@ -143,6 +143,23 @@ impl CloudEnvironment {
         }
     }
 
+    /// The `aud` value Entra requires in an external token presented for
+    /// workload-identity-federation token exchange — the recommended value for
+    /// a federated identity credential's `audiences`.
+    ///
+    /// Cloud-specific: a commercial `api://AzureADTokenExchange` in a sovereign
+    /// tenant creates a credential Graph accepts without error and that then
+    /// fails, silently, at exchange time. DoD is served by the US Government
+    /// cloud here, as it is for the login authority.
+    /// <https://learn.microsoft.com/entra/workload-id/workload-identity-federation-config-app-trust-managed-identity>
+    pub fn token_exchange_audience(&self) -> &'static str {
+        match self {
+            Self::Commercial => "api://AzureADTokenExchange",
+            Self::UsGov | Self::UsGovDod => "api://AzureADTokenExchangeUSGov",
+            Self::China => "api://AzureADTokenExchangeChina",
+        }
+    }
+
     /// Azure Monitor Logs query API origin — both the Log Analytics `.default`
     /// scope audience and the query base host (`{resource}/v1/workspaces/...`).
     /// Commercial uses the current `api.loganalytics.azure.com` (the legacy

@@ -1,36 +1,32 @@
-# Changelog
-
-All notable changes to azapptoolkit are documented here. The format
-follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
-the project adheres to
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-Older releases (**0.19.2 and earlier**) live in
-[docs/CHANGELOG-archive.md](docs/CHANGELOG-archive.md).
-
 ## [Unreleased]
 
-### Internal
+### Security
 
-- **The mailbox permission checks that could not see which resource a grant was
-  on are gone.** Both Microsoft Graph and the legacy Office 365 Exchange Online
-  resource publish permissions with the same names, and only Graph's can be
-  confined to specific mailboxes — so a check that looked at the name alone
-  called an unconfinable grant confinable. Deprecating them had not worked:
-  they were still re-exported in a way that suppressed the warning for anyone
-  using them. They are deleted, the three remaining callers now state the
-  resource they were already relying on, and a build check fails if one
-  reappears.
-- **Secret scanning now blocks a merge, and knows Azure secrets.** The check ran
-  on every pull request and could not stop one: it was not among the required
-  checks, so a run that found a committed key was advisory. It is now required
-  (8 checks, not 7) — and it always runs, including on documentation-only
-  changes, because those can commit a key too. Separately, the scanner's own
-  pattern set — used whenever `gitleaks` is not installed, which is the normal
-  local case — knew AWS, Google, GitHub, GitLab, Slack and OpenAI key shapes and
-  **not a single Azure one**, in a tool whose entire subject is Entra
-  credentials. It now recognises storage and Service Bus connection strings, SAS
-  signatures, bearer tokens and Entra client secrets.
+- **Restoring a backup no longer imports sign-in trusts unchecked.** A backup
+  file can carry federated identity credentials — the setting that lets an
+  outside system sign in as an application **with no secret and no expiry**.
+  Restore replayed them verbatim, so a manifest that had been tampered with
+  could hand an outside party permanent access to a restored app, and nothing
+  in the report would have said so. Every credential is now validated the same
+  way the app's own editor validates one, and every credential that *is* created
+  is listed in the restore report with its issuer and subject, so you can
+  confirm each one belongs. Microsoft Entra accepts a bad issuer without an
+  error and only fails much later, at sign-in, so this check has to happen here.
+- **The same validation now applies when you add or edit a federated credential
+  by hand.** An issuer that isn't an `https` address, a wildcard, a stray space
+  that silently breaks sign-in, or a name Entra would reject are all refused up
+  front instead of becoming a credential that looks fine and never works.
+- **Restore refuses a backup written by a newer version.** The manifest has
+  always carried a schema version for this purpose but never checked it, so a
+  newer file was restored anyway — silently skipping settings this version does
+  not understand, after the apps had already been created. Older backups restore
+  as before.
+- **SAML signing certificates can no longer be given an unlimited lifetime.**
+  The certificate that proves a sign-in response came from Entra could be minted
+  with any lifetime at all, including one far beyond the three years Entra
+  permits — a certificate that in practice never expires and never has to be
+  re-established. Lifetimes are now bounded, and rejected before anything is
+  created rather than half-way through setting up the app.
 
 ### Fixed
 
@@ -88,6 +84,33 @@ Older releases (**0.19.2 and earlier**) live in
   expired, so an application holding one expired secret alongside one that never
   expires was described as "All credentials expired" — reading as a dead app,
   when in fact it held a permanent credential that never rotates.
+- **Federated credentials in US Gov and China tenants used the wrong default
+  audience.** The token-exchange audience differs per cloud, and the commercial
+  value was used everywhere. Entra accepted the credential and it then failed at
+  sign-in with nothing to indicate why. Sovereign builds now default to their
+  own audience.
+
+### Internal
+
+- **The mailbox permission checks that could not see which resource a grant was
+  on are gone.** Both Microsoft Graph and the legacy Office 365 Exchange Online
+  resource publish permissions with the same names, and only Graph's can be
+  confined to specific mailboxes — so a check that looked at the name alone
+  called an unconfinable grant confinable. Deprecating them had not worked:
+  they were still re-exported in a way that suppressed the warning for anyone
+  using them. They are deleted, the three remaining callers now state the
+  resource they were already relying on, and a build check fails if one
+  reappears.
+- **Secret scanning now blocks a merge, and knows Azure secrets.** The check ran
+  on every pull request and could not stop one: it was not among the required
+  checks, so a run that found a committed key was advisory. It is now required
+  (8 checks, not 7) — and it always runs, including on documentation-only
+  changes, because those can commit a key too. Separately, the scanner's own
+  pattern set — used whenever `gitleaks` is not installed, which is the normal
+  local case — knew AWS, Google, GitHub, GitLab, Slack and OpenAI key shapes and
+  **not a single Azure one**, in a tool whose entire subject is Entra
+  credentials. It now recognises storage and Service Bus connection strings, SAS
+  signatures, bearer tokens and Entra client secrets.
 
 ## [0.25.1] - 2026-08-09
 
