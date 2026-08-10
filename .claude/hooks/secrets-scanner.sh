@@ -53,6 +53,31 @@ pattern="$pattern"'|xox[baprs]-[A-Za-z0-9-]+'               # Slack token
 pattern="$pattern"'|sk-[A-Za-z0-9]{32,}'                    # OpenAI / Anthropic-style key
 pattern="$pattern"'|-----BEGIN [A-Z ]*PRIVATE KEY-----'     # PEM private key
 
+# Azure / Entra ID — the secret types THIS app handles. Their absence was the
+# gap: a toolkit whose whole subject is app-registration credentials scanned for
+# AWS and Slack keys and not for the one it actually mints. CI installs gitleaks
+# (which knows these), so this set is what a contributor running the hook
+# locally without gitleaks gets.
+#
+# Shapes below are from Microsoft's own documentation, except where noted.
+# A storage account key is a 512-bit key, so 88 base64 characters ending "==".
+pattern="$pattern"'|AccountKey=[A-Za-z0-9+/]{86}=='           # storage connection string
+# Service Bus / Event Hub / Relay connection string.
+pattern="$pattern"'|SharedAccessKey=[A-Za-z0-9+/]{43}='
+# A SAS signature: base64 HMAC-SHA256 (44 chars), commonly URL-encoded, and
+# always a query parameter alongside the required sv= / se= fields.
+pattern="$pattern"'|[?&]sig=[A-Za-z0-9%+/=_-]{43,}'
+pattern="$pattern"'|SharedAccessSignature[ =]sig=[A-Za-z0-9%+/=_-]{43,}'
+# A bearer token: the two JWT headers, {"typ":"JWT" and {"alg":, base64url'd.
+# Length-bounded so a doc mentioning the prefix is not a hit.
+pattern="$pattern"'|eyJ0eXAiOiJKV1Qi[A-Za-z0-9_-]{24,}'
+pattern="$pattern"'|eyJhbGciOi[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{24,}'
+# Entra application client secret. HEURISTIC, not a documented format:
+# Microsoft does not publish the layout, but current secret values carry a "Q~"
+# marker a few characters in, which is what every scanner keys on. An older
+# secret without it is caught only by gitleaks.
+pattern="$pattern"'|[A-Za-z0-9._~-]{3}[0-9]Q~[A-Za-z0-9._~-]{31,34}'
+
 hits=""
 while IFS= read -r f; do
   [ -z "$f" ] && continue
