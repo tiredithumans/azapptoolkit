@@ -896,7 +896,8 @@ impl Cache {
 
     /// Returns the typed value (a refcount clone — no deserialize) when present,
     /// unexpired, and stored via [`Self::put_typed`] as the same `T`. A type
-    /// mismatch or an untyped entry reads as a miss.
+    /// mismatch or an untyped entry reads as a miss — and **only** a miss: see
+    /// the `None` arm.
     pub fn get_typed<T: Send + Sync + 'static>(
         &self,
         kind: CacheKind,
@@ -909,11 +910,31 @@ impl Cache {
                 Some(arc)
             }
             None => {
-                // Drop it, exactly as `get` does on a failed deserialize: an
-                // entry that can never downcast will never serve a hit, and
-                // `lookup` just touched it — so leaving it refreshes its own LRU
-                // position and, if pinned, keeps the slot until TTL.
-                self.buckets[kind.idx()].lock().remove(key);
+                // Miss, and leave the entry alone — the mirror of the wrong-door
+                // rule `get` already follows.
+                //
+                // This arm is reached in two ways, and NEITHER means the entry
+                // is unusable. The stored payload is untyped (a plain `put` /
+                // `put_index` entry, which has no `typed` body at all), or it is
+                // typed as some other `T` — in both cases it still serves every
+                // caller coming through the right door. It is *this* read that
+                // is wrong.
+                //
+                // Removing it made one read through the wrong accessor
+                // permanently evict a pinned tenant-wide index, the exact
+                // failure `get` was fixed for: pinned entries are exempt from
+                // LRU precisely so they survive pressure, and a `remove` here
+                // discards that protection on a caller's mistake. Every surface
+                // then pays for a full directory rescan.
+                //
+                // There is no poisoned case to clean up on this path. Unlike
+                // `get`, nothing is being decoded: a downcast either matches or
+                // it does not, so a failure says nothing about the entry's
+                // integrity.
+                tracing::warn!(
+                    "`get_typed` against an entry stored untyped or as another type; \
+                     use the matching accessor. Entry kept."
+                );
                 self.record(kind, false);
                 None
             }
@@ -1442,26 +1463,6 @@ mod tests {
     }
 
     #[test]
-    fn get_typed_drops_a_poisoned_entry_rather_than_re_reading_it() {
-        // `get` already did this; `get_typed` recorded the miss and left the
-        // entry in place — and `lookup` had just touched it, so a pinned one
-        // survived to TTL while never serving a hit.
-        let cache = Cache::new();
-        cache.put_typed_index(CacheKind::Lists, "t1|idx".into(), Arc::new(vec![1u8]));
-        // Wrong type: cannot downcast.
-        assert!(
-            cache
-                .get_typed::<String>(CacheKind::Lists, "t1|idx")
-                .is_none()
-        );
-        assert_eq!(
-            entry_count(&cache, CacheKind::Lists),
-            0,
-            "a value that can never downcast must be dropped, not retained"
-        );
-    }
-
-    #[test]
     fn lowering_max_size_also_shrinks_the_two_per_object_buckets() {
         // `cap_for` clamped ServicePrincipal/Lists up to the per-object ceiling
         // unconditionally, so the operator's setting was a no-op for exactly
@@ -1810,6 +1811,46 @@ mod tests {
         }
         let index: Option<Sample> = cache.get(CacheKind::Permissions, "t1|sp_index");
         assert_eq!(index, Some(Sample("index".into())));
+    }
+
+    /// A read through the WRONG accessor misses; it never destroys the entry.
+    ///
+    /// The twin of the `get` rule below. `put_typed` stores `Value::Null` as its
+    /// untyped body and `put_index` stores no typed body at all, so each is
+    /// guaranteed to fail through the other's door — which made a single
+    /// mistaken read permanently evict a pinned tenant-wide index, the thing
+    /// pinning exists to protect, and sent every surface into a full rescan.
+    #[test]
+    fn a_read_through_the_wrong_accessor_never_evicts_the_entry() {
+        let cache = Cache::new();
+        // Untyped + pinned, the shape `put_index` gives a tenant-wide index.
+        cache.put_index(CacheKind::Lists, "t1|sp_index".into(), &Sample("a".into()));
+        assert!(
+            cache
+                .get_typed::<Vec<u32>>(CacheKind::Lists, "t1|sp_index")
+                .is_none(),
+            "an untyped entry has no typed body to hand back"
+        );
+        assert_eq!(
+            cache.get::<Sample>(CacheKind::Lists, "t1|sp_index"),
+            Some(Sample("a".into())),
+            "the wrong-door read must not have destroyed the index"
+        );
+
+        // Typed + pinned, read as a different `T`.
+        cache.put_typed_index(CacheKind::Lists, "t1|corpus".into(), Arc::new(vec![1u32]));
+        assert!(
+            cache
+                .get_typed::<Vec<String>>(CacheKind::Lists, "t1|corpus")
+                .is_none()
+        );
+        assert_eq!(
+            cache
+                .get_typed::<Vec<u32>>(CacheKind::Lists, "t1|corpus")
+                .as_deref(),
+            Some(&vec![1u32]),
+            "a type-mismatched read must not have destroyed the index either"
+        );
     }
 
     /// Pinning is an LRU exemption only — an explicit tenant sweep still drops
