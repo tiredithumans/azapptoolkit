@@ -82,7 +82,7 @@ docs/CHANGELOG-archive.md            # releases <= 0.19.2 (split out of CHANGELO
 
 - **Audit scoring rule** — implement in `azapptoolkit-core::audit` with a table-driven test citing the legacy PowerShell `file:line`. A rule that shifts ranking needs a CHANGELOG note — operators watch these scores.
 
-- **Audit remediation (one-click "Fix")** — only for findings with a safe, existing mutation (additive like AddOwner or reversible like DisableSignIn also qualify); handler **re-resolves live state**. Scorer-attached via `build_remediations`, except `DisableSignIn` (runner post-pass). `AddOwner` + `MigrateApplicationAccessPolicy` have **no dedicated handler** — they reuse `add_application_owner` / `migrate_application_access_policies` (appId-keyed, plan-first). Full pattern: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
+- **Audit remediation (one-click "Fix")** — only for findings with a safe, existing mutation (additive/reversible qualifies); the handler **re-resolves live state**. Which are scorer-attached, which reuse an existing core, and the `DisableSignIn` post-pass: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
 ## Canonical commands
 
@@ -124,7 +124,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Tauri commands:** `#[tauri::command] async fn` → `State<'_, AppState>` → `Result<T, UiError>`. Must be in `generate_handler![]` AND have a typed stub calling `invoke_result()`. Frontend args use `#[serde(rename_all = "camelCase")]`.
 
-- **Tenant-scoped caches — cross-tenant leakage is the #1 footgun.** Keys are `{tenant_id}|{kind}`, never unscoped; sign-out calls `invalidate_prefix` for **every** kind. The two tenant-wide indexes are *typed* and pinned — read via `sp_index_*`/`app_name_index_*`/`indexes_cached` (a wrong-door read = silent miss + rescan; it never evicts). A command answering from cache **alone** must prove the session (`tenant_context`) — every other read proves it by needing a token. Never pin a per-object key (pinned by `repo_invariants.rs`); bound bulk seeding by `capacity_for`. Details: [caching-and-search.md](docs/architecture/caching-and-search.md).
+- **Tenant-scoped caches — cross-tenant leakage is the #1 footgun.** Keys are `{tenant_id}|{kind}`, never unscoped; sign-out calls `invalidate_prefix` for **every** kind. The two tenant-wide indexes are *typed* and pinned — read via `sp_index_*`/`app_name_index_*`/`indexes_cached` (a wrong-door read = silent miss + rescan; it never evicts). A cache-**only** command must prove the session (`tenant_context`); every other read proves it by needing a token. Never pin a per-object key (pinned by `repo_invariants.rs`); bound bulk seeding by `capacity_for`. Details: [caching-and-search.md](docs/architecture/caching-and-search.md).
 
 - **Invalidate caches only on `Ok`.** SP/app-reg mutation → `invalidate_app_lists(...)`; **credential-only** → `invalidate_app_credentials(...)` (keeps the indexes). A pinned index takes `generation_for(kind, key)` **before** the fetch (an owned `IndexWatch`, per KEY, released on drop) and stores via `*_if_current`. All pinned in `repo_invariants.rs`. Details: [caching-and-search.md](docs/architecture/caching-and-search.md).
 
@@ -219,9 +219,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 ## Verification playbook
 
-Run the same gates CI runs before declaring a change done. `just verify` is the machine-independent core; `just verify-full` adds full CI parity. Use recipe flags from `/justfile`, don't hand-type raw `cargo` invocations.
-
-Steps 1–4 are `just verify` (see **Canonical commands**); it also attempts web-itest. The CI-only additions below:
+Run the gates CI runs before declaring a change done, via the `/justfile` recipes — never hand-typed `cargo`. Steps 1–4 are `just verify` (which also attempts web-itest); the CI-only additions follow.
 
 5. **Frontend GUI tests** *(browser-gated)* — `just web-itest`: real Leptos views in a headless browser, Tauri IPC mocked; the frontend's only behavioural gate. Sharded because one binary exceeds what headless Chrome will instantiate — `just web-itest-size` enforces the ceiling. Renaming a CSS class / aria-label / on-screen text a test references fails CI. Sharding rules, the `strip` constraint and the `reset()` footgun: [frontend-workspace.md](docs/architecture/frontend-workspace.md).
 

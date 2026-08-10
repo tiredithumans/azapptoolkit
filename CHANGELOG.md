@@ -1,27 +1,4 @@
-# Changelog
-
-All notable changes to azapptoolkit are documented here. The format
-follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
-the project adheres to
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-Older releases (**0.19.2 and earlier**) live in
-[docs/CHANGELOG-archive.md](docs/CHANGELOG-archive.md).
-
 ## [Unreleased]
-
-### Internal
-
-- **Secret scanning now blocks a merge, and knows Azure secrets.** The check ran
-  on every pull request and could not stop one: it was not among the required
-  checks, so a run that found a committed key was advisory. It is now required
-  (8 checks, not 7) — and it always runs, including on documentation-only
-  changes, because those can commit a key too. Separately, the scanner's own
-  pattern set — used whenever `gitleaks` is not installed, which is the normal
-  local case — knew AWS, Google, GitHub, GitLab, Slack and OpenAI key shapes and
-  **not a single Azure one**, in a tool whose entire subject is Entra
-  credentials. It now recognises storage and Service Bus connection strings, SAS
-  signatures, bearer tokens and Entra client secrets.
 
 ### Fixed
 
@@ -37,18 +14,6 @@ Older releases (**0.19.2 and earlier**) live in
   every other read it never needed a token — which meant the tenant id it was
   asked for was the only thing deciding whose data came back, and a stale one
   (after switching tenants, say) could show the previous tenant's findings.
-
-### Internal
-
-- Two guards that could not catch what they were written for: the rule keeping
-  pinned cache writes on tenant-wide keys stopped its search only at an
-  unindented function, so a key mentioned in an *earlier* function — or merely
-  named in a doc comment — excused an offending write; and nothing checked that
-  a cache-only command proves the session. Both are now enforced and tested
-  against the shapes that slipped past.
-
-### Fixed
-
 - **A legacy-policy migration can no longer point an app at the wrong mailboxes
   and call it done.** If a management scope already existed for the app and
   confined access to a *different* set of groups than the migration worked out,
@@ -103,6 +68,25 @@ Older releases (**0.19.2 and earlier**) live in
   expired, so an application holding one expired secret alongside one that never
   expires was described as "All credentials expired" — reading as a dead app,
   when in fact it held a permanent credential that never rotates.
+
+### Internal
+
+- **Secret scanning now blocks a merge, and knows Azure secrets.** The check ran
+  on every pull request and could not stop one: it was not among the required
+  checks, so a run that found a committed key was advisory. It is now required
+  (8 checks, not 7) — and it always runs, including on documentation-only
+  changes, because those can commit a key too. Separately, the scanner's own
+  pattern set — used whenever `gitleaks` is not installed, which is the normal
+  local case — knew AWS, Google, GitHub, GitLab, Slack and OpenAI key shapes and
+  **not a single Azure one**, in a tool whose entire subject is Entra
+  credentials. It now recognises storage and Service Bus connection strings, SAS
+  signatures, bearer tokens and Entra client secrets.
+- Two guards that could not catch what they were written for: the rule keeping
+  pinned cache writes on tenant-wide keys stopped its search only at an
+  unindented function, so a key mentioned in an *earlier* function — or merely
+  named in a doc comment — excused an offending write; and nothing checked that
+  a cache-only command proves the session. Both are now enforced and tested
+  against the shapes that slipped past.
 
 ## [0.25.1] - 2026-08-09
 
