@@ -25,6 +25,8 @@ use std::collections::HashMap;
 
 use tauri::{AppHandle, State};
 
+use azapptoolkit_core::cloud::CloudEnvironment;
+use azapptoolkit_core::federation::validate_federated_credential;
 use azapptoolkit_core::restore_plan::{
     remap_pre_authorized, remap_required_resource_access, rewrite_identifier_uris,
 };
@@ -43,9 +45,10 @@ use crate::commands::progress::emit_progress;
 use crate::dto::UiError;
 use crate::dto::applications::CreateApplicationInput;
 use crate::dto::backup::{
-    AppRegistrationBackup, CloudMismatch, EnterpriseAppBackup, ManagedIdentityBackup, ManualItem,
-    PrincipalRef, RegeneratedSecret, RestoreFailure, RestorePlan, RestoreReport, RestoredApp,
-    RestoredEnterpriseApp, RestoredManagedIdentity, TenantBackup,
+    AppRegistrationBackup, BACKUP_SCHEMA_VERSION, CloudMismatch, EnterpriseAppBackup,
+    ManagedIdentityBackup, ManualItem, PrincipalRef, RegeneratedSecret, RestoreFailure,
+    RestorePlan, RestoreReport, RestoredApp, RestoredEnterpriseApp, RestoredManagedIdentity,
+    TenantBackup,
 };
 use crate::dto::bulk::BulkProgress;
 use crate::state::AppState;
@@ -69,6 +72,30 @@ pub async fn plan_restore(
         tenant_id,
         state.auth.cloud().as_str(),
     ))
+}
+
+/// Refuses a manifest written by a *newer* build.
+///
+/// A restore is not a read — it mutates the tenant before anyone can inspect
+/// the result — so a manifest carrying fields this build cannot interpret has
+/// to be rejected rather than partially applied. `schema_version` exists for
+/// exactly this refusal and was never checked.
+///
+/// Only the future direction is rejected: every field is `serde(default)` and
+/// additive, so an older manifest restores correctly, and refusing one would
+/// break the DR case the format was versioned to support.
+fn check_manifest_schema(schema_version: u32) -> Result<(), UiError> {
+    if schema_version > BACKUP_SCHEMA_VERSION {
+        return Err(UiError::validation(
+            "schema_too_new",
+            format!(
+                "backup uses manifest schema version {schema_version} but this build understands \
+                 up to {BACKUP_SCHEMA_VERSION}. Restoring it could silently skip settings it does \
+                 not recognise — update azapptoolkit first."
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Pure dry-run analysis (no I/O): the counts plus the cloud/tenant checks
@@ -105,9 +132,12 @@ pub async fn restore_tenant(
     tenant_id: String,
     backup: TenantBackup,
 ) -> Result<RestoreReport, UiError> {
+    check_manifest_schema(backup.schema_version)?;
+
     // A cross-cloud restore is never valid: endpoints and well-known appIds
     // differ, so the remapped permissions would point at the wrong resources.
-    let dest_cloud = state.auth.cloud().as_str();
+    let cloud = state.auth.cloud();
+    let dest_cloud = cloud.as_str();
     if backup.cloud != dest_cloud {
         return Err(UiError::validation(
             "cloud_mismatch",
@@ -198,9 +228,10 @@ pub async fn restore_tenant(
         if session.is_dead() {
             break;
         }
-        report
-            .apps
-            .push(wire_application(&client, c, &app_id_remap, &mut principals, &session).await);
+        let (restored, trusts) =
+            wire_application(&client, c, &app_id_remap, &mut principals, &session, cloud).await;
+        report.apps.push(restored);
+        report.manual_items.extend(trusts);
     }
 
     // ---- Pass 3: re-consent (after all apps wired, so resources exist) ----
@@ -332,8 +363,13 @@ async fn wire_application(
     app_id_remap: &HashMap<String, String>,
     principals: &mut HashMap<String, Option<String>>,
     session: &SessionDead,
-) -> RestoredApp {
+    cloud: CloudEnvironment,
+) -> (RestoredApp, Vec<ManualItem>) {
     let app = &c.backup;
+    // Sign-in trusts this app gained from the manifest. Reported separately
+    // from `warnings`, because these are the steps that *succeeded* — and a
+    // secretless trust the operator did not intend is not visible any other way.
+    let mut trusts: Vec<ManualItem> = Vec::new();
     let mut out = RestoredApp {
         display_name: app.display_name.clone(),
         source_app_id: app.source_app_id.clone(),
@@ -411,13 +447,34 @@ async fn wire_application(
         }
     }
 
-    // Federated identity credentials — restored verbatim (no secret material).
+    // Federated identity credentials.
+    //
+    // These are the only thing a manifest can carry that grants standing access
+    // to the restored app **without any secret**: whoever controls the named
+    // issuer can mint tokens as it, indefinitely. The manifest is a file, and a
+    // file may not have been written by the operator restoring it — so each one
+    // is validated like any other untrusted input (`core::federation`, the same
+    // check the interactive editor uses), and each one that *is* created is
+    // named in the report rather than applied silently.
     for fic in &app.federated_credentials {
         let audiences = if fic.audiences.is_empty() {
-            vec!["api://AzureADTokenExchange".to_string()]
+            vec![cloud.token_exchange_audience().to_string()]
         } else {
             fic.audiences.clone()
         };
+        if let Err(reason) = validate_federated_credential(
+            Some(&fic.name),
+            &fic.issuer,
+            &fic.subject,
+            &audiences,
+            fic.description.as_deref(),
+        ) {
+            out.warnings.push(format!(
+                "federated credential '{}' was NOT restored — {reason}",
+                fic.name
+            ));
+            continue;
+        }
         let body = FederatedCredentialRequest {
             name: fic.name.clone(),
             issuer: fic.issuer.clone(),
@@ -431,6 +488,17 @@ async fn wire_application(
         {
             out.warnings
                 .push(format!("federated credential '{}': {e}", fic.name));
+        } else {
+            trusts.push(ManualItem {
+                display_name: format!("{} — federated credential '{}'", app.display_name, fic.name),
+                reason: format!(
+                    "Restored a secretless sign-in trust: anything presenting subject '{}' \
+                     from issuer '{}' can now obtain tokens as this application, with no \
+                     secret and no expiry. Confirm that external workload still exists and \
+                     should have this access in this tenant.",
+                    fic.subject, fic.issuer
+                ),
+            });
         }
     }
 
@@ -476,7 +544,7 @@ async fn wire_application(
         .map(|c| c.display_name.clone().unwrap_or_else(|| "(unnamed)".into()))
         .collect();
 
-    out
+    (out, trusts)
 }
 
 /// Default-access app role (the all-zero GUID) — present on every SP, so an
@@ -795,6 +863,18 @@ fn emit(app_handle: &AppHandle, done: usize, total: usize, current_app: Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_manifest_from_a_newer_build_is_refused_but_an_older_one_restores() {
+        // Older and current: additive, `serde(default)` fields — restoring one
+        // is the DR case the version field exists to support.
+        assert!(check_manifest_schema(0).is_ok());
+        assert!(check_manifest_schema(BACKUP_SCHEMA_VERSION).is_ok());
+        // Newer: this build cannot know what it would be dropping, and a
+        // restore mutates the tenant before anyone can look.
+        let err = check_manifest_schema(BACKUP_SCHEMA_VERSION + 1).unwrap_err();
+        assert_eq!(err.code, "schema_too_new");
+    }
 
     #[test]
     fn assignee_role_maps_default_passthrough_value_match_or_none() {

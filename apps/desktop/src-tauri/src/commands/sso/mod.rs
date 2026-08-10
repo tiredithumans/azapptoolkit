@@ -143,6 +143,11 @@ pub async fn create_saml_sso_application(
     if let Some(s) = input.cert_subject.as_deref().filter(|s| !s.is_empty()) {
         validate_cert_subject(s)?;
     }
+    // Same reason, same step: the certificate's lifetime is also only used at
+    // step 4, so it is bounded here rather than after the app exists.
+    // `configure_saml` resolves it again to get the value — it is a pure
+    // function of the input, and this call is the gate.
+    resolve_cert_lifetime_days(input.cert_lifetime_days)?;
 
     // Pre-acquire the claims-write token up front (only when needed) so a
     // missing-consent rejection surfaces as `consent_required` and the UI can
@@ -210,7 +215,7 @@ async fn configure_saml(
         .clone()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("CN={}", input.display_name));
-    let days = input.cert_lifetime_days.unwrap_or(365);
+    let days = resolve_cert_lifetime_days(input.cert_lifetime_days)?;
     let end = chrono::Utc::now() + chrono::Duration::days(days as i64);
     let cert = client
         .add_token_signing_certificate(sp_id, &subject, end)
@@ -392,6 +397,36 @@ fn validate_cert_subject(subject: &str) -> Result<(), UiError> {
             "certificate subject must start with 'CN=' (e.g. CN=Contoso SSO)",
         ))
     }
+}
+
+/// Graph's ceiling on a token-signing certificate: `endDateTime` "can be up to
+/// 3 years from the date the certificate is created". 1095 days is three years
+/// even across a leap day.
+const MAX_CERT_LIFETIME_DAYS: u32 = 1095;
+
+/// Default when the caller supplies none — matches Graph's own default (and the
+/// portal's) of three years.
+const DEFAULT_CERT_LIFETIME_DAYS: u32 = 365;
+
+/// Bounds a caller-supplied signing-certificate lifetime.
+///
+/// This certificate is what proves a SAML assertion came from Entra, so its
+/// lifetime is the window in which a stolen key stays useful — an unbounded
+/// value is a trust that never has to be re-established. Graph refuses past
+/// three years anyway; checking here turns a raw 400 into a typed rejection
+/// *before* any mutation, and keeps an absurd value out of
+/// `chrono::Duration::days`, which panics rather than saturating.
+fn resolve_cert_lifetime_days(days: Option<u32>) -> Result<u32, UiError> {
+    let days = days.unwrap_or(DEFAULT_CERT_LIFETIME_DAYS);
+    if days == 0 || days > MAX_CERT_LIFETIME_DAYS {
+        return Err(UiError::validation(
+            "invalid_cert_lifetime",
+            format!(
+                "certificate lifetime must be between 1 and {MAX_CERT_LIFETIME_DAYS} days                  (3 years, Entra's maximum); got {days}"
+            ),
+        ));
+    }
+    Ok(days)
 }
 
 /// Annotates an error message with the created object id so a partial failure
@@ -676,7 +711,7 @@ pub async fn rotate_saml_signing_certificate(
     lifetime_days: Option<u32>,
 ) -> Result<SsoCertResult, UiError> {
     let client = state.graph_for(&tenant_id);
-    let days = lifetime_days.unwrap_or(365);
+    let days = resolve_cert_lifetime_days(lifetime_days)?;
     let end = chrono::Utc::now() + chrono::Duration::days(days as i64);
     let subject = if subject.is_empty() {
         "CN=SSO".to_string()
@@ -873,6 +908,26 @@ pub async fn get_sso_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_signing_certificate_lifetime_is_bounded_by_entras_three_year_ceiling() {
+        // Default when none is supplied.
+        assert_eq!(resolve_cert_lifetime_days(None).unwrap(), 365);
+        assert_eq!(resolve_cert_lifetime_days(Some(1)).unwrap(), 1);
+        assert_eq!(
+            resolve_cert_lifetime_days(Some(MAX_CERT_LIFETIME_DAYS)).unwrap(),
+            MAX_CERT_LIFETIME_DAYS
+        );
+        // A certificate that never practically expires is a trust that never
+        // has to be re-established — and Graph refuses past three years anyway.
+        let err = resolve_cert_lifetime_days(Some(MAX_CERT_LIFETIME_DAYS + 1)).unwrap_err();
+        assert_eq!(err.code, "invalid_cert_lifetime");
+        // Zero would mint an already-expired certificate.
+        assert!(resolve_cert_lifetime_days(Some(0)).is_err());
+        // And an absurd value never reaches `chrono::Duration::days`, which
+        // panics rather than saturating.
+        assert!(resolve_cert_lifetime_days(Some(u32::MAX)).is_err());
+    }
 
     #[test]
     fn cert_subject_requires_cn_prefix() {
