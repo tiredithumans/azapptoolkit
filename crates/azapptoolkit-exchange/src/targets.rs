@@ -408,6 +408,15 @@ fn member_of_group_clauses(filter: &str) -> Vec<MemberClause> {
         let start = from + rel;
         let mut i = start + KEY.len();
         from = i;
+        // The key must be a whole property name, not the tail of a longer one.
+        // `find` matches a substring, so `NotMemberOfGroup -eq '…'` read as a
+        // plain `MemberOfGroup` clause — and `rewritable_scope_dns` would then
+        // see a pure OR-chain, blank the clause out, find no residue, and
+        // rewrite the filter WITHOUT the exclusion. That widens the scope's
+        // reach, in the one product area whose purpose is narrowing it.
+        if !starts_property(&lower, start) {
+            continue;
+        }
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
@@ -424,6 +433,12 @@ fn member_of_group_clauses(filter: &str) -> Vec<MemberClause> {
         let Some((dn, end)) = read_opath_literal(filter, i) else {
             continue;
         };
+        // A blank operand names no group. Accepting it produced a DN set of
+        // {""}, which is non-empty — so every "did this resolve to any group?"
+        // check downstream passed while the filter confined nothing.
+        if dn.trim().is_empty() {
+            continue;
+        }
         out.push(MemberClause {
             span: (start, end),
             dn,
@@ -431,6 +446,18 @@ fn member_of_group_clauses(filter: &str) -> Vec<MemberClause> {
         from = end;
     }
     out
+}
+
+/// Whether the `memberofgroup` occurrence at `at` starts a property name rather
+/// than ending a longer one (`NotMemberOfGroup`, `XMemberOfGroup`).
+///
+/// OPath property names are alphanumeric, so any alphanumeric immediately
+/// before the key means this is the tail of a different property.
+fn starts_property(lower: &str, at: usize) -> bool {
+    lower[..at]
+        .chars()
+        .next_back()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_')
 }
 
 /// The groups a management scope's recipient filter confines access to.
@@ -894,6 +921,71 @@ mod tests {
         let unparsed = "MemberOfGroup -like 'CN=a,DC=x'";
         assert_eq!(count_member_of_group(unparsed), 1);
         assert!(!scope_groups_in_filter(unparsed).complete);
+    }
+
+    /// A lookalike property and a blank operand must both REFUSE, not rewrite.
+    ///
+    /// `find` matches a substring, so `NotMemberOfGroup -eq '…'` used to read as
+    /// a plain `MemberOfGroup` clause; `rewritable_scope_dns` then saw a pure
+    /// OR-chain, blanked it out, found no residue, and would have rewritten the
+    /// filter WITHOUT the exclusion — widening the scope. And `-eq ''` produced
+    /// a DN set of `{""}`, non-empty, so every downstream "did that resolve to a
+    /// group?" check passed on a filter confining nothing.
+    ///
+    /// Note the fix is deliberately in `member_of_group_clauses` ALONE.
+    /// `count_member_of_group` still counts the lookalike, so the
+    /// `clauses.len() != count` check turns both cases into `UnparsedClause` and
+    /// the filter is refused. Anchoring the counter too would make the counts
+    /// agree again and the rewrite would proceed, dropping the exclusion — the
+    /// exact bug. Refusing is the correct outcome here, not a fallback.
+    #[test]
+    fn a_lookalike_property_or_a_blank_dn_refuses_the_rewrite() {
+        // Tail of a longer property name: not a MemberOfGroup clause.
+        let excl = "NotMemberOfGroup -eq 'CN=Blocked,DC=x'";
+        assert!(member_of_group_clauses(excl).is_empty());
+        assert_eq!(
+            rewritable_scope_dns(excl),
+            Err(UnrewritableFilter::NoGroupClauses)
+        );
+
+        // Mixed with a real clause: counts disagree, so the whole filter is
+        // refused rather than rewritten without the exclusion.
+        let mixed = "MemberOfGroup -eq 'CN=a,DC=x' -or NotMemberOfGroup -eq 'CN=b,DC=x'";
+        assert_eq!(member_of_group_clauses(mixed).len(), 1);
+        assert_eq!(
+            rewritable_scope_dns(mixed),
+            Err(UnrewritableFilter::UnparsedClause)
+        );
+        // ...and it must not read as a complete view of the groups either.
+        assert!(!scope_groups_in_filter(mixed).complete);
+
+        // A blank operand names no group. With it skipped there are no clauses
+        // at all, so this refuses as NoGroupClauses rather than UnparsedClause —
+        // a different arm, the same fail-closed outcome.
+        let blank = "MemberOfGroup -eq ''";
+        assert!(member_of_group_clauses(blank).is_empty());
+        assert_eq!(
+            rewritable_scope_dns(blank),
+            Err(UnrewritableFilter::NoGroupClauses)
+        );
+        assert!(scope_groups_in_filter(blank).dns.is_empty());
+        // Beside a real clause it is the counts-disagree arm instead.
+        let blank_mixed = "MemberOfGroup -eq 'CN=a,DC=x' -or MemberOfGroup -eq ''";
+        assert_eq!(
+            rewritable_scope_dns(blank_mixed),
+            Err(UnrewritableFilter::UnparsedClause)
+        );
+
+        // Whitespace-only is the same case.
+        assert!(member_of_group_clauses("MemberOfGroup -eq '   '").is_empty());
+
+        // The ordinary filters this crate writes are untouched.
+        let ok = crate::client::member_of_group_filter(&[
+            "CN=a,DC=x".to_string(),
+            "CN=b,DC=x".to_string(),
+        ]);
+        assert_eq!(member_of_group_clauses(&ok).len(), 2);
+        assert_eq!(rewritable_scope_dns(&ok).unwrap().len(), 2);
     }
 
     /// A non-ASCII character OUTSIDE a quoted literal must not panic.

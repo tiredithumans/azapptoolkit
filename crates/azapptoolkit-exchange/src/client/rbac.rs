@@ -119,6 +119,21 @@ impl ExchangeClient {
                  every role assignment using it to the whole organization."
             )));
         }
+        // Refuse a filter we cannot fully READ before the write, not after.
+        //
+        // The post-write proof below already rejects `!complete`, but by then the
+        // filter is live on every role assignment using this scope — the check
+        // could only report the damage, never prevent it. A filter this parser
+        // reads only partially is one whose reach we cannot state, and this is
+        // the sole mutator of that reach, so the honest moment to refuse is
+        // before the cmdlet runs. Nothing downstream can undo it afterwards.
+        if !wanted_groups.complete {
+            return Err(crate::error::ExchangeError::Protocol(format!(
+                "refusing to set management scope '{name}' to a filter this client cannot fully \
+                 read: it holds a MemberOfGroup token that is not a plain `-eq '…'` comparison, \
+                 so the groups it would confine access to cannot be stated. Nothing was changed."
+            )));
+        }
 
         let values = self
             .invoke_command(

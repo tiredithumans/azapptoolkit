@@ -10,6 +10,36 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+### Fixed
+
+- **A legacy-policy migration can no longer point an app at the wrong mailboxes
+  and call it done.** If a management scope already existed for the app and
+  confined access to a *different* set of groups than the migration worked out,
+  the scope was left exactly as it was — but the app's Exchange roles were still
+  assigned against it, its org-wide grants were still removed, and the legacy
+  policy was still deleted. The app then reached whatever that older scope
+  covered, which could be wider, narrower or simply somebody else's set of
+  mailboxes, while the report showed the groups the migration had intended. The
+  migration now repoints the scope where it is allowed to, proves the repoint
+  actually took effect, and otherwise refuses that app and changes nothing. The
+  report shows the filter Exchange really has rather than the one that was
+  planned, and a dry run says up front when an existing scope disagrees.
+- **A mailbox scope filter naming several groups is no longer described by
+  whichever one Exchange mentioned first.** An application confined through more
+  than one management scope reaches the union of them; the effective-access
+  readout named only the first, so it understated the reach and could describe
+  the same tenant differently between two runs.
+- **A recipient filter the toolkit cannot fully read is refused before it is
+  written, not after.** The check existed but ran after the change had already
+  been applied to every role assignment using that scope, so it could report the
+  problem and never prevent it.
+- **Two filter shapes that quietly defeated the safety checks.** A property whose
+  name merely *ends* in `MemberOfGroup` — such as an exclusion clause — was read
+  as an ordinary group clause, so a rewrite could have dropped the exclusion and
+  widened what the app reaches; and a clause naming an empty group (`-eq ''`)
+  counted as a real group, letting a filter that confines nothing pass the check
+  that exists to catch exactly that. Both are now refused outright.
+
 ## [0.25.1] - 2026-08-09
 
 ### Fixed
