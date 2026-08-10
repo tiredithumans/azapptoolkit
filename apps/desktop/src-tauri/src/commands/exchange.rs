@@ -29,13 +29,11 @@ use azapptoolkit_exchange::targets::{
     plan_role_assignments, policies_safe_to_remove, require_scopable_targets, rewritable_scope_dns,
     scope_groups_in_filter, targets_from_declared, targets_from_grants, targets_safe_to_strip,
 };
-// `exchange_role_for_permission` is deprecated and stays that way; the three
-// uses left in this file resolve roles for permission sets a resource-aware gate
-// has ALREADY vetted (see each `#[allow(deprecated)]` for which gate). The
-// import is allowed here so the attribute keeps firing for anyone who adds a
-// fourth use without doing that vetting.
-#[allow(deprecated)]
-use azapptoolkit_exchange::exchange_role_for_permission;
+// These three flows resolve roles for permission sets a resource-aware gate has
+// already proven scopable — and only Microsoft Graph's mail permissions ever
+// are, which is what that proof establishes. So they name the resource instead
+// of asking the value-only form to guess it.
+use azapptoolkit_exchange::MICROSOFT_GRAPH_APP_ID;
 // The pure mailbox-scope decisions now live in the crate, where they are
 // unit-testable without a Tauri `State`. This file keeps the I/O around them.
 use azapptoolkit_exchange::verdict::{
@@ -660,13 +658,16 @@ pub(crate) async fn resolve_mail_scopes(
 ) -> Result<HashMap<String, MailPermissionScope>, ExchangeError> {
     // Callers vet the resource before reaching here — `targets_from_declared`
     // for the manifest paths, the (resource, value) gate in
-    // `get_mail_scopes_for_principal` for the held-permission path — so the
-    // value-only lookup is resolving an already-proven-scopable set, not
-    // deciding scopability. The deprecation stands for new callers.
-    #[allow(deprecated)]
+    // `get_mail_scopes_for_principal` for the held-permission path — and what
+    // that vetting proves is that these are Microsoft Graph mail permissions,
+    // since the legacy Office 365 Exchange Online namesakes are not confinable.
+    // Naming the resource here says so, rather than re-deriving it from the
+    // value and getting the legacy ones wrong.
     let scopable: Vec<(&String, &'static str)> = graph_perms
         .iter()
-        .filter_map(|p| exchange_role_for_permission(p).map(|role| (p, role)))
+        .filter_map(|p| {
+            exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, p).map(|role| (p, role))
+        })
         .collect();
     if scopable.is_empty() {
         return Ok(HashMap::new());
@@ -794,10 +795,9 @@ pub(crate) async fn resolve_mail_scopes_audit_cached(
     // `resolve_mail_scopes` and the Permissions-tab commands).
     // Pre-vetted by the audit's `declared_values` (resource-aware). See
     // `resolve_mail_scopes`.
-    #[allow(deprecated)]
     let mut scopable: Vec<&str> = graph_perms
         .iter()
-        .filter(|p| exchange_role_for_permission(p).is_some())
+        .filter(|p| exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, p).is_some())
         .map(String::as_str)
         .collect();
     if scopable.is_empty() {
@@ -889,11 +889,10 @@ pub async fn get_mail_permission_scopes(
     let scopes = resolve_mail_scopes(&exo, &app.app_id, &scopable, &orgwide, true).await?;
 
     // `scopable` is `targets_from_declared` output — already resource-vetted.
-    #[allow(deprecated)]
     let entries: Vec<MailScopeEntry> = scopable
         .into_iter()
         .filter_map(|p| {
-            let role = exchange_role_for_permission(&p)?;
+            let role = exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, &p)?;
             let scope = scopes
                 .get(&p)
                 .cloned()

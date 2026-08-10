@@ -112,70 +112,9 @@ pub fn exchange_role_for_resource_permission(
     }
 }
 
-/// The Exchange application role for a permission `value` whose resource is
-/// genuinely unknown at the call site (badge rendering from a bare value, a
-/// caller-supplied permission list with no resource context).
-///
-/// **Optimistic, not unambiguous.** The doc here used to claim the two mapped
-/// resources "share no value names"; they do — Office 365 Exchange Online
-/// exposes its own `Mail.*` / `Calendars.*` / `Contacts.*` /
-/// `MailboxSettings.*` appRoles (retired Outlook REST), which is exactly why
-/// [`is_unscopable_legacy_exchange_permission`] exists thirty lines below. What
-/// this function actually does is resolve the *Microsoft Graph* reading first,
-/// which is the right precedence for display (Graph's is the one that can be
-/// scoped) and the wrong answer for a gate: it says "scopable" about a legacy
-/// grant that RBAC for Applications cannot touch.
-///
-/// Use [`exchange_role_for_resource_permission`] wherever the resource is
-/// known — which is every gate, and nearly every caller.
-///
-/// Marked `#[deprecated]` rather than merely documented: its sibling
-/// [`is_scopable_exchange_permission`] carries the attribute and had no callers
-/// left, while this one carried only prose calling itself "the wrong answer for
-/// a gate" — and still had five, including two on mutation paths. Prose does not
-/// stop the next caller; the attribute does.
-#[deprecated(
-    note = "resource-blind: resolves the Microsoft Graph reading first, so an Office 365 Exchange \
-            Online Mail.* grant is reported as scopable when RBAC for Applications cannot confine \
-            it. Use exchange_role_for_resource_permission(resource_app_id, value)."
-)]
-pub fn exchange_role_for_permission(value: &str) -> Option<&'static str> {
-    graph_mail_role(value).or(exchange_role_for_resource_permission(
-        OFFICE365_EXCHANGE_ONLINE_APP_ID,
-        value,
-    ))
-}
-
-/// True when `value` is an Exchange mailbox permission that can be
-/// resource-scoped via RBAC for Applications — **assuming Microsoft Graph**.
-///
-/// Deprecated as a *gate*. It answers `true` for Office 365 Exchange Online's
-/// identically-named `Mail.*` / `Calendars.*` / `Contacts.*` /
-/// `MailboxSettings.*` appRoles, which RBAC for Applications cannot confine, so
-/// every gate built on it treated an unscopable legacy grant as scopable: the
-/// audit counted mailbox reach it could not scope, the effective-scope probe
-/// listed it as a scoping candidate, and a legacy Application Access Policy
-/// verdict was allowed to score it at the reduced "scoped" weight — hiding
-/// genuinely org-wide mailbox access.
-///
-/// AGENTS.md states the rule this violated: permissions travel as
-/// `ResourcePermission { resource_app_id, value }`, and "value-keyed shortcuts
-/// here have silently widened access".
-///
-/// Remaining legitimate use is display-only, where the resource is truly
-/// unavailable and a wrong answer costs a hint rather than access.
-#[deprecated(
-    since = "0.25.0",
-    note = "resource-blind: answers true for unscopable Office 365 Exchange Online appRoles.             Use is_scopable_exchange_resource_permission with the grant's resource_app_id."
-)]
-pub fn is_scopable_exchange_permission(value: &str) -> bool {
-    // One deprecated form delegating to another; the attribute is for callers.
-    #[allow(deprecated)]
-    exchange_role_for_permission(value).is_some()
-}
-
-/// [`is_scopable_exchange_permission`] for a permission whose resource IS known —
-/// the form every surface that has a resource id should use. Office 365 Exchange
+/// True when `value` on `resource_app_id` is an Exchange mailbox permission
+/// RBAC for Applications can confine — the only form there is, because it is
+/// the only one that can be right. Office 365 Exchange
 /// Online's own `Mail.Read`-family appRoles (retired Outlook REST) have no RBAC
 /// role, so only the resource-aware answer can tell them apart from Microsoft
 /// Graph's identically named ones. A `None` resource means "a resource this build
@@ -381,37 +320,11 @@ impl ScopeKind {
     }
 }
 
-/// The mechanism (if any) that can resource-scope the permission `value`.
+/// The mechanism (if any) that can resource-scope `value` on `resource_app_id`.
 /// Single source of truth: mail/calendar/contacts and the EWS
 /// `full_access_as_app` scope → Exchange RBAC; `Sites.Selected` or a broad
 /// `Sites.*` → SharePoint `Sites.Selected`; everything else (e.g.
 /// `Directory.Read.All`) is org-wide only and returns `None`.
-///
-/// **Display-only; not a gate.** This is the optimistic reading — it resolves
-/// each name against whichever mailbox resource defines it, which is what makes
-/// it usable for a badge built from a bare value (and it must stay that way:
-/// [`EWS_FULL_ACCESS_AS_APP`] exists *only* on Office 365 Exchange Online, so
-/// pinning this to Graph would lose the single most dangerous mailbox grant
-/// there is). The cost is the other direction: it also answers `Exchange` for
-/// that resource's unscopable `Mail.*` namesakes.
-///
-/// Use [`scope_kind_for`] anywhere the answer decides whether an apply action
-/// is offered.
-pub fn scope_kind(value: &str) -> Option<ScopeKind> {
-    // Deliberate: this IS the resource-blind form, documented as such above.
-    #[allow(deprecated)]
-    let exchange = exchange_role_for_permission(value).is_some();
-    if exchange {
-        Some(ScopeKind::Exchange)
-    } else if value == "Sites.Selected" || is_sharepoint_orgwide(value) {
-        Some(ScopeKind::SharePoint)
-    } else {
-        None
-    }
-}
-
-/// [`scope_kind`] for a permission whose resource is known — the form every
-/// surface holding a `resource_app_id` should use.
 ///
 /// The resource decides whether the mechanism can be applied at all. Office 365
 /// Exchange Online's retired Outlook REST `Mail.*` appRoles and Office 365
@@ -432,31 +345,39 @@ pub fn scope_kind_for(resource_app_id: Option<&str>, value: &str) -> Option<Scop
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // exercises the deprecated value-only gate on purpose
 mod tests {
     use super::*;
 
     #[test]
     fn maps_common_mail_permissions() {
         assert_eq!(
-            exchange_role_for_permission("Mail.Read"),
+            exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, "Mail.Read"),
             Some("Application Mail.Read")
         );
         assert_eq!(
-            exchange_role_for_permission("Calendars.ReadWrite"),
+            exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, "Calendars.ReadWrite"),
             Some("Application Calendars.ReadWrite")
         );
         assert_eq!(
-            exchange_role_for_permission("Mail.ReadBasic.All"),
+            exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, "Mail.ReadBasic.All"),
             Some("Application Mail.ReadBasic")
         );
     }
 
     #[test]
     fn unmapped_permission_returns_none() {
-        assert_eq!(exchange_role_for_permission("User.Read.All"), None);
-        assert!(!is_scopable_exchange_permission("Directory.Read.All"));
-        assert!(is_scopable_exchange_permission("Mail.Send"));
+        assert_eq!(
+            exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, "User.Read.All"),
+            None
+        );
+        assert!(!is_scopable_exchange_resource_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Directory.Read.All"
+        ));
+        assert!(is_scopable_exchange_resource_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Mail.Send"
+        ));
     }
 
     #[test]
@@ -471,9 +392,15 @@ mod tests {
             ),
             Some("Application EWS.AccessAsApp")
         );
-        assert!(is_scopable_exchange_permission(EWS_FULL_ACCESS_AS_APP));
+        assert!(is_scopable_exchange_resource_permission(
+            Some(OFFICE365_EXCHANGE_ONLINE_APP_ID),
+            EWS_FULL_ACCESS_AS_APP
+        ));
         assert_eq!(
-            scope_kind(EWS_FULL_ACCESS_AS_APP),
+            scope_kind_for(
+                Some(OFFICE365_EXCHANGE_ONLINE_APP_ID),
+                EWS_FULL_ACCESS_AS_APP
+            ),
             Some(ScopeKind::Exchange)
         );
         // ...and only on that resource — Graph never exposes it.
@@ -569,8 +496,12 @@ mod tests {
     fn loose_mail_lookalikes_are_not_scopable() {
         // The map is authoritative: these look mail-ish but have no Exchange
         // application role, so a prefix check would wrongly call them scopable.
-        assert!(!is_scopable_exchange_permission("Mail.ReadWrite.Shared"));
-        assert!(!is_scopable_exchange_permission(
+        assert!(!is_scopable_exchange_resource_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Mail.ReadWrite.Shared"
+        ));
+        assert!(!is_scopable_exchange_resource_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
             "MailboxSettings.ReadBasic"
         ));
     }
@@ -755,21 +686,45 @@ mod tests {
     #[test]
     fn scope_kind_classifies_by_mechanism() {
         // Mail/calendar/contacts → Exchange RBAC.
-        assert_eq!(scope_kind("Mail.Read"), Some(ScopeKind::Exchange));
-        assert_eq!(scope_kind("Calendars.ReadWrite"), Some(ScopeKind::Exchange));
-        assert_eq!(scope_kind("Contacts.Read"), Some(ScopeKind::Exchange));
-        // Both the scoped model and a broad Sites.* → SharePoint.
-        assert_eq!(scope_kind("Sites.Selected"), Some(ScopeKind::SharePoint));
-        assert_eq!(scope_kind("Sites.Read.All"), Some(ScopeKind::SharePoint));
         assert_eq!(
-            scope_kind("Sites.FullControl.All"),
+            scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), "Mail.Read"),
+            Some(ScopeKind::Exchange)
+        );
+        assert_eq!(
+            scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), "Calendars.ReadWrite"),
+            Some(ScopeKind::Exchange)
+        );
+        assert_eq!(
+            scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), "Contacts.Read"),
+            Some(ScopeKind::Exchange)
+        );
+        // Both the scoped model and a broad Sites.* → SharePoint.
+        assert_eq!(
+            scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), "Sites.Selected"),
+            Some(ScopeKind::SharePoint)
+        );
+        assert_eq!(
+            scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), "Sites.Read.All"),
+            Some(ScopeKind::SharePoint)
+        );
+        assert_eq!(
+            scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), "Sites.FullControl.All"),
             Some(ScopeKind::SharePoint)
         );
         // Org-wide-only permissions are not scopable.
-        assert_eq!(scope_kind("Directory.Read.All"), None);
-        assert_eq!(scope_kind("User.Read.All"), None);
+        assert_eq!(
+            scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), "Directory.Read.All"),
+            None
+        );
+        assert_eq!(
+            scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), "User.Read.All"),
+            None
+        );
         // A mail look-alike with no Exchange role is not scopable.
-        assert_eq!(scope_kind("Mail.ReadWrite.Shared"), None);
+        assert_eq!(
+            scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), "Mail.ReadWrite.Shared"),
+            None
+        );
     }
 
     #[test]
@@ -793,12 +748,13 @@ mod resource_aware_gate_tests {
     /// Both mailbox resources expose appRoles named `Mail.Read`, `Contacts.Read`
     /// and friends, and only Microsoft Graph's can be confined by RBAC for
     /// Applications — Office 365 Exchange Online's are the retired Outlook REST
-    /// family, which nothing here can scope. A value-only gate cannot see the
+    /// family, which nothing here can scope. A value-only gate could not see the
     /// difference, so it reported the legacy grant as scopable: the audit
     /// counted mailbox reach it could not confine, the effective-scope probe
     /// offered it as a candidate, and a legacy AAP verdict scored it at the
     /// reduced "scoped" weight — hiding org-wide mailbox access behind a
-    /// healthy-looking badge.
+    /// healthy-looking badge. There is no value-only gate left to make that
+    /// mistake; this pins the distinction the surviving one has to draw.
     #[test]
     fn the_legacy_namesake_is_not_scopable_even_though_it_shares_the_name() {
         for value in ["Mail.Read", "Mail.Send", "Contacts.Read", "Calendars.Read"] {
@@ -813,12 +769,6 @@ mod resource_aware_gate_tests {
                 ),
                 "Office 365 Exchange Online's {value} is retired Outlook REST — unscopable"
             );
-            // ...and the deprecated value-only form cannot tell them apart,
-            // which is the whole reason it is deprecated.
-            #[allow(deprecated)]
-            {
-                assert!(is_scopable_exchange_permission(value));
-            }
         }
     }
 
@@ -850,7 +800,10 @@ mod resource_aware_gate_tests {
         // The display-only form stays optimistic so a bare-value badge still
         // recognises the most dangerous mailbox grant there is.
         assert_eq!(
-            scope_kind(EWS_FULL_ACCESS_AS_APP),
+            scope_kind_for(
+                Some(OFFICE365_EXCHANGE_ONLINE_APP_ID),
+                EWS_FULL_ACCESS_AS_APP
+            ),
             Some(ScopeKind::Exchange)
         );
     }

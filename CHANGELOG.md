@@ -118,6 +118,15 @@
 
 ### Internal
 
+- **The mailbox permission checks that could not see which resource a grant was
+  on are gone.** Both Microsoft Graph and the legacy Office 365 Exchange Online
+  resource publish permissions with the same names, and only Graph's can be
+  confined to specific mailboxes — so a check that looked at the name alone
+  called an unconfinable grant confinable. Deprecating them had not worked:
+  they were still re-exported in a way that suppressed the warning for anyone
+  using them. They are deleted, the three remaining callers now state the
+  resource they were already relying on, and a build check fails if one
+  reappears.
 - **Secret scanning now blocks a merge, and knows Azure secrets.** The check ran
   on every pull request and could not stop one: it was not among the required
   checks, so a run that found a committed key was advisory. It is now required

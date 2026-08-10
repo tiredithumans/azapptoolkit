@@ -8,12 +8,11 @@
 //! re-exports it for `azapptoolkit-exchange`'s existing callers (and the crate
 //! root re-export in `lib.rs`).
 
-// Re-exported for existing callers; the deprecation is theirs to see, not
-// this line's. Removing it from the re-export would be a breaking change
-// unrelated to the hazard.
-#[allow(deprecated)]
+// Only the resource-aware forms exist to re-export now: the value-only ones
+// were deleted, so the blanket `#[allow(deprecated)]` that used to sit here —
+// and hid them from every caller of this crate root — has nothing to allow.
 pub use azapptoolkit_core::scoping::{
     EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
-    exchange_role_for_permission, exchange_role_for_resource_permission, is_blanket_mailbox_grant,
+    exchange_role_for_resource_permission, is_blanket_mailbox_grant,
     is_scopable_exchange_resource_permission,
 };
