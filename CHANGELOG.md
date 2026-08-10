@@ -10,6 +10,23 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+### Security
+
+- **Files this app writes are now readable only by you.** The settings file, the
+  tenant backup manifest, every export, and the restore report — which carries
+  freshly-minted client secrets in plain text for you to hand out — were written
+  with whatever permissions the system default gave them, commonly readable by
+  every account on the machine. They are now owner-only. This changes the
+  default, not what you can do: sharing a file you exported still works exactly
+  as before. (No mode bits exist on Windows, where files inherit the permissions
+  of the folder you save into.)
+- **A failed save no longer leaves a corrupted sign-in behind.** The saved
+  refresh token is split across several entries in the OS keyring, and if a
+  write failed part way the older token's tail stayed behind — the next launch
+  then read a spliced value that looked like a valid stored session and was
+  rejected as if your access had been revoked. A failed save is now rolled back
+  to no stored session, so the app simply asks you to sign in.
+
 ### Internal
 
 - **Secret scanning now blocks a merge, and knows Azure secrets.** The check ran

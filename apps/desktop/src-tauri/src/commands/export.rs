@@ -87,7 +87,15 @@ pub(crate) async fn write_via_dialog(
         let path_buf = path
             .into_path()
             .map_err(|e| UiError::validation("invalid_path", e.to_string()))?;
-        std::fs::write(&path_buf, content).map_err(|e| UiError::io(e.to_string()))?;
+        // Owner-only. This is the single choke point for every file the app
+        // writes, and what goes through it is not neutral: a restore report
+        // carries plaintext show-once client secrets, a backup manifest is the
+        // whole app estate, and an export is directory data. Under the process
+        // umask these landed world-readable on a shared machine. It does not
+        // stop the operator sharing a file deliberately — only the default
+        // changes. (No-op on Windows, which has no mode bits; see the helper.)
+        azapptoolkit_core::private_file::write_owner_only(&path_buf, content.as_bytes())
+            .map_err(|e| UiError::io(e.to_string()))?;
         Ok(Some(path_buf.display().to_string()))
     })
     .await

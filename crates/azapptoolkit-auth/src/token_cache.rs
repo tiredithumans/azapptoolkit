@@ -195,13 +195,34 @@ fn split_into_chunks(token: &str) -> Vec<&str> {
 
 pub fn save_refresh_token(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
     ensure_keyring_store()?;
+    // A refresh token is stored across N keyring entries, and `load` simply
+    // concatenates entries 0, 1, 2, … until one is missing. There is no length,
+    // no checksum, and nothing marking where this token ends — so a write that
+    // stops half way leaves chunks 0..k holding the NEW token and k..old_len
+    // still holding the OLD one's tail, and the next load returns that splice
+    // as if it were a token. Entra rejects it, and because it *looks* like a
+    // stored session the failure reads as a revoked refresh token rather than
+    // a corrupt one.
+    //
+    // So a partial write is rolled back to nothing: no session is a state the
+    // app already handles (it prompts to sign in), a spliced one is not.
+    if let Err(err) = write_chunks(tenant_id, account_oid, token) {
+        // Best-effort: if the keyring is failing, the cleanup may fail too.
+        // Either way the original error is what the caller needs.
+        let _ = delete_refresh_token(tenant_id, account_oid);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// The write itself: every chunk, then the trailing chunks of any previously
+/// larger token — without which a shrunk token loads with a stale tail appended.
+fn write_chunks(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
     let chunks = split_into_chunks(token);
     for (idx, chunk) in chunks.iter().enumerate() {
         let account = chunk_account(tenant_id, account_oid, idx);
         keyring_core::Entry::new(KEYRING_SERVICE, &account)?.set_password(chunk)?;
     }
-    // Clear any trailing chunks left by a previously larger token, so a shrunk
-    // token doesn't load with stale tail bytes appended.
     let mut idx = chunks.len();
     loop {
         let account = chunk_account(tenant_id, account_oid, idx);
@@ -358,6 +379,41 @@ mod tests {
         // Delete removes every chunk; load then reports nothing.
         delete_refresh_token(tenant, oid).unwrap();
         assert_eq!(load_refresh_token(tenant, oid).unwrap(), None);
+    }
+
+    /// The rollback a failed `save_refresh_token` performs must clear **every**
+    /// chunk, however many are there — not just the ones this write created.
+    ///
+    /// That is the whole point: a partial write leaves chunks 0..k holding the
+    /// new token and k.. still holding the previous one's tail, and `load` just
+    /// concatenates until an entry is missing, so it would return the splice as
+    /// if it were a real token. A rollback bounded by the *new* token's chunk
+    /// count would leave exactly that tail behind.
+    ///
+    /// The failing write itself needs a keyring that can be made to fail
+    /// mid-loop, which the mock store cannot do; this pins the property the
+    /// rollback depends on.
+    #[test]
+    fn the_rollback_clears_chunks_it_did_not_write() {
+        init_mock_keyring();
+        let (tenant, oid) = ("rb-tenant", "rb-oid");
+
+        // Stand in for the state a half-finished write leaves: more chunks on
+        // disk than the token being written would produce.
+        for idx in 0..4 {
+            keyring_core::Entry::new(KEYRING_SERVICE, &chunk_account(tenant, oid, idx))
+                .unwrap()
+                .set_password("stale")
+                .unwrap();
+        }
+
+        delete_refresh_token(tenant, oid).unwrap();
+
+        assert_eq!(
+            load_refresh_token(tenant, oid).unwrap(),
+            None,
+            "a rollback must leave NO session rather than a spliced one"
+        );
     }
 
     #[test]
