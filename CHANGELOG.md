@@ -10,6 +10,19 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+### Internal
+
+- **Secret scanning now blocks a merge, and knows Azure secrets.** The check ran
+  on every pull request and could not stop one: it was not among the required
+  checks, so a run that found a committed key was advisory. It is now required
+  (8 checks, not 7) — and it always runs, including on documentation-only
+  changes, because those can commit a key too. Separately, the scanner's own
+  pattern set — used whenever `gitleaks` is not installed, which is the normal
+  local case — knew AWS, Google, GitHub, GitLab, Slack and OpenAI key shapes and
+  **not a single Azure one**, in a tool whose entire subject is Entra
+  credentials. It now recognises storage and Service Bus connection strings, SAS
+  signatures, bearer tokens and Entra client secrets.
+
 ### Fixed
 
 - **A legacy-policy migration can no longer point an app at the wrong mailboxes

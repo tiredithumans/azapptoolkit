@@ -63,8 +63,8 @@ is clean.
 
 ## 5. Wait for the required checks, merge
 
-- 7 required checks: Rust workspace (ubuntu/windows/macos), Frontend (Leptos/WASM),
-  actionlint, cargo-audit, cargo-deny. Watch with `gh pr checks <num> --watch`, or a
+- 8 required checks: Rust workspace (ubuntu/windows/macos), Frontend (Leptos/WASM),
+  actionlint, cargo-audit, cargo-deny, secrets + hooks. Watch with `gh pr checks <num> --watch`, or a
   background poll loop on `gh pr view <num> --json statusCheckRollup` (sleep ~45s between
   polls) so a ~7-minute CI run doesn't burn a tool timeout.
 - Strict protection: if another merge lands first, this PR goes "behind" →
