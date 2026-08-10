@@ -80,6 +80,17 @@ pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
     "Sites.ReadWrite.All",
     "User.ReadWrite.All",
     "Group.ReadWrite.All",
+    // Net-new. Microsoft's own permissions reference flags both of these with a
+    // "Caution" note for the reason that makes them tenant-compromising:
+    // `Application.ReadWrite.OwnedBy` "allows the same operations as
+    // Application.ReadWrite.All but only on applications it is an owner of" —
+    // including updating their secrets, i.e. acting as those entities — and it
+    // can still list every application and service principal in the tenant;
+    // `EntitlementManagement.ReadWrite.All` can "grant additional privileges to
+    // itself, other applications, or any user", covering Entra role
+    // assignments, app role assignments and API permissions. Both scored ZERO.
+    "Application.ReadWrite.OwnedBy",
+    "EntitlementManagement.ReadWrite.All",
     // Net-new (not in the PowerShell `Constants.ps1` source): the EWS
     // `full_access_as_app` scope on the legacy Office 365 Exchange Online
     // resource grants full access to *every* mailbox in the tenant — strictly
@@ -98,7 +109,22 @@ pub const MEDIUM_RISK_APP_PERMISSIONS: &[&str] = &[
     "Mail.Read",
     "Files.Read.All",
     "Sites.Read.All",
-    "Calendar.ReadWrite",
+    // `Calendars.ReadWrite`, PLURAL. This entry read `Calendar.ReadWrite` for
+    // its whole life, which is not a permission Microsoft Graph defines — every
+    // calendar permission is plural (`Calendars.Read`, `Calendars.ReadWrite`,
+    // `Calendars.ReadWrite.All`), and the rest of this codebase already used the
+    // plural form in `scoping.rs`'s role map and in the subsumption table below.
+    // So the entry could never match a real grant: an application holding
+    // org-wide `Calendars.ReadWrite` — create, read, update and delete events in
+    // EVERY mailbox — scored zero and could rank Low.
+    "Calendars.ReadWrite",
+    // Net-new. Microsoft describes this as "the highest privileged read-only
+    // permission for Microsoft Entra ID resources", ranked immediately below
+    // `Directory.ReadWrite.All`. It sits in the medium band with the other
+    // tenant-wide reads (`User.Read.All`, `Group.Read.All`) rather than the high
+    // one, which is reserved for write and impersonation — but it reads strictly
+    // more than either of them and scored zero.
+    "Directory.Read.All",
 ];
 
 /// High-risk delegated permissions (by scope `value`). Ported from
@@ -526,6 +552,59 @@ mod tests {
         // Already least-privilege / no narrower equivalent.
         assert_eq!(least_privilege_alternative("Sites.Selected"), None);
         assert_eq!(least_privilege_alternative("Directory.ReadWrite.All"), None);
+    }
+
+    /// Every mailbox-family name in the risk tables must be one `scoping.rs`
+    /// recognises — the guard that would have caught `Calendar.ReadWrite`.
+    ///
+    /// That entry sat in the medium table for its whole life naming a
+    /// permission Microsoft Graph does not define (all calendar permissions are
+    /// plural), so it could never match a real grant and an org-wide
+    /// `Calendars.ReadWrite` scored zero. Nothing could notice, because a risk
+    /// table is just a list of strings and a string that matches nothing looks
+    /// exactly like a string that has not come up yet.
+    ///
+    /// `scoping.rs` independently maps every scopable mail/calendar/contacts
+    /// permission to its Exchange role, so it is a second spelling of the same
+    /// names — and a name in one list that the other rejects is a typo by
+    /// construction. Deliberately limited to that family: the tables also carry
+    /// Directory/Application/Sites names that `scoping.rs` has no opinion on.
+    #[test]
+    fn mailbox_family_risk_entries_agree_with_the_scoping_role_map() {
+        let mailbox_family = |v: &str| {
+            v.starts_with("Mail.") || v.starts_with("Calendar") || v.starts_with("Contacts.")
+        };
+        let mut unmapped: Vec<&str> = Vec::new();
+        let mut checked = 0usize;
+        for value in HIGH_RISK_APP_PERMISSIONS
+            .iter()
+            .chain(MEDIUM_RISK_APP_PERMISSIONS.iter())
+        {
+            if !mailbox_family(value) {
+                continue;
+            }
+            checked += 1;
+            if crate::scoping::exchange_role_for_resource_permission(
+                crate::scoping::MICROSOFT_GRAPH_APP_ID,
+                value,
+            )
+            .is_none()
+            {
+                unmapped.push(value);
+            }
+        }
+        assert!(
+            checked >= 4,
+            "only {checked} mailbox-family risk entries found — the family test is broken and \
+             this rule would pass vacuously"
+        );
+        assert!(
+            unmapped.is_empty(),
+            "risk-table entries in the mail/calendar/contacts family that scoping.rs does not \
+             recognise: {unmapped:?}\nA name no gate maps is a name no grant can match, so the \
+             entry is dead and the permission scores zero. Check the exact spelling against the \
+             Microsoft Graph permissions reference — `Calendars.*` is plural."
+        );
     }
 
     #[test]

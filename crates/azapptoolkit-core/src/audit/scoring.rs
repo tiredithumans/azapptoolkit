@@ -456,10 +456,19 @@ fn rule_sharepoint_advisory(
 /// (Rule 3), so this surfaces the specific scopes without altering the score.
 fn rule_high_risk_delegated(perms: &AppPermissions) -> RuleContribution {
     let mut c = RuleContribution::default();
+    // The module's OWN broader predicate, not just the two-entry exact list.
+    //
+    // `is_risky_delegated_scope` already encodes what "risky delegated scope"
+    // means here — the two named scopes PLUS the broad-reach prefixes (Mail.,
+    // Files., Directory., Group., AppRoleAssignment., RoleManagement., Sites.)
+    // — and the consent-grant audit uses it. This rule matched only the exact
+    // pair, so an admin-consented `Mail.ReadWrite` or `Directory.ReadWrite.All`
+    // DELEGATED scope produced no advisory at all: two definitions of the same
+    // idea, and the narrower one was in front of the operator.
     let high_risk_delegated: Vec<&String> = perms
         .scope_values
         .iter()
-        .filter(|v| HIGH_RISK_DELEGATED_PERMISSIONS.contains(&v.as_str()))
+        .filter(|v| is_risky_delegated_scope(v))
         .collect();
     if !high_risk_delegated.is_empty() {
         c.issues.push(format!(
@@ -884,9 +893,25 @@ pub fn score_application(
         .copied()
         .filter(|c| c.status == CredentialStatus::ExpiringSoon)
         .collect();
+    // Credentials that STILL WORK — which includes one with no end date.
+    //
+    // `credential_status(None)` is `Unknown`, and counting only `Active` meant a
+    // never-expiring credential counted as nothing: an app holding one expired
+    // secret plus one that never expires reported "All credentials expired" and
+    // scored as though it had no working credential at all. That reads as a dead
+    // app, so an operator stops looking — while the app in fact holds a
+    // permanent, never-rotating credential, which is the one most worth finding.
+    // `ExpiringSoon` is deliberately NOT counted here: the branches below use
+    // `active_count == 0` to mean "nothing but expiring credentials left", and
+    // folding it in would silence that warning entirely.
     let active_count = all_creds
         .iter()
-        .filter(|c| c.status == CredentialStatus::Active)
+        .filter(|c| {
+            matches!(
+                c.status,
+                CredentialStatus::Active | CredentialStatus::Unknown
+            )
+        })
         .count();
     let long_lived: Vec<&CredentialSummary> = all_creds
         .iter()

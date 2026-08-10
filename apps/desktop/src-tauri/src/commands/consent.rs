@@ -301,7 +301,9 @@ mod tests {
         assert_eq!(permission_risk("Directory.ReadWrite.All"), "high");
         assert_eq!(permission_risk("Mail.Send"), "high");
         assert_eq!(permission_risk("User.Read.All"), "medium");
-        assert_eq!(permission_risk("Calendar.ReadWrite"), "medium");
+        assert_eq!(permission_risk("Calendars.ReadWrite"), "medium");
+        // The singular form is not a Graph permission and must NOT classify.
+        assert_eq!(permission_risk("Calendar.ReadWrite"), "low");
         // Anything not on either list is low (including an unresolved role id).
         assert_eq!(permission_risk("User.Read"), "low");
         assert_eq!(
