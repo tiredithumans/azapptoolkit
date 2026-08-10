@@ -10,6 +10,8 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-08-09
+
 ### Fixed
 
 - **Risk scores no longer depend on how an app's manifest happens to be
