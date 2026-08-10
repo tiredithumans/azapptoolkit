@@ -19,6 +19,9 @@ pub mod identity;
 pub mod models;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod net;
+// Server-side only: no filesystem in the WASM frontend.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod private_file;
 pub mod reauth;
 pub mod redirect;
 pub mod restore_plan;
