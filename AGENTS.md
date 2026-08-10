@@ -194,7 +194,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Auto-update is interactive (not silent).** The front-end checks once on launch and toasts a notification whose action opens `UpdateSplash` (explicit **Update & restart**). **Don't reintroduce a silent background `download_and_install` in `lib.rs` setup** — it would race the prompt. Details: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
 
-- **Release is a 3-OS matrix → one aggregated `latest.json`.** `guard` → `build` matrix → `release` assembles one draft; a human publishes. CHANGELOG headers are `## [X.Y.Z] - YYYY-MM-DD` (**no `v` prefix, ASCII hyphen, one space**) — **two** parsers depend on it (PowerShell in `release.yml`, Rust in `web-rs/build.rs`), so `repo_invariants.rs` checks the format. Releases ≤ 0.19.2 sit in `docs/CHANGELOG-archive.md`. Matrix: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
+- **Release is a 3-OS matrix → one aggregated `latest.json`.** `guard` → `build` matrix → `release` assembles one draft; a human publishes. CHANGELOG headers are `## [X.Y.Z] - YYYY-MM-DD` (**no `v` prefix, ASCII hyphen, one space**) — **two** parsers depend on it (PowerShell in `release.yml`, Rust in `web-rs/build.rs`), so `repo_invariants.rs` checks the format. Matrix: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
 
 - **CSP governs the *webview*, not backend egress.** `connect-src` in `tauri.conf.json` restricts only WASM frontend fetches; backend reqwest calls to new hosts need no CSP change.
 
@@ -202,6 +202,8 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 
 - **Full-collection PATCH for `appRoles` / `oauth2PermissionScopes`.** Graph **full-replaces** these not-nullable arrays — re-read live state, mutate, write the whole array back (never merge a cached payload). Deleting an enabled entry needs two PATCHes: disable, then remove. Exposed **app roles** edit the **paired application** when one exists (else the SP) and round-trip as **raw JSON** so the `value: null` SAML default survives byte-for-byte. Bust with `invalidate_app_details` only.
+
+- **A sign-in trust is validated wherever it is minted.** Federated credentials go through `core::federation` on **every** path — Graph accepts a bad issuer silently — and SAML signing-cert lifetimes are bounded. Pinned by `repo_invariants/trust.rs`.
 
 - **Crypto/encoding deps — no `rsa`; `rand`/`sha2`/`base64` majors pinned on purpose.** `cert.rs` uses `rcgen` on the `aws_lc_rs` backend specifically to keep `rsa` (RUSTSEC-2023-0071) out of the graph — **don't reintroduce it**. The three pins match what `oauth2` 5 + Tauri 2 + the reqwest stack resolve; bumping one nothing else follows only *adds* a duplicate major. Rationale + drop conditions live in `dependabot.yml`'s `ignore` blocks.
 

@@ -10,6 +10,42 @@ Older releases (**0.19.2 and earlier**) live in
 
 ## [Unreleased]
 
+### Security
+
+- **Restoring a backup no longer imports sign-in trusts unchecked.** A backup
+  file can carry federated identity credentials — the setting that lets an
+  outside system sign in as an application **with no secret and no expiry**.
+  Restore replayed them verbatim, so a manifest that had been tampered with
+  could hand an outside party permanent access to a restored app, and nothing
+  in the report would have said so. Every credential is now validated the same
+  way the app's own editor validates one, and every credential that *is* created
+  is listed in the restore report with its issuer and subject, so you can
+  confirm each one belongs. Microsoft Entra accepts a bad issuer without an
+  error and only fails much later, at sign-in, so this check has to happen here.
+- **The same validation now applies when you add or edit a federated credential
+  by hand.** An issuer that isn't an `https` address, a wildcard, a stray space
+  that silently breaks sign-in, or a name Entra would reject are all refused up
+  front instead of becoming a credential that looks fine and never works.
+- **Restore refuses a backup written by a newer version.** The manifest has
+  always carried a schema version for this purpose but never checked it, so a
+  newer file was restored anyway — silently skipping settings this version does
+  not understand, after the apps had already been created. Older backups restore
+  as before.
+- **SAML signing certificates can no longer be given an unlimited lifetime.**
+  The certificate that proves a sign-in response came from Entra could be minted
+  with any lifetime at all, including one far beyond the three years Entra
+  permits — a certificate that in practice never expires and never has to be
+  re-established. Lifetimes are now bounded, and rejected before anything is
+  created rather than half-way through setting up the app.
+
+### Fixed
+
+- **Federated credentials in US Gov and China tenants used the wrong default
+  audience.** The token-exchange audience differs per cloud, and the commercial
+  value was used everywhere. Entra accepted the credential and it then failed at
+  sign-in with nothing to indicate why. Sovereign builds now default to their
+  own audience.
+
 ## [0.25.1] - 2026-08-09
 
 ### Fixed
