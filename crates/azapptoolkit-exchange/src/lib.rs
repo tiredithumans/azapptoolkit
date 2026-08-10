@@ -27,13 +27,9 @@ pub use aap::{
 };
 pub use client::{EXCHANGE_BASE, ExchangeClient, member_of_group_filter};
 pub use error::{ExchangeError, Result};
-// Re-exported for existing callers; the deprecation is theirs to see, not
-// this line's. Removing it from the re-export would be a breaking change
-// unrelated to the hazard.
-#[allow(deprecated)]
 pub use roles::{
     EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
-    exchange_role_for_permission, exchange_role_for_resource_permission, is_blanket_mailbox_grant,
+    exchange_role_for_resource_permission, is_blanket_mailbox_grant,
     is_scopable_exchange_resource_permission,
 };
 pub use targets::{

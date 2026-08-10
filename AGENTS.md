@@ -82,7 +82,7 @@ docs/CHANGELOG-archive.md            # releases <= 0.19.2 (split out of CHANGELO
 
 - **Audit scoring rule** — implement in `azapptoolkit-core::audit` with a table-driven test citing the legacy PowerShell `file:line`. A rule that shifts ranking needs a CHANGELOG note — operators watch these scores.
 
-- **Audit remediation (one-click "Fix")** — only for findings with a safe, existing mutation (additive like AddOwner or reversible like DisableSignIn also qualify); handler **re-resolves live state**. Scorer-attached via `build_remediations`, except `DisableSignIn` (runner post-pass). `AddOwner` + `MigrateApplicationAccessPolicy` have **no dedicated handler** — they reuse `add_application_owner` / `migrate_application_access_policies` (appId-keyed, plan-first). Full pattern: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
+- **Audit remediation (one-click "Fix")** — only for findings with a safe, existing mutation (additive/reversible qualifies); the handler **re-resolves live state**. Which are scorer-attached, which reuse an existing core, and the `DisableSignIn` post-pass: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
 ## Canonical commands
 
@@ -160,7 +160,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **`Sites.Selected` reach is knowable only from the site side.** No reverse `appId → sites` lookup exists, so the Resource Access sweep and the per-app "Sites this app can reach" panel share ONE tenant index; `AppSiteAccessDto::from_sweep` is the single projection (cached ⇒ backend-side, fresh ⇒ frontend), and an empty list means "no grants" only when `is_complete()`.
 
-- **Mailbox AND SharePoint permissions live on TWO resources each — carry the resource, never the bare value.** Both Graph and the legacy Office 365 resources expose `Mail.*`/`Contacts.*` and `Sites.*`; only Graph's are confinable. Permissions travel as `audit::ResourcePermission`; every gate uses the POSITIVE `is_scopable_{exchange,sharepoint}_resource_permission` / `scope_kind_for` — never a negation, never the **deprecated** value-only forms (pinned by `repo_invariants.rs`). Value-keyed shortcuts here have silently widened access — dedupe on `(resource, value)`, and name the resource in operator-facing text. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
+- **Mailbox AND SharePoint permissions live on TWO resources each — carry the resource, never the bare value.** Both Graph and the legacy Office 365 resources expose `Mail.*`/`Contacts.*` and `Sites.*`; only Graph's are confinable. Permissions travel as `audit::ResourcePermission`; every gate uses the POSITIVE `is_scopable_{exchange,sharepoint}_resource_permission` / `scope_kind_for` — never a negation. The value-only forms are **deleted**, and `repo_invariants.rs` fails if one comes back. Value-keyed shortcuts here have silently widened access — dedupe on `(resource, value)`, and name the resource in operator-facing text. Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
 - **AAP migration is guarded, not mechanical.** `RestrictAccess` only (a `DenyAccess` blocklist inverts), one batch per **app**, policies deleted only once every grant they confined is re-scoped **and** both mailbox resources resolved; an unverifiable set fails closed. Planner: `azapptoolkit-exchange::aap` (pure, tested). Details: [scoping-and-audit.md](docs/architecture/scoping-and-audit.md).
 
@@ -219,9 +219,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 ## Verification playbook
 
-Run the same gates CI runs before declaring a change done. `just verify` is the machine-independent core; `just verify-full` adds full CI parity. Use recipe flags from `/justfile`, don't hand-type raw `cargo` invocations.
-
-Steps 1–4 are `just verify` (see **Canonical commands**); it also attempts web-itest. The CI-only additions below:
+Run the gates CI runs before declaring a change done, via the `/justfile` recipes — never hand-typed `cargo`. Steps 1–4 are `just verify` (which also attempts web-itest); the CI-only additions follow.
 
 5. **Frontend GUI tests** *(browser-gated)* — `just web-itest`: real Leptos views in a headless browser, Tauri IPC mocked; the frontend's only behavioural gate. Sharded because one binary exceeds what headless Chrome will instantiate — `just web-itest-size` enforces the ceiling. Renaming a CSS class / aria-label / on-screen text a test references fails CI. Sharding rules, the `strip` constraint and the `reset()` footgun: [frontend-workspace.md](docs/architecture/frontend-workspace.md).
 
