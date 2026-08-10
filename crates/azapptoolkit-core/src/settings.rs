@@ -72,11 +72,16 @@ impl UserSettings {
     /// Writes the settings to `<config_dir>/settings.json` (creating the
     /// directory if needed), pretty-printed. Used by the first-run config
     /// screen — the only writer of this file.
+    ///
+    /// Owner-only: `tenant_defaults` records which Key Vault holds which
+    /// application's secrets (`default_vault` / `app_vaults`), which is a map
+    /// of where this tenant's credentials live. Written under the process
+    /// umask it was commonly world-readable.
     pub fn save(&self, config_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(config_dir)?;
         let json = serde_json::to_vec_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(config_dir.join(SETTINGS_FILE), json)
+        crate::private_file::write_owner_only(&config_dir.join(SETTINGS_FILE), &json)
     }
 
     /// The defaults saved for `tenant_id`, or an empty default set if none.
