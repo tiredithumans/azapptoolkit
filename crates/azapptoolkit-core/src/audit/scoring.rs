@@ -273,15 +273,20 @@ type MailboxAdvisory<'a> = (
 
 fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
     let mut c = RuleContribution::default();
-    let mailbox_hits: Vec<&ResourcePermission> = perms
-        .app_role_grants
-        .iter()
-        .filter(|g| {
-            crate::scoping::is_mailbox_reaching_permission(g.resource_app_id.as_deref(), &g.value)
-        })
-        .collect();
+    // Partitioned straight off the filter — this runs once per application in a
+    // tenant-wide audit, and the intermediate `Vec` was built only to be
+    // consumed by the very next line.
     let (mailbox_scoped, mailbox_orgwide): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) =
-        mailbox_hits.into_iter().partition(|g| perms.is_scoped(g));
+        perms
+            .app_role_grants
+            .iter()
+            .filter(|g| {
+                crate::scoping::is_mailbox_reaching_permission(
+                    g.resource_app_id.as_deref(),
+                    &g.value,
+                )
+            })
+            .partition(|g| perms.is_scoped(g));
     // Positive test, deliberately: only a permission RBAC for Applications can
     // actually confine may carry the ScopeMailboxAccess remediation. Asking the
     // negative question ("is it *not* the legacy Outlook-REST case?") let three
@@ -397,17 +402,16 @@ fn rule_sharepoint_advisory(
     };
     let mut c = RuleContribution::default();
 
-    let orgwide: Vec<&ResourcePermission> = perms
+    // Split on the POSITIVE gate, never on the negation of a legacy test: only
+    // grants the Sites.Selected handler can actually confine may carry the fix.
+    // Partitioned straight off the filter, as in the mailbox rule above.
+    let (scopable, unconfinable): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) = perms
         .app_role_grants
         .iter()
         .filter(|g| is_sharepoint_orgwide_permission(g.resource_app_id.as_deref(), &g.value))
-        .collect();
-
-    // Split on the POSITIVE gate, never on the negation of a legacy test: only
-    // grants the Sites.Selected handler can actually confine may carry the fix.
-    let (scopable, unconfinable): (Vec<_>, Vec<_>) = orgwide.into_iter().partition(|g| {
-        is_scopable_sharepoint_resource_permission(g.resource_app_id.as_deref(), &g.value)
-    });
+        .partition(|g| {
+            is_scopable_sharepoint_resource_permission(g.resource_app_id.as_deref(), &g.value)
+        });
 
     if !scopable.is_empty() {
         c.issues.push(format!(
