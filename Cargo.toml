@@ -28,7 +28,18 @@ futures = "0.3"
 # HTTP
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "form"] }
 # Auth
-oauth2 = "5"
+#
+# `default-features = false` on purpose. oauth2's defaults enable its own
+# `reqwest` + `rustls-tls` clients, and this workspace uses oauth2 for exactly
+# three types — `CsrfToken`, `PkceCodeChallenge`, `PkceCodeVerifier`. Every HTTP
+# call in `azapptoolkit-auth` goes through the workspace `reqwest` above, so the
+# defaults compiled and linked a SECOND http client (reqwest 0.12, one major
+# behind ours) plus a second webpki root store that nothing ever called. In an
+# app whose job is handling tenant credentials, an unused TLS path is liability,
+# not just build time. Turning them off removes exactly those two crates and
+# needs no code change; if a future version starts using oauth2's own client,
+# add the feature back deliberately rather than by default.
+oauth2 = { version = "5", default-features = false }
 keyring-core = { package = "keyring_core", version = "1.0" }
 # Serde
 serde = { version = "1", features = ["derive"] }

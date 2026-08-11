@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Internal
+
+- **A second HTTP client was being compiled into the app and never used.** The
+  OAuth library is used here for three small helper types; every network call
+  goes through the toolkit's own HTTP client. Its default settings quietly
+  brought along a second, older HTTP client and a second set of TLS root
+  certificates that nothing ever called. Both are gone. No behaviour changes —
+  in an app that handles tenant credentials, a network path nothing uses is
+  worth removing rather than shipping.
+
 ### Security
 
 - **Files this app writes are now readable only by you.** The settings file, the
