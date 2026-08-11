@@ -14,7 +14,7 @@ use crate::bindings::keyvault_rbac::{
 };
 use crate::bindings::sharepoint;
 use crate::components::ui::SearchInput;
-use crate::components::ui::{Badge, Callout};
+use crate::components::ui::{Badge, Callout, ShowMore};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
@@ -391,26 +391,14 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                     {move || {
                         let total = filtered_rows.with(|r| r.len());
                         let limit = render_limit.get();
-                        (total > limit)
-                            .then(|| {
-                                let remaining = total - limit;
-                                let next = RENDER_PAGE.min(remaining);
-                                view! {
-                                    <div class="audit-show-more">
-                                        <Body1>
-                                            {format!("Showing {limit} of {total} matching rows")}
-                                        </Body1>
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                            on_click=Box::new(move |_| {
-                                                render_limit.update(|n| *n += RENDER_PAGE)
-                                            })
-                                        >
-                                            {format!("Show {next} more")}
-                                        </Button>
-                                    </div>
-                                }
-                            })
+                        view! {
+                            <ShowMore
+                                total=total
+                                limit=limit
+                                render_limit=render_limit
+                                noun="matching rows"
+                            />
+                        }
                     }}
                 </Show>
             }

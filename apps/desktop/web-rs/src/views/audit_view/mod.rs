@@ -24,12 +24,12 @@ use std::sync::Arc;
 
 use azapptoolkit_core::audit::{AuditItem, AuditPrincipalKind, RiskLevel};
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::Body1;
 
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::icon::IconName;
 use crate::components::select_all_bar::SelectAllBar;
-use crate::components::ui::{CopyableId, EmptyState, SearchInput, TabBar, TabBarItem};
+use crate::components::ui::{CopyableId, EmptyState, SearchInput, ShowMore, TabBar, TabBarItem};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
@@ -455,26 +455,14 @@ pub fn AuditAppsPane() -> impl IntoView {
                         {move || {
                             let matched = filtered.with(|f| f.len());
                             let limit = render_limit.get();
-                            (matched > limit)
-                                .then(|| {
-                                    let remaining = matched - limit;
-                                    let next = RENDER_PAGE.min(remaining);
-                                    view! {
-                                        <div class="audit-show-more">
-                                            <Body1>
-                                                {format!("Showing {limit} of {matched} matching rows")}
-                                            </Body1>
-                                            <Button
-                                                appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                                on_click=Box::new(move |_| {
-                                                    render_limit.update(|n| *n += RENDER_PAGE)
-                                                })
-                                            >
-                                                {format!("Show {next} more")}
-                                            </Button>
-                                        </div>
-                                    }
-                                })
+                            view! {
+                                <ShowMore
+                                    total=matched
+                                    limit=limit
+                                    render_limit=render_limit
+                                    noun="matching rows"
+                                />
+                            }
                         }}
                         </div>
                     </div>

@@ -128,6 +128,12 @@
 
 ### Internal
 
+- **The "Show N more" footer is one component instead of six copies.** Six list
+  views had each grown their own copy of the same footer, identical apart from
+  the word they counted — and all six carried an `audit-`prefixed style class,
+  including the Key Vault, Sites and Mailboxes panels, which are not audit
+  views. They now share one primitive, and the style class is named for what it
+  does. No visible change.
 - **The mailbox permission checks that could not see which resource a grant was
   on are gone.** Both Microsoft Graph and the legacy Office 365 Exchange Online
   resource publish permissions with the same names, and only Graph's can be

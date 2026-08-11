@@ -18,7 +18,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::components::bulk_action_bar::BulkActionBar;
 use crate::components::select_all_bar::SelectAllBar;
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, ShowMore};
 use crate::constants::*;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::use_session;
@@ -472,25 +472,14 @@ fn finding_group_view(
                     </table>
                     {move || {
                         let limit = render_limit.get();
-                        (count > limit)
-                            .then(|| {
-                                let next = RENDER_PAGE.min(count - limit);
-                                view! {
-                                    <div class="audit-show-more">
-                                        <Body1>
-                                            {format!("Showing {limit} of {count} affected")}
-                                        </Body1>
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                            on_click=Box::new(move |_| {
-                                                render_limit.update(|n| *n += RENDER_PAGE)
-                                            })
-                                        >
-                                            {format!("Show {next} more")}
-                                        </Button>
-                                    </div>
-                                }
-                            })
+                        view! {
+                            <ShowMore
+                                total=count
+                                limit=limit
+                                render_limit=render_limit
+                                noun="affected"
+                            />
+                        }
                     }}
                 </div>
             </Show>
