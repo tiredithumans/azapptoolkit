@@ -87,6 +87,22 @@ pub(crate) fn audit_cache_key(tenant_id: &str) -> String {
     format!("{tenant_id}|audit_run")
 }
 
+/// Whether a finished run may be written to the audit cache.
+///
+/// **Only a complete, undegraded scan.** A cancelled or truncated run scored an
+/// arbitrary subset of the tenant, and a degraded one scored every app but
+/// under-reports because some input could not be resolved. On the next read a
+/// cached run of any of those three kinds is indistinguishable from a clean
+/// full scan — the operator sees an all-clear that was never established.
+///
+/// AGENTS.md states this ("a `cancelled`/`truncated`/`degraded` run is **never
+/// cached** nor shown as an all-clear") and nothing enforced it; extracted from
+/// [`run_audit`] purely so it can be, since that function needs a Tauri `State`
+/// and cannot be unit-tested.
+fn run_is_cacheable(cancelled: bool, truncated: bool, degraded: &[AuditCoverageGap]) -> bool {
+    !cancelled && !truncated && degraded.is_empty()
+}
+
 /// Runs a full audit scan. Blocks until every app has been scored (or the
 /// user calls [`cancel_audit`]). Emits a `audit-progress` event after each
 /// completed app. Caches the full result under `CacheKind::Audit` with the
@@ -399,13 +415,7 @@ pub async fn run_audit(
     let cancelled = cancelled_before_all_dispatched || cancel.is_cancelled();
     items.sort_by_key(|i| std::cmp::Reverse(i.risk_score));
 
-    // A truncated run is cached no more than a cancelled one: both scored an
-    // arbitrary subset of the tenant, and a cached subset is indistinguishable
-    // from a clean full scan on the next read.
-    // ...and neither is a degraded one, for the same reason: a cached partial
-    // analysis is indistinguishable from a full one on the next read, and this
-    // one under-reports risk rather than merely covering fewer apps.
-    if !cancelled && !truncated && degraded.is_empty() {
+    if run_is_cacheable(cancelled, truncated, &degraded) {
         state
             .cache
             .put(CacheKind::Audit, audit_cache_key(&tenant_id), &items);
@@ -1400,6 +1410,57 @@ mod tests {
             let stops = classify_audit_failure(&err) == AuditFailure::SessionDead;
             assert_eq!(stops, expected_stop, "{code} diverged from is_reauth_fatal");
         }
+    }
+
+    /// The cache guard, exhaustively. AGENTS.md states that a
+    /// cancelled/truncated/degraded run is never cached; until this the rule
+    /// lived only in an `if` inside a `State`-taking command, so nothing could
+    /// fail when it changed.
+    ///
+    /// Every combination on purpose: the failure mode is one condition being
+    /// dropped from the conjunction, which any single-case test would miss.
+    #[test]
+    fn only_a_complete_undegraded_run_is_cacheable() {
+        let gap = vec![AuditCoverageGap::PermissionResolution];
+        for &cancelled in &[false, true] {
+            for &truncated in &[false, true] {
+                for degraded in [Vec::new(), gap.clone()] {
+                    let clean = !cancelled && !truncated && degraded.is_empty();
+                    assert_eq!(
+                        run_is_cacheable(cancelled, truncated, &degraded),
+                        clean,
+                        "cancelled={cancelled} truncated={truncated} degraded={} \
+                         — a partial or degraded run cached here reads as a clean \
+                         full scan on the next open",
+                        degraded.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// A run that scored everything and resolved everything is the ONE case
+    /// that caches — stated separately so the intent survives if the loop above
+    /// is ever rewritten.
+    #[test]
+    fn a_clean_full_run_is_cached() {
+        assert!(run_is_cacheable(false, false, &[]));
+    }
+
+    /// The audit key must carry the `{tenant_id}|` prefix every other kind
+    /// uses, because sign-out invalidates by prefix. The original `run:{tenant}`
+    /// shape was invisible to that sweep — one tenant's audit survived into the
+    /// next session, which is the cross-tenant leak AGENTS.md calls the #1
+    /// footgun. Nothing pinned the shape.
+    #[test]
+    fn the_audit_cache_key_is_tenant_prefixed_so_sign_out_reaches_it() {
+        let key = audit_cache_key("contoso-tenant-id");
+        assert!(
+            key.starts_with("contoso-tenant-id|"),
+            "key {key:?} does not start with the tenant prefix sign-out sweeps"
+        );
+        // And distinct tenants never collide.
+        assert_ne!(audit_cache_key("tenant-a"), audit_cache_key("tenant-b"));
     }
 
     fn sample(name: &str) -> AuditItem {
