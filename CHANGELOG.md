@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.25.2] - 2026-08-11
+
 ### Internal
 
 - **A second HTTP client was being compiled into the app and never used.** The
