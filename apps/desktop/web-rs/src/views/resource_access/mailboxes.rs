@@ -11,7 +11,7 @@ use crate::bindings::permission_tester::{
     self, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
 };
 use crate::bindings::sharepoint;
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, ShowMore};
 use crate::constants::*;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_progress_stream::use_progress_stream;
@@ -309,26 +309,12 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                                             .collect_view()}
                                     </tbody>
                                 </table>
-                                {(visible_total > limit)
-                                    .then(|| {
-                                        let remaining = visible_total - limit;
-                                        let next = RENDER_PAGE.min(remaining);
-                                        view! {
-                                            <div class="audit-show-more">
-                                                <Body1>
-                                                    {format!("Showing {limit} of {visible_total} apps")}
-                                                </Body1>
-                                                <Button
-                                                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                                    on_click=Box::new(move |_| {
-                                                        render_limit.update(|n| *n += RENDER_PAGE)
-                                                    })
-                                                >
-                                                    {format!("Show {next} more")}
-                                                </Button>
-                                            </div>
-                                        }
-                                    })}
+                                <ShowMore
+                                    total=visible_total
+                                    limit=limit
+                                    render_limit=render_limit
+                                    noun="apps"
+                                />
                             }
                                 .into_any()
                         }}
@@ -340,7 +326,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                                     format!("Show {no_access} with no access")
                                 };
                                 view! {
-                                    <div class="audit-show-more">
+                                    <div class="show-more">
                                         <Button
                                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                             on_click=Box::new(move |_| {

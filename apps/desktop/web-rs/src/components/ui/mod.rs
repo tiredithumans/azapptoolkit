@@ -15,6 +15,7 @@ mod empty_state;
 mod icon_button;
 mod search_input;
 mod section_header;
+mod show_more;
 mod skeleton;
 mod tab_bar;
 
@@ -29,5 +30,6 @@ pub use empty_state::EmptyState;
 pub use icon_button::IconButton;
 pub use search_input::SearchInput;
 pub use section_header::SectionHeader;
+pub use show_more::ShowMore;
 pub use skeleton::{DetailSkeleton, Skeleton, SkeletonList};
 pub use tab_bar::{TabBar, TabBarItem};

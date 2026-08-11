@@ -2249,7 +2249,7 @@ h3 {
   font-size: var(--text-xs);
 }
 /* "Show more" footer under the windowed audit table. */
-.audit-show-more {
+.show-more {
   display: flex;
   align-items: center;
   gap: var(--space-3);
