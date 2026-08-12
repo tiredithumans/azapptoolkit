@@ -36,10 +36,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: apps/desktop/web-rs
-      - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: just,trunk
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
