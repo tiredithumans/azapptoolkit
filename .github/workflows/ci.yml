@@ -108,9 +108,9 @@ jobs:
         if: needs.changes.outputs.code == 'true'
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: needs.changes.outputs.code == 'true'
-      - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         if: needs.changes.outputs.code == 'true'
         with:
           tool: just
@@ -144,10 +144,10 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: apps/desktop/web-rs
-      - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: just,trunk,wasm-pack
       # web-rs is excluded from the root workspace, so the `rust` job's
@@ -257,7 +257,7 @@ jobs:
       # list in .cargo/audit.toml). Covers BOTH lockfiles: the root workspace
       # and the frontend's own Cargo.lock (web-rs is excluded from the
       # workspace, so the root scan never sees it).
-      - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: just,cargo-audit
       - name: audit (workspace)
@@ -281,7 +281,7 @@ jobs:
       # can't reach. cargo-deny is version-pinned (not @latest) because its
       # 0.20 CLI refactor broke the recipes unannounced mid-bump; the web-deny
       # recipe's `--config` placement must match the pinned version's CLI.
-      - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: just,cargo-deny@0.20.2
       - name: deny (workspace)
