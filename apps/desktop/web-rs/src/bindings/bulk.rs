@@ -221,3 +221,36 @@ pub async fn bulk_disable_sign_in(
     )
     .await
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkStageCertArgs<'a> {
+    tenant_id: &'a str,
+    service_principal_ids: &'a [String],
+    subject: &'a str,
+    lifetime_days: Option<u32>,
+}
+
+/// Stages a fresh SAML signing certificate on each selected app **without
+/// activating any of them** — additive and inactive, so nothing changes for
+/// users until each app is activated individually. Takes **service principal**
+/// ids (signing certificates live on the SP), not app-registration object ids.
+/// An app that already has a valid replacement staged is skipped, not
+/// re-staged.
+pub async fn bulk_stage_sso_certificates(
+    tenant_id: &str,
+    service_principal_ids: &[String],
+    subject: &str,
+    lifetime_days: Option<u32>,
+) -> Result<BulkStageCertResult, UiError> {
+    invoke_result(
+        "bulk_stage_sso_certificates",
+        BulkStageCertArgs {
+            tenant_id,
+            service_principal_ids,
+            subject,
+            lifetime_days,
+        },
+    )
+    .await
+}

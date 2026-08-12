@@ -1117,7 +1117,57 @@ pub(crate) fn sso_certificate_expirations_key(tenant_id: &str) -> String {
 /// on the board at all). Missing either of those last two leaves the board
 /// contradicting the SSO tab for up to the cache TTL.
 fn invalidate_sso_cert_board(state: &State<'_, AppState>, tenant_id: &str) {
-    state.cache.invalidate(
+    invalidate_sso_cert_board_by_cache(&state.cache, tenant_id);
+}
+
+/// Stages a certificate on `service_principal_id` **unless a valid replacement
+/// is already staged**, in which case it returns `Ok(None)` having written
+/// nothing.
+///
+/// The idempotency guard for the bulk path. The board's work-queue filter lists
+/// an app until its rollover is *finished* (activated), not until it is started
+/// — so an operator who stages the queue on Monday and returns on Wednesday
+/// would otherwise mint a second spare certificate on every app they already
+/// prepared. Staging is additive, so nothing breaks; the pile of unused
+/// certificates is just noise that makes the real replacement harder to pick out.
+///
+/// Re-resolves live state rather than trusting the caller's list, matching the
+/// rule every remediation handler follows.
+pub(crate) async fn stage_if_not_already(
+    state: &State<'_, AppState>,
+    tenant_id: &str,
+    service_principal_id: &str,
+    subject: &str,
+    lifetime_days: Option<u32>,
+) -> Result<Option<SsoCertResult>, UiError> {
+    let roll = get_signing_cert_rollover(
+        state.clone(),
+        tenant_id.to_string(),
+        service_principal_id.to_string(),
+    )
+    .await?;
+    if roll.staged_thumbprint.is_some() {
+        return Ok(None);
+    }
+    let cert = mint_signing_certificate(
+        state,
+        tenant_id,
+        service_principal_id,
+        subject,
+        lifetime_days,
+    )
+    .await?;
+    invalidate_sso_cert_board(state, tenant_id);
+    Ok(Some(cert))
+}
+
+/// Cache-only variant of [`invalidate_sso_cert_board`] for callers that hold a
+/// `&Cache` rather than the `State` (the bulk driver's post-run sweep).
+pub(crate) fn invalidate_sso_cert_board_by_cache(
+    cache: &azapptoolkit_core::cache::Cache,
+    tenant_id: &str,
+) {
+    cache.invalidate(
         CacheKind::Lists,
         &sso_certificate_expirations_key(tenant_id),
     );

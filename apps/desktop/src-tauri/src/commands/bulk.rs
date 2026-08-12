@@ -29,6 +29,7 @@ use crate::dto::bulk::{
     BulkDeleteFailure, BulkDeleteResult, BulkDisableOutcome, BulkDisableSignInResult, BulkError,
     BulkGrantOutcome, BulkGrantResult, BulkOwnerOutcome, BulkProgress, BulkRemoveExpiredResult,
     BulkRemoveRedundantOutcome, BulkRemoveRedundantResult, BulkScopeOutcome, BulkScopeResult,
+    BulkStageCertOutcome, BulkStageCertResult,
 };
 use crate::state::{AppState, CancelToken};
 
@@ -83,6 +84,7 @@ bulk_outcome_error_field!(
     BulkScopeOutcome,
     BulkOwnerOutcome,
     BulkDisableOutcome,
+    BulkStageCertOutcome,
 );
 
 /// Rejects a bulk-create spec that cannot possibly succeed, without touching
@@ -863,6 +865,96 @@ pub async fn bulk_disable_sign_in(
     .await;
 
     Ok(BulkDisableSignInResult {
+        outcomes,
+        cancelled,
+    })
+}
+
+/// Stages a fresh SAML token-signing certificate on each selected service
+/// principal — **without activating any of them**.
+///
+/// This is the one rollover phase that is safe to run across many apps at once:
+/// a staged certificate is additive and inactive, so nothing changes for users
+/// until someone activates it per app. Activation stays deliberately per-app and
+/// gated — flipping `preferredTokenSigningKeyThumbprint` across a selection would
+/// be a coordinated outage, not a bulk action.
+///
+/// Re-resolves each app's live rollover state first and **skips** one that
+/// already has a valid replacement staged, so re-running over a filter that
+/// still lists a half-finished rollover doesn't mint a second spare certificate
+/// on every pass.
+///
+/// Sequential + cancel-aware like the other bulk remediations, reusing the same
+/// [`sso::mint_signing_certificate`] core as the create flow, the one-shot
+/// rotate, and the per-app stage — so the subject and lifetime rules can't drift
+/// between them.
+///
+/// [`sso::mint_signing_certificate`]: super::sso
+#[tauri::command]
+pub async fn bulk_stage_sso_certificates(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    tenant_id: String,
+    service_principal_ids: Vec<String>,
+    subject: String,
+    lifetime_days: Option<u32>,
+) -> Result<BulkStageCertResult, UiError> {
+    // Claimed once, before any suspension point: a token claimed later carries a
+    // higher generation than a cancel issued in the meantime, which
+    // `is_cancelled()` then discards. Pinned by `repo_invariants::cancel`.
+    let cancel = state.audit_cancel.claim();
+
+    let (outcomes, cancelled) = run_bulk_seq(
+        &app_handle,
+        &cancel,
+        service_principal_ids,
+        |id| id.clone(),
+        |sp_id| {
+            let state = state.clone();
+            let tenant_id = tenant_id.clone();
+            let subject = subject.clone();
+            async move {
+                match super::sso::stage_if_not_already(
+                    &state,
+                    &tenant_id,
+                    &sp_id,
+                    &subject,
+                    lifetime_days,
+                )
+                .await
+                {
+                    Ok(Some(cert)) => BulkStageCertOutcome {
+                        object_id: sp_id,
+                        thumbprint: Some(cert.thumbprint),
+                        skipped: false,
+                        error: None,
+                    },
+                    Ok(None) => BulkStageCertOutcome {
+                        object_id: sp_id,
+                        thumbprint: None,
+                        skipped: true,
+                        error: None,
+                    },
+                    Err(e) => BulkStageCertOutcome {
+                        object_id: sp_id,
+                        thumbprint: None,
+                        skipped: false,
+                        error: Some(BulkError::from(e)),
+                    },
+                }
+            }
+        },
+    )
+    .await;
+
+    // The per-app core busts the board on each success, so this is belt-and-
+    // braces for a run that staged nothing — but a cancelled run that DID stage
+    // some must still leave the board truthful about those.
+    if outcomes.iter().any(|o| o.thumbprint.is_some()) {
+        super::sso::invalidate_sso_cert_board_by_cache(&state.cache, &tenant_id);
+    }
+
+    Ok(BulkStageCertResult {
         outcomes,
         cancelled,
     })

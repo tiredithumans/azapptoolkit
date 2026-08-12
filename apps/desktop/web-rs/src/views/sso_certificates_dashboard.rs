@@ -13,12 +13,16 @@
 //! turn into outages — Entra seeds only the admin who added the app, whose
 //! mailbox may be long gone.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use azapptoolkit_core::audit::CredentialStatus;
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::sso::{self, RolloverPhase, SsoCertificateRowDto};
 use crate::components::audit_dashboard::AuditDashboard;
+use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::ui::{Callout, CopyableId};
 use crate::state::use_session;
 
@@ -28,6 +32,13 @@ const WARNING_DAYS: i64 = 30;
 #[component]
 pub fn SsoCertificatesDashboard() -> impl IntoView {
     let session = use_session();
+    // Service-principal ids, tenant-scoped (reset on switch by structure).
+    let selection = session.tenant_ui.selected_sso_cert_ids;
+    // Lifted out of the scaffold so the bulk bar can refetch after staging —
+    // the board must not keep claiming "no replacement staged" for apps it just
+    // staged one on.
+    let reload = RwSignal::new(0_u32);
+    let on_done = Callback::new(move |()| reload.update(|n| *n = n.wrapping_add(1)));
 
     // Bound to `let` rather than inline: the `view!` macro can't parse an
     // `async move {}` block as an attribute value.
@@ -45,6 +56,7 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
             view_key="sso-certificates"
             noun="SAML app(s)"
             empty_message="No SAML applications match this filter."
+            reload=reload
             facets=vec![
                 ("all", "All"),
                 ("expired", "Expired"),
@@ -53,6 +65,7 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
                 ("unprepared", "No replacement staged"),
             ]
             headers=vec![
+                "",
                 "Application",
                 "Thumbprint",
                 "Expires",
@@ -78,29 +91,76 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
                             && matches!(r.days_to_expiry, Some(d) if d <= WARNING_DAYS)
                     })
                     .count();
-                (expired + unprepared > 0)
-                    .then(|| {
-                        view! {
-                            <Callout tone="warn">
-                                {format!(
-                                    "{expired} signing certificate(s) already expired; {unprepared} expire within {WARNING_DAYS} days with no replacement staged.",
-                                )}
-                            </Callout>
-                        }
-                            .into_any()
+                // The bar is rendered from the banner slot because that is the
+                // one place the scaffold hands the caller its rows — and the
+                // bar needs them for two things: a name for every id (a failure
+                // list of raw SP GUIDs is unreadable) and the "select all
+                // unprepared" shortcut that turns the work queue into one click.
+                let names: Arc<HashMap<String, String>> = Arc::new(
+                    all.iter()
+                        .map(|r| (r.service_principal_id.clone(), r.display_name.clone()))
+                        .collect(),
+                );
+                let unprepared_ids: Vec<String> = all
+                    .iter()
+                    .filter(|r| {
+                        !r.has_staged_replacement
+                            && matches!(r.days_to_expiry, Some(d) if d <= WARNING_DAYS)
                     })
+                    .map(|r| r.service_principal_id.clone())
+                    .collect();
+                let queue = unprepared_ids.len();
+                Some(
+                    view! {
+                        {(expired + unprepared > 0)
+                            .then(|| {
+                                view! {
+                                    <Callout tone="warn">
+                                        {format!(
+                                            "{expired} signing certificate(s) already expired; {unprepared} expire within {WARNING_DAYS} days with no replacement staged.",
+                                        )}
+                                    </Callout>
+                                }
+                            })}
+                        {(queue > 0)
+                            .then(|| {
+                                let ids = unprepared_ids.clone();
+                                view! {
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                        on_click=Box::new(move |_| {
+                                            selection.set(ids.iter().cloned().collect())
+                                        })
+                                    >
+                                        {format!("Select the {queue} needing a replacement")}
+                                    </Button>
+                                }
+                            })}
+                        <BulkActionBar
+                            selection=selection
+                            actions=Signal::derive(|| vec![BulkAction::StageSsoCertificate])
+                            on_done=on_done
+                            names=Signal::derive(move || names.clone())
+                        />
+                    }
+                        .into_any(),
+                )
             }
             matches=move |r: &SsoCertificateRowDto, facet: &str, q: &str| {
                 matches_facet(r, facet)
                     && (q.is_empty() || r.display_name.to_lowercase().contains(q)
                         || r.app_id.to_lowercase().contains(q))
             }
-            row=move |r: SsoCertificateRowDto| sso_cert_row(session, r).into_any()
+            row=move |r: SsoCertificateRowDto| sso_cert_row(session, selection, r).into_any()
         />
     }
 }
 
-fn sso_cert_row(session: crate::state::Session, r: SsoCertificateRowDto) -> impl IntoView {
+fn sso_cert_row(
+    session: crate::state::Session,
+    selection: RwSignal<std::collections::HashSet<String>>,
+    r: SsoCertificateRowDto,
+) -> impl IntoView {
     let (status_label, badge_class) = status_badge(r.status, r.days_to_expiry);
     // The payload carries RFC3339; the board only ever shows the date.
     let expires = r
@@ -125,8 +185,31 @@ fn sso_cert_row(session: crate::state::Session, r: SsoCertificateRowDto) -> impl
         (false, _) => ("None", "badge--unknown"),
     };
 
+    let checkbox_id = r.service_principal_id.clone();
+    let checked = {
+        let id = r.service_principal_id.clone();
+        Signal::derive(move || selection.with(|s| s.contains(&id)))
+    };
+    let label = format!("Select {}", r.display_name);
+
     view! {
         <tr>
+            <td>
+                <input
+                    type="checkbox"
+                    class="row-select"
+                    aria-label=label
+                    prop:checked=checked
+                    on:change=move |_| {
+                        selection
+                            .update(|s| {
+                                if !s.remove(&checkbox_id) {
+                                    s.insert(checkbox_id.clone());
+                                }
+                            })
+                    }
+                />
+            </td>
             <td>
                 <div class="permissions-cell__primary">{r.display_name.clone()}</div>
                 <div class="permissions-cell__secondary">

@@ -200,3 +200,24 @@ in-app entirely.
   `set_notification_emails` (it flips the "nobody is warned" column) and `set_sso_mode` (it decides
   whether the app is on the board at all). Missing either of those last two leaves the board
   contradicting the SSO tab for up to the TTL.
+
+### Bulk staging
+
+`bulk_stage_sso_certificates` is the only rollover phase offered across a selection. Staging is
+additive and inactive, so a bulk run changes nothing for users; activation flips
+`preferredTokenSigningKeyThumbprint` and is a coordinated switch, which is why it stays per-app.
+
+- Runs through `run_bulk_seq` like the other bulk remediations — sequential (the per-app core takes
+  `State`, so it is not `Send`), claiming `audit_cancel` before any suspension point, degrading to a
+  per-app `BulkError`, and halting on a re-auth-fatal code rather than failing every remaining app
+  identically.
+- **Idempotent by design.** `stage_if_not_already` re-resolves live state and skips an app that
+  already has a valid replacement staged. The board's work-queue filter lists an app until its
+  rollover is *finished*, not until it is started, so without this an operator who stages on Monday
+  and returns on Wednesday mints a second spare on every app they already prepared.
+- The outcome distinguishes `thumbprint: Some(..)` (staged) from `skipped: true` (already prepared);
+  the summary reports them separately, because folding skips into "staged" claims work that did not
+  happen.
+- Takes **service-principal** ids. `Session.tenant_ui.selected_sso_cert_ids` is deliberately a third
+  selection set alongside `selected_app_ids`/`selected_audit_ids`, which hold app-registration object
+  ids — feeding SP ids to an app-registration bulk command would target the wrong objects entirely.
