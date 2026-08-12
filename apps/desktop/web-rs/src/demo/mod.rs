@@ -443,6 +443,17 @@ fn register_fixtures() {
         "get_sso_summary",
         &f::saml_sso_summary("sp-demo", "app-demo"),
     );
+    // The signing-certificate rollover panel sits inside the SSO tab and reads
+    // on mount, so it needs the same treatment — and the staged phase is the
+    // one worth showing a visitor.
+    mock_ok(
+        "get_signing_cert_rollover",
+        &f::signing_cert_rollover("sp-demo", "app-demo"),
+    );
+    // The metadata probe is an explicit button, but mocking it lets a visitor
+    // actually press it and see what "Entra publishes 2 signing keys" looks
+    // like — the whole point of the staged flow.
+    mock_ok("probe_federation_metadata", &f::metadata_probe());
     mock_ok(
         "get_enterprise_app_provisioning",
         &vec![f::provisioning_job(

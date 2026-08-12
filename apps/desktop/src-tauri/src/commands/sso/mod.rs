@@ -30,8 +30,8 @@ use claims::{build_claims_definition, parse_claims_definition};
 use crate::commands::applications::invalidate_app_lists;
 use crate::dto::UiError;
 use crate::dto::sso::{
-    ClaimsPolicyDto, OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput, SamlSsoSummary,
-    SsoConfigDto,
+    ClaimsPolicyDto, MetadataProbeDto, OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput,
+    SamlSsoSummary, SigningCertRolloverDto, SsoConfigDto,
 };
 use crate::state::AppState;
 
@@ -700,8 +700,16 @@ pub async fn set_saml_urls(
     Ok(())
 }
 
-/// Generates a fresh SAML token-signing certificate and activates it as the
-/// preferred signing key. Returns the new thumbprint + expiry for display.
+/// Generates a fresh SAML token-signing certificate and activates it immediately
+/// — a **big-bang rotation**. Every new assertion is signed by the new key the
+/// moment this returns, so any app holding a single static certificate stops
+/// accepting sign-ins until its copy is replaced.
+///
+/// Kept for the app that genuinely can only hold one certificate, where a
+/// maintenance window is the plan. Everything else should use the staged flow
+/// ([`stage_saml_signing_certificate`] → [`probe_federation_metadata`] →
+/// [`activate_saml_signing_certificate`]), which keeps the old certificate
+/// available as an instant rollback.
 #[tauri::command]
 pub async fn rotate_saml_signing_certificate(
     state: State<'_, AppState>,
@@ -710,20 +718,16 @@ pub async fn rotate_saml_signing_certificate(
     subject: String,
     lifetime_days: Option<u32>,
 ) -> Result<SsoCertResult, UiError> {
-    let client = state.graph_for(&tenant_id);
-    let days = resolve_cert_lifetime_days(lifetime_days)?;
-    let end = chrono::Utc::now() + chrono::Duration::days(days as i64);
-    let subject = if subject.is_empty() {
-        "CN=SSO".to_string()
-    } else {
-        subject
-    };
-    // Typed rejection instead of a raw Graph 400 (consistent with the create flow).
-    validate_cert_subject(&subject)?;
-    let cert = client
-        .add_token_signing_certificate(&service_principal_id, &subject, end)
-        .await?;
-    client
+    let cert = mint_signing_certificate(
+        &state,
+        &tenant_id,
+        &service_principal_id,
+        &subject,
+        lifetime_days,
+    )
+    .await?;
+    state
+        .graph_for(&tenant_id)
         .patch_service_principal(
             &service_principal_id,
             &ServicePrincipalSigningKeyPatch {
@@ -732,6 +736,248 @@ pub async fn rotate_saml_signing_certificate(
         )
         .await?;
     invalidate_app_lists(&state.cache, &tenant_id);
+    Ok(cert)
+}
+
+/// Result of [`rotate_saml_signing_certificate`] and
+/// [`stage_saml_signing_certificate`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SsoCertResult {
+    pub thumbprint: String,
+    pub base64: Option<String>,
+    pub expiry: Option<String>,
+}
+
+// ---------------- staged rollover ----------------
+
+/// Reads the staged-rollover state of a SAML app's signing certificates.
+///
+/// Live read (the SSO tab is uncached anyway). The phase is a **pure projection
+/// of live Graph state** — nothing about a rollover is persisted, so one
+/// abandoned halfway is always resumable and two operators can't hold different
+/// ideas about where it is.
+#[tauri::command]
+pub async fn get_signing_cert_rollover(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    service_principal_id: String,
+) -> Result<SigningCertRolloverDto, UiError> {
+    let client = state.graph_for(&tenant_id);
+    let sp = client
+        .get_service_principal_sso_fields(&service_principal_id)
+        .await?
+        .ok_or_else(|| UiError::validation("not_found", "Service principal not found."))?;
+    Ok(build_rollover(
+        &sp,
+        &service_principal_id,
+        &tenant_id,
+        chrono::Utc::now(),
+    ))
+}
+
+/// **Phase 1 of a staged rollover** — mints a new signing certificate and stops.
+///
+/// Deliberately does *not* touch `preferredTokenSigningKeyThumbprint`: the new
+/// certificate lands inactive, Entra starts publishing it in the app's
+/// federation metadata, and an app that polls metadata can pick it up before it
+/// ever signs an assertion. Additive and reversible, so this is the half that is
+/// safe to run across many apps at once; activation stays per-app and gated.
+#[tauri::command]
+pub async fn stage_saml_signing_certificate(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    service_principal_id: String,
+    subject: String,
+    lifetime_days: Option<u32>,
+) -> Result<SsoCertResult, UiError> {
+    let cert = mint_signing_certificate(
+        &state,
+        &tenant_id,
+        &service_principal_id,
+        &subject,
+        lifetime_days,
+    )
+    .await?;
+    // `add_token_signing_certificate` self-invalidates the SP cache; the app
+    // lists carry no signing-cert field, so nothing else to bust.
+    Ok(cert)
+}
+
+/// **Phase 2** — fetches the app's federation metadata and reports the signing
+/// certificates Entra publishes for it.
+///
+/// Unauthenticated GET to the public metadata endpoint (a backend `reqwest`
+/// call, so no CSP change — `connect-src` governs the webview only). A transport
+/// or parse failure is returned as a populated [`MetadataProbeDto`] with
+/// `http_status: None`, never as a command error: "we couldn't check" and "Entra
+/// isn't publishing it" must not look the same to the operator.
+#[tauri::command]
+pub async fn probe_federation_metadata(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    app_id: String,
+) -> Result<MetadataProbeDto, UiError> {
+    // Prove the session before reaching out: this command takes no token, so
+    // without it a signed-out window could still drive tenant-shaped requests.
+    state.auth.tenant_context(&tenant_id).ok_or_else(|| {
+        UiError::validation(
+            "not_signed_in",
+            format!("not signed in to tenant {tenant_id}"),
+        )
+    })?;
+    let (_, _, _, metadata_url) = saml_summary_urls(&tenant_id, &app_id);
+    let fetched_at = chrono::Utc::now().to_rfc3339();
+
+    let response = metadata_http_client().get(&metadata_url).send().await;
+    let (status, body) = match response {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            match resp.text().await {
+                Ok(body) => (status, Some(body)),
+                Err(err) => {
+                    return Ok(MetadataProbeDto {
+                        fetched_at,
+                        error: Some(format!("Could not read the metadata response: {err}")),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        Err(err) => {
+            return Ok(MetadataProbeDto {
+                fetched_at,
+                error: Some(format!("Could not reach the metadata endpoint: {err}")),
+                ..Default::default()
+            });
+        }
+    };
+
+    let certs = body.as_deref().map(parse_signing_certs).unwrap_or_default();
+    let error = (!(200..300).contains(&status))
+        .then(|| format!("The metadata endpoint returned HTTP {status}."));
+    Ok(MetadataProbeDto {
+        fetched_at,
+        signing_key_count: certs.len(),
+        published_certs: certs,
+        http_status: Some(status),
+        error,
+    })
+}
+
+/// **Phase 3** — promotes a staged certificate to
+/// `preferredTokenSigningKeyThumbprint`. The moment this lands, every new SAML
+/// assertion is signed by it.
+///
+/// Re-resolves live state first and refuses anything unsafe: a thumbprint that
+/// is no longer on the service principal, or one that has already expired.
+/// Activating the certificate that is already active is a no-op, not an error,
+/// so a double-click can't produce a scary failure.
+///
+/// Deliberately **not** gated on a metadata probe having run — a probe can fail
+/// for reasons that have nothing to do with the rollover (offline, proxy), and
+/// blocking on it would strand an operator mid-window. The UI surfaces it as an
+/// unchecked precondition instead.
+#[tauri::command]
+pub async fn activate_saml_signing_certificate(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    service_principal_id: String,
+    thumbprint: String,
+) -> Result<SigningCertRolloverDto, UiError> {
+    set_preferred_signing_key(state, tenant_id, service_principal_id, thumbprint).await
+}
+
+/// **Phase 3b** — the rollback. Re-points `preferredTokenSigningKeyThumbprint`
+/// back at the superseded certificate, which is still in `keyCredentials` and
+/// therefore takes effect immediately for new assertions.
+///
+/// Same PATCH as [`activate_saml_signing_certificate`], kept as its own command
+/// so the UI can offer it as a distinct, obviously-safe action and so a revert
+/// reads as a revert in the logs rather than as another activation.
+#[tauri::command]
+pub async fn revert_saml_signing_certificate(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    service_principal_id: String,
+    thumbprint: String,
+) -> Result<SigningCertRolloverDto, UiError> {
+    set_preferred_signing_key(state, tenant_id, service_principal_id, thumbprint).await
+}
+
+/// **Phase 4** — removes a retired certificate, ending the rollover.
+///
+/// Refuses to remove the active certificate or the last usable one (either would
+/// break sign-in outright), and refuses to remove the sole remaining fallback
+/// while a rollover is still in flight — retiring the superseded certificate is
+/// what *ends* the ability to roll back, so it can't happen by accident before
+/// the new one is confirmed good.
+#[tauri::command]
+pub async fn retire_saml_signing_certificate(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    service_principal_id: String,
+    key_id: String,
+) -> Result<SigningCertRolloverDto, UiError> {
+    let client = state.graph_for(&tenant_id);
+    let before = get_signing_cert_rollover(
+        state.clone(),
+        tenant_id.clone(),
+        service_principal_id.clone(),
+    )
+    .await?;
+
+    let target = before
+        .certs
+        .iter()
+        .find(|c| c.key_id == key_id)
+        .ok_or_else(|| {
+            UiError::validation(
+                "cert_not_found",
+                "That certificate is no longer on the service principal.",
+            )
+        })?;
+    if target.is_active {
+        return Err(UiError::validation(
+            "cert_is_active",
+            "That certificate is signing assertions right now. Activate its replacement first.",
+        ));
+    }
+    if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Staged) {
+        return Err(UiError::validation(
+            "cert_is_staged",
+            "That certificate is staged for the next rollover, not retired. Activate it or let it expire.",
+        ));
+    }
+
+    client
+        .remove_service_principal_key_credential(&service_principal_id, &key_id)
+        .await?;
+    get_signing_cert_rollover(state, tenant_id, service_principal_id).await
+}
+
+/// Mints a signing certificate on the service principal. Shared by the create
+/// flow, the one-shot rotate, and [`stage_saml_signing_certificate`], so the
+/// subject/lifetime rules can't drift between them.
+async fn mint_signing_certificate(
+    state: &State<'_, AppState>,
+    tenant_id: &str,
+    service_principal_id: &str,
+    subject: &str,
+    lifetime_days: Option<u32>,
+) -> Result<SsoCertResult, UiError> {
+    let days = resolve_cert_lifetime_days(lifetime_days)?;
+    let subject = if subject.is_empty() {
+        "CN=SSO"
+    } else {
+        subject
+    };
+    // Typed rejection instead of a raw Graph 400 (consistent with create).
+    validate_cert_subject(subject)?;
+    let end = chrono::Utc::now() + chrono::Duration::days(days as i64);
+    let cert = state
+        .graph_for(tenant_id)
+        .add_token_signing_certificate(service_principal_id, subject, end)
+        .await?;
     Ok(SsoCertResult {
         thumbprint: cert.thumbprint.clone(),
         base64: cert.key.clone(),
@@ -739,12 +985,276 @@ pub async fn rotate_saml_signing_certificate(
     })
 }
 
-/// Result of [`rotate_saml_signing_certificate`].
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SsoCertResult {
-    pub thumbprint: String,
-    pub base64: Option<String>,
-    pub expiry: Option<String>,
+/// The one PATCH that changes which certificate signs assertions, shared by
+/// activate and revert so the guards can't diverge between the forward and the
+/// backward move. Re-resolves live state before writing.
+async fn set_preferred_signing_key(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    service_principal_id: String,
+    thumbprint: String,
+) -> Result<SigningCertRolloverDto, UiError> {
+    let before = get_signing_cert_rollover(
+        state.clone(),
+        tenant_id.clone(),
+        service_principal_id.clone(),
+    )
+    .await?;
+
+    let target = before
+        .certs
+        .iter()
+        .find(|c| c.thumbprint.eq_ignore_ascii_case(&thumbprint))
+        .ok_or_else(|| {
+            UiError::validation(
+                "cert_not_staged",
+                "That certificate is no longer on the service principal — stage a new one.",
+            )
+        })?;
+    if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Expired) {
+        return Err(UiError::validation(
+            "cert_expired",
+            "That certificate has expired. Entra won't sign with it — stage a new one instead.",
+        ));
+    }
+    // Idempotent: a double-click shouldn't read as a failure.
+    if target.is_active {
+        return Ok(before);
+    }
+
+    state
+        .graph_for(&tenant_id)
+        .patch_service_principal(
+            &service_principal_id,
+            &ServicePrincipalSigningKeyPatch {
+                preferred_token_signing_key_thumbprint: target.thumbprint.clone(),
+            },
+        )
+        .await?;
+    get_signing_cert_rollover(state, tenant_id, service_principal_id).await
+}
+
+/// Shared `reqwest` client for federation-metadata probes. The endpoint is
+/// public and unauthenticated, so this never carries a token — it exists only so
+/// repeated probes reuse one connection pool.
+fn metadata_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+/// Extracts the base64 DER bodies of the `<KeyDescriptor use="signing">`
+/// certificates from a federation metadata document, deduped and whitespace
+/// stripped.
+///
+/// Scans for the elements directly rather than pulling in an XML parser: the
+/// document is a fixed-shape Microsoft-generated file, and the only thing read
+/// out of it is a count and a set of opaque base64 bodies. A malformed document
+/// yields an empty list, which the caller reports as "0 published" alongside the
+/// HTTP status — it never fabricates a match.
+///
+/// A `KeyDescriptor` with no `use` attribute is signing-capable per the SAML
+/// metadata spec, so those count too; an explicit `use="encryption"` does not.
+fn parse_signing_certs(xml: &str) -> Vec<String> {
+    const DESCRIPTOR: &str = "<KeyDescriptor";
+    const CERT_OPEN: &str = "<X509Certificate>";
+    const CERT_CLOSE: &str = "</X509Certificate>";
+
+    let mut out: Vec<String> = Vec::new();
+    for block in xml.split(DESCRIPTOR).skip(1) {
+        // The attributes run up to the element's own `>`; anything after that
+        // belongs to the children.
+        let attrs = block.split('>').next().unwrap_or_default();
+        if attrs.contains("use=\"encryption\"") || attrs.contains("use='encryption'") {
+            continue;
+        }
+        // Stop at the next descriptor's content — `split` already did that.
+        let mut rest = block;
+        while let Some(start) = rest.find(CERT_OPEN) {
+            let after = &rest[start + CERT_OPEN.len()..];
+            let Some(end) = after.find(CERT_CLOSE) else {
+                break;
+            };
+            let body: String = after[..end]
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            if !body.is_empty() && !out.iter().any(|existing| existing == &body) {
+                out.push(body);
+            }
+            rest = &after[end + CERT_CLOSE.len()..];
+        }
+    }
+    out
+}
+
+/// Projects a service principal's raw JSON into the rollover view.
+///
+/// Pure (no Graph, no `State`) so the phase machine is table-testable — mirrors
+/// [`extract_sp_sso_fields`]. Two Graph behaviours are load-bearing here:
+///
+/// - a signing certificate is **two** `keyCredentials` entries (a `Sign` and a
+///   `Verify` half sharing one `customKeyIdentifier`), so entries are deduped by
+///   thumbprint or the list shows every certificate twice;
+/// - `customKeyIdentifier` is reported uppercase while
+///   `preferredTokenSigningKeyThumbprint` can differ in case, so every
+///   comparison is case-insensitive.
+fn build_rollover(
+    sp: &serde_json::Value,
+    service_principal_id: &str,
+    tenant_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> SigningCertRolloverDto {
+    use azapptoolkit_dto::sso::{CertStatus, RolloverPhase, SigningCertDto};
+
+    let app_id = sp
+        .get("appId")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let preferred = sp
+        .get("preferredTokenSigningKeyThumbprint")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let parse_time = |v: Option<&serde_json::Value>| -> Option<chrono::DateTime<chrono::Utc>> {
+        v.and_then(|x| x.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&chrono::Utc))
+    };
+
+    // Dedupe the Sign/Verify pair down to one row per certificate.
+    let mut certs: Vec<(SigningCertDto, Option<chrono::DateTime<chrono::Utc>>)> = Vec::new();
+    for cred in sp
+        .get("keyCredentials")
+        .and_then(|v| v.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let thumbprint = cred
+            .get("customKeyIdentifier")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if thumbprint.is_empty()
+            || certs
+                .iter()
+                .any(|(c, _)| c.thumbprint.eq_ignore_ascii_case(&thumbprint))
+        {
+            continue;
+        }
+        let end = parse_time(cred.get("endDateTime"));
+        let is_active = preferred
+            .as_deref()
+            .is_some_and(|p| p.eq_ignore_ascii_case(&thumbprint));
+        certs.push((
+            SigningCertDto {
+                key_id: cred
+                    .get("keyId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                thumbprint,
+                display_name: cred
+                    .get("displayName")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                start_date_time: cred
+                    .get("startDateTime")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                end_date_time: cred
+                    .get("endDateTime")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                is_active,
+                days_to_expiry: end.map(|e| (e - now).num_days()),
+                // Provisional; the pass below needs the active cert's expiry.
+                status: CertStatus::Expired,
+            },
+            end,
+        ));
+    }
+
+    // The active certificate's expiry is the pivot: a valid non-active cert that
+    // outlives it is the rollover candidate, one that doesn't is the fallback.
+    let active_end = certs
+        .iter()
+        .find(|(c, _)| c.is_active)
+        .and_then(|(_, end)| *end);
+    let active_expired = active_end.is_some_and(|e| e <= now);
+
+    for (cert, end) in &mut certs {
+        let expired = end.is_some_and(|e| e <= now);
+        cert.status = if expired {
+            CertStatus::Expired
+        } else if cert.is_active {
+            CertStatus::Active
+        } else if active_expired || active_end.is_none_or(|a| end.is_some_and(|e| e > a)) {
+            // Newer than the active one — or the active one can no longer sign,
+            // in which case every valid certificate is a candidate.
+            CertStatus::Staged
+        } else {
+            CertStatus::Superseded
+        };
+    }
+
+    // Newest first; undated entries sort last.
+    certs.sort_by(|(_, a), (_, b)| match (a, b) {
+        (Some(a), Some(b)) => b.cmp(a),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    let certs: Vec<SigningCertDto> = certs.into_iter().map(|(c, _)| c).collect();
+
+    let staged_thumbprint = certs
+        .iter()
+        .find(|c| matches!(c.status, CertStatus::Staged))
+        .map(|c| c.thumbprint.clone());
+    let has_superseded = certs
+        .iter()
+        .any(|c| matches!(c.status, CertStatus::Superseded));
+    let has_active = certs.iter().any(|c| matches!(c.status, CertStatus::Active));
+
+    let phase = if preferred.is_none() || certs.is_empty() {
+        RolloverPhase::Unconfigured
+    } else if staged_thumbprint.is_some() {
+        RolloverPhase::Staged
+    } else if !has_active {
+        // A preferred key that is expired (or missing from keyCredentials) with
+        // nothing valid to promote — sign-in is broken, not merely mid-rollover.
+        RolloverPhase::Unconfigured
+    } else if has_superseded {
+        RolloverPhase::PendingRetire
+    } else {
+        RolloverPhase::Steady
+    };
+
+    let auto_promote_deadline = matches!(phase, RolloverPhase::Staged)
+        .then(|| {
+            certs
+                .iter()
+                .find(|c| c.is_active)
+                .and_then(|c| c.end_date_time.clone())
+        })
+        .flatten();
+
+    let (_, _, _, federation_metadata_url) = saml_summary_urls(tenant_id, &app_id);
+    SigningCertRolloverDto {
+        service_principal_id: service_principal_id.to_string(),
+        app_id,
+        federation_metadata_url,
+        certs,
+        active_thumbprint: preferred,
+        staged_thumbprint,
+        phase,
+        auto_promote_deadline,
+    }
 }
 
 /// Replaces the claims-mapping policy on an existing app. Removes any existing
@@ -1024,6 +1534,234 @@ mod tests {
         // Picked the matching (upper-cased) credential, not the first one.
         assert_eq!(expiry.as_deref(), Some("2030-06-01T00:00:00Z"));
         assert_eq!(emails, vec!["a@x.com".to_string(), "b@y.com".to_string()]);
+    }
+
+    // ---------------- staged rollover ----------------
+
+    use azapptoolkit_dto::sso::{CertStatus, RolloverPhase};
+
+    /// `now` for the rollover tables below. Fixed so "expired" and "valid" are
+    /// properties of the fixture, not of the day the suite runs.
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// One `keyCredentials` entry. Graph emits a `Sign`/`Verify` pair per
+    /// certificate, so the helper takes the usage explicitly.
+    fn cred(key_id: &str, thumbprint: &str, end: &str, usage: &str) -> serde_json::Value {
+        serde_json::json!({
+            "keyId": key_id,
+            "customKeyIdentifier": thumbprint,
+            "displayName": "CN=Contoso",
+            "endDateTime": end,
+            "usage": usage,
+            "type": "AsymmetricX509Cert",
+        })
+    }
+
+    fn sp_with(preferred: Option<&str>, creds: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({
+            "appId": "app-1",
+            "preferredSingleSignOnMode": "saml",
+            "preferredTokenSigningKeyThumbprint": preferred,
+            "keyCredentials": creds,
+        })
+    }
+
+    #[test]
+    fn rollover_phase_reads_the_four_states_off_live_sp_state() {
+        // Steady: one valid certificate, and it's the preferred one.
+        let roll = build_rollover(
+            &sp_with(
+                Some("AAA"),
+                vec![cred("k1", "AAA", "2027-01-01T00:00:00Z", "Verify")],
+            ),
+            "sp-1",
+            "tid",
+            now(),
+        );
+        assert_eq!(roll.phase, RolloverPhase::Steady);
+        assert_eq!(roll.staged_thumbprint, None);
+        // Nothing staged ⇒ no deadline to show.
+        assert_eq!(roll.auto_promote_deadline, None);
+
+        // Staged: a newer valid certificate exists but isn't preferred yet.
+        let roll = build_rollover(
+            &sp_with(
+                Some("AAA"),
+                vec![
+                    cred("k1", "AAA", "2026-06-01T00:00:00Z", "Verify"),
+                    cred("k2", "BBB", "2029-01-01T00:00:00Z", "Verify"),
+                ],
+            ),
+            "sp-1",
+            "tid",
+            now(),
+        );
+        assert_eq!(roll.phase, RolloverPhase::Staged);
+        assert_eq!(roll.staged_thumbprint.as_deref(), Some("BBB"));
+        // The ACTIVE certificate's expiry is the activation deadline: once it
+        // passes, Entra promotes the staged certificate on its own.
+        assert_eq!(
+            roll.auto_promote_deadline.as_deref(),
+            Some("2026-06-01T00:00:00Z")
+        );
+
+        // PendingRetire: the newest certificate is active, the older one is the
+        // rollback target and still present.
+        let roll = build_rollover(
+            &sp_with(
+                Some("BBB"),
+                vec![
+                    cred("k1", "AAA", "2026-06-01T00:00:00Z", "Verify"),
+                    cred("k2", "BBB", "2029-01-01T00:00:00Z", "Verify"),
+                ],
+            ),
+            "sp-1",
+            "tid",
+            now(),
+        );
+        assert_eq!(roll.phase, RolloverPhase::PendingRetire);
+        assert_eq!(
+            roll.certs
+                .iter()
+                .find(|c| c.thumbprint == "AAA")
+                .map(|c| c.status),
+            Some(CertStatus::Superseded)
+        );
+
+        // Unconfigured: no preferred key at all.
+        let roll = build_rollover(
+            &sp_with(
+                None,
+                vec![cred("k1", "AAA", "2027-01-01T00:00:00Z", "Verify")],
+            ),
+            "sp-1",
+            "tid",
+            now(),
+        );
+        assert_eq!(roll.phase, RolloverPhase::Unconfigured);
+    }
+
+    #[test]
+    fn an_expired_active_certificate_means_entra_already_promoted_the_staged_one() {
+        // The trap from Microsoft's own docs: with an expired active certificate
+        // and a valid inactive one, Entra signs with the inactive one — so the
+        // deadline is in the PAST and the UI must not call this "steady".
+        let roll = build_rollover(
+            &sp_with(
+                Some("AAA"),
+                vec![
+                    cred("k1", "AAA", "2025-06-01T00:00:00Z", "Verify"),
+                    cred("k2", "BBB", "2029-01-01T00:00:00Z", "Verify"),
+                ],
+            ),
+            "sp-1",
+            "tid",
+            now(),
+        );
+        assert_eq!(roll.phase, RolloverPhase::Staged);
+        assert_eq!(roll.staged_thumbprint.as_deref(), Some("BBB"));
+        let active = roll.certs.iter().find(|c| c.is_active).unwrap();
+        // Still the nominated key, but it can't sign — both facts are visible.
+        assert!(active.is_active);
+        assert_eq!(active.status, CertStatus::Expired);
+        assert!(active.days_to_expiry.is_some_and(|d| d < 0));
+        assert_eq!(
+            roll.auto_promote_deadline.as_deref(),
+            Some("2025-06-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn the_sign_verify_pair_graph_returns_is_one_certificate_not_two() {
+        // `addTokenSigningCertificate` writes TWO keyCredentials entries sharing
+        // one customKeyIdentifier. Listing both would show every certificate
+        // twice and make a one-certificate app look mid-rollover.
+        let roll = build_rollover(
+            &sp_with(
+                Some("AAA"),
+                vec![
+                    cred("k1", "AAA", "2027-01-01T00:00:00Z", "Sign"),
+                    cred("k2", "AAA", "2027-01-01T00:00:00Z", "Verify"),
+                ],
+            ),
+            "sp-1",
+            "tid",
+            now(),
+        );
+        assert_eq!(roll.certs.len(), 1);
+        assert_eq!(roll.phase, RolloverPhase::Steady);
+    }
+
+    #[test]
+    fn rollover_matches_the_preferred_thumbprint_case_insensitively_and_sorts_newest_first() {
+        // Graph reports customKeyIdentifier uppercase; the preferred field can
+        // differ in case. A case-sensitive match would show NO active
+        // certificate and read as a broken app.
+        let roll = build_rollover(
+            &sp_with(
+                Some("bbb"),
+                vec![
+                    cred("k1", "AAA", "2026-06-01T00:00:00Z", "Verify"),
+                    cred("k2", "BBB", "2029-01-01T00:00:00Z", "Verify"),
+                ],
+            ),
+            "sp-1",
+            "tid",
+            now(),
+        );
+        assert_eq!(roll.certs[0].thumbprint, "BBB", "newest first");
+        assert!(roll.certs[0].is_active);
+        assert_eq!(roll.certs[0].status, CertStatus::Active);
+        // The metadata URL is the app's own, so the panel can link it directly.
+        assert!(roll.federation_metadata_url.ends_with("appid=app-1"));
+    }
+
+    #[test]
+    fn parse_signing_certs_reads_signing_keys_and_skips_encryption_ones() {
+        let xml = r#"
+            <EntityDescriptor>
+              <IDPSSODescriptor>
+                <KeyDescriptor use="signing">
+                  <KeyInfo><X509Data><X509Certificate>MIIC
+                  AAAA</X509Certificate></X509Data></KeyInfo>
+                </KeyDescriptor>
+                <KeyDescriptor use="encryption">
+                  <KeyInfo><X509Data><X509Certificate>SHOULDNOTAPPEAR</X509Certificate></X509Data></KeyInfo>
+                </KeyDescriptor>
+                <KeyDescriptor use="signing">
+                  <KeyInfo><X509Data><X509Certificate>MIICBBBB</X509Certificate></X509Data></KeyInfo>
+                </KeyDescriptor>
+              </IDPSSODescriptor>
+            </EntityDescriptor>"#;
+        let certs = parse_signing_certs(xml);
+        // Whitespace inside the base64 body is stripped, encryption keys skipped.
+        assert_eq!(certs, vec!["MIICAAAA".to_string(), "MIICBBBB".to_string()]);
+        // Two published signing keys is the precondition for an app that polls
+        // metadata to discover a staged certificate before it goes live.
+        assert_eq!(certs.len(), 2);
+    }
+
+    #[test]
+    fn parse_signing_certs_counts_a_use_less_descriptor_and_dedupes() {
+        // Per the SAML metadata spec a KeyDescriptor with no `use` is valid for
+        // signing, so it counts. The same body repeated is still one key.
+        let xml = "<KeyDescriptor><X509Certificate>DUP</X509Certificate></KeyDescriptor>\
+                   <KeyDescriptor use=\"signing\"><X509Certificate>DUP</X509Certificate></KeyDescriptor>";
+        assert_eq!(parse_signing_certs(xml), vec!["DUP".to_string()]);
+    }
+
+    #[test]
+    fn parse_signing_certs_never_fabricates_a_match_from_junk() {
+        // A malformed or empty document yields nothing — the probe reports "0
+        // published" next to the HTTP status rather than inventing a key.
+        assert!(parse_signing_certs("").is_empty());
+        assert!(parse_signing_certs("<html>404</html>").is_empty());
+        // An unterminated element is not a certificate.
+        assert!(parse_signing_certs("<KeyDescriptor><X509Certificate>oops").is_empty());
     }
 
     #[test]

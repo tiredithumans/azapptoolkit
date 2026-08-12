@@ -131,3 +131,48 @@ Three surfaces read it so the guidance never drifts:
    `check_readiness` is **never cached** (freshness after a PIM activation is the point); the Azure
    and Exchange *role* halves are deliberately `Unknown` (not per-user enumerable — verify in PIM /
    use the scoping action).
+
+## SAML signing-certificate rollover — staged, resumable, revertible
+
+A SAML signing certificate is the trust the *application* validates assertions against, so replacing
+it is a two-sided change. Entra can hold several certificates on the service principal at once and
+nominates one via `preferredTokenSigningKeyThumbprint`; downtime comes entirely from promoting a key
+the application has never seen. Commands live in `commands/sso/mod.rs`.
+
+**Phase is derived, never stored.** `build_rollover` projects `RolloverPhase` from live SP state
+(`keyCredentials` + `preferredTokenSigningKeyThumbprint` + `now`) on every read. Nothing about an
+in-flight rollover is persisted, so one abandoned half way — app closed, tenant switched, handed to a
+colleague — resumes exactly where it was, and two operators can't hold different ideas about it.
+Phases: `Steady` · `Staged` (a valid newer cert is not yet preferred) · `PendingRetire` (the newest
+is live, the previous one still present as the rollback) · `Unconfigured`.
+
+**Three Graph behaviours are load-bearing:**
+
+1. **One certificate is two `keyCredentials` entries** — a `Sign` and a `Verify` half sharing one
+   `customKeyIdentifier`. Dedupe by thumbprint or every certificate lists twice and a
+   one-certificate app reads as mid-rollover. `remove_service_principal_key_credential` drops *both*
+   halves for the same reason — removing one strands the other.
+2. **`customKeyIdentifier` is uppercase** while `preferredTokenSigningKeyThumbprint` can differ in
+   case. Every comparison is `eq_ignore_ascii_case`; a case-sensitive match shows no active
+   certificate and reads as a broken app.
+3. **Entra auto-promotes.** Once the active certificate expires with a valid inactive one present,
+   Entra signs with the inactive one whether or not anyone activated it. So a staged certificate
+   turns the active cert's expiry into an *activation deadline* (`auto_promote_deadline`), and an
+   expired-but-still-nominated certificate means the promotion already happened.
+
+**Guards.** `activate` and `revert` share one PATCH (`set_preferred_signing_key`) that re-resolves
+live state and refuses a thumbprint that is missing or expired; activating the already-active
+certificate is a no-op, not an error. `retire` refuses the active certificate (breaks sign-in) and
+the staged one (that's a pending rollover, not a leftover) — and because the superseded certificate
+*is* the rollback, retiring is what ends the ability to revert, so it stays an explicit action.
+
+**Deliberately not a guard:** activation is not gated on `probe_federation_metadata` having run. The
+probe reads the public metadata endpoint (a backend `reqwest` call — `connect-src` governs the
+webview only) and can fail for reasons unrelated to the rollover; blocking on it would strand an
+operator mid-window. It is an unchecked precondition in the UI instead, and a failed probe renders as
+"couldn't check", never as "not published" — a false negative there talks an operator out of a safe
+activation. The probe compares base64 DER bodies rather than thumbprints: deriving a thumbprint means
+SHA-1, which `cert.rs` deliberately keeps out of the tree.
+
+**Bulk.** Staging is additive, reversible, and changes nothing for users, so it is the only phase safe
+to fan out (via `run_bulk_seq`, like the other bulk remediations). Activation stays per-app and gated.

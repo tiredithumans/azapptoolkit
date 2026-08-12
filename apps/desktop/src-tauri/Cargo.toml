@@ -45,6 +45,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 parking_lot = { workspace = true }
+# Federation-metadata probes only: a public, unauthenticated GET to the SAML
+# metadata endpoint, which is off the Graph client's base URL. Already in the
+# lock file via the client crates, so this adds an edge, not a crate.
+reqwest = { workspace = true }
 
 # Self-signed certificate generation (native-only). rcgen generates the RSA-2048
 # key itself on the `aws_lc_rs` backend (Entra client assertions require RSA;
