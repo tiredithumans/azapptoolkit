@@ -23,6 +23,8 @@ mod dr;
 mod event_streams;
 #[path = "gui/global_search.rs"]
 mod global_search;
+#[path = "gui/harness.rs"]
+mod harness;
 #[path = "gui/key_vault.rs"]
 mod key_vault;
 #[path = "gui/reauth.rs"]
