@@ -40,15 +40,78 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
     let reload = RwSignal::new(0_u32);
     let on_done = Callback::new(move |()| reload.update(|n| *n = n.wrapping_add(1)));
 
+    // Row-derived state the bulk bar needs, owned HERE rather than read out of
+    // the banner slot.
+    //
+    // The bar used to be rendered from the banner (the one place the scaffold
+    // hands a caller its rows) — which quietly broke the thing the bar exists to
+    // show: a successful run bumps `reload`, the dashboard refetches, the banner
+    // re-renders, and the bar is REMOUNTED with a fresh (empty) summary. The
+    // operator never saw what the run did, or which apps failed. Populating
+    // these in `fetch` instead is a plain async write, outside any render, and
+    // lets the bar sit outside the reloading subtree.
+    let names: RwSignal<Arc<HashMap<String, String>>> = RwSignal::new(Arc::new(HashMap::new()));
+    let queue_ids: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+
     // Bound to `let` rather than inline: the `view!` macro can't parse an
     // `async move {}` block as an attribute value.
-    let fetch = move |tid: String| async move { sso::list_sso_certificate_expirations(&tid).await };
+    let fetch = move |tid: String| async move {
+        let rows = sso::list_sso_certificate_expirations(&tid).await;
+        if let Ok(rows) = &rows {
+            names.set(Arc::new(
+                rows.iter()
+                    .map(|r| (r.service_principal_id.clone(), r.display_name.clone()))
+                    .collect(),
+            ));
+            // The work queue: due within the warning window with nothing
+            // prepared. Same predicate as the `unprepared` facet, so the
+            // shortcut and the filter can't disagree about what needs doing.
+            queue_ids.set(
+                rows.iter()
+                    .filter(|r| {
+                        !r.has_staged_replacement
+                            && matches!(r.days_to_expiry, Some(d) if d <= WARNING_DAYS)
+                    })
+                    .map(|r| r.service_principal_id.clone())
+                    .collect(),
+            );
+        }
+        rows
+    };
     let export = move |data: Vec<SsoCertificateRowDto>, format: &'static str| async move {
         sso::save_sso_certificates_to_file(&data, format).await
     };
 
     view! {
-        <AuditDashboard
+        <div class="sso-cert-board">
+            // Outside the dashboard on purpose: a successful run reloads it, and
+            // anything rendered inside would be remounted — taking the run's
+            // summary and failure list with it.
+            {move || {
+                let ids = queue_ids.get();
+                let queue = ids.len();
+                (queue > 0)
+                    .then(|| {
+                        view! {
+                            <Button
+                                class="sso-cert-queue-select"
+                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                on_click=Box::new(move |_| {
+                                    selection.set(ids.iter().cloned().collect())
+                                })
+                            >
+                                {format!("Select the {queue} needing a replacement")}
+                            </Button>
+                        }
+                    })
+            }}
+            <BulkActionBar
+                selection=selection
+                actions=Signal::derive(|| vec![BulkAction::StageSsoCertificate])
+                on_done=on_done
+                names=Signal::derive(move || names.get())
+            />
+            <AuditDashboard
             title="SSO certificate expiry"
             crumb="SAML token-signing certificates across the tenant"
             search_placeholder="Filter by app name or appId…"
@@ -91,69 +154,26 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
                             && matches!(r.days_to_expiry, Some(d) if d <= WARNING_DAYS)
                     })
                     .count();
-                // The bar is rendered from the banner slot because that is the
-                // one place the scaffold hands the caller its rows — and the
-                // bar needs them for two things: a name for every id (a failure
-                // list of raw SP GUIDs is unreadable) and the "select all
-                // unprepared" shortcut that turns the work queue into one click.
-                let names: Arc<HashMap<String, String>> = Arc::new(
-                    all.iter()
-                        .map(|r| (r.service_principal_id.clone(), r.display_name.clone()))
-                        .collect(),
-                );
-                let unprepared_ids: Vec<String> = all
-                    .iter()
-                    .filter(|r| {
-                        !r.has_staged_replacement
-                            && matches!(r.days_to_expiry, Some(d) if d <= WARNING_DAYS)
+                (expired + unprepared > 0)
+                    .then(|| {
+                        view! {
+                            <Callout tone="warn">
+                                {format!(
+                                    "{expired} signing certificate(s) already expired; {unprepared} expire within {WARNING_DAYS} days with no replacement staged.",
+                                )}
+                            </Callout>
+                        }
+                            .into_any()
                     })
-                    .map(|r| r.service_principal_id.clone())
-                    .collect();
-                let queue = unprepared_ids.len();
-                Some(
-                    view! {
-                        {(expired + unprepared > 0)
-                            .then(|| {
-                                view! {
-                                    <Callout tone="warn">
-                                        {format!(
-                                            "{expired} signing certificate(s) already expired; {unprepared} expire within {WARNING_DAYS} days with no replacement staged.",
-                                        )}
-                                    </Callout>
-                                }
-                            })}
-                        {(queue > 0)
-                            .then(|| {
-                                let ids = unprepared_ids.clone();
-                                view! {
-                                    <Button
-                                        class="sso-cert-queue-select"
-                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                        on_click=Box::new(move |_| {
-                                            selection.set(ids.iter().cloned().collect())
-                                        })
-                                    >
-                                        {format!("Select the {queue} needing a replacement")}
-                                    </Button>
-                                }
-                            })}
-                        <BulkActionBar
-                            selection=selection
-                            actions=Signal::derive(|| vec![BulkAction::StageSsoCertificate])
-                            on_done=on_done
-                            names=Signal::derive(move || names.clone())
-                        />
-                    }
-                        .into_any(),
-                )
             }
             matches=move |r: &SsoCertificateRowDto, facet: &str, q: &str| {
                 matches_facet(r, facet)
                     && (q.is_empty() || r.display_name.to_lowercase().contains(q)
                         || r.app_id.to_lowercase().contains(q))
             }
-            row=move |r: SsoCertificateRowDto| sso_cert_row(session, selection, r).into_any()
-        />
+                row=move |r: SsoCertificateRowDto| sso_cert_row(session, selection, r).into_any()
+            />
+        </div>
     }
 }
 
