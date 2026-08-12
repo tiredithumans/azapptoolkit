@@ -398,6 +398,41 @@ pub struct MetadataProbeDto {
     pub error: Option<String>,
 }
 
+/// One SAML app's token-signing certificate, as a row in the tenant-wide
+/// SSO-certificate expiry board.
+///
+/// Deliberately **not** folded into the audit's risk score. An expiring signing
+/// certificate is an *availability* risk — sign-in stops on a known date — not
+/// an over-privilege one, and `risk_score` ranks exposure. Adding points here
+/// would move apps up a ranking operators read as "most over-permissioned"
+/// because they're due for routine maintenance. It reuses
+/// [`azapptoolkit_core::audit::CredentialStatus`] so the board's filters behave
+/// exactly like the credential-expiry board's.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SsoCertificateRowDto {
+    /// SP object id — deep-links into the enterprise app's SSO tab, where the
+    /// staged rollover lives.
+    pub service_principal_id: String,
+    pub app_id: String,
+    pub display_name: String,
+    /// The active certificate's thumbprint (`preferredTokenSigningKeyThumbprint`).
+    pub thumbprint: Option<String>,
+    pub end_date_time: Option<String>,
+    pub days_to_expiry: Option<i64>,
+    pub status: azapptoolkit_core::audit::CredentialStatus,
+    /// Where this app sits in the staged-rollover flow. An app with a
+    /// replacement already staged needs a different action from one with
+    /// nothing prepared, even when both expire the same week.
+    pub phase: RolloverPhase,
+    /// True when a valid replacement is staged and waiting to be activated.
+    pub has_staged_replacement: bool,
+    /// Whether **anyone** is on Entra's 60/30/7-day expiry notifications for
+    /// this app. Entra seeds the admin who added the app, whose mailbox may be
+    /// long gone — an app with none configured is one whose expiry nobody is
+    /// warned about, which is exactly how these become outages.
+    pub notification_emails_configured: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

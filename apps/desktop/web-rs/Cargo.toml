@@ -84,6 +84,25 @@ lto = true
 codegen-units = 1
 strip = true
 
+# `profile.dev` used to keep full DWARF (see the `profile.test` note below, which
+# was written when that was still true). It stopped being viable: the dev wasm
+# reached **2.19 GiB**, and `rust-lld` fails writing a DWARF custom section that
+# large — `cargo check` passes and the link dies with SIGBUS, so the failure
+# looks nothing like the size problem it is. The tree had been sitting just under
+# the limit, which made the *next* view added anywhere in the frontend the one
+# that appeared to "break the build".
+#
+# Line tables are the part that survives into a browser panic trace anyway
+# (file + line, kept alongside the `name` section); what's given up is variable
+# inspection in a DWARF-aware WASM debugger. Measured on the same tree:
+# 2.19 GiB -> 0.31 GiB, which also makes `just dev` rebuilds materially faster.
+#
+# This is NOT `strip = "debuginfo"` (what `profile.test` uses): that drops the
+# line tables too, and a dev panic pointing at no source line is a bad trade for
+# the extra ~0.1 GiB.
+[profile.dev]
+debug = "line-tables-only"
+
 # The browser GUI tests (`just web-itest`) are the slowest CI step. Each of the
 # ~21 integration-test binaries is a full debug wasm — and DWARF debuginfo is
 # ~96% of it (measured: 1954 MB → 78 MB stripped). wasm-bindgen-test-runner must
@@ -91,10 +110,11 @@ strip = true
 # across the suite). Stripping debuginfo from the linked test wasm cuts that
 # decode to near-nothing; the runner strips debuginfo from the served module
 # anyway, so the in-browser behaviour is unchanged, and test panics assert on
-# messages (kept by console_error_panic_hook), not on wasm stack frames. Scoped to
-# `test` so `just dev` / `web-build` (profile.dev) keep their debuginfo. This is
-# NOT `strip = true`: that also drops the `name` section, making any wasm panic
-# trace fully anonymous.
+# messages (kept by console_error_panic_hook), not on wasm stack frames. Still
+# scoped to `test`, but the contrast with `profile.dev` is now line tables vs
+# none rather than line tables vs full DWARF — see the `profile.dev` block above.
+# This is NOT `strip = true`: that also drops the `name` section, making any wasm
+# panic trace fully anonymous.
 [profile.test]
 strip = "debuginfo"
 # The other half of the size story, and the one that actually makes the shard

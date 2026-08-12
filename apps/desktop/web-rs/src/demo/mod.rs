@@ -454,6 +454,13 @@ fn register_fixtures() {
     // actually press it and see what "Entra publishes 2 signing keys" looks
     // like — the whole point of the staged flow.
     mock_ok("probe_federation_metadata", &f::metadata_probe());
+    // The Security tab's SSO certificate board — the whole point of the demo is
+    // showing an operator what "expiring, nothing staged, nobody notified"
+    // looks like before it happens to them.
+    mock_ok(
+        "list_sso_certificate_expirations",
+        &f::sso_certificate_rows(),
+    );
     mock_ok(
         "get_enterprise_app_provisioning",
         &vec![f::provisioning_job(
