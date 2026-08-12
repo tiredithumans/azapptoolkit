@@ -189,6 +189,11 @@ impl GraphClient {
     /// principal (`addTokenSigningCertificate`). Returns the new certificate,
     /// including its thumbprint; the caller then sets the SP's
     /// `preferredTokenSigningKeyThumbprint` to activate it.
+    ///
+    /// Self-invalidates `CacheKind::ServicePrincipal`: this POST appends to
+    /// `keyCredentials`, which the cached SP projection `$select`s. Staging a
+    /// certificate is a write that ends here (activation is a separate call),
+    /// so without this the rollover view would read the pre-stage array back.
     pub async fn add_token_signing_certificate(
         &self,
         service_principal_id: &str,
@@ -200,6 +205,64 @@ impl GraphClient {
             "endDateTime": end.to_rfc3339(),
         });
         let path = format!("/servicePrincipals/{service_principal_id}/addTokenSigningCertificate");
-        self.send_json(Method::POST, &path, &body).await
+        let cert = self.send_json(Method::POST, &path, &body).await?;
+        self.invalidate_sp_cache();
+        Ok(cert)
+    }
+
+    /// Removes one `keyCredentials` entry from a **service principal** by
+    /// `key_id` — the SP-side twin of [`Self::remove_key_credential`], which
+    /// only targets applications.
+    ///
+    /// `keyCredentials` is a full-collection PATCH, so this re-reads live state
+    /// and writes the whole array back, round-tripping every surviving entry as
+    /// raw JSON. A dropped entry here deletes a live signing certificate, so a
+    /// serialization failure must abort rather than write a partial array.
+    ///
+    /// Graph stores a signing certificate as a `Sign`/`Verify` **pair** sharing
+    /// one `customKeyIdentifier`; removing one half strands the other, so this
+    /// drops every entry with the target's thumbprint (falling back to the bare
+    /// `keyId` when Graph reports no thumbprint).
+    pub async fn remove_service_principal_key_credential(
+        &self,
+        object_id: &str,
+        key_id: &str,
+    ) -> Result<()> {
+        let path = format!("/servicePrincipals/{object_id}");
+        let params: [(&str, &str); 1] = [("$select", "keyCredentials")];
+        let sp: serde_json::Value = self.get_json(&path, &params, false).await?;
+        let entries = sp
+            .get("keyCredentials")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        // Resolve the target's thumbprint so the paired half goes with it.
+        let thumbprint = entries
+            .iter()
+            .find(|c| c.get("keyId").and_then(|v| v.as_str()) == Some(key_id))
+            .and_then(|c| c.get("customKeyIdentifier"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        let kept: Vec<serde_json::Value> = entries
+            .into_iter()
+            .filter(|c| {
+                let this_key = c.get("keyId").and_then(|v| v.as_str());
+                let this_tp = c.get("customKeyIdentifier").and_then(|v| v.as_str());
+                match (&thumbprint, this_tp) {
+                    // Same certificate (either half of the Sign/Verify pair).
+                    (Some(target), Some(tp)) if tp.eq_ignore_ascii_case(target) => false,
+                    // No thumbprint to match on — fall back to the exact entry.
+                    _ => this_key != Some(key_id),
+                }
+            })
+            .collect();
+
+        let body = serde_json::json!({ "keyCredentials": kept });
+        self.send_no_content(Method::PATCH, &path, Some(&body))
+            .await?;
+        self.invalidate_sp_cache();
+        Ok(())
     }
 }
