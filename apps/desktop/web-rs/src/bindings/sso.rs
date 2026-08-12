@@ -185,6 +185,38 @@ pub async fn stage_saml_signing_certificate(
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct TenantArgs<'a> {
+    tenant_id: &'a str,
+}
+
+/// Tenant-wide SAML signing-certificate expiry board, soonest first.
+pub async fn list_sso_certificate_expirations(
+    tenant_id: &str,
+) -> Result<Vec<SsoCertificateRowDto>, UiError> {
+    invoke_result("list_sso_certificate_expirations", TenantArgs { tenant_id }).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveSsoCertsArgs<'a> {
+    rows: &'a [SsoCertificateRowDto],
+    format: &'a str,
+}
+
+/// Exports the expiry board via the OS save dialog. `Ok(None)` = user cancelled.
+pub async fn save_sso_certificates_to_file(
+    rows: &[SsoCertificateRowDto],
+    format: &str,
+) -> Result<Option<String>, UiError> {
+    invoke_result(
+        "save_sso_certificates_to_file",
+        SaveSsoCertsArgs { rows, format },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ProbeMetadataArgs<'a> {
     tenant_id: &'a str,
     app_id: &'a str,

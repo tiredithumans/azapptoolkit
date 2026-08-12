@@ -26,4 +26,5 @@ pub mod security_view;
 pub mod settings_view;
 pub mod shell;
 pub mod sign_in;
+pub mod sso_certificates_dashboard;
 pub mod tabs;

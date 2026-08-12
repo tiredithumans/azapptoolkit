@@ -40,7 +40,7 @@ use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use azapptoolkit_dto::sharepoint::SiteSweepProgress;
 use azapptoolkit_dto::sso::{
     CertStatus, MetadataProbeDto, RolloverPhase, SamlSsoSummary, SigningCertDto,
-    SigningCertRolloverDto, SsoConfigDto,
+    SigningCertRolloverDto, SsoCertificateRowDto, SsoConfigDto,
 };
 use chrono::{DateTime, TimeZone, Utc};
 
@@ -316,6 +316,51 @@ pub fn signing_cert_rollover(service_principal_id: &str, app_id: &str) -> Signin
         phase: RolloverPhase::Staged,
         auto_promote_deadline: Some("2027-04-30T00:00:00Z".to_string()),
     }
+}
+
+/// The tenant-wide SSO certificate expiry board, showing the three states that
+/// make the view worth opening: one expiring with a replacement already staged
+/// (a click away), one expiring with nothing prepared AND nobody on the expiry
+/// notifications — the shape that becomes an outage — and one healthy.
+pub fn sso_certificate_rows() -> Vec<SsoCertificateRowDto> {
+    vec![
+        SsoCertificateRowDto {
+            service_principal_id: "sp-payroll".to_string(),
+            app_id: "app-payroll".to_string(),
+            display_name: "Contoso Payroll".to_string(),
+            thumbprint: Some("11B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
+            end_date_time: Some("2026-08-27T00:00:00Z".to_string()),
+            days_to_expiry: Some(15),
+            status: CredentialStatus::ExpiringSoon,
+            phase: RolloverPhase::Unconfigured,
+            has_staged_replacement: false,
+            notification_emails_configured: false,
+        },
+        SsoCertificateRowDto {
+            service_principal_id: "sp-demo".to_string(),
+            app_id: "app-demo".to_string(),
+            display_name: "Contoso SSO Portal".to_string(),
+            thumbprint: Some("A1B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
+            end_date_time: Some("2026-09-30T00:00:00Z".to_string()),
+            days_to_expiry: Some(49),
+            status: CredentialStatus::Active,
+            phase: RolloverPhase::Staged,
+            has_staged_replacement: true,
+            notification_emails_configured: true,
+        },
+        SsoCertificateRowDto {
+            service_principal_id: "sp-expenses".to_string(),
+            app_id: "app-expenses".to_string(),
+            display_name: "Contoso Expenses".to_string(),
+            thumbprint: Some("77B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
+            end_date_time: Some("2028-02-14T00:00:00Z".to_string()),
+            days_to_expiry: Some(551),
+            status: CredentialStatus::Active,
+            phase: RolloverPhase::Steady,
+            has_staged_replacement: false,
+            notification_emails_configured: true,
+        },
+    ]
 }
 
 /// A federation-metadata probe that found both certificates published — the

@@ -176,3 +176,27 @@ SHA-1, which `cert.rs` deliberately keeps out of the tree.
 
 **Bulk.** Staging is additive, reversible, and changes nothing for users, so it is the only phase safe
 to fan out (via `run_bulk_seq`, like the other bulk remediations). Activation stays per-app and gated.
+
+### The tenant-wide expiry board
+
+`list_sso_certificate_expirations` (Security → **SSO certificates**) is what makes rotation
+schedulable instead of reactive. The audit's credential rules read an *application's*
+`keyCredentials`, so a signing certificate — which lives on the service principal — was invisible
+in-app entirely.
+
+- **One filtered scan, not a fan-out.** `preferredSingleSignOnMode` supports `$filter eq` on the
+  default query surface (no `ConsistencyLevel`, no `$count`), and only SAML apps have a signing
+  certificate, so `list_saml_sso_service_principals` returns exactly the rows that matter in one
+  paged GET. The `SP_INDEX_MAX` cap applies to that filtered subset, which no real tenant reaches.
+- **Same projection as the SSO tab.** Rows are built by `build_rollover`, so the board and the
+  per-app panel can never disagree about whether a replacement is staged.
+- **Not a risk-score input.** An expiring certificate is an *availability* risk; `risk_score` ranks
+  exposure. Points here would move apps up a ranking operators read as "most over-permissioned"
+  because they are due for maintenance. It reuses `CredentialStatus` and `EXPIRY_WARNING_DAYS` so
+  "Expiring Soon" means the same thing on both expiry boards, and an unreadable expiry is `Unknown`,
+  never `Active`.
+- **Cache busting is wider than it looks.** The board caches on `CacheKind::Lists`, and
+  `invalidate_sso_cert_board` fires on `Ok` from every certificate mutation **plus**
+  `set_notification_emails` (it flips the "nobody is warned" column) and `set_sso_mode` (it decides
+  whether the app is on the board at all). Missing either of those last two leaves the board
+  contradicting the SSO tab for up to the TTL.

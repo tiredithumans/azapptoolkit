@@ -31,9 +31,10 @@ use crate::commands::applications::invalidate_app_lists;
 use crate::dto::UiError;
 use crate::dto::sso::{
     ClaimsPolicyDto, MetadataProbeDto, OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput,
-    SamlSsoSummary, SigningCertRolloverDto, SsoConfigDto,
+    SamlSsoSummary, SigningCertRolloverDto, SsoCertificateRowDto, SsoConfigDto,
 };
 use crate::state::AppState;
+use azapptoolkit_core::cache::CacheKind;
 
 /// The Microsoft Entra generic **custom** (non-gallery) application template.
 /// Instantiating it creates a blank app + service principal we then configure.
@@ -645,6 +646,9 @@ pub async fn set_sso_mode(
     client
         .patch_service_principal(&service_principal_id, &body)
         .await?;
+    // Whether this app is a SAML app at all decides whether it appears on the
+    // expiry board.
+    invalidate_sso_cert_board(&state, &tenant_id);
     Ok(())
 }
 
@@ -736,6 +740,7 @@ pub async fn rotate_saml_signing_certificate(
         )
         .await?;
     invalidate_app_lists(&state.cache, &tenant_id);
+    invalidate_sso_cert_board(&state, &tenant_id);
     Ok(cert)
 }
 
@@ -799,7 +804,8 @@ pub async fn stage_saml_signing_certificate(
     )
     .await?;
     // `add_token_signing_certificate` self-invalidates the SP cache; the app
-    // lists carry no signing-cert field, so nothing else to bust.
+    // lists carry no signing-cert field, but the expiry board does.
+    invalidate_sso_cert_board(&state, &tenant_id);
     Ok(cert)
 }
 
@@ -952,7 +958,169 @@ pub async fn retire_saml_signing_certificate(
     client
         .remove_service_principal_key_credential(&service_principal_id, &key_id)
         .await?;
+    invalidate_sso_cert_board(&state, &tenant_id);
     get_signing_cert_rollover(state, tenant_id, service_principal_id).await
+}
+
+/// Tenant-wide SAML signing-certificate expiry board.
+///
+/// The audit's credential rules read an *application's* `keyCredentials`, so a
+/// SAML signing certificate — which lives on the service principal — was
+/// invisible in-app: the first anyone heard of an expiry was Entra's 60-day
+/// email, which goes to `notificationEmailAddresses` that may be nobody's
+/// mailbox any more. This is the list that makes rotation schedulable.
+///
+/// One server-side filtered scan (`preferredSingleSignOnMode eq 'saml'`), then
+/// the **same** [`build_rollover`] projection the SSO tab uses — so a row here
+/// and the panel there can never disagree about whether a replacement is
+/// staged. Soonest-to-expire first.
+///
+/// Cached per tenant on `CacheKind::Lists`; every rollover mutation busts it.
+#[tauri::command]
+pub async fn list_sso_certificate_expirations(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<Vec<SsoCertificateRowDto>, UiError> {
+    let cache_key = sso_certificate_expirations_key(&tenant_id);
+    if let Some(cached) = state
+        .cache
+        .get::<Vec<SsoCertificateRowDto>>(CacheKind::Lists, &cache_key)
+    {
+        return Ok(cached);
+    }
+
+    let client = state.graph_for(&tenant_id);
+    // `truncated` is logged by the client. The cap is SP_INDEX_MAX (10 000)
+    // applied to SAML apps *only*, so unlike the unfiltered index scans this is
+    // not a bound a real tenant reaches — a directory with more than ten
+    // thousand SAML SSO applications does not exist in practice.
+    let (sps, _truncated) = client.list_saml_sso_service_principals().await?;
+    let now = chrono::Utc::now();
+
+    let mut rows: Vec<SsoCertificateRowDto> = sps
+        .iter()
+        .map(|sp| {
+            let sp_id = sp
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let roll = build_rollover(sp, &sp_id, &tenant_id, now);
+            // The row is about the certificate that signs *today* — the active
+            // one. `build_rollover` keeps it flagged `is_active` even once
+            // expired, which is exactly the row worth showing loudest.
+            let active = roll.certs.iter().find(|c| c.is_active);
+            SsoCertificateRowDto {
+                service_principal_id: sp_id,
+                app_id: roll.app_id,
+                display_name: sp
+                    .get("displayName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("—")
+                    .to_string(),
+                thumbprint: roll.active_thumbprint,
+                end_date_time: active.and_then(|c| c.end_date_time.clone()),
+                days_to_expiry: active.and_then(|c| c.days_to_expiry),
+                status: sso_cert_status(active.and_then(|c| c.days_to_expiry)),
+                has_staged_replacement: roll.staged_thumbprint.is_some(),
+                phase: roll.phase,
+                notification_emails_configured: sp
+                    .get("notificationEmailAddresses")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|a| a.iter().any(|e| e.as_str().is_some_and(|s| !s.is_empty()))),
+            }
+        })
+        .collect();
+
+    // Soonest first; an app with no resolvable expiry sorts last rather than
+    // masquerading as urgent.
+    rows.sort_by_key(|r| r.days_to_expiry.unwrap_or(i64::MAX));
+    state.cache.put(CacheKind::Lists, cache_key, &rows);
+    Ok(rows)
+}
+
+/// Exports the expiry board as CSV through the OS save dialog — same shape as
+/// the credential-expiry export, so both boards produce comparable files.
+#[tauri::command]
+pub async fn save_sso_certificates_to_file(
+    app_handle: tauri::AppHandle,
+    rows: Vec<SsoCertificateRowDto>,
+    format: String,
+) -> Result<Option<String>, UiError> {
+    crate::commands::export::save_csv_via_dialog(app_handle, "sso-certificates", &format, || {
+        sso_certificates_to_csv(&rows)
+    })
+    .await
+}
+
+/// Serializes the board as CSV. Display names are tenant-controllable, so every
+/// field goes through `csv_field` (formula-injection guard + delimiter quoting),
+/// reused from the audit export.
+fn sso_certificates_to_csv(rows: &[SsoCertificateRowDto]) -> String {
+    use crate::commands::export::csv_field;
+    let mut out = String::new();
+    out.push_str(
+        "Application,AppId,ServicePrincipalId,Thumbprint,Expires,DaysToExpiry,Status,\
+         ReplacementStaged,NotificationEmailsConfigured\n",
+    );
+    for r in rows {
+        let row = [
+            csv_field(&r.display_name),
+            csv_field(&r.app_id),
+            csv_field(&r.service_principal_id),
+            csv_field(r.thumbprint.as_deref().unwrap_or_default()),
+            csv_field(r.end_date_time.as_deref().unwrap_or_default()),
+            r.days_to_expiry.map(|d| d.to_string()).unwrap_or_default(),
+            csv_field(r.status.as_str()),
+            csv_field(if r.has_staged_replacement {
+                "yes"
+            } else {
+                "no"
+            }),
+            csv_field(if r.notification_emails_configured {
+                "yes"
+            } else {
+                "no"
+            }),
+        ]
+        .join(",");
+        out.push_str(&row);
+        out.push('\n');
+    }
+    out
+}
+
+/// Classifies a signing certificate's expiry, by the same day thresholds the
+/// audit's credential rules use — so "Expiring Soon" means the same number of
+/// days on both boards. A certificate with no resolvable expiry is `Unknown`,
+/// never `Active`: an unreadable date is not evidence of health.
+fn sso_cert_status(days: Option<i64>) -> azapptoolkit_core::audit::CredentialStatus {
+    use azapptoolkit_core::audit::{CredentialStatus, EXPIRY_WARNING_DAYS};
+    match days {
+        None => CredentialStatus::Unknown,
+        Some(d) if d < 0 => CredentialStatus::Expired,
+        Some(d) if d <= EXPIRY_WARNING_DAYS => CredentialStatus::ExpiringSoon,
+        Some(_) => CredentialStatus::Active,
+    }
+}
+
+/// Cache key for [`list_sso_certificate_expirations`]. Tenant-scoped like every
+/// other Lists key — an unscoped key here would leak one tenant's SSO inventory
+/// into another's board.
+pub(crate) fn sso_certificate_expirations_key(tenant_id: &str) -> String {
+    format!("{tenant_id}|sso_certificate_expirations")
+}
+
+/// Busts the expiry board. Called on `Ok` by every mutation that can change a
+/// row: the certificate ones, plus `set_notification_emails` (it flips the
+/// "nobody is warned" column) and `set_sso_mode` (it decides whether the app is
+/// on the board at all). Missing either of those last two leaves the board
+/// contradicting the SSO tab for up to the cache TTL.
+fn invalidate_sso_cert_board(state: &State<'_, AppState>, tenant_id: &str) {
+    state.cache.invalidate(
+        CacheKind::Lists,
+        &sso_certificate_expirations_key(tenant_id),
+    );
 }
 
 /// Mints a signing certificate on the service principal. Shared by the create
@@ -1031,6 +1199,7 @@ async fn set_preferred_signing_key(
             },
         )
         .await?;
+    invalidate_sso_cert_board(&state, &tenant_id);
     get_signing_cert_rollover(state, tenant_id, service_principal_id).await
 }
 
@@ -1331,8 +1500,9 @@ pub async fn set_notification_emails(
     client
         .patch_service_principal(&service_principal_id, &body)
         .await?;
-    // No cache bust: notificationEmailAddresses is SSO-tab state read live and is
-    // on no cached list/detail/audit payload.
+    // The SSO tab reads this live, but the expiry board caches it as the
+    // "nobody is warned" column, so that one entry does need busting.
+    invalidate_sso_cert_board(&state, &tenant_id);
     Ok(())
 }
 
@@ -1718,6 +1888,49 @@ mod tests {
         assert_eq!(roll.certs[0].status, CertStatus::Active);
         // The metadata URL is the app's own, so the panel can link it directly.
         assert!(roll.federation_metadata_url.ends_with("appid=app-1"));
+    }
+
+    #[test]
+    fn an_unreadable_expiry_is_unknown_not_healthy() {
+        use azapptoolkit_core::audit::CredentialStatus;
+        // A certificate whose expiry can't be resolved must never read as
+        // Active: on an expiry board, "we couldn't tell" and "it's fine" have
+        // opposite consequences, and Unknown is what sorts it out of the
+        // all-clear.
+        assert_eq!(sso_cert_status(None), CredentialStatus::Unknown);
+        assert_eq!(sso_cert_status(Some(-1)), CredentialStatus::Expired);
+        // The threshold matches the audit's credential rules exactly, so
+        // "Expiring Soon" means the same number of days on both boards.
+        assert_eq!(sso_cert_status(Some(30)), CredentialStatus::ExpiringSoon);
+        assert_eq!(sso_cert_status(Some(0)), CredentialStatus::ExpiringSoon);
+        assert_eq!(sso_cert_status(Some(31)), CredentialStatus::Active);
+    }
+
+    #[test]
+    fn the_expiry_board_csv_guards_tenant_controlled_display_names() {
+        use azapptoolkit_core::audit::CredentialStatus;
+        // Display names are tenant-controllable, so a name starting with `=`
+        // must not reach a spreadsheet as a formula.
+        let rows = vec![SsoCertificateRowDto {
+            service_principal_id: "sp-1".into(),
+            app_id: "app-1".into(),
+            display_name: "=cmd|'/c calc'!A1".into(),
+            thumbprint: Some("AAA".into()),
+            end_date_time: Some("2027-01-01T00:00:00Z".into()),
+            days_to_expiry: Some(12),
+            status: CredentialStatus::ExpiringSoon,
+            phase: azapptoolkit_dto::sso::RolloverPhase::Staged,
+            has_staged_replacement: true,
+            notification_emails_configured: false,
+        }];
+        let csv = sso_certificates_to_csv(&rows);
+        assert!(csv.starts_with("Application,AppId,ServicePrincipalId,"));
+        assert!(
+            !csv.contains("\n=cmd"),
+            "a formula-leading display name reached the CSV unguarded: {csv}"
+        );
+        // The two columns that make a row actionable survive the round trip.
+        assert!(csv.contains(",yes,no\n"), "staged/notified columns: {csv}");
     }
 
     #[test]

@@ -177,6 +177,8 @@ pub fn run() {
             commands::sso::activate_saml_signing_certificate,
             commands::sso::revert_saml_signing_certificate,
             commands::sso::retire_saml_signing_certificate,
+            commands::sso::list_sso_certificate_expirations,
+            commands::sso::save_sso_certificates_to_file,
             commands::sso::set_claims_mapping,
             commands::sso::set_notification_emails,
             commands::sso::set_oidc_redirect_uris,

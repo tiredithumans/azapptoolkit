@@ -2,6 +2,29 @@
 
 ### Added
 
+- **Expiring SAML signing certificates are now visible before they bite.**
+  Security → **SSO certificates** lists every SAML application in the tenant
+  with its signing certificate, soonest to expire first, with the same filters
+  and CSV export as the Credential expiry board. Until now these were invisible
+  in the app: the audit reads an *app registration's* credentials, while a
+  signing certificate lives on the enterprise application — so the first anyone
+  heard of an expiry was Microsoft's 60-day email, which goes to whoever is on
+  that app's notification list and, by default, only to the admin who first
+  added it. Two columns say what the expiry date alone can't: whether a
+  replacement is already **staged** (the difference between clicking Activate
+  and starting a rollover), and whether **anyone at all** is on Entra's
+  60/30/7-day warnings. A "≤ 30 days, no replacement staged" filter is the work
+  queue. The banner counts the rows that are actually at risk, not every row
+  with a date coming up.
+- **The board says "Auto-promoted" when Entra has already switched for you** —
+  an expired certificate that still has a valid replacement staged is one Entra
+  is signing with regardless of whether anyone pressed Activate.
+
+  These certificates deliberately **do not** change an application's audit risk
+  score. An expiring certificate is a scheduled outage, not excess privilege,
+  and the risk score ranks how much an app can reach — adding points would push
+  apps up that ranking for being due for routine maintenance.
+
 - **SAML signing certificates can now be rolled over without a sign-in outage.**
   Renewing a certificate used to be one button that minted a new one and made it
   live in the same breath — from that moment every sign-in was signed with a key

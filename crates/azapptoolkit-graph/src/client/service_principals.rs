@@ -219,6 +219,46 @@ impl GraphClient {
         Ok(all)
     }
 
+    /// Every SAML-SSO service principal in the tenant with the fields needed to
+    /// judge its token-signing certificate, as raw JSON
+    /// (`preferredSingleSignOnMode` / `preferredTokenSigningKeyThumbprint` aren't
+    /// on the typed [`ServicePrincipal`] — same reason as
+    /// [`Self::get_service_principal_sso_fields`], whose `$select` this mirrors).
+    ///
+    /// **Server-side filtered, not fanned out.** `preferredSingleSignOnMode`
+    /// supports `$filter eq` on the default query surface (no `ConsistencyLevel`
+    /// header, no `$count`), so the SAML apps — a small slice of a tenant's
+    /// service principals — come back in one paged scan instead of a per-SP
+    /// batch over everything. Only SAML apps have a signing certificate at all,
+    /// so anything wider is pure waste.
+    ///
+    /// Bounded by [`SP_INDEX_MAX`] like the SP index: an expiry roll-up that
+    /// degrades to the first N rows beats one that fails outright. Returns
+    /// `(rows, truncated)` so the caller can tell the operator its coverage is
+    /// partial rather than showing a short list as if it were complete.
+    pub async fn list_saml_sso_service_principals(&self) -> Result<(Vec<serde_json::Value>, bool)> {
+        let params: [(&str, &str); 3] = [
+            ("$filter", "preferredSingleSignOnMode eq 'saml'"),
+            (
+                "$select",
+                "id,appId,displayName,preferredSingleSignOnMode,preferredTokenSigningKeyThumbprint,keyCredentials,notificationEmailAddresses",
+            ),
+            ("$top", MAX_PAGE_SIZE),
+        ];
+        let page: Paged<serde_json::Value> =
+            self.get_json("/servicePrincipals", &params, false).await?;
+        let (all, truncated) = self.collect_all_pages_capped(page, SP_INDEX_MAX).await?;
+        if truncated {
+            tracing::warn!(
+                target = "azapptoolkit::graph",
+                cap = SP_INDEX_MAX,
+                "SAML SSO service-principal scan hit the cap; signing-certificate \
+                 coverage is partial",
+            );
+        }
+        Ok((all, truncated))
+    }
+
     /// Seeds the audit's lean SP cache (`|lean` keys) from an **already-fetched**
     /// service-principal index at **zero Graph cost**.
     /// [`Self::list_service_principals_index`]'s projection

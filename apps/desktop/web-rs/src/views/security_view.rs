@@ -30,6 +30,7 @@ use crate::views::audit_view::posture::PostureCounts;
 use crate::views::audit_view::{AuditAppsPane, AuditController, FindingsPane};
 use crate::views::consent_grants_view::ConsentGrantsView;
 use crate::views::credentials_dashboard::CredentialsDashboard;
+use crate::views::sso_certificates_dashboard::SsoCertificatesDashboard;
 
 #[component]
 pub fn SecurityView() -> impl IntoView {
@@ -73,6 +74,7 @@ pub fn SecurityView() -> impl IntoView {
                     TabBarItem { value: "findings", label: "Findings" },
                     TabBarItem { value: "apps", label: "All apps" },
                     TabBarItem { value: "credentials", label: "Credential expiry" },
+                    TabBarItem { value: "sso-certificates", label: "SSO certificates" },
                     TabBarItem { value: "grants", label: "Delegated grants" },
                     TabBarItem { value: "app-permissions", label: "Application permissions" },
                 ]
@@ -80,6 +82,12 @@ pub fn SecurityView() -> impl IntoView {
             {keep_alive(sub, visited, "findings", || view! { <FindingsPane /> })}
             {keep_alive(sub, visited, "apps", || view! { <AuditAppsPane /> })}
             {keep_alive(sub, visited, "credentials", || view! { <CredentialsDashboard /> })}
+            {keep_alive(
+                sub,
+                visited,
+                "sso-certificates",
+                || view! { <SsoCertificatesDashboard /> },
+            )}
             {keep_alive(sub, visited, "grants", || view! { <ConsentGrantsView /> })}
             {keep_alive(
                 sub,
