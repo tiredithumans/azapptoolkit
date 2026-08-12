@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-12
+
 ### Added
 
 - **Stage replacement certificates for a whole queue at once.** The SSO
@@ -65,6 +67,15 @@
   Renamed to "Rotate and activate immediately" and carries a warning: it's the
   right tool for an application that can only hold one certificate at a time,
   and the wrong one everywhere else.
+
+### Internal
+
+- **Frontend debug builds no longer carry full DWARF.** The development wasm had
+  grown to 2.19 GB, past what the linker can emit as a single debug section — the
+  next view added anywhere in the front-end would have failed the build with an
+  error that said nothing about size. Debug info is now line tables only
+  (0.31 GB), which keeps file and line in a panic trace and makes development
+  rebuilds noticeably faster. Shipped builds were never affected.
 
 ## [0.25.2] - 2026-08-11
 
