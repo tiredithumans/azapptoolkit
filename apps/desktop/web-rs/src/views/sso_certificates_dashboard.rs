@@ -127,6 +127,7 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
                                 let ids = unprepared_ids.clone();
                                 view! {
                                     <Button
+                                        class="sso-cert-queue-select"
                                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                         on_click=Box::new(move |_| {
                                             selection.set(ids.iter().cloned().collect())

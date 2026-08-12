@@ -398,6 +398,19 @@ pub struct MetadataProbeDto {
     pub error: Option<String>,
 }
 
+/// A newly minted token-signing certificate — the result of staging, rotating,
+/// or creating one.
+///
+/// `base64` is **show-once**: Graph returns the public certificate only in the
+/// response to `addTokenSigningCertificate`, never on a later read, so the UI
+/// reveals it immediately and it is absent from every subsequent projection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SsoCertResult {
+    pub thumbprint: String,
+    pub base64: Option<String>,
+    pub expiry: Option<String>,
+}
+
 /// One SAML app's token-signing certificate, as a row in the tenant-wide
 /// SSO-certificate expiry board.
 ///

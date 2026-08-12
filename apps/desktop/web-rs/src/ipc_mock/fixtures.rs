@@ -40,7 +40,7 @@ use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use azapptoolkit_dto::sharepoint::SiteSweepProgress;
 use azapptoolkit_dto::sso::{
     CertStatus, MetadataProbeDto, RolloverPhase, SamlSsoSummary, SigningCertDto,
-    SigningCertRolloverDto, SsoCertificateRowDto, SsoConfigDto,
+    SigningCertRolloverDto, SsoCertResult, SsoCertificateRowDto, SsoConfigDto,
 };
 use chrono::{DateTime, TimeZone, Utc};
 
@@ -361,6 +361,33 @@ pub fn sso_certificate_rows() -> Vec<SsoCertificateRowDto> {
             notification_emails_configured: true,
         },
     ]
+}
+
+/// A freshly staged certificate, as `stage_saml_signing_certificate` returns
+/// it — public certificate included, since Graph hands that back exactly once.
+pub fn staged_cert_result() -> SsoCertResult {
+    SsoCertResult {
+        thumbprint: "FE09D8C7B6A5948372615F4E3D2C1B0A98765432".to_string(),
+        base64: Some("MIIC-demo-newly-staged-certificate-body".to_string()),
+        expiry: Some("2029-07-01T00:00:00Z".to_string()),
+    }
+}
+
+/// A **steady** rollover: one valid active certificate, nothing staged. The
+/// state most apps sit in, and the one where the panel must offer no activate
+/// or revert action.
+pub fn signing_cert_rollover_steady(
+    service_principal_id: &str,
+    app_id: &str,
+) -> SigningCertRolloverDto {
+    let mut roll = signing_cert_rollover(service_principal_id, app_id);
+    roll.certs.retain(|c| c.is_active);
+    roll.staged_thumbprint = None;
+    roll.phase = RolloverPhase::Steady;
+    // Nothing staged ⇒ no deadline: Entra only auto-promotes when there IS a
+    // valid replacement waiting.
+    roll.auto_promote_deadline = None;
+    roll
 }
 
 /// A bulk staging run over the demo's work queue: one staged, one skipped

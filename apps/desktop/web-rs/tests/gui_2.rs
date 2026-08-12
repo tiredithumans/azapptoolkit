@@ -21,5 +21,7 @@ mod readiness;
 mod security_audit;
 #[path = "gui/security_findings.rs"]
 mod security_findings;
+#[path = "gui/sso_certificates_dashboard.rs"]
+mod sso_certificates_dashboard;
 #[path = "gui/view_smoke.rs"]
 mod view_smoke;
