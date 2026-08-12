@@ -28,9 +28,53 @@ use crate::state::{Session, provide_session, use_session};
 // `test_support` unchanged.
 pub use crate::ipc_mock::fixtures;
 pub use crate::ipc_mock::{
-    RecordedCall, Unmocked, call_count, emit_event, last_call, mock_err, mock_ok, reset,
-    set_unmocked_mode,
+    RecordedCall, Unmocked, call_count, emit_event, last_call, mock_err, mock_ok, set_unmocked_mode,
 };
+
+/// Marks a mount host so [`sweep_orphaned_mounts`] can find one left behind.
+const MOUNT_MARKER: &str = "data-test-mount";
+
+/// Removes every mount host still in the document.
+///
+/// **Why this is needed at all:** wasm tests are compiled with `panic = abort`,
+/// so a failing assertion (or a `wait_for` timeout) tears the module down
+/// *without unwinding* — [`Mounted`]'s `Drop` never runs, and that test's view
+/// stays in `document.body` for the rest of the shard. Every later test in the
+/// same binary then queries a DOM containing a dead view.
+///
+/// That turned one real failure into four red tests: a leaked table added rows
+/// that other modules' globally-scoped counts (`tbody tr`,
+/// `tbody input[type=checkbox]`) silently absorbed, and the extra failures
+/// pointed at code that was fine. Sweeping here means a broken test costs
+/// exactly one red test.
+///
+/// Deliberately NOT solved by scoping [`query`]/[`query_all`] to the active
+/// mount root instead: Thaw renders dialogs and toasts through portals that sit
+/// *outside* the host element, so scoping would make the surfaces several
+/// existing modules assert on unreachable. A portal left behind by an aborted
+/// test is the residual gap — rare, because it needs the test to die with a
+/// dialog open, and visible when it happens rather than silently miscounting.
+fn sweep_orphaned_mounts() {
+    let Ok(nodes) = document().query_selector_all(&format!("[{MOUNT_MARKER}]")) else {
+        return;
+    };
+    for i in 0..nodes.length() {
+        if let Some(node) = nodes.item(i)
+            && let Some(parent) = node.parent_node()
+        {
+            let _ = parent.remove_child(&node);
+        }
+    }
+}
+
+/// Clears the mock IPC bridge **and** the DOM, so each test starts from a clean
+/// document even if the previous one aborted mid-mount (see
+/// [`sweep_orphaned_mounts`]). Shadows `ipc_mock::reset`, which the demo build
+/// also uses and which must not touch the DOM.
+pub fn reset() {
+    crate::ipc_mock::reset();
+    sweep_orphaned_mounts();
+}
 
 /// A default signed-in tenant context, so views that guard on
 /// `session.active_tenant` proceed to fetch.
@@ -72,7 +116,11 @@ where
     V: IntoView + 'static,
 {
     ensure_installed();
+    // Belt and braces with `reset()`: a test that mounts twice, or forgets to
+    // reset, still starts from a document with no dead views in it.
+    sweep_orphaned_mounts();
     let element = document().create_element("div").unwrap();
+    element.set_attribute(MOUNT_MARKER, "").unwrap();
     document().body().unwrap().append_child(&element).unwrap();
     let host: web_sys::HtmlElement = element.clone().unchecked_into();
 
