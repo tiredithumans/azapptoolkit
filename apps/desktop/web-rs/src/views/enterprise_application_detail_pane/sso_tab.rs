@@ -49,6 +49,357 @@ pub(super) fn SsoContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> im
     }
 }
 
+/// Staged signing-certificate rollover — the no-downtime path.
+///
+/// Stage → verify → activate → retire, each an explicit step, because the only
+/// thing that makes a rollover seamless is the *old* certificate still being
+/// there when the new one goes live. The panel reads its phase from live Graph
+/// state on every load: nothing about a rollover is stored, so one abandoned
+/// halfway picks up exactly where it was left.
+#[component]
+fn SigningCertRolloverPanel(
+    sp_id: StoredValue<String>,
+    app_id: StoredValue<String>,
+) -> impl IntoView {
+    let session = use_session();
+    let tenant = session.active_tenant;
+    let reload = RwSignal::new(0u32);
+    let cmd = use_command();
+    let subject = RwSignal::new(String::new());
+    // Show-once public certificate, revealed right after staging.
+    let staged_pem: RwSignal<Option<String>> = RwSignal::new(None);
+    let probe: RwSignal<Option<sso::MetadataProbeDto>> = RwSignal::new(None);
+
+    let rollover = LocalResource::new(move || {
+        let tenant = tenant.get();
+        let id = sp_id.get_value();
+        let _ = reload.get();
+        async move {
+            match tenant {
+                Some(t) => sso::get_signing_cert_rollover(&t.tenant_id, &id).await,
+                None => Ok(sso::SigningCertRolloverDto::default()),
+            }
+        }
+    });
+    let bump = move || reload.update(|n| *n = n.wrapping_add(1));
+
+    let stage = move |_| {
+        cmd.run_toast_err(
+            move |cert: sso::SsoCertResult| {
+                session
+                    .toast_success("Certificate staged. Nothing changes for users until you activate it.");
+                staged_pem.set(cert.base64);
+                bump();
+            },
+            move |tenant_id| {
+                let id = sp_id.get_value();
+                let subject = subject.get_untracked().trim().to_string();
+                async move {
+                    sso::stage_saml_signing_certificate(&tenant_id, &id, &subject, None).await
+                }
+            },
+        );
+    };
+
+    let run_probe = move |_| {
+        cmd.run_toast_err(
+            move |result: sso::MetadataProbeDto| {
+                probe.set(Some(result));
+            },
+            move |tenant_id| {
+                let app_id = app_id.get_value();
+                async move { sso::probe_federation_metadata(&tenant_id, &app_id).await }
+            },
+        );
+    };
+
+    view! {
+        <div class="cert-rollover">
+            <Suspense fallback=move || {
+                view! { <SkeletonList rows=3 /> }
+            }>
+                {move || Suspend::new(async move {
+                    let Ok(roll) = rollover.await else {
+                        return view! {
+                            <Callout tone="warn">
+                                "Couldn't read the signing-certificate state."
+                            </Callout>
+                        }
+                            .into_any();
+                    };
+                    let phase = roll.phase;
+                    let staged = roll.staged_thumbprint.clone();
+                    let deadline = roll.auto_promote_deadline.clone();
+                    // The nominated key having expired means Entra is already
+                    // signing with the staged one — the operator is later than
+                    // the panel would otherwise suggest.
+                    let active_expired = roll
+                        .certs
+                        .iter()
+                        .any(|c| c.is_active && c.status == sso::CertStatus::Expired);
+                    let activate = {
+                        let staged = staged.clone();
+                        move |_| {
+                            let Some(thumbprint) = staged.clone() else { return };
+                            cmd.run_toast_err(
+                                move |_: sso::SigningCertRolloverDto| {
+                                    session
+                                        .toast_success(
+                                            "Activated. If sign-ins fail, roll back with Revert — the previous certificate is still in place.",
+                                        );
+                                    bump();
+                                },
+                                move |tenant_id| {
+                                    let id = sp_id.get_value();
+                                    let thumbprint = thumbprint.clone();
+                                    async move {
+                                        sso::activate_saml_signing_certificate(
+                                                &tenant_id,
+                                                &id,
+                                                &thumbprint,
+                                            )
+                                            .await
+                                    }
+                                },
+                            );
+                        }
+                    };
+                    let superseded = roll
+                        .certs
+                        .iter()
+                        .find(|c| c.status == sso::CertStatus::Superseded)
+                        .map(|c| (c.thumbprint.clone(), c.key_id.clone()));
+                    let revert = {
+                        let superseded = superseded.clone();
+                        move |_| {
+                            let Some((thumbprint, _)) = superseded.clone() else { return };
+                            cmd.run_toast_err(
+                                move |_: sso::SigningCertRolloverDto| {
+                                    session.toast_success("Rolled back to the previous certificate.");
+                                    bump();
+                                },
+                                move |tenant_id| {
+                                    let id = sp_id.get_value();
+                                    let thumbprint = thumbprint.clone();
+                                    async move {
+                                        sso::revert_saml_signing_certificate(
+                                                &tenant_id,
+                                                &id,
+                                                &thumbprint,
+                                            )
+                                            .await
+                                    }
+                                },
+                            );
+                        }
+                    };
+                    let retire = {
+                        let superseded = superseded.clone();
+                        move |_| {
+                            let Some((_, key_id)) = superseded.clone() else { return };
+                            cmd.run_toast_err(
+                                move |_: sso::SigningCertRolloverDto| {
+                                    session.toast_success("Previous certificate retired.");
+                                    bump();
+                                },
+                                move |tenant_id| {
+                                    let id = sp_id.get_value();
+                                    let key_id = key_id.clone();
+                                    async move {
+                                        sso::retire_saml_signing_certificate(&tenant_id, &id, &key_id)
+                                            .await
+                                    }
+                                },
+                            );
+                        }
+                    };
+                    let rows = roll
+                        .certs
+                        .iter()
+                        .map(|c| {
+                            let label = match c.status {
+                                sso::CertStatus::Active => "Active",
+                                sso::CertStatus::Staged => "Staged",
+                                sso::CertStatus::Superseded => "Previous",
+                                sso::CertStatus::Expired => "Expired",
+                            };
+                            let expiry = c
+                                .end_date_time
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let days = c
+                                .days_to_expiry
+                                .map(|d| if d < 0 {
+                                    format!("expired {} days ago", -d)
+                                } else {
+                                    format!("{d} days left")
+                                })
+                                .unwrap_or_default();
+                            view! {
+                                <tr class="cert-rollover__row">
+                                    <td class="cert-rollover__status">{label}</td>
+                                    <td class="cert-rollover__thumbprint">
+                                        <code>{c.thumbprint.clone()}</code>
+                                    </td>
+                                    <td class="cert-rollover__expiry">{expiry} " (" {days} ")"</td>
+                                </tr>
+                            }
+                        })
+                        .collect_view();
+                    view! {
+                        <table class="cert-rollover__table">
+                            <thead>
+                                <tr>
+                                    <th>"Status"</th>
+                                    <th>"Thumbprint"</th>
+                                    <th>"Expires"</th>
+                                </tr>
+                            </thead>
+                            <tbody>{rows}</tbody>
+                        </table>
+
+                        // Phase guidance — one Callout, never two competing ones.
+                        {(phase == sso::RolloverPhase::Staged && active_expired)
+                            .then(|| {
+                                view! {
+                                    <Callout tone="warn">
+                                        "The nominated certificate has expired, so Entra is already signing with the staged one. Activate it to make that official."
+                                    </Callout>
+                                }
+                            })}
+                        {(phase == sso::RolloverPhase::Staged && !active_expired)
+                            .then(|| {
+                                let deadline = deadline.clone().unwrap_or_default();
+                                view! {
+                                    <Callout tone="info">
+                                        "A replacement is staged and published in this app's federation metadata. Confirm the application has picked it up, then activate. Entra promotes it on its own once the active certificate expires on "
+                                        {deadline} " — activate before then so the switch happens when you choose."
+                                    </Callout>
+                                }
+                            })}
+                        {(phase == sso::RolloverPhase::PendingRetire)
+                            .then(|| {
+                                view! {
+                                    <Callout tone="info">
+                                        "The new certificate is live. The previous one is still in place as an instant rollback — retire it once sign-ins look healthy."
+                                    </Callout>
+                                }
+                            })}
+                        {(phase == sso::RolloverPhase::Unconfigured)
+                            .then(|| {
+                                view! {
+                                    <Callout tone="warn">
+                                        "No usable signing certificate is nominated for this application. SAML sign-in will fail until one is staged and activated."
+                                    </Callout>
+                                }
+                            })}
+
+                        // ---- step 1: stage ----
+                        <Field label="Certificate subject for a staged certificate (e.g. CN=Contoso)">
+                            <Input value=subject />
+                        </Field>
+                        <Button
+                            appearance=Signal::derive(|| ButtonAppearance::Primary)
+                            on_click=Box::new(stage)
+                            disabled=Signal::derive(move || cmd.busy.get())
+                        >
+                            "Stage new certificate"
+                        </Button>
+                        {move || {
+                            staged_pem
+                                .get()
+                                .map(|c| {
+                                    view! {
+                                        <p class="hint">
+                                            "Upload this to the application before activating."
+                                        </p>
+                                        <pre class="secret-reveal">{c}</pre>
+                                    }
+                                })
+                        }}
+
+                        // ---- step 2: verify ----
+                        <Button
+                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                            on_click=Box::new(run_probe)
+                            disabled=Signal::derive(move || cmd.busy.get())
+                        >
+                            "Check published metadata"
+                        </Button>
+                        {move || {
+                            probe
+                                .get()
+                                .map(|p| {
+                                    // A failed fetch is NOT evidence of absence — say
+                                    // "couldn't check", or an operator talks themselves
+                                    // out of a safe activation.
+                                    let text = match (p.http_status, p.error.clone()) {
+                                        (_, Some(err)) => {
+                                            format!("Couldn't check what Entra publishes: {err}")
+                                        }
+                                        (Some(_), None) if p.signing_key_count > 1 => {
+                                            format!(
+                                                "Entra publishes {} signing certificates for this app, so an application that polls federation metadata can pick up the staged one.",
+                                                p.signing_key_count,
+                                            )
+                                        }
+                                        (Some(_), None) => {
+                                            format!(
+                                                "Entra publishes {} signing certificate for this app — stage a replacement before activating anything.",
+                                                p.signing_key_count,
+                                            )
+                                        }
+                                        (None, None) => "Couldn't check what Entra publishes.".to_string(),
+                                    };
+                                    view! { <Callout tone="info">{text}</Callout> }
+                                })
+                        }}
+                        <Body1 class="hint">
+                            "This reads the Entra side only. It can't tell you the application consumed the new certificate — check the app, or its metadata refresh schedule."
+                        </Body1>
+
+                        // ---- step 3/4: activate, revert, retire ----
+                        {staged
+                            .is_some()
+                            .then(|| {
+                                view! {
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                        on_click=Box::new(activate)
+                                        disabled=Signal::derive(move || cmd.busy.get())
+                                    >
+                                        "Activate staged certificate"
+                                    </Button>
+                                }
+                            })}
+                        {superseded
+                            .is_some()
+                            .then(|| {
+                                view! {
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                        on_click=Box::new(revert)
+                                        disabled=Signal::derive(move || cmd.busy.get())
+                                    >
+                                        "Revert to previous certificate"
+                                    </Button>
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                        on_click=Box::new(retire)
+                                        disabled=Signal::derive(move || cmd.busy.get())
+                                    >
+                                        "Retire previous certificate"
+                                    </Button>
+                                }
+                            })}
+                    }
+                        .into_any()
+                })}
+            </Suspense>
+        </div>
+    }
+}
+
 /// Inner SSO editor, seeded from the loaded [`SsoConfigDto`]. A method selector
 /// sets `preferredSingleSignOnMode`; the editable fields then branch on the
 /// *saved* mode (SAML / OIDC / not-configured). Renders the app-owner summary
@@ -75,6 +426,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
     let tenant_id = StoredValue::new(tenant_id);
     let object_id = StoredValue::new(cfg.object_id.clone());
     let sp_id = StoredValue::new(cfg.service_principal_id.clone());
+    let app_id = StoredValue::new(cfg.app_id.clone());
 
     // Method selector — seeded to the saved mode; "disabled" clears SSO.
     let selected_mode = RwSignal::new(match cfg.sso_mode.as_deref() {
@@ -308,6 +660,12 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 </Button>
 
                 <h4>"Signing certificate"</h4>
+                <SigningCertRolloverPanel sp_id=sp_id app_id=app_id />
+
+                <h5>"Rotate now (no staging)"</h5>
+                <Callout tone="warn">
+                    "This replaces the signing certificate immediately. Applications that hold a single static certificate stop accepting sign-ins until their copy is replaced — use the staged rollover above unless you're in a maintenance window."
+                </Callout>
                 <Field label="Certificate subject (e.g. CN=Contoso)">
                     <Input value=cert_subject />
                 </Field>
@@ -316,7 +674,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                     on_click=Box::new(rotate_cert)
                     disabled=Signal::derive(move || cmd.busy.get())
                 >
-                    "Generate new signing certificate"
+                    "Rotate and activate immediately"
                 </Button>
                 {move || {
                     rotated_cert

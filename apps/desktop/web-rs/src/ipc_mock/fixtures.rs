@@ -38,7 +38,10 @@ use azapptoolkit_dto::permissions::{
 };
 use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use azapptoolkit_dto::sharepoint::SiteSweepProgress;
-use azapptoolkit_dto::sso::{SamlSsoSummary, SsoConfigDto};
+use azapptoolkit_dto::sso::{
+    CertStatus, MetadataProbeDto, RolloverPhase, SamlSsoSummary, SigningCertDto,
+    SigningCertRolloverDto, SsoConfigDto,
+};
 use chrono::{DateTime, TimeZone, Utc};
 
 /// A `UiError` with the given code and message (the error-path mock payload).
@@ -272,6 +275,61 @@ pub fn sso_config(object_id: &str, app_id: &str) -> SsoConfigDto {
         notification_emails: vec!["identity-team@contoso.com".to_string()],
         claims_policy: None,
         claims_policy_id: None,
+    }
+}
+
+/// A signing-certificate rollover caught mid-flight: the active certificate
+/// expiring in months, a staged replacement already published in federation
+/// metadata, and the activation deadline that comes with it. Shows the panel in
+/// the one state worth demonstrating — the other three phases are quiet.
+pub fn signing_cert_rollover(service_principal_id: &str, app_id: &str) -> SigningCertRolloverDto {
+    SigningCertRolloverDto {
+        service_principal_id: service_principal_id.to_string(),
+        app_id: app_id.to_string(),
+        federation_metadata_url:
+            "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/federationmetadata/2007-06/federationmetadata.xml?appid=app-demo"
+                .to_string(),
+        certs: vec![
+            SigningCertDto {
+                key_id: "key-staged".to_string(),
+                thumbprint: "FE09D8C7B6A5948372615F4E3D2C1B0A98765432".to_string(),
+                display_name: Some("CN=Contoso SSO 2029".to_string()),
+                start_date_time: Some("2026-07-01T00:00:00Z".to_string()),
+                end_date_time: Some("2029-07-01T00:00:00Z".to_string()),
+                is_active: false,
+                days_to_expiry: Some(1053),
+                status: CertStatus::Staged,
+            },
+            SigningCertDto {
+                key_id: "key-active".to_string(),
+                thumbprint: "A1B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string(),
+                display_name: Some("CN=Contoso SSO".to_string()),
+                start_date_time: Some("2024-04-30T00:00:00Z".to_string()),
+                end_date_time: Some("2027-04-30T00:00:00Z".to_string()),
+                is_active: true,
+                days_to_expiry: Some(261),
+                status: CertStatus::Active,
+            },
+        ],
+        active_thumbprint: Some("A1B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
+        staged_thumbprint: Some("FE09D8C7B6A5948372615F4E3D2C1B0A98765432".to_string()),
+        phase: RolloverPhase::Staged,
+        auto_promote_deadline: Some("2027-04-30T00:00:00Z".to_string()),
+    }
+}
+
+/// A federation-metadata probe that found both certificates published — the
+/// precondition for an app that polls metadata to roll over on its own.
+pub fn metadata_probe() -> MetadataProbeDto {
+    MetadataProbeDto {
+        fetched_at: "2026-08-12T09:30:00Z".to_string(),
+        signing_key_count: 2,
+        published_certs: vec![
+            "MIIC-demo-active-certificate-body".to_string(),
+            "MIIC-demo-staged-certificate-body".to_string(),
+        ],
+        http_status: Some(200),
+        error: None,
     }
 }
 

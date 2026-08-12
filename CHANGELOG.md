@@ -1,5 +1,35 @@
 ## [Unreleased]
 
+### Added
+
+- **SAML signing certificates can now be rolled over without a sign-in outage.**
+  Renewing a certificate used to be one button that minted a new one and made it
+  live in the same breath — from that moment every sign-in was signed with a key
+  the application had never seen, so nobody could sign in until someone uploaded
+  the new certificate at the other end. The SSO tab now walks the rollover
+  instead: **stage** a certificate (it lands inactive, and Entra starts
+  publishing it in the app's federation metadata, so an application that polls
+  metadata can pick it up before it ever goes live), **check** what Entra
+  publishes, **activate** when the application is ready, and **retire** the old
+  one only once sign-ins look healthy. Because the previous certificate stays in
+  place until you retire it, **Revert** puts it back instantly if anything goes
+  wrong. The panel reads its state live from Entra, so a rollover interrupted
+  half way — you closed the app, switched tenants, handed it to a colleague —
+  picks up exactly where it was.
+- **The panel shows the deadline Entra imposes on you.** Once a replacement is
+  staged, Entra promotes it on its own the moment the current certificate
+  expires. That date is now shown as an activation deadline, so the switch
+  happens when you choose it rather than at 3am on the expiry date. If the
+  nominated certificate has *already* expired, the panel says so plainly —
+  Entra is signing with the staged one whether or not anyone activated it.
+
+### Changed
+
+- **The immediate-rotation button is still there, and now says what it does.**
+  Renamed to "Rotate and activate immediately" and carries a warning: it's the
+  right tool for an application that can only hold one certificate at a time,
+  and the wrong one everywhere else.
+
 ## [0.25.2] - 2026-08-11
 
 ### Internal

@@ -142,7 +142,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **The `BearerProvider` boundary carries the auth classification.** `core::token::TokenError { code, message }` — not a bare `String` — so a dead session survives into `GraphError/ExchangeError/KeyVaultError/ArmError::Token` and `ui_code()` passes `refresh_missing`/`not_signed_in` through. Flattening it to `token_error` made `is_reauth_fatal` unfirable for every client call. Sole mapping: `token_adapter::token_error`.
 
-- **Long-running writes stop on Cancel AND on a dead session.** A command reading a tenant-wide collection then writing per result `claim()`s a `CancelToken` **once, above the first `.await`** (a later `claim()` takes a higher generation and discards a cancel issued during that await) — latches `dispatch::SessionDead`, breaks on both, and flags its result incomplete. Fan-outs gate `dispatch_capped`'s `spawn` on `is_dead()` and return `session.err(..)`, never a partial result; sequential flows (restore, AAP migration) break each pass and flag the report, having already mutated. Feed failures in via `note`/`note_code`/`note_fatal`. Flags: `audit_cancel` (audit + bulk), `sweep_cancel`, `dr_cancel`. Pinned per **call site** and derived from the source tree — not an allowlist — in `repo_invariants/{cancel,fanout}.rs` via `sources.rs`; `KNOWN_GAPS` stays empty.
+- **Long-running writes stop on Cancel AND on a dead session.** A command reading a tenant-wide collection then writing per result `claim()`s a `CancelToken` **once, above the first `.await`** (a later `claim()` takes a higher generation and discards a cancel issued during that await) — latches `dispatch::SessionDead`, breaks on both, and flags its result incomplete. Fan-outs gate `dispatch_capped`'s `spawn` on `is_dead()` and return `session.err(..)`, never a partial result; sequential flows (restore, AAP migration) break each pass and flag the report, having already mutated. Feed failures in via `note`/`note_code`/`note_fatal`. Flags: `audit_cancel` (audit + bulk), `sweep_cancel`, `dr_cancel`. Pinned per **call site** in `repo_invariants/{cancel,fanout}.rs`; `KNOWN_GAPS` stays empty.
 
 - **Re-auth-fatal codes have ONE definition: `core::reauth::REAUTH_FATAL_CODES`.** `UiError`/`TokenError::is_reauth_fatal()` both read it (agreement tested in `azapptoolkit-dto`). Adding a code = editing that slice; every long-running loop stops on it.
 
@@ -176,7 +176,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Open-items workspace = full-width lists + ONE shared cross-entity working set.** `session.open_item(kind, entity_id, title)` fills `Session.open_items`; no side detail pane, and the dock + workspace mount **once in `shell.rs`**. **Footgun:** `open_items` + `shown_items` MUST reset in `set_active_tenant`, or a stale item leaks the prior tenant's data. No `selected_*_id` signals. Details: [frontend-workspace.md](docs/architecture/frontend-workspace.md).
 
-- **Per-list filter state lives on `Session.tenant_ui` (`TenantScopedUi`) and resets on tenant switch by structure.** Searches, drill-target facets, both bulk selections and shell dialog flags live there so outside surfaces can seed them. A new tenant-scoped signal goes INTO the substruct with a `reset()` line + an assertion in the `tenant_switch_resets_every_tenant_scoped_field` pinning test — never a bare `Session` field with a hand-added reset. Details: [frontend-workspace.md](docs/architecture/frontend-workspace.md).
+- **Per-list filter state lives on `Session.tenant_ui` (`TenantScopedUi`) and resets on tenant switch by structure.** A new tenant-scoped signal goes INTO the substruct with a `reset()` line + an assertion in the `tenant_switch_resets_every_tenant_scoped_field` pinning test — never a bare `Session` field with a hand-added reset. Details: [frontend-workspace.md](docs/architecture/frontend-workspace.md).
 
 - **Security tab = findings-first workbench: one controller, read-only posture strip.** Filtering has exactly two homes (Findings accordion + All-apps `audit_severity`); `BulkActionBar` is the single home of bulk command-calling; **no Grant consent on audit surfaces**. Details + the load-bearing `scoped_mailbox` matcher asymmetry: [frontend-workspace.md](docs/architecture/frontend-workspace.md).
 
@@ -188,7 +188,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Build-time config baking.** `build.rs` reads `.env` → `AZAPPTOOLKIT_BUILD_*`; env vars override.
 
-- **Per-tenant operator defaults live in `settings.json` too.** `UserSettings.tenant_defaults` (types in `azapptoolkit-core::defaults`, ungated — it is also the IPC payload). **Two writers** (`commands::config` + `commands::defaults`), both read-modify-write via `UserSettings::stored`. `apply_tenant_defaults` writes only operator-editable fields and **preserves `default_vault`/`app_vaults`** (owned by the rotation flow); it destructures `TenantDefaults` exhaustively, so a new field won't compile until it's decided there.
+- **Per-tenant operator defaults live in `settings.json` too.** `UserSettings.tenant_defaults` (types in `azapptoolkit-core::defaults`, ungated — also the IPC payload). **Two writers** (`commands::config` + `commands::defaults`), both read-modify-write via `UserSettings::stored`. `apply_tenant_defaults` writes only operator-editable fields and **preserves `default_vault`/`app_vaults`** (owned by the rotation flow); it destructures `TenantDefaults` exhaustively, so a new field won't compile until it's decided there.
 
 - **GitHub Pages demo = the WASM frontend with the Tauri backend mocked.** `just web-build-pages` builds `web-rs` with the `demo` feature (off in `web-build`/desktop, so the mock never ships); `pages.yml` deploys it. **Footgun:** any infallible `invoke()` must be in `demo::register_fixtures` or it **panics the whole page** — enforced by `web-rs/tests/demo_fixture_coverage.rs`. Details: [release-updater-demo.md](docs/architecture/release-updater-demo.md).
 
@@ -200,9 +200,9 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Permissions catalog** is bundled at compile time from `azapptoolkit-permissions/data/`; unknown resources fall back to `resolve_resource_sp()`.
 
-
-
 - **Full-collection PATCH for `appRoles` / `oauth2PermissionScopes`.** Graph **full-replaces** these not-nullable arrays — re-read live state, mutate, write the whole array back (never merge a cached payload). Deleting an enabled entry needs two PATCHes: disable, then remove. Exposed **app roles** edit the **paired application** when one exists (else the SP) and round-trip as **raw JSON** so the `value: null` SAML default survives byte-for-byte. Bust with `invalidate_app_details` only.
+
+- **SAML signing-cert rollover: phase derives from live SP state, not stored.** Entra auto-promotes a staged cert when the active expires. [auth-and-consent.md](docs/architecture/auth-and-consent.md).
 
 - **Auth trusts are validated wherever minted.** Federated credentials go through `core::federation` on **every** path (Graph accepts a bad issuer silently); SAML cert lifetimes are bounded. Pinned by `repo_invariants/trust.rs`.
 

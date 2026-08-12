@@ -402,7 +402,10 @@ impl GraphClient {
     /// re-fetch cost is acceptable. Without this, a patched/deleted SP stays
     /// cached up to the 60-min TTL, skewing the audit's `accountEnabled` read and
     /// the app-registration detail pane's paired-SP fields.
-    fn invalidate_sp_cache(&self) {
+    /// `pub(crate)` so the SP-side credential mutators in `client::credentials`
+    /// (staging / retiring a SAML signing certificate) invalidate through the
+    /// same door rather than growing a second sweep.
+    pub(crate) fn invalidate_sp_cache(&self) {
         self.cache
             .invalidate_prefix(CacheKind::ServicePrincipal, &format!("{}|", self.tenant_id));
     }

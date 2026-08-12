@@ -148,6 +148,130 @@ pub async fn rotate_saml_signing_certificate(
     .await
 }
 
+/// Reads the staged-rollover state of the app's signing certificates.
+pub async fn get_signing_cert_rollover(
+    tenant_id: &str,
+    service_principal_id: &str,
+) -> Result<SigningCertRolloverDto, UiError> {
+    invoke_result(
+        "get_signing_cert_rollover",
+        ServicePrincipalIdArgs {
+            tenant_id,
+            service_principal_id,
+        },
+    )
+    .await
+}
+
+/// Phase 1 — mints a new signing certificate WITHOUT activating it. Additive
+/// and reversible; nothing changes for users until `activate_*` runs.
+pub async fn stage_saml_signing_certificate(
+    tenant_id: &str,
+    service_principal_id: &str,
+    subject: &str,
+    lifetime_days: Option<u32>,
+) -> Result<SsoCertResult, UiError> {
+    invoke_result(
+        "stage_saml_signing_certificate",
+        RotateCertArgs {
+            tenant_id,
+            service_principal_id,
+            subject,
+            lifetime_days,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProbeMetadataArgs<'a> {
+    tenant_id: &'a str,
+    app_id: &'a str,
+}
+
+/// Phase 2 — reads what the app's federation metadata endpoint publishes.
+pub async fn probe_federation_metadata(
+    tenant_id: &str,
+    app_id: &str,
+) -> Result<MetadataProbeDto, UiError> {
+    invoke_result(
+        "probe_federation_metadata",
+        ProbeMetadataArgs { tenant_id, app_id },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CertThumbprintArgs<'a> {
+    tenant_id: &'a str,
+    service_principal_id: &'a str,
+    thumbprint: &'a str,
+}
+
+/// Phase 3 — promotes a staged certificate to the preferred signing key. Takes
+/// effect for every new assertion immediately.
+pub async fn activate_saml_signing_certificate(
+    tenant_id: &str,
+    service_principal_id: &str,
+    thumbprint: &str,
+) -> Result<SigningCertRolloverDto, UiError> {
+    invoke_result(
+        "activate_saml_signing_certificate",
+        CertThumbprintArgs {
+            tenant_id,
+            service_principal_id,
+            thumbprint,
+        },
+    )
+    .await
+}
+
+/// Phase 3b — rolls back to the superseded certificate. Instant: it never left
+/// `keyCredentials`.
+pub async fn revert_saml_signing_certificate(
+    tenant_id: &str,
+    service_principal_id: &str,
+    thumbprint: &str,
+) -> Result<SigningCertRolloverDto, UiError> {
+    invoke_result(
+        "revert_saml_signing_certificate",
+        CertThumbprintArgs {
+            tenant_id,
+            service_principal_id,
+            thumbprint,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CertKeyIdArgs<'a> {
+    tenant_id: &'a str,
+    service_principal_id: &'a str,
+    key_id: &'a str,
+}
+
+/// Phase 4 — removes a retired certificate. This is what ends the ability to
+/// roll back, so the UI keeps it an explicit, separate action.
+pub async fn retire_saml_signing_certificate(
+    tenant_id: &str,
+    service_principal_id: &str,
+    key_id: &str,
+) -> Result<SigningCertRolloverDto, UiError> {
+    invoke_result(
+        "retire_saml_signing_certificate",
+        CertKeyIdArgs {
+            tenant_id,
+            service_principal_id,
+            key_id,
+        },
+    )
+    .await
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetClaimsArgs<'a> {

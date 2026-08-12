@@ -1071,6 +1071,7 @@ dependencies = [
  "parking_lot",
  "rand 0.8.7",
  "rcgen",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

@@ -281,6 +281,123 @@ pub struct SsoConfigDto {
     pub claims_policy_id: Option<String>,
 }
 
+/// Lifecycle position of one SAML token-signing certificate. Derived from live
+/// service-principal state on every read — never stored, so a rollover
+/// abandoned halfway (app closed, tenant switched) is always resumable and two
+/// operators can't disagree about where it is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CertStatus {
+    /// The preferred signing key, still valid — signs assertions today.
+    Active,
+    /// Valid, not preferred, and newer than the active certificate: the
+    /// rollover candidate. Entra publishes it in federation metadata already,
+    /// so an app that polls metadata can pick it up before it goes live.
+    Staged,
+    /// Valid, not preferred, older than the active one — the previous
+    /// generation, kept as the revert target until it's retired.
+    Superseded,
+    /// Past `end_date_time`. Entra will not sign with it.
+    #[default]
+    Expired,
+}
+
+/// Where an app sits in the staged-rollover state machine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RolloverPhase {
+    /// Exactly one usable certificate, and it's the active one. Nothing to do.
+    Steady,
+    /// A [`CertStatus::Staged`] certificate exists — verify, then activate.
+    Staged,
+    /// The newest certificate is active and an older [`CertStatus::Superseded`]
+    /// one is still present. Safe to retire — but retiring is also what *ends*
+    /// the ability to roll back, so it stays an explicit action.
+    PendingRetire,
+    /// No signing certificate, or no preferred key set. Not a SAML app (or a
+    /// broken one).
+    #[default]
+    Unconfigured,
+}
+
+/// One SAML token-signing certificate on the service principal, projected from
+/// its `keyCredentials` entries.
+///
+/// **Graph returns two `keyCredentials` entries per signing certificate** — a
+/// `Sign` and a `Verify` half sharing one `customKeyIdentifier`. The projection
+/// dedupes on the thumbprint, so one certificate is one row here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SigningCertDto {
+    /// `keyId` of the entry this row was projected from — the handle
+    /// `retire_saml_signing_certificate` takes.
+    pub key_id: String,
+    /// `customKeyIdentifier`. Graph reports it uppercase for a service
+    /// principal's signing certs while `preferredTokenSigningKeyThumbprint` can
+    /// differ in case, so every comparison against it is case-insensitive.
+    pub thumbprint: String,
+    pub display_name: Option<String>,
+    pub start_date_time: Option<String>,
+    pub end_date_time: Option<String>,
+    /// Matches `preferredTokenSigningKeyThumbprint`. Independent of
+    /// [`Self::status`]: a preferred certificate that has expired is still the
+    /// nominated one, and reads `is_active` with `status == Expired`.
+    pub is_active: bool,
+    /// Whole days from now to `end_date_time`; negative once expired.
+    pub days_to_expiry: Option<i64>,
+    pub status: CertStatus,
+}
+
+/// The rollover picture for one SAML app — everything the SSO tab's rollover
+/// panel needs in a single round trip. A pure projection of live Graph state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SigningCertRolloverDto {
+    pub service_principal_id: String,
+    pub app_id: String,
+    /// The per-app federation metadata URL — what an auto-rolling app polls,
+    /// and what `probe_federation_metadata` fetches.
+    pub federation_metadata_url: String,
+    /// Newest first. Includes expired certificates so retire can clear them.
+    pub certs: Vec<SigningCertDto>,
+    /// `preferredTokenSigningKeyThumbprint` as Entra has it, expired or not.
+    pub active_thumbprint: Option<String>,
+    pub staged_thumbprint: Option<String>,
+    pub phase: RolloverPhase,
+    /// The active certificate's expiry, surfaced **only** while something is
+    /// staged. Entra silently promotes a valid inactive certificate once the
+    /// active one expires, so with a certificate staged this is a hard deadline
+    /// for an intentional activation — not a soft warning. A value in the past
+    /// means Entra has already promoted for you.
+    pub auto_promote_deadline: Option<String>,
+}
+
+/// Result of fetching the app's federation metadata and reading its
+/// `<KeyDescriptor use="signing">` entries.
+///
+/// This proves what the **Entra** side publishes — the precondition for an app
+/// that polls metadata to discover a staged certificate. It never proves the
+/// app consumed it; only sign-in telemetry can do that. The field names say
+/// "publishes" for exactly that reason.
+///
+/// Certificates are compared by their base64 DER body, not by thumbprint:
+/// deriving a thumbprint means SHA-1, and `cert.rs` deliberately keeps that
+/// class of dependency out of the tree.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetadataProbeDto {
+    pub fetched_at: String,
+    /// Distinct signing certificates published, deduped by body. Two or more
+    /// means an app that polls metadata can see the staged certificate.
+    pub signing_key_count: usize,
+    /// Base64 DER bodies of the published signing certificates, whitespace
+    /// stripped.
+    #[serde(default)]
+    pub published_certs: Vec<String>,
+    /// `None` ⇒ the fetch itself failed (offline, 404, unparseable). The UI
+    /// renders that as "unknown", never as "not published" — a false negative
+    /// here would talk an operator out of a safe activation.
+    pub http_status: Option<u16>,
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
