@@ -122,14 +122,6 @@ struct RotateCertArgs<'a> {
     lifetime_days: Option<u32>,
 }
 
-/// Result of `rotate_saml_signing_certificate` (mirrors the backend struct).
-#[derive(Clone, Debug, serde::Deserialize)]
-pub struct SsoCertResult {
-    pub thumbprint: String,
-    pub base64: Option<String>,
-    pub expiry: Option<String>,
-}
-
 pub async fn rotate_saml_signing_certificate(
     tenant_id: &str,
     service_principal_id: &str,

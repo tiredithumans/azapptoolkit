@@ -31,7 +31,7 @@ use crate::commands::applications::invalidate_app_lists;
 use crate::dto::UiError;
 use crate::dto::sso::{
     ClaimsPolicyDto, MetadataProbeDto, OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput,
-    SamlSsoSummary, SigningCertRolloverDto, SsoCertificateRowDto, SsoConfigDto,
+    SamlSsoSummary, SigningCertRolloverDto, SsoCertResult, SsoCertificateRowDto, SsoConfigDto,
 };
 use crate::state::AppState;
 use azapptoolkit_core::cache::CacheKind;
@@ -742,15 +742,6 @@ pub async fn rotate_saml_signing_certificate(
     invalidate_app_lists(&state.cache, &tenant_id);
     invalidate_sso_cert_board(&state, &tenant_id);
     Ok(cert)
-}
-
-/// Result of [`rotate_saml_signing_certificate`] and
-/// [`stage_saml_signing_certificate`].
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SsoCertResult {
-    pub thumbprint: String,
-    pub base64: Option<String>,
-    pub expiry: Option<String>,
 }
 
 // ---------------- staged rollover ----------------

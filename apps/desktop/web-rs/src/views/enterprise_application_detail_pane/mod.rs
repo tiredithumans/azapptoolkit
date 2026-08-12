@@ -42,7 +42,10 @@ mod overview;
 mod owners;
 mod panels;
 mod permissions;
-mod sso_tab;
+// `pub` so the GUI tests can mount the SSO tab (and its rollover panel)
+// directly, the same way `AuthenticationTab` is mounted — driving the pane to a
+// non-default tab from a test needs machinery this behaviour doesn't warrant.
+pub mod sso_tab;
 
 use access::AccessContent;
 use app_roles::AppRolesContent;
