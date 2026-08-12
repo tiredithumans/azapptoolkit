@@ -706,3 +706,12 @@ pure `MemberOfGroup` OR-chain; anything it cannot fully read is unrewritable.
 back: a scope that cannot be *proved* safe to narrow keeps its original groups,
 because an integration that silently stops seeing a mailbox reports "not found",
 not "denied" — the hardest kind of outage to trace to a permission change.
+
+## Name the resource in operator-facing text
+
+Wherever a mailbox or SharePoint permission is shown to an operator — a finding, a Fix's preview, a
+scope badge, a CSV column — say which **resource** exposes it, not just the value. `Mail.Read` on
+Microsoft Graph and `Mail.Read` on Office 365 Exchange Online are different permissions with
+different reach, and only Graph's can be confined. Text that shows the bare value asks the operator
+to make a scoping decision on information that cannot answer it, and reads as though the two rows
+were duplicates of one grant.

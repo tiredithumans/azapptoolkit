@@ -13,6 +13,23 @@ The convention is universal: every kind — Lists, Audit (`{tenant}|audit_run`,
 prefix-sweeps **all four kinds**, so a different operator signing into the *same* tenant never
 reads the previous session's audit/sweep/SP data.
 
+### Proving the session, and what may be pinned
+
+Two rules ride alongside the key prefix:
+
+- **A cache-only command must prove the session** with `state.auth.tenant_context(tenant_id)`. Every
+  other read proves it implicitly by needing a token; a command answering purely from cache has no
+  such gate, so without this an operator who signed out (or a window that never signed in) could
+  still read a populated tenant's data. Pinned by
+  `repo_invariants::cache::a_command_answering_from_cache_alone_checks_the_session`.
+- **Never pin a per-object key.** Pinning is for the handful of entries that cost a full directory
+  scan to rebuild (the two indexes, the search corpus). A pinned per-app entry can never be evicted,
+  so a large tenant's thousands of `app_detail|…` writes would grow the bucket without bound. Pinned
+  by `repo_invariants.rs`.
+- **Bound bulk seeding by `capacity_for`.** Seeding a whole scan into a bucket must respect its
+  capacity, or the seed evicts everything else the bucket holds — including entries the same run is
+  about to read back.
+
 ## Two tenant-wide indexes, and every surface joins against them
 
 There are exactly **two** cached tenant-wide directory enumerations, and no surface may run its own:
@@ -234,12 +251,22 @@ any new heavy fan-out; don't hand-roll a second tracker or a raw per-item loop:
   (`graph/src/client/batch.rs`): 20 GETs per POST, results returned in input order, inner-429
   sub-requests re-batched. Advanced queries inside a batch (e.g. `memberOf` `$count`) need the
   **per-sub-request** header form — the outer POST's headers don't reach sub-requests.
-  Whole-batch failures must degrade to per-object reads, never fail the run.
+  Whole-batch failures must degrade to per-object reads through `dispatch::batch_or_serial`,
+  never fail the run.
 - **`ConcurrencyThrottle`** (`commands/throttle.rs`) — wired as the client's `ThrottleObserver`
   and fed to `dispatch_capped` as `|| throttle.current_limit()`, so the in-flight cap halves on
   429 and recovers when quiet. Attach/detach with the `ThrottleGuard::attach(client, tracker)`
   RAII (used by the audit and the bulk fan-outs) so an early `?` can't leave a stale observer
   halving the shared per-tenant client's cap.
+
+### `$count`/`$orderby` belong to `$search` alone
+
+Entra's advanced query capabilities (`ConsistencyLevel: eventual` + `$count=true`) are what make
+`$search` and some `$filter` forms work — but they do **not** compose with `$expand`. An advanced
+query carrying `$expand` fails *silently*: Graph returns 200 with the expanded property missing
+rather than an error, so the caller reads an empty collection and concludes the object has no
+related entities. Keep `$count`/`$orderby` on the `$search` paths that need them, and never add them
+to a request that expands.
 
 ## Page size is a wall-clock divisor, not a tuning knob
 
@@ -295,3 +322,29 @@ app id. Errors are never cached, so a transient Exchange failure doesn't pin "Un
 that busts the detail payload (grants, revokes, scoping actions) also drops the verdicts.
 `remove_exchange_mailbox_access` invalidates even on **partial** success — assignments were really
 removed (the same rule as audit remediations above).
+
+## Cancellation and dead sessions in long-running writes
+
+A command that reads a tenant-wide collection and then writes per result must stop for two distinct
+reasons: the operator pressed Cancel, and the session died underneath it. Both are handled at the
+same place, and the shape is load-bearing enough that `repo_invariants/{cancel,fanout}.rs` derives
+its expectations from the source tree per **call site** — not from an allowlist, and `KNOWN_GAPS`
+stays empty.
+
+- **Claim the `CancelToken` once, before the first suspension point.** `claim()` stamps a
+  generation, and `is_cancelled()` compares `cancelled >= generation`. A token claimed *after* an
+  await therefore carries a higher generation than a cancel issued *during* that await, and silently
+  discards it — the run carries on after the operator asked it to stop. The tenant-wide read at the
+  top of these commands can walk 10 000 objects, so that window is not theoretical.
+  (The invariant test scans source text, so a comment containing a literal `.await` above the claim
+  line reads as a suspension point and trips it. Word around it rather than suppressing the test.)
+- **Latch `dispatch::SessionDead` and break on both.** A dead refresh token cannot be re-minted
+  silently, so every remaining item would fail identically — turning one recoverable
+  "re-authenticate" into a wall of N indistinguishable failures.
+- **Flag the result incomplete.** A cancelled or session-dead run is never cached and never renders
+  as an all-clear; failures are fed in through `note` / `note_code` / `note_fatal`.
+- **Fan-outs gate `dispatch_capped`'s `spawn` on `is_dead()`** and return `session.err(..)` rather
+  than a partial result. Sequential flows that have already mutated (restore, AAP migration) instead
+  break each pass and flag the report — stopping is not enough once writes have landed.
+
+Flags: `audit_cancel` (audit + bulk), `sweep_cancel`, `dr_cancel`.
