@@ -2,6 +2,19 @@
 
 ### Added
 
+- **Stage replacement certificates for a whole queue at once.** The SSO
+  certificates board's "≤ 30 days, no replacement staged" filter is the work
+  queue; now you can select those apps (one button selects all of them) and
+  stage a fresh signing certificate on every one. The certificates land
+  **inactive** — nothing changes for users, each app keeps signing with its
+  current certificate until you activate the new one from its SSO tab. That is
+  why staging is the only part of a rollover offered in bulk: activation is a
+  coordinated switch and stays per-app on purpose. An app that already has a
+  replacement staged is skipped rather than given a second spare, so re-running
+  it over the queue on a later day doesn't pile up unused certificates. The run
+  is cancellable, reports per-app failures, and stops if your session expires
+  mid-way rather than failing every remaining app the same way.
+
 - **Expiring SAML signing certificates are now visible before they bite.**
   Security → **SSO certificates** lists every SAML application in the tenant
   with its signing certificate, soonest to expire first, with the same filters

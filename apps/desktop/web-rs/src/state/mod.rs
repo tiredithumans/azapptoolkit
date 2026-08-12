@@ -146,6 +146,12 @@ pub struct TenantScopedUi {
     // versa) — both hold app-registration object ids but they're independent
     // working sets.
     pub selected_audit_ids: RwSignal<HashSet<String>>,
+    // Multi-select set for the SSO-certificate board's bulk-stage bar. Holds
+    // **service principal** ids, not app-registration object ids — SAML signing
+    // certificates live on the SP — so it must stay distinct from the two sets
+    // above rather than sharing one: feeding these ids to an app-registration
+    // bulk command would target the wrong objects entirely.
+    pub selected_sso_cert_ids: RwSignal<HashSet<String>>,
     // Deep-link target tab for the app detail pane. Set by `open_app_on_tab`
     // (e.g. the credential dashboard's "Open" action) and consumed once by the
     // detail pane on mount so it opens directly on that tab instead of
@@ -196,6 +202,7 @@ impl TenantScopedUi {
             pending_open_filters: RwSignal::new(false),
             selected_app_ids: RwSignal::new(HashSet::new()),
             selected_audit_ids: RwSignal::new(HashSet::new()),
+            selected_sso_cert_ids: RwSignal::new(HashSet::new()),
             pending_app_tab: RwSignal::new(None),
             pending_enterprise_tab: RwSignal::new(None),
             cache_open: RwSignal::new(false),
@@ -225,6 +232,7 @@ impl TenantScopedUi {
         self.pending_open_filters.set(false);
         self.selected_app_ids.update(HashSet::clear);
         self.selected_audit_ids.update(HashSet::clear);
+        self.selected_sso_cert_ids.update(HashSet::clear);
         self.pending_app_tab.set(None);
         self.pending_enterprise_tab.set(None);
         self.cache_open.set(false);
@@ -394,6 +402,9 @@ mod tests {
             ui.selected_audit_ids.update(|s| {
                 s.insert("app-2".into());
             });
+            ui.selected_sso_cert_ids.update(|s| {
+                s.insert("sp-1".into());
+            });
             ui.pending_app_tab.set(Some("credentials".into()));
             ui.pending_enterprise_tab.set(Some("permissions".into()));
             ui.cache_open.set(true);
@@ -420,6 +431,8 @@ mod tests {
             ui.selected_app_ids
                 .with_untracked(|s| assert!(s.is_empty()));
             ui.selected_audit_ids
+                .with_untracked(|s| assert!(s.is_empty()));
+            ui.selected_sso_cert_ids
                 .with_untracked(|s| assert!(s.is_empty()));
             assert_eq!(ui.pending_app_tab.get_untracked(), None);
             assert_eq!(ui.pending_enterprise_tab.get_untracked(), None);

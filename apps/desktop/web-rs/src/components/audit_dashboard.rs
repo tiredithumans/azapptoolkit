@@ -52,6 +52,15 @@ pub fn AuditDashboard<T, Fetch, FetchFut, Export, ExportFut, Banner, Matches, Ro
     /// specific Credential-expiry filter. Omitted → a fresh local `"all"` signal.
     #[prop(optional)]
     facet: Option<RwSignal<String>>,
+    /// Optional external reload counter, on the same lifting principle as
+    /// [`facet`]: a host that mutates the underlying data from *outside* this
+    /// component (the SSO board's bulk-stage bar) must be able to pull fresh
+    /// rows afterwards. Without it the table keeps showing pre-mutation state
+    /// until the user notices and hits refresh — and a board that contradicts
+    /// what just happened is worse than no board. Bump it to refetch; omitted
+    /// → a fresh local counter, unchanged behaviour for every other caller.
+    #[prop(optional)]
+    reload: Option<RwSignal<u32>>,
     /// Column header labels (use `""` for an action column with no heading).
     headers: Vec<&'static str>,
     /// Fetches the rows for a tenant id.
@@ -84,7 +93,7 @@ where
     // Keep the whole `UiError` (not a pre-formatted string) so the failure can
     // render through the shared `DetailLoadError`, which shows the code too.
     let error: RwSignal<Option<UiError>> = RwSignal::new(None);
-    let reload = RwSignal::new(0_u32);
+    let reload = reload.unwrap_or_else(|| RwSignal::new(0_u32));
     // Use the caller-supplied (session-lifted) facet if given, else a local one.
     let facet = facet.unwrap_or_else(|| RwSignal::new(String::from("all")));
     let search = RwSignal::new(String::new());

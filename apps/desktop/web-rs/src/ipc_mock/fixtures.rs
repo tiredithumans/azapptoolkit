@@ -17,7 +17,7 @@ use azapptoolkit_dto::applications::{
     ApplicationAuthenticationDto, ApplicationDetail, ApplicationListRowDto,
 };
 use azapptoolkit_dto::audit::AuditRunResult;
-use azapptoolkit_dto::bulk::BulkProgress;
+use azapptoolkit_dto::bulk::{BulkProgress, BulkStageCertOutcome, BulkStageCertResult};
 use azapptoolkit_dto::config::AuthConfigStatus;
 use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};
 use azapptoolkit_dto::credentials::CredentialRowDto;
@@ -361,6 +361,28 @@ pub fn sso_certificate_rows() -> Vec<SsoCertificateRowDto> {
             notification_emails_configured: true,
         },
     ]
+}
+
+/// A bulk staging run over the demo's work queue: one staged, one skipped
+/// because it was already prepared. Shows both halves of the summary line.
+pub fn bulk_stage_cert_result() -> BulkStageCertResult {
+    BulkStageCertResult {
+        outcomes: vec![
+            BulkStageCertOutcome {
+                object_id: "sp-payroll".to_string(),
+                thumbprint: Some("22B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
+                skipped: false,
+                error: None,
+            },
+            BulkStageCertOutcome {
+                object_id: "sp-demo".to_string(),
+                thumbprint: None,
+                skipped: true,
+                error: None,
+            },
+        ],
+        cancelled: false,
+    }
 }
 
 /// A federation-metadata probe that found both certificates published — the

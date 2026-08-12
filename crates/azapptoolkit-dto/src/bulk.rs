@@ -211,3 +211,31 @@ pub struct BulkDisableSignInResult {
     pub outcomes: Vec<BulkDisableOutcome>,
     pub cancelled: bool,
 }
+
+// ---------------- Bulk stage SAML signing certificates ----------------
+
+/// One app's outcome from a bulk signing-certificate **staging** run.
+///
+/// `object_id` is the **service principal** id here, not an app-registration
+/// object id — SAML signing certificates live on the SP. The field keeps the
+/// shared name so the bar's failure-labelling machinery works unchanged; the
+/// host supplies SP-keyed display names to match.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkStageCertOutcome {
+    pub object_id: String,
+    /// Thumbprint of the newly staged certificate. `None` when this app was
+    /// skipped or failed.
+    pub thumbprint: Option<String>,
+    /// True when nothing was minted because a valid replacement was **already**
+    /// staged. Distinct from an error: re-running over a filter that still lists
+    /// a half-finished rollover must not mint a second spare certificate.
+    #[serde(default)]
+    pub skipped: bool,
+    pub error: Option<BulkError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkStageCertResult {
+    pub outcomes: Vec<BulkStageCertOutcome>,
+    pub cancelled: bool,
+}

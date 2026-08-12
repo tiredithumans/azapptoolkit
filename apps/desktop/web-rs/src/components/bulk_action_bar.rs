@@ -75,6 +75,7 @@ bulk_row!(
     bulk::BulkScopeOutcome,
     bulk::BulkOwnerOutcome,
     bulk::BulkDisableOutcome,
+    bulk::BulkStageCertOutcome,
 );
 
 /// The failed rows of a bulk run, labelled for display.
@@ -118,6 +119,10 @@ pub enum BulkAction {
     ScopeSharePoint,
     AddOwner,
     DisableSignIn,
+    /// Stage a fresh SAML signing certificate on each selected app WITHOUT
+    /// activating it. Takes service-principal ids, not app-registration object
+    /// ids — signing certificates live on the SP.
+    StageSsoCertificate,
     Delete,
 }
 
@@ -175,6 +180,13 @@ impl BulkAction {
             BulkAction::ScopeSharePoint => ("Scope SharePoint access", false, Confirm::Sites),
             BulkAction::AddOwner => ("Add owner", false, Confirm::Owner),
             BulkAction::DisableSignIn => ("Disable sign-in", false, Confirm::Click),
+            // Additive and inactive: the new certificate signs nothing until it
+            // is activated per app, so this is neither destructive nor worth a
+            // typed keyword. The risk it carries is the opposite of the usual
+            // one — doing nothing is what breaks sign-in.
+            BulkAction::StageSsoCertificate => {
+                ("Stage signing certificates", false, Confirm::Click)
+            }
             BulkAction::Delete => ("Delete", true, Confirm::Keyword("DELETE")),
         };
         Spec {
@@ -385,6 +397,16 @@ pub fn BulkActionBar(
                     bulk::bulk_add_owner(tid, &ids, &principal_id)
                         .await
                         .map(|r| (parse_add_owner(r, label_for), false))
+                        .map(|((s, f), c)| (s, f, c))
+                        .map_err(|e| e.message)
+                }
+                // Subject empty => the backend defaults to `CN=SSO`; lifetime
+                // `None` => Entra's default. A bulk run is not the place to
+                // hand-tune either, and both are per-app editable afterwards.
+                BulkAction::StageSsoCertificate => {
+                    bulk::bulk_stage_sso_certificates(tid, &ids, "", None)
+                        .await
+                        .map(|r| (parse_stage_certs(r, label_for), false))
                         .map(|((s, f), c)| (s, f, c))
                         .map_err(|e| e.message)
                 }
@@ -616,6 +638,11 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
                 {move || format!("Convert the {} selected app(s)' org-wide SharePoint access to Sites.Selected on the sites below.", n())}
             </Body1>
         }.into_any(),
+        BulkAction::StageSsoCertificate => view! {
+            <Body1>
+                {move || format!("Generate a new SAML signing certificate on the {} selected app(s) and leave it INACTIVE. Nothing changes for users: each app keeps signing with its current certificate until you activate the new one from its SSO tab. Apps that already have a replacement staged are skipped.", n())}
+            </Body1>
+        }.into_any(),
         BulkAction::AddOwner => view! {
             <Body1>
                 {move || format!("Add one user as an owner of the {} selected app(s). Purely additive — apps that already have this owner are skipped.", n())}
@@ -745,6 +772,7 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
         BulkAction::ScopeSharePoint => "Scope SharePoint",
         BulkAction::AddOwner => "Add owner",
         BulkAction::DisableSignIn => "Disable sign-in",
+        BulkAction::StageSsoCertificate => "Stage certificates",
         BulkAction::Delete => "Delete",
         BulkAction::Grant => "Grant consent",
     };
@@ -896,6 +924,35 @@ fn parse_disable(
     (
         format!(
             "Disabled sign-in for {disabled} app(s); {} failed{}. Re-enable anytime from the enterprise app's Overview.",
+            fails.len(),
+            cancelled_suffix(r.cancelled)
+        ),
+        fails,
+    )
+}
+
+/// Summarises a staging run. Reports **staged** and **already prepared**
+/// separately: a re-run over a work-queue filter legitimately skips the apps it
+/// prepared last time, and folding those into "staged" would claim work that
+/// didn't happen. Names the next step, because a staged certificate that nobody
+/// activates is not a finished rollover.
+fn parse_stage_certs(
+    r: bulk::BulkStageCertResult,
+    label_for: impl Fn(&str) -> String,
+) -> (String, Vec<BulkFailure>) {
+    let fails = failures_of(&r.outcomes, label_for);
+    let staged = r.outcomes.iter().filter(|o| o.thumbprint.is_some()).count();
+    let skipped = r.outcomes.iter().filter(|o| o.skipped).count();
+    let skipped_note = if skipped > 0 {
+        format!("; {skipped} already had one staged")
+    } else {
+        String::new()
+    };
+    (
+        format!(
+            "Staged a new signing certificate on {staged} app(s){skipped_note}; {} failed{}. \
+             Nothing has changed for users yet — activate each app from its SSO tab once the \
+             application has picked the new certificate up.",
             fails.len(),
             cancelled_suffix(r.cancelled)
         ),

@@ -112,6 +112,7 @@ pub fn run() {
             commands::bulk::bulk_scope_sharepoint_access,
             commands::bulk::bulk_add_owner,
             commands::bulk::bulk_disable_sign_in,
+            commands::bulk::bulk_stage_sso_certificates,
             commands::bulk::cancel_bulk,
             commands::diagnostics::cache_stats,
             commands::diagnostics::clear_cache,
