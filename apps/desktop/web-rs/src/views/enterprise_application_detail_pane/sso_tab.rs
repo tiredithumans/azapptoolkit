@@ -223,10 +223,24 @@ fn SigningCertRolloverPanel(
                                 sso::CertStatus::Superseded => "Previous",
                                 sso::CertStatus::Expired => "Expired",
                             };
+                            // Status reads as a badge, matching the expiry board,
+                            // so Active is findable at a glance in a list where
+                            // every other row is inert.
+                            let status_class = match c.status {
+                                sso::CertStatus::Active => "badge badge--ok",
+                                sso::CertStatus::Staged => "badge badge--info",
+                                sso::CertStatus::Superseded => "badge badge--unknown",
+                                sso::CertStatus::Expired => "badge badge--danger",
+                            };
+                            // Only the DATE, not the full RFC3339 timestamp: a
+                            // wall of `2029-08-12T13:34:01Z` buries the one
+                            // number that matters.
                             let expiry = c
                                 .end_date_time
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_string());
+                                .as_deref()
+                                .and_then(|d| d.split('T').next())
+                                .unwrap_or("unknown")
+                                .to_string();
                             let days = c
                                 .days_to_expiry
                                 .map(|d| if d < 0 {
@@ -235,13 +249,27 @@ fn SigningCertRolloverPanel(
                                     format!("{d} days left")
                                 })
                                 .unwrap_or_default();
+                            // An imminent expiry must not read with the same
+                            // weight as one three years out — the live tenant
+                            // showed "4 days left" and "1095 days left" in
+                            // identical plain text.
+                            let days_class = match c.days_to_expiry {
+                                Some(d) if d < 0 => "cert-rollover__days badge badge--danger",
+                                Some(d) if d <= 7 => "cert-rollover__days badge badge--danger",
+                                Some(d) if d <= 30 => "cert-rollover__days badge badge--warning",
+                                _ => "cert-rollover__days",
+                            };
                             view! {
                                 <tr class="cert-rollover__row">
-                                    <td class="cert-rollover__status">{label}</td>
+                                    <td class="cert-rollover__status">
+                                        <span class=status_class>{label}</span>
+                                    </td>
                                     <td class="cert-rollover__thumbprint">
                                         <code>{c.thumbprint.clone()}</code>
                                     </td>
-                                    <td class="cert-rollover__expiry">{expiry} " (" {days} ")"</td>
+                                    <td class="cert-rollover__expiry">
+                                        {expiry} " " <span class=days_class>{days}</span>
+                                    </td>
                                 </tr>
                             }
                         })
@@ -269,11 +297,25 @@ fn SigningCertRolloverPanel(
                             })}
                         {(phase == sso::RolloverPhase::Staged && !active_expired)
                             .then(|| {
-                                let deadline = deadline.clone().unwrap_or_default();
+                                // The deadline sentence is rendered ONLY with a
+                                // date. It previously fell back to an empty
+                                // string, so a rollover whose active certificate
+                                // couldn't be resolved showed "expires on  —" with
+                                // a hole in it, which is how this class of bug
+                                // reaches an operator looking merely untidy
+                                // rather than wrong.
+                                let deadline = deadline
+                                    .clone()
+                                    .and_then(|d| d.split('T').next().map(str::to_string));
                                 view! {
                                     <Callout tone="info">
-                                        "A replacement is staged and published in this app's federation metadata. Confirm the application has picked it up, then activate. Entra promotes it on its own once the active certificate expires on "
-                                        {deadline} " — activate before then so the switch happens when you choose."
+                                        "A replacement is staged and published in this app's federation metadata. Confirm the application has picked it up, then activate."
+                                        {deadline
+                                            .map(|d| {
+                                                format!(
+                                                    " Entra promotes it on its own once the active certificate expires on {d} — activate before then so the switch happens when you choose.",
+                                                )
+                                            })}
                                     </Callout>
                                 }
                             })}
