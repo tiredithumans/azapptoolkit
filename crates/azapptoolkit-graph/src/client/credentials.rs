@@ -219,20 +219,27 @@ impl GraphClient {
     /// raw JSON. A dropped entry here deletes a live signing certificate, so a
     /// serialization failure must abort rather than write a partial array.
     ///
-    /// Graph stores a signing certificate as a `Sign`/`Verify` **pair** sharing
-    /// one `customKeyIdentifier`; removing one half strands the other, so this
-    /// drops every entry with the target's thumbprint (falling back to the bare
-    /// `keyId` when Graph reports no thumbprint).
+    /// `addTokenSigningCertificate` writes **three** objects per certificate, all
+    /// sharing one `customKeyIdentifier`: a `Sign` key, a `Verify` key, and a
+    /// **`passwordCredentials` entry** (the PFX password). Removing only the key
+    /// halves stranded that password credential on the service principal
+    /// forever, so this sweeps `passwordCredentials` by the same identifier —
+    /// otherwise every retired certificate left a permanent orphan behind.
     pub async fn remove_service_principal_key_credential(
         &self,
         object_id: &str,
         key_id: &str,
     ) -> Result<()> {
         let path = format!("/servicePrincipals/{object_id}");
-        let params: [(&str, &str); 1] = [("$select", "keyCredentials")];
+        let params: [(&str, &str); 1] = [("$select", "keyCredentials,passwordCredentials")];
         let sp: serde_json::Value = self.get_json(&path, &params, false).await?;
         let entries = sp
             .get("keyCredentials")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let passwords = sp
+            .get("passwordCredentials")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
@@ -259,7 +266,27 @@ impl GraphClient {
             })
             .collect();
 
-        let body = serde_json::json!({ "keyCredentials": kept });
+        // The certificate's PFX password rides `passwordCredentials` under the
+        // same `customKeyIdentifier`. Only drop it when we resolved a thumbprint
+        // to match on — without one we can't tell which password belongs to the
+        // key being retired, and removing the wrong one breaks a live cert.
+        let kept_passwords: Vec<serde_json::Value> = passwords
+            .into_iter()
+            .filter(|c| {
+                match (
+                    &thumbprint,
+                    c.get("customKeyIdentifier").and_then(|v| v.as_str()),
+                ) {
+                    (Some(target), Some(tp)) => !tp.eq_ignore_ascii_case(target),
+                    _ => true,
+                }
+            })
+            .collect();
+
+        let body = serde_json::json!({
+            "keyCredentials": kept,
+            "passwordCredentials": kept_passwords,
+        });
         self.send_no_content(Method::PATCH, &path, Some(&body))
             .await?;
         self.invalidate_sp_cache();

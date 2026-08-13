@@ -1,5 +1,38 @@
 ## [Unreleased]
 
+## [0.26.1] - 2026-08-13
+
+### Fixed
+
+- **The SAML signing-certificate features didn't work against a real tenant, and
+  said nothing was wrong.** Microsoft Entra reports a certificate's identifier in
+  two different encodings — `customKeyIdentifier` as base64 of the thumbprint
+  bytes, `preferredTokenSigningKeyThumbprint` as hexadecimal — and the app
+  compared them directly, so it never recognised which certificate was actually
+  in use. Every certificate showed as "Staged" with no active one, every expiry
+  read "Unknown", the "no replacement staged" filter matched nothing, the banner
+  never warned, and staging in bulk silently skipped every application. Nothing
+  errored: the board simply reported all-clear no matter how close an expiry
+  was, which is the opposite of what it exists for. Both encodings are now
+  normalised to one form before anything is compared, displayed, or written — so
+  thumbprints on screen match what the Entra portal shows, and activating a
+  certificate writes the value Entra expects.
+- **Retiring a certificate left part of it behind.** Entra stores three objects
+  per signing certificate — two keys and a password for the key file. Removal
+  only took the two keys, stranding the password on the enterprise application
+  permanently. It's now removed with them.
+- **A staged rollover could show a sentence with a missing date** — "expires
+  on  — activate before then" — when the active certificate couldn't be
+  resolved. The deadline is only offered when there is a date to name.
+
+### Changed
+
+- **Signing-certificate dates are easier to read at a glance.** The rollover
+  panel shows the expiry date rather than a full timestamp, marks status with the
+  same badges as the expiry board, and highlights a certificate expiring within
+  30 days (red inside 7) instead of printing "4 days left" in the same plain text
+  as "1095 days left".
+
 ## [0.26.0] - 2026-08-12
 
 ### Added

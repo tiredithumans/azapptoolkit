@@ -405,8 +405,14 @@ fn validate_cert_subject(subject: &str) -> Result<(), UiError> {
 /// even across a leap day.
 const MAX_CERT_LIFETIME_DAYS: u32 = 1095;
 
-/// Default when the caller supplies none — matches Graph's own default (and the
-/// portal's) of three years.
+/// Default when the caller supplies none.
+///
+/// Deliberately ONE year, not the three that Graph and the portal default to: a
+/// signing certificate's lifetime is the window a stolen key stays useful, and
+/// the staged rollover makes renewing cheap enough that three years of exposure
+/// isn't worth the saved effort. (An earlier version of this comment claimed it
+/// matched Graph's three-year default, which invited "correcting" the value
+/// upward.)
 const DEFAULT_CERT_LIFETIME_DAYS: u32 = 365;
 
 /// Bounds a caller-supplied signing-certificate lifetime.
@@ -529,11 +535,10 @@ pub async fn get_sso_config(
 /// Pulls the SSO-relevant fields out of a service principal's raw JSON:
 /// `(app_id, sso_mode, signing_cert_thumbprint, signing_cert_expiry,
 /// notification_emails)`. The expiry is the `endDateTime` of the `keyCredentials`
-/// entry whose `customKeyIdentifier` matches the preferred signing thumbprint
-/// (case-insensitive) — Graph stores the thumbprint uppercase in
-/// `customKeyIdentifier` but the preferred-key field can differ in case, so the
-/// match is the load-bearing bit (unit-tested below). Pure (no Graph / State),
-/// mirroring [`extract_app_sso_fields`].
+/// entry whose `customKeyIdentifier` denotes the preferred signing key. The two
+/// fields are in DIFFERENT ENCODINGS — base64 bytes vs hex — so the match runs
+/// through [`is_preferred_key`]; comparing them raw never matches and silently
+/// yields no expiry. Pure (no Graph / State), mirroring [`extract_app_sso_fields`].
 fn extract_sp_sso_fields(
     sp: &serde_json::Value,
 ) -> (
@@ -563,8 +568,7 @@ fn extract_sp_sso_fields(
                 creds.iter().find(|c| {
                     c.get("customKeyIdentifier")
                         .and_then(|v| v.as_str())
-                        .map(|id| id.eq_ignore_ascii_case(tp))
-                        .unwrap_or(false)
+                        .is_some_and(|id| is_preferred_key(id, tp))
                 })
             })
             .and_then(|c| c.get("endDateTime"))
@@ -1302,6 +1306,62 @@ fn parse_signing_certs(xml: &str) -> Vec<String> {
     out
 }
 
+/// The canonical (uppercase hex) thumbprint for a `keyCredentials` entry's
+/// `customKeyIdentifier`.
+///
+/// **The two fields are in different encodings, and this is the bug that made
+/// the whole rollover feature silently inert.** `customKeyIdentifier` is
+/// `Edm.Binary`, so Graph serializes it as **base64 of the SHA-1 thumbprint
+/// bytes** (`"2iD8ppbE+D6Kmu1ZvjM2jtQh88E="`), while
+/// `preferredTokenSigningKeyThumbprint` is a String holding the **hex** form
+/// (`"DA20FCA696C4F83E8A9AED59BE33368ED421F3C1"`) — the same 20 bytes, written
+/// two ways. Comparing them directly never matches, so no certificate was ever
+/// recognised as active: every app read as "Staged", every expiry read
+/// "Unknown", the work-queue filter matched nothing, and bulk staging skipped
+/// every app. Nothing errored; the board simply reported all-clear forever.
+///
+/// Both the display value and the `preferredTokenSigningKeyThumbprint` we PATCH
+/// come from here, so what an operator reads matches what the Entra portal shows
+/// and what activation actually writes.
+///
+/// Accepts the hex form unchanged: a certificate uploaded by hand (rather than
+/// minted by `addTokenSigningCertificate`) can carry `customKeyIdentifier`
+/// already written as hex, and Microsoft's own upload guidance describes it as
+/// "the certificate thumbprint hash".
+pub(crate) fn canonical_thumbprint(custom_key_identifier: &str) -> Option<String> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let raw = custom_key_identifier.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // Already hex (40 chars = 20 SHA-1 bytes) — normalise case only.
+    if raw.len() == 40 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(raw.to_ascii_uppercase());
+    }
+    // Otherwise base64 of the raw thumbprint bytes.
+    let bytes = STANDARD.decode(raw).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(bytes.iter().fold(String::new(), |mut acc, b| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "{b:02X}");
+        acc
+    }))
+}
+
+/// True when a `keyCredentials` entry's `customKeyIdentifier` denotes the same
+/// certificate as `preferred` (`preferredTokenSigningKeyThumbprint`). The single
+/// comparison — both sides normalised through [`canonical_thumbprint`] first.
+fn is_preferred_key(custom_key_identifier: &str, preferred: &str) -> bool {
+    match canonical_thumbprint(custom_key_identifier) {
+        Some(hex) => hex.eq_ignore_ascii_case(preferred.trim()),
+        None => false,
+    }
+}
+
 /// Projects a service principal's raw JSON into the rollover view.
 ///
 /// Pure (no Graph, no `State`) so the phase machine is table-testable — mirrors
@@ -1310,9 +1370,9 @@ fn parse_signing_certs(xml: &str) -> Vec<String> {
 /// - a signing certificate is **two** `keyCredentials` entries (a `Sign` and a
 ///   `Verify` half sharing one `customKeyIdentifier`), so entries are deduped by
 ///   thumbprint or the list shows every certificate twice;
-/// - `customKeyIdentifier` is reported uppercase while
-///   `preferredTokenSigningKeyThumbprint` can differ in case, so every
-///   comparison is case-insensitive.
+/// - `customKeyIdentifier` (base64 bytes) and `preferredTokenSigningKeyThumbprint`
+///   (hex) are DIFFERENT ENCODINGS of the same 20 bytes, so both sides go
+///   through [`canonical_thumbprint`] before any comparison or display.
 fn build_rollover(
     sp: &serde_json::Value,
     service_principal_id: &str,
@@ -1345,22 +1405,27 @@ fn build_rollover(
         .map(Vec::as_slice)
         .unwrap_or_default()
     {
-        let thumbprint = cred
+        // Canonical hex, not the raw base64 `customKeyIdentifier` — see
+        // `canonical_thumbprint`. An entry whose identifier can't be decoded is
+        // skipped rather than shown with a value that matches nothing and can't
+        // be activated.
+        let Some(thumbprint) = cred
             .get("customKeyIdentifier")
             .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if thumbprint.is_empty()
-            || certs
-                .iter()
-                .any(|(c, _)| c.thumbprint.eq_ignore_ascii_case(&thumbprint))
+            .and_then(canonical_thumbprint)
+        else {
+            continue;
+        };
+        if certs
+            .iter()
+            .any(|(c, _)| c.thumbprint.eq_ignore_ascii_case(&thumbprint))
         {
             continue;
         }
         let end = parse_time(cred.get("endDateTime"));
         let is_active = preferred
             .as_deref()
-            .is_some_and(|p| p.eq_ignore_ascii_case(&thumbprint));
+            .is_some_and(|p| p.trim().eq_ignore_ascii_case(&thumbprint));
         certs.push((
             SigningCertDto {
                 key_id: cred
@@ -1731,17 +1796,17 @@ mod tests {
         let sp = serde_json::json!({
             "appId": "app-123",
             "preferredSingleSignOnMode": "saml",
-            "preferredTokenSigningKeyThumbprint": "abc123def",
+            "preferredTokenSigningKeyThumbprint": A_HEX,
             "keyCredentials": [
-                { "customKeyIdentifier": "OTHER", "endDateTime": "2000-01-01T00:00:00Z" },
-                { "customKeyIdentifier": "ABC123DEF", "endDateTime": "2030-06-01T00:00:00Z" }
+                { "customKeyIdentifier": B_B64, "endDateTime": "2000-01-01T00:00:00Z" },
+                { "customKeyIdentifier": A_B64, "endDateTime": "2030-06-01T00:00:00Z" }
             ],
             "notificationEmailAddresses": ["a@x.com", "b@y.com"]
         });
         let (app_id, sso_mode, thumbprint, expiry, emails) = extract_sp_sso_fields(&sp);
         assert_eq!(app_id, "app-123");
         assert_eq!(sso_mode.as_deref(), Some("saml"));
-        assert_eq!(thumbprint.as_deref(), Some("abc123def"));
+        assert_eq!(thumbprint.as_deref(), Some(A_HEX));
         // Picked the matching (upper-cased) credential, not the first one.
         assert_eq!(expiry.as_deref(), Some("2030-06-01T00:00:00Z"));
         assert_eq!(emails, vec!["a@x.com".to_string(), "b@y.com".to_string()]);
@@ -1751,6 +1816,17 @@ mod tests {
 
     use azapptoolkit_dto::sso::{CertStatus, RolloverPhase};
 
+    // REAL encoding pairs: `customKeyIdentifier` as Graph serializes it (base64
+    // of the 20 SHA-1 bytes) alongside the hex `preferredTokenSigningKeyThumbprint`
+    // for the SAME certificate. The previous fixtures used invented hex on both
+    // sides, which is precisely why these tests passed while the feature was
+    // inert against a real tenant: they asserted our assumption, not Graph's
+    // behaviour. Never hand-write a `customKeyIdentifier` again — derive it.
+    const A_B64: &str = "ATKoPe8CbYUF5PKRSLDOvhutu7A=";
+    const A_HEX: &str = "0132A83DEF026D8505E4F29148B0CEBE1BADBBB0";
+    const B_B64: &str = "7uqUyFZqj3EYkgjAu6GFqd4tB30=";
+    const B_HEX: &str = "EEEA94C8566A8F71189208C0BBA185A9DE2D077D";
+
     /// `now` for the rollover tables below. Fixed so "expired" and "valid" are
     /// properties of the fixture, not of the day the suite runs.
     fn now() -> chrono::DateTime<chrono::Utc> {
@@ -1759,12 +1835,12 @@ mod tests {
             .with_timezone(&chrono::Utc)
     }
 
-    /// One `keyCredentials` entry. Graph emits a `Sign`/`Verify` pair per
-    /// certificate, so the helper takes the usage explicitly.
-    fn cred(key_id: &str, thumbprint: &str, end: &str, usage: &str) -> serde_json::Value {
+    /// One `keyCredentials` entry. `thumbprint_b64` is the base64
+    /// `customKeyIdentifier` exactly as Graph returns it.
+    fn cred(key_id: &str, thumbprint_b64: &str, end: &str, usage: &str) -> serde_json::Value {
         serde_json::json!({
             "keyId": key_id,
-            "customKeyIdentifier": thumbprint,
+            "customKeyIdentifier": thumbprint_b64,
             "displayName": "CN=Contoso",
             "endDateTime": end,
             "usage": usage,
@@ -1782,12 +1858,58 @@ mod tests {
     }
 
     #[test]
+    fn the_two_thumbprint_fields_are_different_encodings_of_the_same_bytes() {
+        // The pair Microsoft's own `addTokenSigningCertificate` reference returns
+        // for ONE certificate — `customKeyIdentifier` base64, `thumbprint` hex.
+        // Copied verbatim from the API docs, so this test fails if the
+        // normalisation ever stops handling what Graph actually sends.
+        const DOC_CKI: &str = "2iD8ppbE+D6Kmu1ZvjM2jtQh88E=";
+        const DOC_THUMBPRINT: &str = "DA20FCA696C4F83E8A9AED59BE33368ED421F3C1";
+
+        assert_eq!(
+            canonical_thumbprint(DOC_CKI).as_deref(),
+            Some(DOC_THUMBPRINT),
+            "base64 customKeyIdentifier must normalise to the hex thumbprint",
+        );
+        assert!(
+            is_preferred_key(DOC_CKI, DOC_THUMBPRINT),
+            "these two ARE the same certificate; comparing them raw is what made \
+             every app read as Staged, every expiry Unknown, and bulk staging a \
+             no-op",
+        );
+        // Case-insensitive on the hex side — Entra is not consistent about it.
+        assert!(is_preferred_key(
+            DOC_CKI,
+            &DOC_THUMBPRINT.to_ascii_lowercase()
+        ));
+
+        // A hand-uploaded certificate can carry the identifier already in hex.
+        assert_eq!(
+            canonical_thumbprint(DOC_THUMBPRINT).as_deref(),
+            Some(DOC_THUMBPRINT),
+        );
+        assert_eq!(
+            canonical_thumbprint(&DOC_THUMBPRINT.to_ascii_lowercase()).as_deref(),
+            Some(DOC_THUMBPRINT),
+            "hex is normalised to upper case so display and comparison agree",
+        );
+
+        // Undecodable input yields None rather than a value that silently
+        // matches nothing and cannot be activated.
+        assert_eq!(canonical_thumbprint(""), None);
+        assert_eq!(canonical_thumbprint("   "), None);
+        assert_eq!(canonical_thumbprint("not base64 !!"), None);
+        // And the raw base64 never equals the hex — the original bug, pinned.
+        assert_ne!(DOC_CKI, DOC_THUMBPRINT);
+    }
+
+    #[test]
     fn rollover_phase_reads_the_four_states_off_live_sp_state() {
         // Steady: one valid certificate, and it's the preferred one.
         let roll = build_rollover(
             &sp_with(
-                Some("AAA"),
-                vec![cred("k1", "AAA", "2027-01-01T00:00:00Z", "Verify")],
+                Some(A_HEX),
+                vec![cred("k1", A_B64, "2027-01-01T00:00:00Z", "Verify")],
             ),
             "sp-1",
             "tid",
@@ -1801,10 +1923,10 @@ mod tests {
         // Staged: a newer valid certificate exists but isn't preferred yet.
         let roll = build_rollover(
             &sp_with(
-                Some("AAA"),
+                Some(A_HEX),
                 vec![
-                    cred("k1", "AAA", "2026-06-01T00:00:00Z", "Verify"),
-                    cred("k2", "BBB", "2029-01-01T00:00:00Z", "Verify"),
+                    cred("k1", A_B64, "2026-06-01T00:00:00Z", "Verify"),
+                    cred("k2", B_B64, "2029-01-01T00:00:00Z", "Verify"),
                 ],
             ),
             "sp-1",
@@ -1812,7 +1934,7 @@ mod tests {
             now(),
         );
         assert_eq!(roll.phase, RolloverPhase::Staged);
-        assert_eq!(roll.staged_thumbprint.as_deref(), Some("BBB"));
+        assert_eq!(roll.staged_thumbprint.as_deref(), Some(B_HEX));
         // The ACTIVE certificate's expiry is the activation deadline: once it
         // passes, Entra promotes the staged certificate on its own.
         assert_eq!(
@@ -1824,10 +1946,10 @@ mod tests {
         // rollback target and still present.
         let roll = build_rollover(
             &sp_with(
-                Some("BBB"),
+                Some(B_HEX),
                 vec![
-                    cred("k1", "AAA", "2026-06-01T00:00:00Z", "Verify"),
-                    cred("k2", "BBB", "2029-01-01T00:00:00Z", "Verify"),
+                    cred("k1", A_B64, "2026-06-01T00:00:00Z", "Verify"),
+                    cred("k2", B_B64, "2029-01-01T00:00:00Z", "Verify"),
                 ],
             ),
             "sp-1",
@@ -1838,7 +1960,7 @@ mod tests {
         assert_eq!(
             roll.certs
                 .iter()
-                .find(|c| c.thumbprint == "AAA")
+                .find(|c| c.thumbprint == A_HEX)
                 .map(|c| c.status),
             Some(CertStatus::Superseded)
         );
@@ -1863,10 +1985,10 @@ mod tests {
         // deadline is in the PAST and the UI must not call this "steady".
         let roll = build_rollover(
             &sp_with(
-                Some("AAA"),
+                Some(A_HEX),
                 vec![
-                    cred("k1", "AAA", "2025-06-01T00:00:00Z", "Verify"),
-                    cred("k2", "BBB", "2029-01-01T00:00:00Z", "Verify"),
+                    cred("k1", A_B64, "2025-06-01T00:00:00Z", "Verify"),
+                    cred("k2", B_B64, "2029-01-01T00:00:00Z", "Verify"),
                 ],
             ),
             "sp-1",
@@ -1874,7 +1996,7 @@ mod tests {
             now(),
         );
         assert_eq!(roll.phase, RolloverPhase::Staged);
-        assert_eq!(roll.staged_thumbprint.as_deref(), Some("BBB"));
+        assert_eq!(roll.staged_thumbprint.as_deref(), Some(B_HEX));
         let active = roll.certs.iter().find(|c| c.is_active).unwrap();
         // Still the nominated key, but it can't sign — both facts are visible.
         assert!(active.is_active);
@@ -1893,10 +2015,10 @@ mod tests {
         // twice and make a one-certificate app look mid-rollover.
         let roll = build_rollover(
             &sp_with(
-                Some("AAA"),
+                Some(A_HEX),
                 vec![
-                    cred("k1", "AAA", "2027-01-01T00:00:00Z", "Sign"),
-                    cred("k2", "AAA", "2027-01-01T00:00:00Z", "Verify"),
+                    cred("k1", A_B64, "2027-01-01T00:00:00Z", "Sign"),
+                    cred("k2", A_B64, "2027-01-01T00:00:00Z", "Verify"),
                 ],
             ),
             "sp-1",
@@ -1914,17 +2036,18 @@ mod tests {
         // certificate and read as a broken app.
         let roll = build_rollover(
             &sp_with(
-                Some("bbb"),
+                // Lower-case preferred value: Entra is inconsistent about case.
+                Some(&B_HEX.to_ascii_lowercase()),
                 vec![
-                    cred("k1", "AAA", "2026-06-01T00:00:00Z", "Verify"),
-                    cred("k2", "BBB", "2029-01-01T00:00:00Z", "Verify"),
+                    cred("k1", A_B64, "2026-06-01T00:00:00Z", "Verify"),
+                    cred("k2", B_B64, "2029-01-01T00:00:00Z", "Verify"),
                 ],
             ),
             "sp-1",
             "tid",
             now(),
         );
-        assert_eq!(roll.certs[0].thumbprint, "BBB", "newest first");
+        assert_eq!(roll.certs[0].thumbprint, B_HEX, "newest first");
         assert!(roll.certs[0].is_active);
         assert_eq!(roll.certs[0].status, CertStatus::Active);
         // The metadata URL is the app's own, so the panel can link it directly.
