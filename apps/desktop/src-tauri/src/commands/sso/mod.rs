@@ -938,10 +938,17 @@ pub async fn retire_saml_signing_certificate(
             )
         })?;
     if target.is_active {
-        return Err(UiError::validation(
-            "cert_is_active",
-            "That certificate is signing assertions right now. Activate its replacement first.",
-        ));
+        // An expired-but-still-nominated certificate isn't signing anything —
+        // Entra already promoted the staged one — but removing it while
+        // `preferredTokenSigningKeyThumbprint` still points at it would leave
+        // the nomination dangling. Same guard, honest message.
+        let message = if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Expired) {
+            "That certificate has expired but is still nominated as the signing key. \
+             Activate its replacement first — then it can be removed."
+        } else {
+            "That certificate is signing assertions right now. Activate its replacement first."
+        };
+        return Err(UiError::validation("cert_is_active", message));
     }
     if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Staged) {
         return Err(UiError::validation(
@@ -1016,7 +1023,7 @@ pub async fn list_sso_certificate_expirations(
                 thumbprint: roll.active_thumbprint,
                 end_date_time: active.and_then(|c| c.end_date_time.clone()),
                 days_to_expiry: active.and_then(|c| c.days_to_expiry),
-                status: sso_cert_status(active.and_then(|c| c.days_to_expiry)),
+                status: sso_cert_status(active),
                 has_staged_replacement: roll.staged_thumbprint.is_some(),
                 phase: roll.phase,
                 notification_emails_configured: sp
@@ -1085,13 +1092,28 @@ fn sso_certificates_to_csv(rows: &[SsoCertificateRowDto]) -> String {
     out
 }
 
-/// Classifies a signing certificate's expiry, by the same day thresholds the
-/// audit's credential rules use — so "Expiring Soon" means the same number of
-/// days on both boards. A certificate with no resolvable expiry is `Unknown`,
-/// never `Active`: an unreadable date is not evidence of health.
-fn sso_cert_status(days: Option<i64>) -> azapptoolkit_core::audit::CredentialStatus {
+/// Classifies the active signing certificate for the expiry board, by the same
+/// day thresholds the audit's credential rules use — so "Expiring Soon" means
+/// the same number of days on both boards. No resolvable certificate (or no
+/// resolvable expiry on it) is `Unknown`, never `Active`: an unreadable date is
+/// not evidence of health.
+///
+/// Expired-ness is taken from the cert's [`CertStatus`] — the timestamp
+/// comparison `build_rollover` already made — not re-derived from the day
+/// count, so the board and the SSO tab can never disagree about whether the
+/// same certificate is expired.
+fn sso_cert_status(
+    active: Option<&azapptoolkit_dto::sso::SigningCertDto>,
+) -> azapptoolkit_core::audit::CredentialStatus {
     use azapptoolkit_core::audit::{CredentialStatus, EXPIRY_WARNING_DAYS};
-    match days {
+    use azapptoolkit_dto::sso::CertStatus;
+    let Some(cert) = active else {
+        return CredentialStatus::Unknown;
+    };
+    if matches!(cert.status, CertStatus::Expired) {
+        return CredentialStatus::Expired;
+    }
+    match cert.days_to_expiry {
         None => CredentialStatus::Unknown,
         Some(d) if d < 0 => CredentialStatus::Expired,
         Some(d) if d <= EXPIRY_WARNING_DAYS => CredentialStatus::ExpiringSoon,
@@ -1447,7 +1469,13 @@ fn build_rollover(
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
                 is_active,
-                days_to_expiry: end.map(|e| (e - now).num_days()),
+                // Floored, not truncated: `num_days()` rounds toward zero, so a
+                // certificate expired less than 24h ago would read `0` — the
+                // same number as one *expiring* within 24h — and every `d < 0`
+                // check downstream would call it alive while the `end <= now`
+                // comparison below calls it Expired. `div_euclid` keeps the
+                // day count's sign in agreement with that comparison.
+                days_to_expiry: end.map(|e| (e - now).num_seconds().div_euclid(86_400)),
                 // Provisional; the pass below needs the active cert's expiry.
                 status: CertStatus::Expired,
             },
@@ -2054,6 +2082,20 @@ mod tests {
         assert!(roll.federation_metadata_url.ends_with("appid=app-1"));
     }
 
+    /// A hand-built active cert for the [`sso_cert_status`] table below.
+    fn active_cert(days: Option<i64>, status: CertStatus) -> azapptoolkit_dto::sso::SigningCertDto {
+        azapptoolkit_dto::sso::SigningCertDto {
+            key_id: "k1".to_string(),
+            thumbprint: A_HEX.to_string(),
+            display_name: None,
+            start_date_time: None,
+            end_date_time: None,
+            is_active: true,
+            days_to_expiry: days,
+            status,
+        }
+    }
+
     #[test]
     fn an_unreadable_expiry_is_unknown_not_healthy() {
         use azapptoolkit_core::audit::CredentialStatus;
@@ -2062,12 +2104,79 @@ mod tests {
         // opposite consequences, and Unknown is what sorts it out of the
         // all-clear.
         assert_eq!(sso_cert_status(None), CredentialStatus::Unknown);
-        assert_eq!(sso_cert_status(Some(-1)), CredentialStatus::Expired);
+        assert_eq!(
+            sso_cert_status(Some(&active_cert(None, CertStatus::Active))),
+            CredentialStatus::Unknown
+        );
+        assert_eq!(
+            sso_cert_status(Some(&active_cert(Some(-1), CertStatus::Expired))),
+            CredentialStatus::Expired
+        );
         // The threshold matches the audit's credential rules exactly, so
         // "Expiring Soon" means the same number of days on both boards.
-        assert_eq!(sso_cert_status(Some(30)), CredentialStatus::ExpiringSoon);
-        assert_eq!(sso_cert_status(Some(0)), CredentialStatus::ExpiringSoon);
-        assert_eq!(sso_cert_status(Some(31)), CredentialStatus::Active);
+        assert_eq!(
+            sso_cert_status(Some(&active_cert(Some(30), CertStatus::Active))),
+            CredentialStatus::ExpiringSoon
+        );
+        assert_eq!(
+            sso_cert_status(Some(&active_cert(Some(0), CertStatus::Active))),
+            CredentialStatus::ExpiringSoon
+        );
+        assert_eq!(
+            sso_cert_status(Some(&active_cert(Some(31), CertStatus::Active))),
+            CredentialStatus::Active
+        );
+        // The timestamp verdict wins over the day count: a certificate whose
+        // `CertStatus` says Expired is Expired on the board even when the day
+        // count reads 0 (the expired-at-this-exact-second edge).
+        assert_eq!(
+            sso_cert_status(Some(&active_cert(Some(0), CertStatus::Expired))),
+            CredentialStatus::Expired
+        );
+    }
+
+    #[test]
+    fn a_certificate_expired_less_than_a_day_ago_still_reads_expired() {
+        // `now()` is 2026-01-01T00:00:00Z; this cert expired 12 hours earlier.
+        // Truncating division called this `0` days — the same number as a cert
+        // *expiring* in 12 hours — so the board showed "0d left", the Expired
+        // facet missed it, and the SSO tab contradicted itself in a single row
+        // (badge "Expired", text "0 days left").
+        let roll = build_rollover(
+            &sp_with(
+                Some(A_HEX),
+                vec![cred("k1", A_B64, "2025-12-31T12:00:00Z", "Verify")],
+            ),
+            "sp-1",
+            "tid",
+            now(),
+        );
+        let active = roll.certs.iter().find(|c| c.is_active);
+        let c = active.unwrap();
+        assert_eq!(c.status, CertStatus::Expired);
+        assert_eq!(c.days_to_expiry, Some(-1), "floored, not truncated to 0");
+        assert_eq!(
+            sso_cert_status(active),
+            azapptoolkit_core::audit::CredentialStatus::Expired
+        );
+
+        // And the mirror case: expiring in 12 hours is `0d left`, not expired.
+        let roll = build_rollover(
+            &sp_with(
+                Some(A_HEX),
+                vec![cred("k1", A_B64, "2026-01-01T12:00:00Z", "Verify")],
+            ),
+            "sp-1",
+            "tid",
+            now(),
+        );
+        let active = roll.certs.iter().find(|c| c.is_active);
+        assert_eq!(active.unwrap().days_to_expiry, Some(0));
+        assert_eq!(active.unwrap().status, CertStatus::Active);
+        assert_eq!(
+            sso_cert_status(active),
+            azapptoolkit_core::audit::CredentialStatus::ExpiringSoon
+        );
     }
 
     #[test]
