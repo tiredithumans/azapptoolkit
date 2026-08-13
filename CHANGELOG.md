@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.26.2] - 2026-08-13
+
 ### Added
 
 - **Expired signing certificates can now be removed.** The rollover panel shows
