@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use azapptoolkit_core::audit::CredentialStatus;
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance};
+use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::bindings::sso::{self, RolloverPhase, SsoCertificateRowDto};
 use crate::components::audit_dashboard::AuditDashboard;
@@ -173,6 +173,14 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
             }
                 row=move |r: SsoCertificateRowDto| sso_cert_row(session, selection, r).into_any()
             />
+            // Coverage caveat straight from Microsoft's docs: the board scans
+            // service principals whose `preferredSingleSignOnMode` is `saml`,
+            // and Entra can leave that field null on older SAML apps — those
+            // have signing certificates but never appear here. Said out loud so
+            // an empty (or short) board doesn't read as tenant-wide proof.
+            <Body1 class="hint sso-cert-board__coverage">
+                "Covers applications whose single sign-on mode is recorded as SAML. Entra may leave that field unset on older SAML apps — those won't appear here."
+            </Body1>
         </div>
     }
 }
