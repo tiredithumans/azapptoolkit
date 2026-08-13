@@ -1,5 +1,35 @@
 ## [Unreleased]
 
+### Added
+
+- **Expired signing certificates can now be removed.** The rollover panel shows
+  a Remove button on any certificate that has expired and is no longer the
+  nominated signing key — the equivalent of the Entra portal's "Delete
+  certificate" on an inactive cert. The backend had always been willing to
+  remove one (it deletes both key halves and the associated key-file password);
+  no surface offered the action, so expired leftovers accumulated forever. The
+  active and staged certificates still can't be removed, and the previous
+  (rollback) certificate keeps its own explicit "Retire" action.
+
+### Fixed
+
+- **A certificate that expired within the last 24 hours no longer reads "0d
+  left".** Day counts rounded toward zero, so for the first day after expiry the
+  expiry board called the certificate "expiring soon", the Expired filter missed
+  it, and the SSO tab contradicted itself in a single row (an "Expired" badge
+  next to "0 days left"). Day counts are now floored and the board takes
+  expired-ness from the same timestamp comparison the rollover panel uses, so
+  every surface agrees the moment a certificate expires.
+- **Removing an expired-but-still-nominated certificate now explains itself.**
+  It used to be refused with "that certificate is signing assertions right now",
+  which is wrong once it has expired (Entra has already switched to the staged
+  replacement). The refusal now says the certificate is expired but still
+  nominated, and that activating the replacement is what makes it removable.
+- **The SSO certificate board says what it can't see.** It lists applications
+  whose single sign-on mode is recorded as SAML, and Microsoft documents that
+  the field can be unset on older SAML apps — those never appear. The board now
+  carries that caveat instead of letting a short list read as tenant-wide proof.
+
 ## [0.26.1] - 2026-08-13
 
 ### Fixed

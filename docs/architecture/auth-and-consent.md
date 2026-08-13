@@ -160,11 +160,21 @@ is live, the previous one still present as the rollback) · `Unconfigured`.
    turns the active cert's expiry into an *activation deadline* (`auto_promote_deadline`), and an
    expired-but-still-nominated certificate means the promotion already happened.
 
+**Expired-ness is decided once, by timestamp.** `CertStatus::Expired` comes from `end <= now`, and
+`days_to_expiry` is **floored** (`div_euclid`), not truncated — a certificate expired 12 hours ago is
+`-1`, never a `0` indistinguishable from "expires today". The board's `sso_cert_status` additionally
+reads Expired off `CertStatus` rather than re-deriving it from the day count, so the board and the
+SSO tab can't disagree about the same certificate during the first 24 hours after expiry.
+
 **Guards.** `activate` and `revert` share one PATCH (`set_preferred_signing_key`) that re-resolves
 live state and refuses a thumbprint that is missing or expired; activating the already-active
-certificate is a no-op, not an error. `retire` refuses the active certificate (breaks sign-in) and
-the staged one (that's a pending rollover, not a leftover) — and because the superseded certificate
-*is* the rollback, retiring is what ends the ability to revert, so it stays an explicit action.
+certificate is a no-op, not an error. `retire` refuses the active certificate (breaks sign-in — or,
+when it's expired-but-still-nominated, would leave the nomination dangling; the message says which)
+and the staged one (that's a pending rollover, not a leftover) — and because the superseded
+certificate *is* the rollback, retiring is what ends the ability to revert, so it stays an explicit
+action. An **expired, non-nominated** certificate passes both guards and gets a per-row **Remove**
+button in the rollover table (the portal's "Delete certificate" on inactive certs); the superseded
+one deliberately does not — its removal stays on the explicit "Retire previous certificate" action.
 
 **Deliberately not a guard:** activation is not gated on `probe_federation_metadata` having run. The
 probe reads the public metadata endpoint (a backend `reqwest` call — `connect-src` governs the
@@ -188,6 +198,11 @@ in-app entirely.
   default query surface (no `ConsistencyLevel`, no `$count`), and only SAML apps have a signing
   certificate, so `list_saml_sso_service_principals` returns exactly the rows that matter in one
   paged GET. The `SP_INDEX_MAX` cap applies to that filtered subset, which no real tenant reaches.
+- **Coverage caveat (documented Graph behaviour).** Microsoft's docs note `preferredSingleSignOnMode`
+  "might be null for older SAML apps" — the filtered scan cannot see those, so an app with signing
+  certificates can be missing from the board entirely. The board carries a hint saying so; don't
+  present it as tenant-wide proof, and don't "fix" this by scanning every SP (that's the fan-out the
+  filter exists to avoid).
 - **Same projection as the SSO tab.** Rows are built by `build_rollover`, so the board and the
   per-app panel can never disagree about whether a replacement is staged.
 - **Not a risk-score input.** An expiring certificate is an *availability* risk; `risk_score` ranks
