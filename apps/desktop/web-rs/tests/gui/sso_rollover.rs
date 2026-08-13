@@ -111,4 +111,46 @@ async fn a_steady_app_offers_no_activate_button() {
         !ts::body_contains("Revert to previous certificate"),
         "with no superseded certificate there is no rollback target",
     );
+    assert!(
+        ts::query(".cert-rollover__remove").is_none(),
+        "nothing is expired, so no row may offer Remove — the active \
+         certificate must never grow a delete button",
+    );
+}
+
+/// An expired certificate that is no longer nominated is dead weight: the
+/// backend has always been willing to remove it, but no UI offered the action —
+/// the retire button only appeared for a superseded (rollback) certificate, so
+/// expired leftovers accumulated forever. The portal's equivalent is "Delete
+/// certificate" on an inactive cert.
+#[wasm_bindgen_test]
+async fn an_expired_inactive_certificate_offers_remove() {
+    ts::reset();
+    let mut roll = fixtures::signing_cert_rollover_steady("sp-demo", "app-demo");
+    roll.certs.push(azapptoolkit_dto::sso::SigningCertDto {
+        key_id: "key-expired".to_string(),
+        thumbprint: "00B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string(),
+        display_name: Some("CN=Contoso SSO 2023".to_string()),
+        start_date_time: Some("2020-05-01T00:00:00Z".to_string()),
+        end_date_time: Some("2023-05-01T00:00:00Z".to_string()),
+        is_active: false,
+        days_to_expiry: Some(-1200),
+        status: azapptoolkit_dto::sso::CertStatus::Expired,
+    });
+    ts::mock_ok(
+        "retire_saml_signing_certificate",
+        &fixtures::signing_cert_rollover_steady("sp-demo", "app-demo"),
+    );
+
+    let _m = mount(&roll);
+    ts::wait_for(|| ts::query(".cert-rollover__remove").is_some()).await;
+
+    ts::click(".cert-rollover__remove");
+    ts::wait_for(|| ts::call_count("retire_saml_signing_certificate") == 1).await;
+
+    assert_eq!(
+        ts::call_count("activate_saml_signing_certificate"),
+        0,
+        "removing an expired leftover must not touch the nomination",
+    );
 }

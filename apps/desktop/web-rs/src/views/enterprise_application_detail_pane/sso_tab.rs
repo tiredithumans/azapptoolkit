@@ -259,6 +259,49 @@ fn SigningCertRolloverPanel(
                                 Some(d) if d <= 30 => "cert-rollover__days badge badge--warning",
                                 _ => "cert-rollover__days",
                             };
+                            // An expired, non-nominated certificate is dead
+                            // weight the backend will happily remove (the retire
+                            // guards only protect the active and staged ones) —
+                            // this is the portal's "Delete certificate" on
+                            // inactive certs. The superseded cert deliberately
+                            // does NOT get this button: it is the rollback
+                            // target, and its removal stays on the explicit
+                            // "Retire previous certificate" action below.
+                            let remove_btn = (matches!(c.status, sso::CertStatus::Expired)
+                                && !c.is_active)
+                                .then(|| {
+                                    let key_id = c.key_id.clone();
+                                    view! {
+                                        <Button
+                                            class="cert-rollover__remove"
+                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                            on_click=Box::new(move |_| {
+                                                let key_id = key_id.clone();
+                                                cmd.run_toast_err(
+                                                    move |_: sso::SigningCertRolloverDto| {
+                                                        session.toast_success("Expired certificate removed.");
+                                                        bump();
+                                                    },
+                                                    move |tenant_id| {
+                                                        let id = sp_id.get_value();
+                                                        let key_id = key_id.clone();
+                                                        async move {
+                                                            sso::retire_saml_signing_certificate(
+                                                                    &tenant_id,
+                                                                    &id,
+                                                                    &key_id,
+                                                                )
+                                                                .await
+                                                        }
+                                                    },
+                                                );
+                                            })
+                                            disabled=Signal::derive(move || cmd.busy.get())
+                                        >
+                                            "Remove"
+                                        </Button>
+                                    }
+                                });
                             view! {
                                 <tr class="cert-rollover__row">
                                     <td class="cert-rollover__status">
@@ -270,6 +313,7 @@ fn SigningCertRolloverPanel(
                                     <td class="cert-rollover__expiry">
                                         {expiry} " " <span class=days_class>{days}</span>
                                     </td>
+                                    <td class="cert-rollover__actions">{remove_btn}</td>
                                 </tr>
                             }
                         })
@@ -281,6 +325,7 @@ fn SigningCertRolloverPanel(
                                     <th>"Status"</th>
                                     <th>"Thumbprint"</th>
                                     <th>"Expires"</th>
+                                    <th></th>
                                 </tr>
                             </thead>
                             <tbody>{rows}</tbody>
