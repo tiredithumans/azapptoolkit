@@ -44,6 +44,9 @@ pub async fn list_app_role_resources(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<Vec<CatalogResourceSummary>, UiError> {
+    // The cache-HIT path below returns before any client is built, so the
+    // `graph_for` on the miss path is not a session proof for it.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let key = app_role_resources_key(&tenant_id);
     if let Some(cached) = state
         .cache

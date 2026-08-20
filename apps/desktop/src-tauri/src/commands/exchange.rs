@@ -841,6 +841,10 @@ pub async fn get_mail_permission_scopes(
     // trip. Busted by `invalidate_app_details` (any app/scope mutation) and
     // the TTL; errors are never cached.
     let cache_key = mail_scopes_key(&tenant_id, &format!("declared|{object_id}"));
+    // A cache hit returns before any client is built, so the `graph_for` below is
+    // NOT a session proof for that path — prove it here, ahead of the read.
+    // Pinned by `a_command_answering_from_cache_alone_checks_the_session`.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     if let Some(cached) = state
         .cache
         .get::<Vec<MailScopeEntry>>(CacheKind::Lists, &cache_key)
@@ -953,6 +957,10 @@ pub async fn get_mail_scopes_for_principal(
         sorted.sort();
         mail_scopes_key(&tenant_id, &format!("held|{app_id}|{}", sorted.join(",")))
     };
+    // A cache hit returns before any client is built, so the `graph_for` below is
+    // NOT a session proof for that path — prove it here, ahead of the read.
+    // Pinned by `a_command_answering_from_cache_alone_checks_the_session`.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     if let Some(cached) = state
         .cache
         .get::<Vec<MailScopeEntry>>(CacheKind::Lists, &cache_key)
