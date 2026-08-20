@@ -473,6 +473,22 @@ pub struct ScopeGroups {
     pub complete: bool,
 }
 
+impl ScopeGroups {
+    /// The DN set case-folded, for comparing what was asked against what
+    /// Exchange echoed back.
+    ///
+    /// Exchange Online normalises the casing of the DNs it returns —
+    /// `aap.rs` already lowercases an identity for exactly that reason — so a
+    /// case-sensitive `HashSet` comparison of "what I wrote" against "what the
+    /// server reports" can differ on a write that DID land. The post-write
+    /// proof then tells the operator the scope was NOT repointed, after the
+    /// filter has already been applied to every role assignment on it, which is
+    /// the worst direction for that message to be wrong in.
+    pub fn folded_dns(&self) -> HashSet<String> {
+        self.dns.iter().map(|d| d.to_ascii_lowercase()).collect()
+    }
+}
+
 /// Parses a management scope's recipient filter into the group DNs it names.
 /// Handles OPATH's doubled-quote escaping (`''` → `'`), so a group whose DN
 /// contains an apostrophe round-trips through
