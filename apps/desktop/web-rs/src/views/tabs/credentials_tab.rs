@@ -157,15 +157,51 @@ fn resolve_expiry_fields(
 /// punctuation) can't be used directly; everything else is stripped, falling
 /// back to a safe default when nothing usable remains.
 fn sanitize_secret_name(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
-    if cleaned.is_empty() {
-        "client-secret".to_string()
-    } else {
-        cleaned
+    // Disallowed characters become a SEPARATOR, not nothing.
+    //
+    // They used to be dropped, which silently merged distinct names: "a.b" and
+    // "ab" produced the same secret, and a rotate or add-secret then wrote a new
+    // VERSION under a name another app already owned — so code trusting "latest
+    // version at that name" for app A could receive app B's credential material.
+    // Runs are collapsed and the ends trimmed so the result never carries a
+    // doubled or leading hyphen Key Vault would reject.
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
     }
+    let cleaned = out.trim_matches('-');
+    if cleaned.is_empty() {
+        // A wholly non-Latin display name reduces to nothing, and every such app
+        // used to land on the bare literal — so they all collided with each
+        // other. Discriminate by a stable digest of the ORIGINAL name, which is
+        // the only distinguishing input left at this point.
+        if name.trim().is_empty() {
+            "client-secret".to_string()
+        } else {
+            format!("client-secret-{:08x}", stable_digest(name))
+        }
+    } else {
+        cleaned.to_string()
+    }
+}
+
+/// FNV-1a, written out rather than taken from `DefaultHasher`.
+///
+/// This digest ends up in a Key Vault secret NAME, so it has to reproduce
+/// across processes and across toolchain upgrades — `DefaultHasher`'s algorithm
+/// carries no such guarantee, and a name that shifted under the app would
+/// orphan every previously written version.
+fn stable_digest(s: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for b in s.as_bytes() {
+        hash ^= u32::from(*b);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 #[component]
@@ -1047,40 +1083,56 @@ mod tests {
 
     /// The Key Vault secret NAME derived from a credential's display name.
     ///
-    /// Untested despite feeding a Key Vault write, and beside a test module
-    /// that covered only the expiry maths. Key Vault accepts `[0-9a-zA-Z-]`
-    /// only, so everything else has to go — and the empty result has to become
-    /// a valid fallback rather than a rejected request.
+    /// Key Vault accepts `[0-9a-zA-Z-]` only, so everything else has to go — and
+    /// the empty result has to become a valid fallback rather than a rejected
+    /// request. What matters beyond legality is DISTINCTNESS: this name selects
+    /// which secret a rotate writes a new version of, so two apps sharing one
+    /// name means one app's rotate lands on the other's credential.
     #[test]
     fn secret_names_are_reduced_to_what_key_vault_accepts() {
         // Already valid: unchanged.
         assert_eq!(sanitize_secret_name("api-prod-2026"), "api-prod-2026");
-        // Spaces, dots, underscores and slashes are DROPPED, not replaced — so
-        // two names differing only in punctuation collapse to the same secret
-        // name, and the second write versions the first rather than creating a
-        // sibling. Pinned because it is the surprising half of the behaviour.
-        assert_eq!(sanitize_secret_name("My App / prod_v1.2"), "MyAppprodv12");
-        assert_eq!(sanitize_secret_name("a.b"), sanitize_secret_name("ab"));
-        // A hyphen already in the name survives.
-        assert_eq!(sanitize_secret_name("api prod-2026"), "apiprod-2026");
-        // Non-ASCII is dropped rather than transliterated — a name that is
-        // entirely non-ASCII therefore reduces to empty, which is the case the
-        // fallback exists for.
+        // Disallowed characters become a separator rather than vanishing, and
+        // runs collapse to a single hyphen with the ends trimmed.
+        assert_eq!(
+            sanitize_secret_name("My App / prod_v1.2"),
+            "My-App-prod-v1-2"
+        );
+        assert_eq!(sanitize_secret_name("api prod-2026"), "api-prod-2026");
+        assert_eq!(sanitize_secret_name("  lead and trail  "), "lead-and-trail");
+        // The regression this replaced: these two used to collapse to the same
+        // name, so the second write versioned the first instead of creating a
+        // sibling.
+        assert_ne!(sanitize_secret_name("a.b"), sanitize_secret_name("ab"));
+        assert_eq!(sanitize_secret_name("a.b"), "a-b");
+        // Non-ASCII is still dropped rather than transliterated, so a wholly
+        // non-Latin name reduces to nothing — but it no longer lands on a shared
+        // literal. Every such app used to get exactly `client-secret`.
         assert_eq!(sanitize_secret_name("Zurich"), "Zurich");
-        assert_eq!(sanitize_secret_name("\u{4f60}\u{597d}"), "client-secret");
-        // Empty and punctuation-only both fall back rather than producing a
-        // name Key Vault would reject.
+        let a = sanitize_secret_name("\u{4f60}\u{597d}");
+        let b = sanitize_secret_name("\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}");
+        assert!(a.starts_with("client-secret-"), "got {a}");
+        assert_ne!(a, b, "two non-Latin names must not share a secret name");
+        // The digest has to reproduce across processes and toolchains, or a
+        // rotate would orphan every version written under the old name.
+        assert_eq!(a, sanitize_secret_name("\u{4f60}\u{597d}"));
+        // Genuinely empty input keeps the bare fallback — there is nothing to
+        // discriminate on, and it is the documented default.
         assert_eq!(sanitize_secret_name(""), "client-secret");
         assert_eq!(sanitize_secret_name("   "), "client-secret");
-        assert_eq!(sanitize_secret_name("!!!"), "client-secret");
         // The output is always a legal Key Vault secret name.
-        for input in ["", "  ", "a b", "\u{e9}\u{e8}", "ok-1"] {
+        for input in ["", "  ", "a b", "\u{e9}\u{e8}", "ok-1", "!!!", "..a..b.."] {
             let out = sanitize_secret_name(input);
             assert!(!out.is_empty(), "{input:?} produced an empty name");
             assert!(
                 out.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
-                "{input:?} produced {out:?}, which Key Vault rejects"
+                "{input:?} produced an illegal name: {out}"
             );
+            assert!(
+                !out.starts_with('-') && !out.ends_with('-'),
+                "{input:?} -> {out}"
+            );
+            assert!(!out.contains("--"), "{input:?} -> {out}");
         }
     }
 

@@ -2,6 +2,18 @@
 
 ### Security
 
+- **Two apps could be handed the same Key Vault secret name, so one app's
+  rotate wrote a new version of another app's credential.** The name derived
+  from a credential's display name dropped every character Key Vault disallows
+  instead of replacing it, so `My App` and `MyApp` collapsed to one name — and
+  any wholly non-Latin display name reduced to nothing and landed on the bare
+  literal `client-secret`, which every such app shared. Code trusting "the
+  latest version at that name" for one app could then receive another's secret
+  material. Disallowed characters now become a single separator (runs collapsed,
+  ends trimmed), and a name that still reduces to nothing gets a stable digest
+  of the original appended. The common path is unchanged: a resolved
+  `secret-<appId>` is already legal and sanitises to itself.
+
 - **Bumped `h2` to 0.4.17** (RUSTSEC-2026-0258 — unbounded empty DATA frames, a
   remote DoS against HTTP/2 servers). It reaches this tree transitively through
   `hyper` under `reqwest` and the `wiremock` test server; the app is an HTTP/2
