@@ -2,6 +2,27 @@
 
 ### Security
 
+- **Every command that can answer from the tenant cache now proves the session
+  first.** Sixteen commands read the tenant-scoped cache; on a cache hit, the
+  `tenant_id` argument from the webview was the only thing deciding whose
+  directory data came back, with no check that the tenant had signed in. Six
+  answered from cache alone — `save_audit_to_file` was the worst shape, serving
+  the cached audit for whatever tenant id it was handed and then writing it to a
+  user-chosen file, which made the leak persistent on disk. The other ten are
+  read-through commands whose *hit* path returns before any client is built, so
+  the `graph_for` on the miss path never ran. All now call a shared
+  `prove_tenant_session` (or `tenant_context` directly) ahead of the read, and
+  refuse with `not_signed_in` otherwise. This is the cross-tenant leak AGENTS.md
+  names the #1 footgun.
+- **The invariant test meant to prevent exactly that had gone blind.** It scanned
+  raw source text for the literal `cache.get(`, which rustfmt defeats — a wrapped
+  `state\n.cache\n.get(...)` and the turbofish `cache.get::<Vec<T>>(...)` contain
+  no such substring. It matched one command, the compliant one, and that cleared
+  its own `found >= 1` floor while fifteen others went unseen. The detector is now
+  whitespace-insensitive, handles nested generics in the turbofish, and requires
+  the session proof to come *before* the first cache read rather than merely
+  appear somewhere in the body. Its floor is the real count (16), and a second
+  test pins the detector against the shapes rustfmt actually produces.
 - **Bumped `h2` to 0.4.17** (RUSTSEC-2026-0258 — unbounded empty DATA frames, a
   remote DoS against HTTP/2 servers). It reaches this tree transitively through
   `hyper` under `reqwest` and the `wiremock` test server; the app is an HTTP/2

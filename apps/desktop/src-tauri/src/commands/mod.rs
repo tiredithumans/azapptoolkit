@@ -30,6 +30,7 @@ pub mod readiness;
 pub mod remediation;
 pub mod restore;
 pub mod search;
+pub(crate) mod session;
 pub mod sharepoint;
 pub mod sso;
 pub(crate) mod throttle;

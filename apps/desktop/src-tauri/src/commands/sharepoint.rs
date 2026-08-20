@@ -556,6 +556,10 @@ pub fn get_cached_site_sweep(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Option<SiteSweepResult> {
+    // A cache-only answer makes the `tenant_id` argument the only thing deciding
+    // whose directory data is returned, so prove the session first (AGENTS.md's
+    // #1 footgun). Pinned by `a_command_answering_from_cache_alone_checks_the_session`.
+    state.auth.tenant_context(&tenant_id)?;
     state
         .cache
         .get(CacheKind::Audit, &sweep_cache_key(&tenant_id))
@@ -582,6 +586,10 @@ pub fn get_app_site_access(
     tenant_id: String,
     app_id: String,
 ) -> Option<AppSiteAccessDto> {
+    // A cache-only answer makes the `tenant_id` argument the only thing deciding
+    // whose directory data is returned, so prove the session first (AGENTS.md's
+    // #1 footgun). Pinned by `a_command_answering_from_cache_alone_checks_the_session`.
+    state.auth.tenant_context(&tenant_id)?;
     let sweep: SiteSweepResult = state
         .cache
         .get(CacheKind::Audit, &sweep_cache_key(&tenant_id))?;
