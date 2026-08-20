@@ -2,6 +2,25 @@
 
 ### Security
 
+- **A failed service-principal read no longer reports itself as a clean audit.**
+  When the tenant-wide SP index could not be read, the error was logged at
+  `info!`, an empty list was returned, and the entire SP-only scoring phase —
+  enterprise applications, managed identities and orphaned service principals —
+  was silently dropped. The run still reported `degraded: []`, so it cached
+  itself as authoritative and an operator could not tell "no findings" from
+  "never looked". It now records a `ServicePrincipalIndex` coverage gap, which
+  both surfaces the caveat and stops the run being cached — matching what the
+  sibling Graph app-role prefetch already did for the same consequence.
+- **SAML federation metadata with namespace prefixes is now read correctly.**
+  `parse_signing_certs` matched the literal `<KeyDescriptor` and
+  `<X509Certificate>`, so any document using prefixes — `<md:KeyDescriptor>`,
+  `<ds:X509Certificate>`, which is what Microsoft's own federation metadata
+  publishes — yielded **zero** certificates, and the probe reported "0
+  published" exactly as it would for an app that genuinely publishes none. Both
+  element names are now matched on their local name with an optional prefix, and
+  each certificate is attributed to the descriptor it actually sits in, so an
+  encryption key between two signing ones cannot leak into a neighbour.
+
 - **Bumped `h2` to 0.4.17** (RUSTSEC-2026-0258 — unbounded empty DATA frames, a
   remote DoS against HTTP/2 servers). It reaches this tree transitively through
   `hyper` under `reqwest` and the `wiremock` test server; the app is an HTTP/2

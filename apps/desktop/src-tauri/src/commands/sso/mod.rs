@@ -1295,34 +1295,124 @@ fn metadata_http_client() -> &'static reqwest::Client {
 ///
 /// A `KeyDescriptor` with no `use` attribute is signing-capable per the SAML
 /// metadata spec, so those count too; an explicit `use="encryption"` does not.
+/// True when `local` starts an element open tag at `at`, allowing a namespace
+/// prefix (`md:KeyDescriptor`, `ds:X509Certificate`).
+///
+/// SAML metadata in the wild is namespace-prefixed — Microsoft's own federation
+/// metadata is — and matching the bare `<KeyDescriptor` literal returned ZERO
+/// certificates for every such document. `probe_federation_metadata` then
+/// reported "0 published", indistinguishable from an app that genuinely
+/// publishes none.
+fn element_open_at(xml: &str, local: &str, at: usize) -> bool {
+    if !xml[at..].starts_with(local) {
+        return false;
+    }
+    // The name must END here — otherwise `X509Certificates` would match
+    // `X509Certificate`.
+    match xml[at + local.len()..].chars().next() {
+        Some(c) if c.is_whitespace() || c == '>' || c == '/' => {}
+        _ => return false,
+    }
+    // Walk back over an optional `prefix:` to the `<`.
+    let before = &xml[..at];
+    if let Some(stripped) = before.strip_suffix('<') {
+        return !stripped.ends_with("</");
+    }
+    let Some(colon) = before.strip_suffix(':') else {
+        return false;
+    };
+    let prefix_start = colon.rfind('<').filter(|lt| {
+        colon[lt + 1..]
+            .chars()
+            .all(|c| c != '>' && !c.is_whitespace())
+    });
+    match prefix_start {
+        Some(lt) => !colon[..lt + 1].ends_with("</") && !colon[lt + 1..].is_empty(),
+        None => false,
+    }
+}
+
+/// Index of the next `<Local`/`<prefix:Local` open tag at or after `from`.
+fn find_element_open(xml: &str, local: &str, from: usize) -> Option<usize> {
+    let mut i = from;
+    while let Some(rel) = xml[i..].find(local) {
+        let at = i + rel;
+        if element_open_at(xml, local, at) {
+            return Some(at);
+        }
+        i = at + local.len();
+    }
+    None
+}
+
+/// Index of the next `</Local>`/`</prefix:Local>` close tag at or after `from`.
+fn find_element_close(xml: &str, local: &str, from: usize) -> Option<usize> {
+    let mut i = from;
+    while let Some(rel) = xml[i..].find(local) {
+        let at = i + rel;
+        let before = &xml[..at];
+        let closes = before.ends_with("</")
+            || before
+                .strip_suffix(':')
+                .and_then(|c| c.rfind("</").map(|lt| (c, lt)))
+                .is_some_and(|(c, lt)| {
+                    !c[lt + 2..].is_empty()
+                        && c[lt + 2..]
+                            .chars()
+                            .all(|ch| ch != '>' && !ch.is_whitespace())
+                });
+        if closes && xml[at + local.len()..].starts_with('>') {
+            return Some(at);
+        }
+        i = at + local.len();
+    }
+    None
+}
+
 fn parse_signing_certs(xml: &str) -> Vec<String> {
-    const DESCRIPTOR: &str = "<KeyDescriptor";
-    const CERT_OPEN: &str = "<X509Certificate>";
-    const CERT_CLOSE: &str = "</X509Certificate>";
+    const DESCRIPTOR: &str = "KeyDescriptor";
+    const CERT: &str = "X509Certificate";
+
+    // Descriptor boundaries, so a certificate is attributed to the descriptor it
+    // actually sits in and an `use="encryption"` block can be skipped whole.
+    let mut bounds: Vec<usize> = Vec::new();
+    let mut from = 0usize;
+    while let Some(at) = find_element_open(xml, DESCRIPTOR, from) {
+        bounds.push(at);
+        from = at + DESCRIPTOR.len();
+    }
 
     let mut out: Vec<String> = Vec::new();
-    for block in xml.split(DESCRIPTOR).skip(1) {
+    for (n, start) in bounds.iter().enumerate() {
+        let end = bounds.get(n + 1).copied().unwrap_or(xml.len());
+        let block = &xml[*start..end];
         // The attributes run up to the element's own `>`; anything after that
         // belongs to the children.
         let attrs = block.split('>').next().unwrap_or_default();
         if attrs.contains("use=\"encryption\"") || attrs.contains("use='encryption'") {
             continue;
         }
-        // Stop at the next descriptor's content — `split` already did that.
-        let mut rest = block;
-        while let Some(start) = rest.find(CERT_OPEN) {
-            let after = &rest[start + CERT_OPEN.len()..];
-            let Some(end) = after.find(CERT_CLOSE) else {
+        let mut at = 0usize;
+        while let Some(open) = find_element_open(block, CERT, at) {
+            let Some(body_start) = block[open..].find('>').map(|i| open + i + 1) else {
                 break;
             };
-            let body: String = after[..end]
+            let Some(close) = find_element_close(block, CERT, body_start) else {
+                break;
+            };
+            // `</` sits two chars before the local name; a prefixed close tag
+            // puts the prefix in between, so trim back to the `<`.
+            let text_end = block[body_start..close]
+                .rfind('<')
+                .map_or(close, |i| body_start + i);
+            let body: String = block[body_start..text_end]
                 .chars()
                 .filter(|c| !c.is_whitespace())
                 .collect();
             if !body.is_empty() && !out.iter().any(|existing| existing == &body) {
                 out.push(body);
             }
-            rest = &after[end + CERT_CLOSE.len()..];
+            at = close + CERT.len();
         }
     }
     out
@@ -2238,6 +2328,48 @@ mod tests {
         let xml = "<KeyDescriptor><X509Certificate>DUP</X509Certificate></KeyDescriptor>\
                    <KeyDescriptor use=\"signing\"><X509Certificate>DUP</X509Certificate></KeyDescriptor>";
         assert_eq!(parse_signing_certs(xml), vec!["DUP".to_string()]);
+    }
+
+    #[test]
+    fn parse_signing_certs_reads_namespace_prefixed_metadata() {
+        // The shape real SAML metadata actually has — Microsoft's own federation
+        // metadata is namespace-prefixed. Matching the bare `<KeyDescriptor`
+        // literal returned ZERO certificates for every such document, and
+        // `probe_federation_metadata` reported that as "0 published",
+        // indistinguishable from an app that genuinely publishes none.
+        let xml = r#"
+            <md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata">
+              <md:IDPSSODescriptor>
+                <md:KeyDescriptor use="signing">
+                  <ds:KeyInfo><ds:X509Data><ds:X509Certificate>MIICAAAA</ds:X509Certificate></ds:X509Data></ds:KeyInfo>
+                </md:KeyDescriptor>
+                <md:KeyDescriptor use="encryption">
+                  <ds:KeyInfo><ds:X509Data><ds:X509Certificate>SHOULDNOTAPPEAR</ds:X509Certificate></ds:X509Data></ds:KeyInfo>
+                </md:KeyDescriptor>
+                <md:KeyDescriptor use="signing">
+                  <ds:X509Certificate>MIICBBBB</ds:X509Certificate>
+                </md:KeyDescriptor>
+              </md:IDPSSODescriptor>
+            </md:EntityDescriptor>"#;
+        assert_eq!(
+            parse_signing_certs(xml),
+            vec!["MIICAAAA".to_string(), "MIICBBBB".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_signing_certs_attributes_each_key_to_its_own_descriptor() {
+        // The encryption descriptor sits BETWEEN two signing ones, so a parser
+        // that does not bound each block would leak its key into a neighbour.
+        let xml = "<KeyDescriptor use=\"signing\"><X509Certificate>A</X509Certificate></KeyDescriptor>\
+                   <KeyDescriptor use=\"encryption\"><X509Certificate>E</X509Certificate></KeyDescriptor>\
+                   <KeyDescriptor use=\"signing\"><X509Certificate>B</X509Certificate></KeyDescriptor>";
+        assert_eq!(
+            parse_signing_certs(xml),
+            vec!["A".to_string(), "B".to_string()]
+        );
+        // And a similarly-named element must not match.
+        assert!(parse_signing_certs("<X509CertificateChain>NO</X509CertificateChain>").is_empty());
     }
 
     #[test]
