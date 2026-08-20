@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.26.3] - 2026-08-20
+
 ### Security
 
 - **A failed service-principal read no longer reports itself as a clean audit.**
