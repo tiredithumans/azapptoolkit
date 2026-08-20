@@ -83,6 +83,18 @@
   exercised at runtime. Bumped regardless, because the advisory failed `audit`
   and `deny` on every branch and blocked all merges.
 
+### Fixed
+
+- **A management-scope repoint that succeeded is no longer reported as
+  refused.** Exchange Online returns group distinguished names in its own
+  casing, but the post-write proof compared the DN set it asked for against the
+  DN set Exchange echoed back *case-sensitively*. A write that had already been
+  applied to every role assignment on the scope could therefore be reported as
+  "the scope was NOT repointed as requested" — the worst direction for that
+  message to be wrong in. Both the post-write proof and the plan-side "a scope
+  already exists with a different group set" warning now compare case-folded,
+  matching how the rest of the Exchange client already treats identities.
+
 ### Changed
 
 - **Refreshed both dependency trees.** `cargo update` over the workspace
