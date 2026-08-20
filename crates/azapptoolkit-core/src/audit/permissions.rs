@@ -98,6 +98,31 @@ pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
     // zero before because the risk tables only ever listed Microsoft Graph
     // names. Unambiguous as a bare value: no other resource exposes it (see
     // `scoping::EWS_FULL_ACCESS_AS_APP`).
+    // Net-new, and all nine additions here share one origin: they appear in
+    // `SUBSUMED_APP_PERMISSIONS` as the BROADER side of a subsumption pair — the
+    // file already names them, and `subsuming_app_permissions` already advises
+    // operators to downgrade *to* the narrower one — yet none was in either risk
+    // table, so each scored ZERO. Weights follow the split the tables already
+    // use for every other family: tenant-wide WRITE is high, tenant-wide READ is
+    // medium (`Mail.ReadWrite`/`Mail.Read`, `Files.ReadWrite.All`/
+    // `Files.Read.All`, `Sites.ReadWrite.All`/`Sites.Read.All`).
+    //
+    // `MailboxSettings.ReadWrite` is the one to note: it sets mail forwarding on
+    // every mailbox in the tenant, which is the classic exfiltration primitive
+    // and needs no read permission to act.
+    "MailboxSettings.ReadWrite",
+    // Adds any principal — including the app's own service principal — to any
+    // group, so it reaches whatever access those groups gate.
+    "GroupMember.ReadWrite.All",
+    // Read and write every Teams chat message in the tenant.
+    "Chat.ReadWrite.All",
+    // Tenant-wide write over device objects, which back conditional-access and
+    // compliance decisions.
+    "Device.ReadWrite.All",
+    // The write side of the contacts family, matching `Mail.ReadWrite`.
+    "Contacts.ReadWrite",
+    // Tenant-wide write over OneNote content, matching `Files.ReadWrite.All`.
+    "Notes.ReadWrite.All",
     crate::scoping::EWS_FULL_ACCESS_AS_APP,
 ];
 
@@ -125,6 +150,10 @@ pub const MEDIUM_RISK_APP_PERMISSIONS: &[&str] = &[
     // one, which is reserved for write and impersonation — but it reads strictly
     // more than either of them and scored zero.
     "Directory.Read.All",
+    // Net-new — the read halves of the two families added to the high list
+    // above, weighted like `Mail.Read` rather than their write counterparts.
+    "Chat.Read.All",
+    "Calendars.Read",
 ];
 
 /// High-risk delegated permissions (by scope `value`). Ported from
@@ -604,6 +633,64 @@ mod tests {
              recognise: {unmapped:?}\nA name no gate maps is a name no grant can match, so the \
              entry is dead and the permission scores zero. Check the exact spelling against the \
              Microsoft Graph permissions reference — `Calendars.*` is plural."
+        );
+    }
+
+    /// The reverse of the rule above, and the one that was missing.
+    ///
+    /// `mailbox_family_risk_entries_agree_with_the_scoping_role_map` scans
+    /// table -> role map, so it catches a *typo* in an entry that exists. It
+    /// cannot catch an entry that was never written, which is how nine values
+    /// came to score zero while this same file named every one of them as the
+    /// broader side of a subsumption pair and advised downgrading away from it.
+    ///
+    /// So: if the file asserts B ⊇ N, then holding B is at least as much reach
+    /// as holding N, and B must carry a risk weight. Derived from
+    /// `SUBSUMED_APP_PERMISSIONS` itself rather than from a hand-kept list, so
+    /// it cannot drift — adding a subsumption pair now forces the weight
+    /// decision at the same time.
+    ///
+    /// A deliberately unscored broader value goes in `INTENTIONALLY_UNSCORED`
+    /// with a reason, which keeps the decision visible instead of silent.
+    #[test]
+    fn every_broader_subsuming_permission_carries_a_risk_weight() {
+        /// Empty on purpose. An entry here is a claim that holding this
+        /// permission tenant-wide is not itself a risk signal — write the
+        /// reason next to it.
+        const INTENTIONALLY_UNSCORED: &[(&str, &str)] = &[(
+            "Sites.Manage.All",
+            "Rule 12 already raises the org-wide SharePoint advisory for any broad `Sites.*`, \
+             and `scoring::tests::broad_sharepoint_manage_flags_issue_without_score` pins that \
+             the advisory fires INDEPENDENTLY of risk-list weighting — using this value as its \
+             example. Giving it points would make that test's example unrepresentative and \
+             double-count reach the advisory already reports. Left to the owner as a risk-model \
+             call; the permission is surfaced either way.",
+        )];
+
+        let scored = |v: &str| {
+            HIGH_RISK_APP_PERMISSIONS.contains(&v) || MEDIUM_RISK_APP_PERMISSIONS.contains(&v)
+        };
+        let mut unscored: Vec<&str> = Vec::new();
+        let mut checked = 0usize;
+        for (_, broaders) in SUBSUMED_APP_PERMISSIONS {
+            for b in *broaders {
+                checked += 1;
+                if scored(b) || INTENTIONALLY_UNSCORED.iter().any(|(v, _)| v == b) {
+                    continue;
+                }
+                unscored.push(b);
+            }
+        }
+        unscored.sort_unstable();
+        unscored.dedup();
+
+        assert!(
+            checked >= 20,
+            "only {checked} broader-side values walked — the subsumption table or this walk is              broken, and the rule would pass vacuously"
+        );
+        assert!(
+            unscored.is_empty(),
+            "these permissions are named as the BROADER side of a subsumption pair — this file              tells operators to downgrade away from them — yet they carry no risk weight and so              score zero: {unscored:?}\nAdd them to HIGH_RISK_APP_PERMISSIONS or              MEDIUM_RISK_APP_PERMISSIONS (tenant-wide write is high, tenant-wide read is medium),              or list them in INTENTIONALLY_UNSCORED with a reason."
         );
     }
 
