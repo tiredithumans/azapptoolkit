@@ -9,6 +9,23 @@
   exercised at runtime. Bumped regardless, because the advisory failed `audit`
   and `deny` on every branch and blocked all merges.
 
+### Changed
+
+- **Refreshed both dependency trees.** `cargo update` over the workspace
+  lockfile (79 crates moved) and the frontend's separate one (56 moved), and the
+  direct `tokio` / `zeroize` requirements now name the versions the lockfile had
+  already resolved (1.53 / 1.9) instead of a stale floor. Notable transitive
+  majors: `zvariant_utils` 3 -> 4 under `zbus` (Linux keyring only) and `phf`
+  0.11 -> 0.13 in the frontend, which drops `rand` 0.8 and `rand_core` 0.6 from
+  the WASM tree outright.
+- **The deliberate crypto/encoding pins are unchanged.** `rand` 0.8, `sha2` 0.10
+  and `base64` 0.22 still match what `oauth2` 5, `tauri-codegen` and the
+  reqwest/hyper stack resolve to, so advancing them would add a duplicate major
+  rather than remove an old one — the rationale and drop conditions stay in
+  `dependabot.yml`. `windows-sys` unification is unchanged at five majors (a
+  narrower `cargo update -p` had previously threatened to un-unify it), and the
+  git-pinned `tauri-sys` rev is already upstream `HEAD`.
+
 ## [0.26.2] - 2026-08-13
 
 ### Added
