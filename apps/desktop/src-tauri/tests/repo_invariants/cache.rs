@@ -467,38 +467,127 @@ fn a_function_header_is_recognised_at_any_depth_or_visibility() {
 /// So: read the cache, and either build a client or check `tenant_context`.
 #[test]
 fn a_command_answering_from_cache_alone_checks_the_session() {
-    const CACHE_READS: [&str; 2] = ["cache.get(", "cache.get_typed"];
-    // Either proves a session: a client factory needs a token for that tenant,
-    // and `tenant_context` is `None` unless that tenant signed in this session.
-    const SESSION_PROOFS: [&str; 5] = [
+    // Detection is whitespace-insensitive and the proof must DOMINATE the read.
+    //
+    // Both properties were added after a wavelet run found this rule passing
+    // vacuously. The old detector was a literal `cache.get(` substring scan over
+    // the raw body, which rustfmt defeats: `state\n.cache\n.get(...)` and the
+    // turbofish form `cache.get::<Vec<T>>(...)` both contain no such substring.
+    // It matched exactly ONE command — the compliant one — which cleared its own
+    // `found >= 1` floor while four unproven reads went unseen.
+    //
+    // Dominance matters for the same reason: `get_mail_scopes_*` returns from the
+    // cache and only then builds a Graph client, so a body-wide `graph_for(`
+    // search "proved" a session the cache-hit path never reaches.
+    let mut offenders: Vec<String> = Vec::new();
+    let mut checked: Vec<String> = Vec::new();
+
+    for cmd in super::sources::commands() {
+        let (flat, map) = flatten_out_whitespace(&cmd.body);
+        let Some(read_at) = first_cache_read(&flat) else {
+            continue;
+        };
+        checked.push(format!("{}::{}", cmd.module, cmd.name));
+        let proven_before = first_session_proof(&flat).is_some_and(|p| p < read_at);
+        if !proven_before {
+            let line = cmd.body[..map[read_at]].matches('\n').count() + 1;
+            offenders.push(format!(
+                "{}::{} (cache read at body line {line})",
+                cmd.module, cmd.name
+            ));
+        }
+    }
+
+    // An explicit floor, not `>= 1`. The old floor was cleared by a single
+    // compliant command, so a detector that had gone blind still passed. These
+    // are the commands that genuinely answer from cache; if the walk or the
+    // matcher breaks, the count drops and this fires.
+    // The real count, not a token floor. The rule this replaced asserted
+    // `found >= 1` and was cleared by the single compliant command while the
+    // detector was blind to fifteen others.
+    const KNOWN_CACHE_READING_COMMANDS: usize = 16;
+    assert!(
+        checked.len() >= KNOWN_CACHE_READING_COMMANDS,
+        "the cache-read detector found only {} command(s) but at least {} answer from cache \
+         ({:?}) — the source walk or the matcher is broken, and a rule that scans nothing \
+         passes vacuously",
+        checked.len(),
+        KNOWN_CACHE_READING_COMMANDS,
+        checked
+    );
+    assert!(
+        offenders.is_empty(),
+        "these commands answer from the cache without FIRST proving the tenant has a session, \
+         so the `tenant_id` argument alone decides whose data is returned:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// Strips every whitespace character, returning the stripped text plus a map
+/// from each stripped index back to its offset in the original — so a match can
+/// still be reported at the right line.
+fn flatten_out_whitespace(body: &str) -> (String, Vec<usize>) {
+    let mut flat = String::with_capacity(body.len());
+    let mut map = Vec::with_capacity(body.len());
+    for (i, c) in body.char_indices() {
+        if !c.is_whitespace() {
+            flat.push(c);
+            map.push(i);
+        }
+    }
+    (flat, map)
+}
+
+/// First `…cache.get(`, `…cache.get_typed(` or `…cache.get::<T>(` in flattened
+/// text. Written as a scan rather than a substring list because the turbofish
+/// form carries an arbitrary type between `::<` and `(` — including nested
+/// generics like `Vec<MailScopeEntry>`, whose `>>` defeats a naive pattern.
+fn first_cache_read(flat: &str) -> Option<usize> {
+    let mut from = 0usize;
+    while let Some(hit) = flat[from..].find("cache.get") {
+        let at = from + hit;
+        let rest = &flat[at + "cache.get".len()..];
+        if rest.starts_with('(') || rest.starts_with("_typed") || rest.starts_with("::<") {
+            return Some(at);
+        }
+        from = at + "cache.get".len();
+    }
+    None
+}
+
+/// Either proves a session: a client factory needs a token for that tenant, and
+/// `tenant_context` is `None` unless that tenant signed in this session.
+fn first_session_proof(flat: &str) -> Option<usize> {
+    const SESSION_PROOFS: [&str; 6] = [
+        // The shared helper, and the raw lookup it wraps (Option-returning
+        // commands use `tenant_context(&tenant_id)?` directly).
+        "prove_tenant_session(",
         "tenant_context(",
+        // A client factory needs a token for that tenant, so reaching one is
+        // itself a proof — but only when it happens BEFORE the cache read.
         "graph_for(",
         "exchange_for(",
         "arm_for(",
         "keyvault_for(",
     ];
+    SESSION_PROOFS.iter().filter_map(|p| flat.find(p)).min()
+}
 
-    let mut found = 0usize;
-    let mut offenders: Vec<String> = Vec::new();
-    for cmd in super::sources::commands() {
-        if !CACHE_READS.iter().any(|r| cmd.body.contains(r)) {
-            continue;
-        }
-        found += 1;
-        if !SESSION_PROOFS.iter().any(|p| cmd.body.contains(p)) {
-            offenders.push(format!("{}::{}", cmd.module, cmd.name));
-        }
-    }
+#[test]
+fn the_cache_read_detector_sees_the_forms_rustfmt_actually_produces() {
+    // The regression guard for the guard. Each of these is a shape that existed
+    // in the tree while the old literal scan reported zero.
+    assert!(first_cache_read("state.cache.get(CacheKind::Audit,&k)").is_some());
+    assert!(first_cache_read("state.cache.get_typed(CacheKind::Lists,&k)").is_some());
+    assert!(
+        first_cache_read("state.cache.get::<Vec<MailScopeEntry>>(CacheKind::Lists,&k)").is_some(),
+        "nested generics in the turbofish must not defeat the matcher"
+    );
+    assert!(first_cache_read("self.cache.getter_helper()").is_none());
+    assert!(first_cache_read("no_cache_here()").is_none());
 
-    assert!(
-        found >= 1,
-        "found no cache-reading commands — the source walk or the detector is broken, and a \
-         rule that scans nothing passes vacuously"
-    );
-    assert!(
-        offenders.is_empty(),
-        "these commands answer from the cache without proving the tenant has a session, so the \
-         `tenant_id` argument alone decides whose data is returned:\n  {}",
-        offenders.join("\n  ")
-    );
+    // And the flattener must survive the wrapping rustfmt applies.
+    let (flat, map) = flatten_out_whitespace("state\n    .cache\n    .get(CacheKind::Audit)");
+    assert!(first_cache_read(&flat).is_some(), "wrapped read must match");
+    assert_eq!(flat.len(), map.len());
 }

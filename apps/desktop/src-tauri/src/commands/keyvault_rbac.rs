@@ -358,6 +358,10 @@ pub fn get_cached_key_vault_access(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Option<KeyVaultSweepResult> {
+    // A cache-only answer makes the `tenant_id` argument the only thing deciding
+    // whose directory data is returned, so prove the session first (AGENTS.md's
+    // #1 footgun). Pinned by `a_command_answering_from_cache_alone_checks_the_session`.
+    state.auth.tenant_context(&tenant_id)?;
     state
         .cache
         .get(CacheKind::Audit, &kv_sweep_cache_key(&tenant_id))

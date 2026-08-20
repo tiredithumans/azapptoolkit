@@ -503,6 +503,10 @@ pub async fn save_audit_to_file(
     items: Option<Vec<AuditItem>>,
     format: String,
 ) -> Result<Option<String>, UiError> {
+    // This can answer entirely from the tenant cache and then WRITE the result to
+    // a user-chosen path, so an unproven `tenant_id` would make a cross-tenant
+    // leak persistent on disk. Prove the session before either branch.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let items: Vec<AuditItem> = match items {
         Some(items) => items,
         None => state
