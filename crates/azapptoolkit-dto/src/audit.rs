@@ -108,6 +108,17 @@ pub enum AuditCoverageGap {
     /// the permissions of every app in the tenant while the run reported itself
     /// complete and cached itself as authoritative.
     PermissionResolution,
+    /// The tenant-wide service-principal index read that supplies the candidate
+    /// pool for the SP-only scoring phase.
+    ///
+    /// Its failure has the same consequence
+    /// [`AuditCoverageGap::GraphAppRoleAssignments`] documents — no enterprise
+    /// apps, managed identities or orphaned service principals are scored at
+    /// all — but it is a different read, and for a long time it had no gap of
+    /// its own: the error was logged at `info!`, an empty vec was returned, and
+    /// the run reported itself complete and cached itself as authoritative. An
+    /// operator could not tell "no SP-only findings" from "never looked".
+    ServicePrincipalIndex,
     /// A gap recorded by a newer build than the one reading it back.
     #[serde(other)]
     Other,
@@ -120,6 +131,11 @@ impl AuditCoverageGap {
         match self {
             AuditCoverageGap::GraphAppRoleAssignments => {
                 "Tenant-wide Microsoft Graph app-role assignments could not be read, so                  enterprise applications, managed identities and orphaned service principals                  were not scored, and mailbox permissions could not be checked for an                  un-stripped org-wide grant."
+            }
+            AuditCoverageGap::ServicePrincipalIndex => {
+                "The tenant's service-principal list could not be read, so enterprise \
+                 applications, managed identities and orphaned service principals were not \
+                 scored. App registrations were still covered."
             }
             AuditCoverageGap::EwsFullAccessGrants => {
                 "Org-wide EWS full-mailbox-access grants could not be read, so an application                  shown as scoped to specific mailboxes may still reach every mailbox."
