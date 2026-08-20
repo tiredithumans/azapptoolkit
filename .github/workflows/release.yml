@@ -71,7 +71,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: just,cargo-audit
       # main-branch CI runs `just audit` per-merge, but an advisory filed after
@@ -126,7 +126,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: just,trunk
 
