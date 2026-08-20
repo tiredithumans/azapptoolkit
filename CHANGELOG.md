@@ -2,6 +2,30 @@
 
 ### Security
 
+- **Eight tenant-wide application permissions that scored zero are now weighted,
+  which shifts audit scores upward for apps holding them.** Each was already
+  named in this codebase as the *broader* side of a subsumption pair — the
+  scorer's own advice was to downgrade away from them — yet none appeared in
+  either risk table, so an app holding one ranked as though it held nothing.
+  `MailboxSettings.ReadWrite` is the one to note: it sets mail forwarding on
+  every mailbox in the tenant, the classic exfiltration primitive, and it needs
+  no read permission to act. Also added: `GroupMember.ReadWrite.All`,
+  `Chat.ReadWrite.All`, `Device.ReadWrite.All`,
+  `Contacts.ReadWrite` and `Notes.ReadWrite.All` as high risk;
+  `Chat.Read.All` and `Calendars.Read` as medium. Weights follow the split the
+  tables already used everywhere else — tenant-wide write is high, tenant-wide
+  read is medium, matching `Mail.ReadWrite`/`Mail.Read` and
+  `Files.ReadWrite.All`/`Files.Read.All`. **Apps holding these will rank higher
+  than they did in 0.26.2; that is the correction, not a scoring change.**
+- **A new invariant makes the omission impossible to repeat.** The existing
+  guard scanned table → role map, so it caught a misspelling in an entry that
+  existed but could say nothing about an entry never written — which is exactly
+  how these values went unscored. The reverse rule now walks
+  `SUBSUMED_APP_PERMISSIONS` and requires every broader-side value to carry a
+  weight, deriving the check from the table itself rather than a hand-kept list,
+  so adding a subsumption pair forces the weight decision at the same time. A
+  value can be left unscored only by naming it in `INTENTIONALLY_UNSCORED` with
+  a reason.
 - **Every command that can answer from the tenant cache now proves the session
   first.** Sixteen commands read the tenant-scoped cache; on a cache hit, the
   `tenant_id` argument from the webview was the only thing deciding whose
