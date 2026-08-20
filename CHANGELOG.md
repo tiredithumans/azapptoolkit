@@ -2,6 +2,17 @@
 
 ### Security
 
+- **Two apps could be handed the same Key Vault secret name, so one app's
+  rotate wrote a new version of another app's credential.** The name derived
+  from a credential's display name dropped every character Key Vault disallows
+  instead of replacing it, so `My App` and `MyApp` collapsed to one name — and
+  any wholly non-Latin display name reduced to nothing and landed on the bare
+  literal `client-secret`, which every such app shared. Code trusting "the
+  latest version at that name" for one app could then receive another's secret
+  material. Disallowed characters now become a single separator (runs collapsed,
+  ends trimmed), and a name that still reduces to nothing gets a stable digest
+  of the original appended. The common path is unchanged: a resolved
+  `secret-<appId>` is already legal and sanitises to itself.
 - **Eight tenant-wide application permissions that scored zero are now weighted,
   which shifts audit scores upward for apps holding them.** Each was already
   named in this codebase as the *broader* side of a subsumption pair — the
