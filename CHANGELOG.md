@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Security
+
+- **Bumped `h2` to 0.4.17** (RUSTSEC-2026-0258 — unbounded empty DATA frames, a
+  remote DoS against HTTP/2 servers). It reaches this tree transitively through
+  `hyper` under `reqwest` and the `wiremock` test server; the app is an HTTP/2
+  *client*, so the server-side frame handling the advisory covers is not
+  exercised at runtime. Bumped regardless, because the advisory failed `audit`
+  and `deny` on every branch and blocked all merges.
+
 ## [0.26.2] - 2026-08-13
 
 ### Added
