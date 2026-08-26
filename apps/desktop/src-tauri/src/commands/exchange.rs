@@ -841,6 +841,10 @@ pub async fn get_mail_permission_scopes(
     // trip. Busted by `invalidate_app_details` (any app/scope mutation) and
     // the TTL; errors are never cached.
     let cache_key = mail_scopes_key(&tenant_id, &format!("declared|{object_id}"));
+    // A cache hit returns before any client is built, so the `graph_for` below is
+    // NOT a session proof for that path — prove it here, ahead of the read.
+    // Pinned by `a_command_answering_from_cache_alone_checks_the_session`.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     if let Some(cached) = state
         .cache
         .get::<Vec<MailScopeEntry>>(CacheKind::Lists, &cache_key)
@@ -953,6 +957,10 @@ pub async fn get_mail_scopes_for_principal(
         sorted.sort();
         mail_scopes_key(&tenant_id, &format!("held|{app_id}|{}", sorted.join(",")))
     };
+    // A cache hit returns before any client is built, so the `graph_for` below is
+    // NOT a session proof for that path — prove it here, ahead of the read.
+    // Pinned by `a_command_answering_from_cache_alone_checks_the_session`.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     if let Some(cached) = state
         .cache
         .get::<Vec<MailScopeEntry>>(CacheKind::Lists, &cache_key)
@@ -2155,7 +2163,12 @@ async fn migrate_one(
         if let Some(current) = existing_filter.as_deref() {
             let current_groups = scope_groups_in_filter(current);
             let wanted_dns = group_dns_in_filter(&scope_filter);
-            if !current_groups.complete || current_groups.dns != wanted_dns {
+            // Case-FOLDED, like the post-write proof in `rbac.rs`: Exchange
+            // returns DNs in its own casing, so a raw comparison warns about a
+            // scope that in fact already confines exactly the wanted groups.
+            let wanted_folded: std::collections::HashSet<String> =
+                wanted_dns.iter().map(|d| d.to_ascii_lowercase()).collect();
+            if !current_groups.complete || current_groups.folded_dns() != wanted_folded {
                 warnings.push(format!(
                     "a management scope “{scope_name}” already exists and confines access to a \
                      different set of groups than this plan computed. Its filter is ({current}). \

@@ -224,10 +224,13 @@ pub async fn run_audit(
     // so instead of reading as a clean scan (see `AuditRunResult::degraded`).
     let (graph_roles_by_sp, graph_roles_gap) = graph_roles_by_sp;
     let (ews_full_access_sps, ews_gap) = ews_full_access_sps;
+    let (sp_index, sp_index_gap) = sp_index;
     // `mut` because a third kind of gap — per-principal scoring failures — can
     // only be known after the fan-out below has run.
-    let mut degraded: Vec<AuditCoverageGap> =
-        [graph_roles_gap, ews_gap].into_iter().flatten().collect();
+    let mut degraded: Vec<AuditCoverageGap> = [graph_roles_gap, ews_gap, sp_index_gap]
+        .into_iter()
+        .flatten()
+        .collect();
 
     let app_ids: Vec<String> = apps.iter().map(|a| a.app_id.clone()).collect();
     client.seed_lean_sps_from_index(&app_ids, &sp_index);
@@ -503,6 +506,10 @@ pub async fn save_audit_to_file(
     items: Option<Vec<AuditItem>>,
     format: String,
 ) -> Result<Option<String>, UiError> {
+    // This can answer entirely from the tenant cache and then WRITE the result to
+    // a user-chosen path, so an unproven `tenant_id` would make a cross-tenant
+    // leak persistent on disk. Prove the session before either branch.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let items: Vec<AuditItem> = match items {
         Some(items) => items,
         None => state
@@ -910,9 +917,9 @@ async fn prefetch_sp_index(
     cache: &Cache,
     client: &GraphClient,
     tenant_id: &str,
-) -> Arc<Vec<ServicePrincipal>> {
+) -> (Arc<Vec<ServicePrincipal>>, Option<AuditCoverageGap>) {
     if let Some(cached) = crate::commands::applications::sp_index_hit(cache, tenant_id) {
-        return cached;
+        return (cached, None);
     }
     // Captured BEFORE the scan: it takes seconds under no lock, and re-pinning
     // a pre-mutation snapshot would outlive the invalidation it raced.
@@ -921,13 +928,26 @@ async fn prefetch_sp_index(
         &crate::commands::applications::sp_index_key(tenant_id),
     );
     match client.list_service_principals_index().await {
-        Ok(sps) => crate::commands::applications::sp_index_store_if_current(cache, sps, watch),
+        Ok(sps) => (
+            crate::commands::applications::sp_index_store_if_current(cache, sps, watch),
+            None,
+        ),
         Err(err) => {
-            tracing::info!(
+            // NOT just a log. Returning an empty index silently drops the whole
+            // SP-only scoring phase — enterprise apps, managed identities and
+            // orphaned service principals — and without a gap the run reported
+            // itself complete and `run_is_cacheable` cached it as authoritative,
+            // so an operator could not tell "no findings" from "never looked".
+            // The sibling `prefetch_graph_app_roles` already returns a gap for
+            // exactly this consequence.
+            tracing::warn!(
                 ?err,
                 "audit: SP index unavailable; scanning app registrations only"
             );
-            Arc::new(Vec::new())
+            (
+                Arc::new(Vec::new()),
+                Some(AuditCoverageGap::ServicePrincipalIndex),
+            )
         }
     }
 }

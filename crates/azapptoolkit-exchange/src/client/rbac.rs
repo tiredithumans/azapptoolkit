@@ -192,7 +192,9 @@ impl ExchangeClient {
                  or may not have been repointed; inspect it in Exchange before relying on it."
             )));
         }
-        if wanted_groups.dns != landed.dns {
+        // Case-FOLDED: Exchange echoes DNs back in its own casing, so comparing
+        // raw sets reports a write that landed as refused.
+        if wanted_groups.folded_dns() != landed.folded_dns() {
             return Err(crate::error::ExchangeError::Protocol(format!(
                 "management scope '{name}' did not take the filter it was given: asked for \
                  {} group(s), Exchange reports {}. The scope was NOT repointed as requested; \

@@ -1,5 +1,119 @@
 ## [Unreleased]
 
+## [0.26.3] - 2026-08-20
+
+### Security
+
+- **A failed service-principal read no longer reports itself as a clean audit.**
+  When the tenant-wide SP index could not be read, the error was logged at
+  `info!`, an empty list was returned, and the entire SP-only scoring phase —
+  enterprise applications, managed identities and orphaned service principals —
+  was silently dropped. The run still reported `degraded: []`, so it cached
+  itself as authoritative and an operator could not tell "no findings" from
+  "never looked". It now records a `ServicePrincipalIndex` coverage gap, which
+  both surfaces the caveat and stops the run being cached — matching what the
+  sibling Graph app-role prefetch already did for the same consequence.
+- **SAML federation metadata with namespace prefixes is now read correctly.**
+  `parse_signing_certs` matched the literal `<KeyDescriptor` and
+  `<X509Certificate>`, so any document using prefixes — `<md:KeyDescriptor>`,
+  `<ds:X509Certificate>`, which is what Microsoft's own federation metadata
+  publishes — yielded **zero** certificates, and the probe reported "0
+  published" exactly as it would for an app that genuinely publishes none. Both
+  element names are now matched on their local name with an optional prefix, and
+  each certificate is attributed to the descriptor it actually sits in, so an
+  encryption key between two signing ones cannot leak into a neighbour.
+- **Two apps could be handed the same Key Vault secret name, so one app's
+  rotate wrote a new version of another app's credential.** The name derived
+  from a credential's display name dropped every character Key Vault disallows
+  instead of replacing it, so `My App` and `MyApp` collapsed to one name — and
+  any wholly non-Latin display name reduced to nothing and landed on the bare
+  literal `client-secret`, which every such app shared. Code trusting "the
+  latest version at that name" for one app could then receive another's secret
+  material. Disallowed characters now become a single separator (runs collapsed,
+  ends trimmed), and a name that still reduces to nothing gets a stable digest
+  of the original appended. The common path is unchanged: a resolved
+  `secret-<appId>` is already legal and sanitises to itself.
+- **Eight tenant-wide application permissions that scored zero are now weighted,
+  which shifts audit scores upward for apps holding them.** Each was already
+  named in this codebase as the *broader* side of a subsumption pair — the
+  scorer's own advice was to downgrade away from them — yet none appeared in
+  either risk table, so an app holding one ranked as though it held nothing.
+  `MailboxSettings.ReadWrite` is the one to note: it sets mail forwarding on
+  every mailbox in the tenant, the classic exfiltration primitive, and it needs
+  no read permission to act. Also added: `GroupMember.ReadWrite.All`,
+  `Chat.ReadWrite.All`, `Device.ReadWrite.All`,
+  `Contacts.ReadWrite` and `Notes.ReadWrite.All` as high risk;
+  `Chat.Read.All` and `Calendars.Read` as medium. Weights follow the split the
+  tables already used everywhere else — tenant-wide write is high, tenant-wide
+  read is medium, matching `Mail.ReadWrite`/`Mail.Read` and
+  `Files.ReadWrite.All`/`Files.Read.All`. **Apps holding these will rank higher
+  than they did in 0.26.2; that is the correction, not a scoring change.**
+- **A new invariant makes the omission impossible to repeat.** The existing
+  guard scanned table → role map, so it caught a misspelling in an entry that
+  existed but could say nothing about an entry never written — which is exactly
+  how these values went unscored. The reverse rule now walks
+  `SUBSUMED_APP_PERMISSIONS` and requires every broader-side value to carry a
+  weight, deriving the check from the table itself rather than a hand-kept list,
+  so adding a subsumption pair forces the weight decision at the same time. A
+  value can be left unscored only by naming it in `INTENTIONALLY_UNSCORED` with
+  a reason.
+- **Every command that can answer from the tenant cache now proves the session
+  first.** Sixteen commands read the tenant-scoped cache; on a cache hit, the
+  `tenant_id` argument from the webview was the only thing deciding whose
+  directory data came back, with no check that the tenant had signed in. Six
+  answered from cache alone — `save_audit_to_file` was the worst shape, serving
+  the cached audit for whatever tenant id it was handed and then writing it to a
+  user-chosen file, which made the leak persistent on disk. The other ten are
+  read-through commands whose *hit* path returns before any client is built, so
+  the `graph_for` on the miss path never ran. All now call a shared
+  `prove_tenant_session` (or `tenant_context` directly) ahead of the read, and
+  refuse with `not_signed_in` otherwise. This is the cross-tenant leak AGENTS.md
+  names the #1 footgun.
+- **The invariant test meant to prevent exactly that had gone blind.** It scanned
+  raw source text for the literal `cache.get(`, which rustfmt defeats — a wrapped
+  `state\n.cache\n.get(...)` and the turbofish `cache.get::<Vec<T>>(...)` contain
+  no such substring. It matched one command, the compliant one, and that cleared
+  its own `found >= 1` floor while fifteen others went unseen. The detector is now
+  whitespace-insensitive, handles nested generics in the turbofish, and requires
+  the session proof to come *before* the first cache read rather than merely
+  appear somewhere in the body. Its floor is the real count (16), and a second
+  test pins the detector against the shapes rustfmt actually produces.
+- **Bumped `h2` to 0.4.17** (RUSTSEC-2026-0258 — unbounded empty DATA frames, a
+  remote DoS against HTTP/2 servers). It reaches this tree transitively through
+  `hyper` under `reqwest` and the `wiremock` test server; the app is an HTTP/2
+  *client*, so the server-side frame handling the advisory covers is not
+  exercised at runtime. Bumped regardless, because the advisory failed `audit`
+  and `deny` on every branch and blocked all merges.
+
+### Fixed
+
+- **A management-scope repoint that succeeded is no longer reported as
+  refused.** Exchange Online returns group distinguished names in its own
+  casing, but the post-write proof compared the DN set it asked for against the
+  DN set Exchange echoed back *case-sensitively*. A write that had already been
+  applied to every role assignment on the scope could therefore be reported as
+  "the scope was NOT repointed as requested" — the worst direction for that
+  message to be wrong in. Both the post-write proof and the plan-side "a scope
+  already exists with a different group set" warning now compare case-folded,
+  matching how the rest of the Exchange client already treats identities.
+
+### Changed
+
+- **Refreshed both dependency trees.** `cargo update` over the workspace
+  lockfile (79 crates moved) and the frontend's separate one (56 moved), and the
+  direct `tokio` / `zeroize` requirements now name the versions the lockfile had
+  already resolved (1.53 / 1.9) instead of a stale floor. Notable transitive
+  majors: `zvariant_utils` 3 -> 4 under `zbus` (Linux keyring only) and `phf`
+  0.11 -> 0.13 in the frontend, which drops `rand` 0.8 and `rand_core` 0.6 from
+  the WASM tree outright.
+- **The deliberate crypto/encoding pins are unchanged.** `rand` 0.8, `sha2` 0.10
+  and `base64` 0.22 still match what `oauth2` 5, `tauri-codegen` and the
+  reqwest/hyper stack resolve to, so advancing them would add a duplicate major
+  rather than remove an old one — the rationale and drop conditions stay in
+  `dependabot.yml`. `windows-sys` unification is unchanged at five majors (a
+  narrower `cargo update -p` had previously threatened to un-unify it), and the
+  git-pinned `tauri-sys` rev is already upstream `HEAD`.
+
 ## [0.26.2] - 2026-08-13
 
 ### Added

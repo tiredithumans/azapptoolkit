@@ -131,6 +131,9 @@ pub async fn list_applications_with_pairing(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<Vec<ApplicationListRowDto>, UiError> {
+    // The cache-HIT path below returns before any client is built, so the
+    // `graph_for` on the miss path is not a session proof for it.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let cache_key = apps_pairing_key(&tenant_id);
     if let Some(cached) = state
         .cache
@@ -225,6 +228,9 @@ pub async fn get_application_detail(
     tenant_id: String,
     object_id: String,
 ) -> Result<ApplicationDetail, UiError> {
+    // The cache-HIT path below returns before any client is built, so the
+    // `graph_for` on the miss path is not a session proof for it.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     // Read-through cache: clicking between apps re-runs this ~6-call fan-out, so
     // a 60-minute (LISTS_CACHE_TTL) entry makes back-and-forth navigation free.
     // Every mutation that touches detail-visible state busts it (see
