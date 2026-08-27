@@ -110,7 +110,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: needs.changes.outputs.code == 'true'
-      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+      - uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         if: needs.changes.outputs.code == 'true'
         with:
           tool: just
@@ -147,7 +147,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: apps/desktop/web-rs
-      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+      - uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: just,trunk,wasm-pack
       # web-rs is excluded from the root workspace, so the `rust` job's
@@ -257,7 +257,7 @@ jobs:
       # list in .cargo/audit.toml). Covers BOTH lockfiles: the root workspace
       # and the frontend's own Cargo.lock (web-rs is excluded from the
       # workspace, so the root scan never sees it).
-      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+      - uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: just,cargo-audit
       - name: audit (workspace)
@@ -281,7 +281,7 @@ jobs:
       # can't reach. cargo-deny is version-pinned (not @latest) because its
       # 0.20 CLI refactor broke the recipes unannounced mid-bump; the web-deny
       # recipe's `--config` placement must match the pinned version's CLI.
-      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+      - uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: just,cargo-deny@0.20.2
       - name: deny (workspace)
