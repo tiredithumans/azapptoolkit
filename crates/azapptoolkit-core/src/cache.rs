@@ -152,6 +152,13 @@ struct Bucket {
     /// narrowed on plain removal, so it is a conservative *lower* bound — at
     /// worst it buys one unnecessary sweep, never a missed one.
     oldest_insert: Option<Instant>,
+    /// Test-only count of full TTL sweeps, so the "don't sweep when nothing can
+    /// have expired" property is asserted rather than merely structural. Not in
+    /// [`CacheStats`]: this is an implementation detail of the eviction policy,
+    /// and it would otherwise become a public field the diagnostics UI has to
+    /// render.
+    #[cfg(test)]
+    expired_sweeps: u64,
     /// Source of [`Entry::stamp`]. Only [`Bucket::insert`] advances it, and it
     /// is deliberately NOT reset by [`Bucket::clear`] — reusing a stamp after a
     /// clear would let a stale rollback match a brand-new entry, which is the
@@ -166,6 +173,8 @@ impl Bucket {
             lru: BTreeMap::new(),
             tick: 0,
             oldest_insert: None,
+            #[cfg(test)]
+            expired_sweeps: 0,
             next_stamp: 0,
         }
     }
@@ -265,6 +274,10 @@ impl Bucket {
     /// the eviction path, where the bucket lock is already held and the cost is
     /// paid only when a bucket is at its cap.
     fn evict_expired(&mut self, ttl: Duration) {
+        #[cfg(test)]
+        {
+            self.expired_sweeps += 1;
+        }
         self.entries.retain(|_, e| e.inserted.elapsed() <= ttl);
         self.rebuild_lru();
         self.oldest_insert = self.entries.values().map(|e| e.inserted).min();
@@ -296,7 +309,17 @@ impl Bucket {
         if !anything_expired && self.entries.len() <= max_size {
             return;
         }
-        self.evict_expired(ttl);
+        // Honour the flag on BOTH branches, not just the early return. Past the
+        // cap the sweep ran on every single `put` even though
+        // `anything_expired == false` is a proof it would remove nothing — and
+        // that sweep is a `retain` over `n`, plus a `rebuild_lru` that clones
+        // every key `String` into a fresh `BTreeMap`, plus a `min()` scan, all
+        // under the bucket mutex the interactive list reads contend on. The doc
+        // above says both conditions are load-bearing; the code only honoured
+        // one of them.
+        if anything_expired {
+            self.evict_expired(ttl);
+        }
         self.evict_lru(max_size);
     }
 
@@ -1099,6 +1122,57 @@ impl Cache {
 
 #[cfg(test)]
 mod tests {
+
+    /// A bucket at its entry cap must not run the full TTL sweep on every `put`
+    /// when nothing can have expired.
+    ///
+    /// `evict_expired` is a `retain` over `n`, plus a `rebuild_lru` that clones
+    /// every key `String` into a fresh `BTreeMap`, plus a `min()` scan — all
+    /// under the bucket mutex the interactive list reads contend on. Past the
+    /// cap that ran on every insert although `anything_expired == false` is a
+    /// proof it would remove nothing.
+    #[test]
+    fn a_bucket_at_cap_does_not_sweep_when_nothing_has_expired() {
+        const CAP: usize = 8;
+        let ttl = Duration::from_secs(3600);
+        let mut bucket = Bucket::new();
+
+        // Fill past the cap with fresh entries.
+        for i in 0..(CAP * 3) {
+            bucket.insert(format!("k{i}"), Arc::new(serde_json::json!(i)), None, false);
+            bucket.evict_if_needed(ttl, CAP);
+        }
+
+        assert_eq!(
+            bucket.expired_sweeps, 0,
+            "nothing is near the TTL, so every one of these sweeps was wasted work"
+        );
+        // LRU eviction still converges to the cap — the sweep was never what
+        // made room.
+        assert_eq!(bucket.entries.len(), CAP);
+        // And the survivors are the most recent, i.e. `evict_lru` did the work.
+        assert!(bucket.entries.contains_key(&format!("k{}", CAP * 3 - 1)));
+        assert!(!bucket.entries.contains_key("k0"));
+    }
+
+    /// The other half of the rule: the sweep still runs when something HAS
+    /// expired, including for a bucket that never reaches its cap — it is the
+    /// only thing that reclaims an expired pinned index.
+    #[test]
+    fn an_expired_entry_is_still_swept_below_the_cap() {
+        let ttl = Duration::from_millis(1);
+        let mut bucket = Bucket::new();
+        bucket.insert("old".into(), Arc::new(serde_json::json!(1)), None, false);
+        std::thread::sleep(Duration::from_millis(5));
+
+        bucket.evict_if_needed(ttl, 1024);
+        assert_eq!(
+            bucket.expired_sweeps, 1,
+            "an expired entry must be reclaimed"
+        );
+        assert!(bucket.entries.is_empty());
+    }
+
     use super::*;
     use serde::{Deserialize, Serialize};
     use std::thread::sleep;
