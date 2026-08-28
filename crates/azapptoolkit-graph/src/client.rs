@@ -11,8 +11,8 @@ use azapptoolkit_core::models::{
     ActiveDirectoryRole, AppRoleAssignment, Application, ApplicationExposeApi,
     ApplicationServicePrincipal, ApplicationTemplate, ClaimsMappingPolicy, ConditionalAccessPolicy,
     DirectoryAuditLog, DirectoryObject, Drive, DriveItem, FederatedIdentityCredential,
-    GroupSummary, KeyCredential, NewKeyCredential, OAuth2PermissionGrant, OAuth2PermissionScope,
-    Organization, Paged, PasswordCredential, PreAuthorizedApplication, RequiredResourceAccess,
+    GroupSummary, NewKeyCredential, OAuth2PermissionGrant, OAuth2PermissionScope, Organization,
+    Paged, PasswordCredential, PreAuthorizedApplication, RequiredResourceAccess,
     ResolvedSharePointResource, SelectedPermission, SelfSignedCertificate, ServicePrincipal,
     ServicePrincipalSignInActivity, Site, SiteList, SitePermission, SynchronizationJob,
 };
