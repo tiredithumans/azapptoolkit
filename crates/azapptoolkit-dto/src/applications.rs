@@ -222,13 +222,29 @@ pub struct GenerateCertificateInput {
 
 /// Result of generating a self-signed certificate. `private_key_pem` is
 /// sensitive — shown once and never persisted by the backend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GeneratedCertificateResult {
     pub thumbprint: String,
     pub certificate_pem: String,
     pub private_key_pem: String,
     /// RFC3339 certificate expiry.
     pub expires: String,
+}
+
+// Hand-written rather than derived: the workspace treats a derived `Debug` on
+// a secret as a defect, because any `?dto` in a `tracing` macro puts the
+// plaintext straight into the daily rolling log file. Mirrors
+// `dto::backup::RegeneratedSecret`, `core::models::PasswordCredential`,
+// `auth::AccessToken`, `keyvault::SecretValue` and `cert::GeneratedCert`.
+impl std::fmt::Debug for GeneratedCertificateResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneratedCertificateResult")
+            .field("thumbprint", &self.thumbprint)
+            .field("certificate_pem", &self.certificate_pem)
+            .field("private_key_pem", &"<redacted>")
+            .field("expires", &self.expires)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +281,22 @@ pub struct RemoveExpiredResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A plaintext RSA private key must never reach a `Debug` string; the
+    /// daily rolling log appender writes whatever a `?dto` produces.
+    #[test]
+    fn a_generated_private_key_is_redacted_in_debug() {
+        let result = GeneratedCertificateResult {
+            thumbprint: "AA:BB".into(),
+            certificate_pem: "-----BEGIN CERTIFICATE-----".into(),
+            private_key_pem: "-----BEGIN PRIVATE KEY-----MIIsecret".into(),
+            expires: "2027-01-01T00:00:00Z".into(),
+        };
+        let dbg = format!("{result:?}");
+        assert!(!dbg.contains("MIIsecret"), "{dbg}");
+        assert!(dbg.contains("<redacted>"), "{dbg}");
+        assert!(dbg.contains("AA:BB"), "{dbg}");
+    }
     use azapptoolkit_core::models::KeyCredential;
 
     #[test]

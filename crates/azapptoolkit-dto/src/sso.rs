@@ -227,7 +227,7 @@ pub struct SamlSsoSummary {
 /// App-owner output summary for an OIDC SSO integration. Also the result of
 /// `create_oidc_sso_application`. `client_secret` is populated only at creation
 /// (show-once) and never re-read.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct OidcSsoSummary {
     pub object_id: String,
     pub service_principal_id: String,
@@ -243,6 +243,27 @@ pub struct OidcSsoSummary {
     pub spa_redirect_uris: Vec<String>,
     pub client_secret: Option<String>,
     pub client_secret_expiry: Option<String>,
+}
+// Hand-written rather than derived: the workspace treats a derived `Debug` on
+// a secret as a defect, because any `?dto` in a `tracing` macro puts the
+// plaintext straight into the daily rolling log file. Mirrors
+// `dto::backup::RegeneratedSecret`, `core::models::PasswordCredential`,
+// `auth::AccessToken`, `keyvault::SecretValue` and `cert::GeneratedCert`.
+impl std::fmt::Debug for OidcSsoSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcSsoSummary")
+            .field("object_id", &self.object_id)
+            .field("service_principal_id", &self.service_principal_id)
+            .field("client_id", &self.client_id)
+            .field("tenant_id", &self.tenant_id)
+            .field("authority", &self.authority)
+            .field("discovery_url", &self.discovery_url)
+            .field("redirect_uris", &self.redirect_uris)
+            .field("spa_redirect_uris", &self.spa_redirect_uris)
+            .field("client_secret", &"<redacted>")
+            .field("client_secret_expiry", &self.client_secret_expiry)
+            .finish()
+    }
 }
 
 /// Current SSO configuration of an existing enterprise app, read by
@@ -449,6 +470,22 @@ pub struct SsoCertificateRowDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `client_secret` is populated at creation (show-once) and is exactly what
+    /// an operator must copy out — so it is also exactly what must not land in
+    /// the log file behind a `?summary`.
+    #[test]
+    fn the_oidc_client_secret_is_redacted_in_debug() {
+        let summary = OidcSsoSummary {
+            client_id: "11111111-1111-1111-1111-111111111111".into(),
+            client_secret: Some("s3cr3t-value".into()),
+            ..Default::default()
+        };
+        let dbg = format!("{summary:?}");
+        assert!(!dbg.contains("s3cr3t-value"), "{dbg}");
+        assert!(dbg.contains("<redacted>"), "{dbg}");
+        assert!(dbg.contains("11111111-1111"), "{dbg}");
+    }
 
     #[test]
     fn saml_input_uses_camel_case_args() {

@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{AuthError, Result};
 
@@ -235,15 +235,33 @@ fn write_chunks(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn load_refresh_token(tenant_id: &str, account_oid: &str) -> Result<Option<String>> {
+/// Reassembles a chunked refresh token.
+///
+/// Returns `Zeroizing<String>` rather than a bare `String`: the call site wraps
+/// the result to keep the secret off freed heap pages, and that guarantee was
+/// undone in here. Each `get_password()` chunk is a fully-materialized plaintext
+/// `String` that was dropped un-wiped, and `push_str` reallocates as it grows,
+/// stranding the earlier buffer too — a refresh token spans one to two 2048-byte
+/// chunks, so at least one growth realloc happened on every refresh.
+///
+/// Making it the return type is what turns the contract from a convention the
+/// caller has to remember into something structural.
+pub fn load_refresh_token(tenant_id: &str, account_oid: &str) -> Result<Option<Zeroizing<String>>> {
     ensure_keyring_store()?;
-    let mut combined = String::new();
+    // Preallocated so the common one-or-two-chunk token never reallocates and
+    // leaves a plaintext copy behind.
+    let mut combined = Zeroizing::new(String::with_capacity(MAX_CHUNK_UTF16_BYTES * 2));
     let mut idx = 0;
     loop {
         let account = chunk_account(tenant_id, account_oid, idx);
         match keyring_core::Entry::new(KEYRING_SERVICE, &account)?.get_password() {
             Ok(part) => {
+                // Bound mutably and wiped after appending: the chunk itself is
+                // plaintext, and dropping it un-zeroized leaves the whole token
+                // recoverable from freed pages regardless of what the caller does.
+                let mut part = part;
                 combined.push_str(&part);
+                part.zeroize();
                 idx += 1;
             }
             Err(keyring_core::Error::NoEntry) => break,
@@ -358,14 +376,20 @@ mod tests {
         // load back byte-identical after being split across numbered entries.
         let big: String = "x".repeat(MAX_CHUNK_UTF16_BYTES * 3 + 17);
         save_refresh_token(tenant, oid, &big).unwrap();
-        assert_eq!(load_refresh_token(tenant, oid).unwrap(), Some(big));
+        assert_eq!(
+            load_refresh_token(tenant, oid).unwrap().as_deref(),
+            Some(&big)
+        );
 
         // Overwriting with a SHORTER (single-chunk) token must clear the larger
         // token's trailing chunks, so the load carries no stale tail — this is the
         // integrity path an off-by-one in the cleanup loop would break.
         let small = "short".to_string();
         save_refresh_token(tenant, oid, &small).unwrap();
-        assert_eq!(load_refresh_token(tenant, oid).unwrap(), Some(small));
+        assert_eq!(
+            load_refresh_token(tenant, oid).unwrap().as_deref(),
+            Some(&small)
+        );
         assert!(
             matches!(
                 keyring_core::Entry::new(KEYRING_SERVICE, &chunk_account(tenant, oid, 1))
