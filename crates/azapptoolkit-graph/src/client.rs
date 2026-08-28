@@ -19,7 +19,9 @@ use azapptoolkit_core::models::{
 use azapptoolkit_core::scoping::SelectedScopeLevel;
 use url::Url;
 
-use azapptoolkit_core::http_retry::{Attempt, parse_retry_after_seconds, with_retries};
+use azapptoolkit_core::http_retry::{
+    Attempt, RetryClass, RetryReason, parse_retry_after_seconds, with_retries,
+};
 use azapptoolkit_core::net::same_origin;
 use azapptoolkit_core::token::BearerProvider;
 

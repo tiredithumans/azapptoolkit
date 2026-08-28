@@ -1,4 +1,5 @@
-//! Origin guard shared by the HTTP client crates (Graph, Key Vault, ARM).
+//! Origin guard shared by the HTTP client crates (Graph, Exchange, Key Vault,
+//! ARM).
 //!
 //! A paging `nextLink` is attacker-influenced server output: following it
 //! verbatim would attach the bearer token to whatever host the response named.

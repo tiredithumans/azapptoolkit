@@ -201,7 +201,9 @@ impl GraphClient {
         // this index. Their row counts sit below the cap even when the index
         // truncated, so neither can detect truncation from its own length; they
         // must ask about the index itself (`sp_index_truncated`).
-        let (all, truncated) = self.collect_all_pages_capped(page, SP_INDEX_MAX).await?;
+        let (all, truncated) = self
+            .collect_all_pages_capped(page, SP_INDEX_MAX, false)
+            .await?;
         if truncated {
             tracing::warn!(
                 target = "azapptoolkit::graph",
@@ -247,7 +249,9 @@ impl GraphClient {
         ];
         let page: Paged<serde_json::Value> =
             self.get_json("/servicePrincipals", &params, false).await?;
-        let (all, truncated) = self.collect_all_pages_capped(page, SP_INDEX_MAX).await?;
+        let (all, truncated) = self
+            .collect_all_pages_capped(page, SP_INDEX_MAX, false)
+            .await?;
         if truncated {
             tracing::warn!(
                 target = "azapptoolkit::graph",
