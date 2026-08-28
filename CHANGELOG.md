@@ -1,5 +1,32 @@
 ## [Unreleased]
 
+### Security
+
+- **An unparseable `/token` error body was written verbatim to the on-disk
+  log.** Tracing is wired to a daily rolling *file* appender at info, so this
+  warning lands on disk — while every other AAD error path here is meticulously
+  redacted, dropping `error_description` because it embeds tenant/user GUIDs and
+  client IPs. The branch fires precisely when the responder is **not** Entra: a
+  TLS-intercepting proxy, WAF or captive portal, which commonly echo the
+  offending request back in the block page. It now logs only the status, the
+  body length and the response content type — which is the signal an operator
+  actually wants ("a proxy answered"), without the content.
+- **Four secret-bearing IPC types derived `Debug`, opting out of the workspace
+  redaction convention.** A plaintext RSA private key, two Key Vault secret
+  values and an OIDC client secret would each be written in full by any `?dto`
+  in a tracing macro — into the same rolling log file. Six sibling types
+  hand-write a redacting impl for exactly this reason; these four now do too,
+  and each is pinned by a test rather than left to convention.
+- **Reassembling a refresh token left plaintext copies on the heap the caller's
+  `Zeroizing` could not reach.** Each keyring chunk was a fully-materialized
+  plaintext string dropped un-wiped, and the accumulator reallocated as it grew,
+  stranding the earlier buffer too — a refresh token spans one to two 2048-byte
+  chunks, so at least one growth realloc happened on every refresh. Chunks are
+  now wiped after appending, the buffer is preallocated, and the function
+  returns `Zeroizing<String>` so the contract is structural rather than
+  something each caller has to remember.
+
+
 ### Added
 
 - **SharePoint access can now be scoped to a single library, folder or file.**
