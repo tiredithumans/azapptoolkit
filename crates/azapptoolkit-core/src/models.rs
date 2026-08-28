@@ -6,6 +6,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::scoping::SelectedScopeLevel;
+
 /// Deserialize a value, mapping an explicit JSON `null` to `T::default()`.
 ///
 /// `#[serde(default)]` alone only covers a *missing* key — a key present with
@@ -708,6 +710,179 @@ pub struct SiteIdentity {
     pub id: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
+}
+
+/// A permission entry on a securable *below* the site collection — a list, a
+/// list item, or a driveItem (the `*.SelectedOperations.Selected` model).
+///
+/// Deliberately a separate type from [`SitePermission`] rather than an extra
+/// field on it, because the two endpoint families disagree about the principal:
+/// `POST /sites/{id}/permissions` reads and writes `grantedToIdentities` (an
+/// array), while the list / listItem / driveItem endpoints use **`grantedToV2`**
+/// (a single identity set) and, per Graph's reference, do not accept the array
+/// forms at all. Folding them into one struct invites writing the wrong one.
+///
+/// `granted_to` is read as a fallback because the driveItem endpoint echoes the
+/// deprecated singular form alongside `grantedToV2` in its response.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedPermission {
+    pub id: String,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub granted_to_v2: Option<SiteIdentitySet>,
+    #[serde(default)]
+    pub granted_to: Option<SiteIdentitySet>,
+}
+
+impl SelectedPermission {
+    /// The application client id this permission grants to, if it is an app
+    /// grant at all. A permission granted to a user or a SharePoint group has no
+    /// `application` and yields `None` — those are ordinary SharePoint sharing
+    /// entries, not Selected-scope grants, and must never be reported as one.
+    pub fn app_id(&self) -> Option<&str> {
+        self.granted_to_v2
+            .as_ref()
+            .or(self.granted_to.as_ref())
+            .and_then(|set| set.application.as_ref())
+            .and_then(|app| app.id.as_deref())
+    }
+
+    /// The display name recorded with the grant, when Graph echoed one back.
+    pub fn app_display_name(&self) -> Option<&str> {
+        self.granted_to_v2
+            .as_ref()
+            .or(self.granted_to.as_ref())
+            .and_then(|set| set.application.as_ref())
+            .and_then(|app| app.display_name.as_deref())
+    }
+}
+
+/// A document library, as returned by `GET /sites/{id}/drives`. `web_url` is
+/// what the resolver prefix-matches an operator's pasted URL against.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Drive {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub web_url: Option<String>,
+}
+
+/// A list in a site, as returned by `GET /sites/{id}/lists`. A document library
+/// appears both here and under `/drives`; the two are joined by `web_url`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteList {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub web_url: Option<String>,
+}
+
+impl SiteList {
+    /// The best operator-facing name Graph offered, preferring the display name.
+    pub fn label(&self) -> Option<&str> {
+        self.display_name.as_deref().or(self.name.as_deref())
+    }
+}
+
+/// Presence marks a driveItem as a folder; the count is informational.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderFacet {
+    #[serde(default)]
+    pub child_count: Option<i64>,
+}
+
+/// Presence marks a driveItem as a file.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FileFacet {
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+/// The SharePoint identifiers behind a driveItem. This is the join that makes
+/// item-level grants possible: an operator pastes a *drive* path, but the
+/// permission endpoint Microsoft documents for a folder is the **listItem** one,
+/// which needs `list_id` + `list_item_id`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SharePointIds {
+    #[serde(default)]
+    pub list_id: Option<String>,
+    #[serde(default)]
+    pub list_item_id: Option<String>,
+    #[serde(default)]
+    pub site_id: Option<String>,
+}
+
+/// An item in a document library — a file or a folder.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveItem {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub web_url: Option<String>,
+    #[serde(default)]
+    pub folder: Option<FolderFacet>,
+    #[serde(default)]
+    pub file: Option<FileFacet>,
+    #[serde(default)]
+    pub sharepoint_ids: Option<SharePointIds>,
+}
+
+impl DriveItem {
+    /// True when the item is a folder. Graph signals this by the *presence* of
+    /// the `folder` facet, not by a type field.
+    pub fn is_folder(&self) -> bool {
+        self.folder.is_some()
+    }
+}
+
+/// A SharePoint URL resolved to the securable a Selected-scope grant addresses.
+///
+/// Unlike its neighbours this is a *composed* result rather than a Graph wire
+/// shape: reaching a folder takes a site lookup, a drive listing and a
+/// path-addressed driveItem read, and every caller needs the same joined
+/// answer. It carries the identifiers for **both** grant endpoints because the
+/// level decides which one is used.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedSharePointResource {
+    /// What the URL turned out to point at. Checked against the cart's scope by
+    /// [`crate::scoping::selected_scope_accepts`] before anything is granted.
+    pub level: SelectedScopeLevel,
+    pub site_id: String,
+    #[serde(default)]
+    pub site_url: Option<String>,
+    #[serde(default)]
+    pub site_name: Option<String>,
+    /// Set for every level below the site — the list or library containing the
+    /// target, and the list the item-level endpoint is addressed through.
+    #[serde(default)]
+    pub list_id: Option<String>,
+    #[serde(default)]
+    pub list_name: Option<String>,
+    /// Set only at item level.
+    #[serde(default)]
+    pub item_id: Option<String>,
+    #[serde(default)]
+    pub drive_id: Option<String>,
+    /// True when the item is a folder rather than a file. Purely for operator
+    /// copy — the grant call is identical either way.
+    #[serde(default)]
+    pub is_folder: bool,
+    /// Operator-facing path, e.g. `Finance / Documents / Invoices / 2026`.
+    pub display_path: String,
 }
 
 /// The `application` + `servicePrincipal` pair returned by
