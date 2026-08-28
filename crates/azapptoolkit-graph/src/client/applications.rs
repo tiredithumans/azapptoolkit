@@ -525,7 +525,12 @@ impl GraphClient {
         body: &ApplicationExposeApiPatch,
     ) -> Result<()> {
         let path = format!("/applications/{object_id}");
-        self.send_no_content(Method::PATCH, &path, Some(body)).await
+        self.send_no_content(Method::PATCH, &path, Some(body))
+            .await?;
+        // `oauth2PermissionScopes` published here are what the permission
+        // picker offers for this resource. Only on the success path.
+        self.invalidate_resource_sp_cache();
+        Ok(())
     }
 
     /// Instantiates a non-gallery application from an application template,
@@ -613,6 +618,10 @@ impl GraphClient {
         let path = format!("/applications/{object_id}");
         let body = serde_json::json!({ "appRoles": roles });
         self.send_no_content(Method::PATCH, &path, Some(&body))
-            .await
+            .await?;
+        // Entra mirrors these onto the paired SP, which is what
+        // `resolve_resource_sp` caches. Only on the success path.
+        self.invalidate_resource_sp_cache();
+        Ok(())
     }
 }
