@@ -143,77 +143,72 @@ pub fn ItemSelectionPanel(
         </div>
 
         <ul class="resource-probe-list" aria-label="Resolved targets">
-            <For
-                each=move || probes.get()
-                key=|(url, _)| url.clone()
-                let:row
-            >
-                {
-                    let (url, probe) = row;
-                    match probe {
-                        Probe::Pending => {
-                            view! {
-                                <li class="resource-probe">
-                                    <Spinner size=SpinnerSize::Tiny />
-                                    <span class="muted">{url}</span>
-                                </li>
+            // Rendered as a plain mapped list rather than `<For>`: `For` is keyed
+            // and only creates, removes or moves rows *by key*. Keying on the URL
+            // — the only stable identity a row has — means a probe going
+            // Pending -> Resolved leaves the key unchanged, so the row keeps the
+            // view built from its original value and stays on the spinner
+            // forever. The list is a handful of pasted URLs, so re-rendering it
+            // whole on each probe is the cheaper correctness.
+            {move || {
+                probes
+                    .get()
+                    .into_iter()
+                    .map(|(url, probe)| {
+                        match probe {
+                            Probe::Pending => {
+                                view! {
+                                    <li class="resource-probe">
+                                        <Spinner size=SpinnerSize::Tiny />
+                                        <span class="muted">{url}</span>
+                                    </li>
+                                }
+                                    .into_any()
                             }
-                                .into_any()
-                        }
-                        Probe::Failed(msg) => {
-                            view! {
-                                <li class="resource-probe resource-probe--bad">
-                                    <span class="badge badge--danger">"Not found"</span>
-                                    <span>{url}</span>
-                                    <span class="muted">{msg}</span>
-                                </li>
+                            Probe::Failed(msg) => {
+                                view! {
+                                    <li class="resource-probe resource-probe--bad">
+                                        <span class="badge badge--danger">"Not found"</span>
+                                        <span>{url}</span>
+                                        <span class="muted">{msg}</span>
+                                    </li>
+                                }
+                                    .into_any()
                             }
-                                .into_any()
-                        }
-                        Probe::Resolved(r) => {
-                            let accepted = scope_level
-                                .get_untracked()
-                                .is_none_or(|l| selected_scope_accepts(l, r.level));
-                            let kind = describe(&r);
-                            let path = r.display_path.clone();
-                            let level_label = r.level.label();
-                            view! {
-                                <li class=move || {
-                                    if accepted {
+                            Probe::Resolved(r) => {
+                                let level = scope_level.get();
+                                let accepted = level
+                                    .is_none_or(|l| selected_scope_accepts(l, r.level));
+                                let kind = describe(&r);
+                                let path = r.display_path.clone();
+                                let why = level
+                                    .map(|l| {
+                                        format!(
+                                            "this permission grants at the {} level and cannot reach it",
+                                            l.label(),
+                                        )
+                                    });
+                                view! {
+                                    <li class=if accepted {
                                         "resource-probe"
                                     } else {
                                         "resource-probe resource-probe--bad"
-                                    }
-                                }>
-                                    <span class=move || {
-                                        if accepted {
+                                    }>
+                                        <span class=if accepted {
                                             "badge badge--ok"
                                         } else {
                                             "badge badge--danger"
-                                        }
-                                    }>{kind}</span>
-                                    <span>{path}</span>
-                                    {(!accepted)
-                                        .then(|| {
-                                            view! {
-                                                <span class="muted">
-                                                    {format!(
-                                                        "this permission grants at the {} level and cannot reach it",
-                                                        scope_level
-                                                            .get_untracked()
-                                                            .map(SelectedScopeLevel::label)
-                                                            .unwrap_or(level_label),
-                                                    )}
-                                                </span>
-                                            }
-                                        })}
-                                </li>
+                                        }>{kind}</span>
+                                        <span>{path}</span>
+                                        {(!accepted).then(|| view! { <span class="muted">{why}</span> })}
+                                    </li>
+                                }
+                                    .into_any()
                             }
-                                .into_any()
                         }
-                    }
-                }
-            </For>
+                    })
+                    .collect_view()
+            }}
         </ul>
 
         <Show when=any_mismatch fallback=|| ()>

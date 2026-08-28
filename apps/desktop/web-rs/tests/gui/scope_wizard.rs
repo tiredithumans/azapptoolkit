@@ -426,9 +426,13 @@ async fn selected_item_path_grants_against_the_resolved_folder() {
         "https://contoso.sharepoint.com/sites/Finance/Shared Documents/Invoices",
     );
 
-    // The panel resolves the URL and shows what it found, before any grant runs.
+    // The panel resolves the URL and shows what it found, before any grant runs
+    // — which also requires the row to re-render as its probe completes.
     ts::wait_for(|| ts::body_contains("Finance / Documents / Invoices")).await;
-    assert!(ts::body_contains("Folder"));
+    assert!(
+        ts::body_contains("Folder"),
+        "a folder reads as a folder, not a file"
+    );
 
     click_button("Next");
     ts::wait_for(|| ts::body_contains("permission inheritance is broken")).await;
@@ -476,7 +480,15 @@ async fn a_target_the_permission_cannot_reach_is_flagged_before_granting() {
     );
 
     ts::wait_for(|| ts::body_contains("level this permission can't grant against")).await;
-    assert!(ts::body_contains("Site"));
+    // The row itself must say what the URL actually resolved to, and why that
+    // level is out of reach — the Callout alone doesn't tell you which line to
+    // correct. This also pins the row re-rendering as its probe resolves: keyed
+    // rendering left them stuck on the spinner while the Callout updated.
+    assert!(
+        ts::body_contains("Site"),
+        "the row names the resolved level"
+    );
+    assert!(ts::body_contains("cannot reach it"));
 }
 
 #[wasm_bindgen_test]
