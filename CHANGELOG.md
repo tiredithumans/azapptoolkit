@@ -1,17 +1,6 @@
 ## [Unreleased]
 
-### Fixed
-
-- **A failed action in a Credentials-tab dialog gave no visible reason.** The
-  three dialogs that run a command — new client secret, generate certificate,
-  rotate into Key Vault — wrote their failures to the tab-body banner, which
-  renders *behind* the modal backdrop. On failure the dialog stays open (only
-  success closes it), so an operator saw the dialog sitting there having
-  apparently done nothing: no certificate, no key, and no explanation. Most
-  visible on "Generate self-signed certificate", whose own copy promises to
-  show the private key once. Each dialog now shows its own failure, and opening
-  one clears any earlier unrelated error.
-
+## [0.27.0] - 2026-08-28
 
 ### Added
 
@@ -41,6 +30,18 @@
   "this resource has no app grants", never "this app has no item-level access".
 
 ### Fixed
+
+- **A failed action in a Credentials-tab dialog gave no visible reason.** The
+  three dialogs that run a command — new client secret, generate certificate,
+  rotate into Key Vault — wrote their failures to the tab-body banner, which
+  renders *behind* the modal backdrop. On failure the dialog stays open (only
+  success closes it), so an operator saw the dialog sitting there having
+  apparently done nothing: no certificate, no key, and no explanation. Most
+  visible on "Generate self-signed certificate", whose own copy promises to
+  show the private key once. Each dialog now shows its own failure, and opening
+  one clears any earlier unrelated error.
+
+
 
 - **Concurrent token refreshes could splice two refresh tokens together and kill
   the session.** The refresh lock is keyed per (tenant, scope set) *by design*,
