@@ -1946,7 +1946,15 @@ pub async fn migrate_application_access_policies(
 
     let mut policies = exo.get_application_access_policies().await?;
     if let Some(filter_app) = &app_id {
-        policies.retain(|p| p.app_id.as_deref() == Some(filter_app.as_str()));
+        // Casefolded: Exchange echoes the AppId back in whatever case it stored,
+        // and a GUID differing only in case is the same application. A
+        // case-sensitive filter here silently produced an empty migration plan
+        // for a tenant whose policies were created with an upper-case GUID.
+        policies.retain(|p| {
+            p.app_id
+                .as_deref()
+                .is_some_and(|a| a.eq_ignore_ascii_case(filter_app))
+        });
     }
 
     // A blank override is treated as "no override"; a whole-tenant run ignores it

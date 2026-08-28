@@ -140,7 +140,15 @@ fn rule_credentials(
     long_lived: &[&CredentialSummary],
 ) -> RuleContribution {
     let mut c = RuleContribution::default();
-    if !expired.is_empty() && active_count == 0 {
+    // `active_count` deliberately excludes `ExpiringSoon` so the expiring-soon
+    // rules below can say "nothing but expiring credentials left". That is sound
+    // there and NOT sound here: with one expired secret and one expiring-soon
+    // secret, `active_count == 0` while a working credential is still
+    // authenticating. Reporting "All credentials expired" then reads as a dead
+    // app, so an operator stops looking — and the ranking overstates the risk.
+    // Only the count of credentials that still WORK decides this branch.
+    let still_working = active_count + expiring.len();
+    if !expired.is_empty() && still_working == 0 {
         c.score += PTS_ALL_CREDS_EXPIRED;
         c.issues
             .push(format!("All credentials expired: {}", join_names(expired)));
@@ -151,7 +159,7 @@ fn rule_credentials(
         c.issues.push(format!(
             "Mixed credential status: {} are expired but {} credentials are active",
             join_names(expired),
-            active_count
+            still_working
         ));
         c.recommendations.push(
             "Remove expired credentials to clean up authentication configuration".to_string(),
@@ -2813,6 +2821,68 @@ mod tests {
         // Expiring-soon is not yet expired, so no remove-expired remediation is
         // offered (guards the `!expired.is_empty()` gate against regressions).
         assert!(item.remediations.is_empty());
+    }
+
+    /// One expired secret plus one expiring-soon secret is NOT "all credentials
+    /// expired" — the expiring one still authenticates.
+    ///
+    /// `active_count` excludes `ExpiringSoon` so the expiring-soon rules can
+    /// say "nothing but expiring credentials left". That exclusion is sound in
+    /// the branch it was written for and wrong one branch above it: the app read
+    /// as dead, so an operator stopped looking, and the ranking overstated the
+    /// risk.
+    #[test]
+    fn one_expired_beside_one_expiring_is_mixed_not_all_expired() {
+        let mut app = base_app();
+        app.password_credentials = vec![
+            PasswordCredential {
+                key_id: "k1".into(),
+                display_name: Some("dead".into()),
+                start_date_time: Some(now() - Duration::days(400)),
+                end_date_time: Some(now() - Duration::days(1)),
+                ..Default::default()
+            },
+            PasswordCredential {
+                key_id: "k2".into(),
+                display_name: Some("expiring".into()),
+                start_date_time: Some(now() - Duration::days(10)),
+                end_date_time: Some(now() + Duration::days(3)),
+                ..Default::default()
+            },
+        ];
+        let item = score_application(&app, Some(true), &AppPermissions::default(), now());
+        let issues = item.issues.join(" | ");
+        assert!(
+            !issues.contains("All credentials expired"),
+            "a working credential is still authenticating: {issues}"
+        );
+        assert!(
+            issues.contains("Mixed credential status"),
+            "expected the mixed verdict: {issues}"
+        );
+        // The count names credentials that still work, not just fully-active
+        // ones — "0 credentials are active" beside a live secret is the same lie
+        // one sentence shorter.
+        assert!(
+            issues.contains("but 1 credentials are active"),
+            "the count must include the expiring-soon credential: {issues}"
+        );
+    }
+
+    /// The other side of the branch: when nothing survives, "all expired" is
+    /// still the right verdict and still carries the heavier score.
+    #[test]
+    fn every_credential_expired_is_still_reported_as_all_expired() {
+        let mut app = base_app();
+        app.password_credentials = vec![PasswordCredential {
+            key_id: "k1".into(),
+            display_name: Some("dead".into()),
+            start_date_time: Some(now() - Duration::days(400)),
+            end_date_time: Some(now() - Duration::days(1)),
+            ..Default::default()
+        }];
+        let item = score_application(&app, Some(true), &AppPermissions::default(), now());
+        assert!(item.issues.join(" | ").contains("All credentials expired"));
     }
 
     #[test]

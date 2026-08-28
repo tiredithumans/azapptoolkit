@@ -1,31 +1,5 @@
 ## [Unreleased]
 
-### Fixed
-
-- **A tenant name pattern missing `{appId}` collapsed every app onto one shared
-  scope, group and secret.** The substitution is a no-op when the pattern omits
-  the placeholder, so with `scope_name_pattern = "contoso_app_scope"` every app
-  in the tenant resolved to the same name. Scoping app A created a management
-  scope filtered to A's group; scoping app B then got A's scope back untouched
-  (the ensure step is create-only) and **B's scoped Exchange roles were attached
-  to a scope pointing at A's mailboxes**. The same collapse cross-wired Key Vault
-  secret names between apps. Such a pattern is now rejected when saved, and the
-  resolvers fall back to the built-in per-app default if one reaches them anyway.
-- **An interrupted settings write could destroy the tenant defaults and vault
-  bindings.** `settings.json` was truncated in place, so any interruption before
-  the write completed left it empty or torn; parsing then failed, the caller
-  swallowed it behind a default, and the next writer serialized those defaults
-  back over the file. The write is now a temp-and-rename, which is atomic and
-  keeps the owner-only mode.
-- **Three unsynchronized writers of `settings.json` could lose a vault
-  binding.** The rotation flow, the auth config and the tenant defaults each did
-  their own read-modify-write, and the last runs synchronously on the main
-  thread while the first is async on the runtime pool — so they genuinely
-  interleave. Either order silently dropped one side's write: the operator's
-  just-saved defaults, or the freshly recorded binding the next rotation needs to
-  find the secret again. All three now go through one serialized helper.
-
-
 ### Added
 
 - **SharePoint access can now be scoped to a single library, folder or file.**
@@ -54,6 +28,73 @@
   "this resource has no app grants", never "this app has no item-level access".
 
 ### Fixed
+
+- **A tenant name pattern missing `{appId}` collapsed every app onto one shared
+  scope, group and secret.** The substitution is a no-op when the pattern omits
+  the placeholder, so with `scope_name_pattern = "contoso_app_scope"` every app
+  in the tenant resolved to the same name. Scoping app A created a management
+  scope filtered to A's group; scoping app B then got A's scope back untouched
+  (the ensure step is create-only) and **B's scoped Exchange roles were attached
+  to a scope pointing at A's mailboxes**. The same collapse cross-wired Key Vault
+  secret names between apps. Such a pattern is now rejected when saved, and the
+  resolvers fall back to the built-in per-app default if one reaches them anyway.
+- **An interrupted settings write could destroy the tenant defaults and vault
+  bindings.** `settings.json` was truncated in place, so any interruption before
+  the write completed left it empty or torn; parsing then failed, the caller
+  swallowed it behind a default, and the next writer serialized those defaults
+  back over the file. The write is now a temp-and-rename, which is atomic and
+  keeps the owner-only mode.
+- **Three unsynchronized writers of `settings.json` could lose a vault
+  binding.** The rotation flow, the auth config and the tenant defaults each did
+  their own read-modify-write, and the last runs synchronously on the main
+  thread while the first is async on the runtime pool — so they genuinely
+  interleave. Either order silently dropped one side's write: the operator's
+  just-saved defaults, or the freshly recorded binding the next rotation needs to
+  find the secret again. All three now go through one serialized helper.
+
+- **"All credentials expired" was reported — and scored — for an app that still
+  holds a working credential.** The active count deliberately excludes
+  expiring-soon credentials so the expiring-soon rules can say "nothing but
+  expiring credentials left"; that exclusion is sound in the branch it was
+  written for and wrong in the branch above it. With one expired secret and one
+  expiring-soon secret the app was scored and labelled as dead while a working
+  credential was still authenticating, so an operator stopped looking and the
+  ranking overstated the risk. **Affects audit scores and issue text.**
+- **A legacy Application Access Policy was matched case-sensitively, against the
+  crate's own documented rule.** Exchange echoes the AppId back in whatever case
+  it stored it, and a GUID differing only in case is the same application. In a
+  tenant where `New-ApplicationAccessPolicy` ran with an upper-case GUID, a
+  confined app reported as **org-wide** on the Permissions-tab Scope column and
+  scored at full risk. Fixed at all three comparison sites (verdict, migration
+  filter, permission tester). **Affects audit scores and the Scope column.**
+- **An app confined by several Application Access Policies named only the
+  first.** Multiple RestrictAccess policies grant the *union* of their groups —
+  which is why the migration planner carries a vector of source policies — but
+  the verdict used `find`, so an app confined to Sales *and* Execs reported
+  `Sales` alone, with Sales' description as the recipient filter. That string is
+  operator-facing on three surfaces, including the permission tester's "which
+  mailboxes can this reach" answer. Scope names are now unioned, sorted and
+  deduped, and the per-policy description is dropped when the union spans more
+  than one policy rather than misdescribing the reach.
+
+
+
+- **Deleting a service principal left the tenant-wide grant matrices reporting
+  its access.** The SP objects and the grant matrices live under different cache
+  kinds, and the delete swept only the first — no command compensated, because
+  `invalidate_app_lists` touches `Lists` and the audit cache, never the
+  `grants:` prefix. An operator deleted an over-privileged enterprise
+  application and the Security tab kept listing its application permissions as
+  live, which is the worst direction for a least-privilege view to be wrong in.
+- **Publishing an app role or an API scope didn't reach the picker.** The cached
+  resource-SP definitions were invalidated by none of the three mutators that
+  change them, so an operator published a role on their own API — which the
+  tenant app-role resource list exists to make grantable — opened the
+  Grant-access wizard, and the role wasn't there. The definitions now sit under
+  their own `resource:` key segment, mirroring how `grants:` separates the grant
+  matrices in the same bucket, so the sweep can be precise instead of taking
+  both families with it.
+
 
 - **The shared retry loop replayed non-idempotent writes after a network error
   or a 5xx.** `with_retries` re-invokes the caller's whole closure — request
@@ -99,6 +140,14 @@
   that also holds a live certificate. Both paths now round-trip raw JSON, the
   shape the service-principal twin was deliberately written against for this
   reason, so `key` and every other unmodeled field survive byte-for-byte.
+
+### Performance
+
+- **A cache bucket at its entry cap ran a full TTL sweep on every write.** The
+  "has anything expired?" flag was computed and then ignored on the at-cap
+  branch, so past the cap every single `put` did a `retain` over the whole
+  bucket, a rebuild that clones every key, and a `min()` scan — all under the
+  mutex the interactive list reads contend on, and all provably removing nothing.
 
 ### Security
 
