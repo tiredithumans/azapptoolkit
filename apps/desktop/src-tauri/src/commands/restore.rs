@@ -27,6 +27,7 @@ use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_core::federation::validate_federated_credential;
+use azapptoolkit_core::redirect::validate_redirect_uri;
 use azapptoolkit_core::restore_plan::{
     remap_pre_authorized, remap_required_resource_access, rewrite_identifier_uris,
 };
@@ -52,6 +53,27 @@ use crate::dto::backup::{
 };
 use crate::dto::bulk::BulkProgress;
 use crate::state::AppState;
+
+/// Keeps only the redirect URIs that pass `core::redirect`, recording each
+/// rejection in the restore report.
+///
+/// Per-URI rather than all-or-nothing on the list: a manifest with one bad
+/// reply URL among four good ones should restore the four, and the operator
+/// needs to know precisely which one was dropped. Mirrors the
+/// federated-credential loop's "was NOT restored — {reason}" phrasing so the
+/// report reads consistently.
+fn checked_uris(uris: &[String], label: &str, warnings: &mut Vec<String>) -> Vec<String> {
+    uris.iter()
+        .filter(|u| match validate_redirect_uri(u) {
+            Ok(()) => true,
+            Err(reason) => {
+                warnings.push(format!("{label}: '{u}' was NOT restored — {reason}"));
+                false
+            }
+        })
+        .cloned()
+        .collect()
+}
 
 /// Lifetime for regenerated secrets — matches the app-creation default (180d).
 /// The original expiry can't be honored (it may be in the past), so a fresh
@@ -416,34 +438,81 @@ async fn wire_application(
     }
 
     // Authentication (redirect URIs + implicit-grant flags + public-client).
-    let has_auth = !app.web_redirect_uris.is_empty()
-        || !app.spa_redirect_uris.is_empty()
-        || !app.public_client_redirect_uris.is_empty()
-        || app.logout_url.is_some()
+    //
+    // Reply URLs are where auth codes get delivered, so a manifest carrying
+    // `https://*.evil.example/cb` or a plaintext `http://attacker.example/cb`
+    // hands an attacker the codes for the restored app. The interactive
+    // authentication editor rejects both before its PATCH; a manifest is
+    // untrusted input for exactly the reason the federated-credential loop
+    // below already documents, so it gets the same validator and the same
+    // shape: reject the offending list, name it in the report, keep going.
+    let web_redirect_uris = checked_uris(
+        &app.web_redirect_uris,
+        "web redirect URIs",
+        &mut out.warnings,
+    );
+    let spa_redirect_uris = checked_uris(
+        &app.spa_redirect_uris,
+        "SPA redirect URIs",
+        &mut out.warnings,
+    );
+    let public_client_redirect_uris = checked_uris(
+        &app.public_client_redirect_uris,
+        "public-client redirect URIs",
+        &mut out.warnings,
+    );
+    // A logout URL is a single value, not a list — same rule, one entry.
+    let logout_url = match app.logout_url.as_deref() {
+        Some(u) => match validate_redirect_uri(u) {
+            Ok(()) => app.logout_url.clone(),
+            Err(reason) => {
+                out.warnings
+                    .push(format!("logout URL was NOT restored — {reason}"));
+                None
+            }
+        },
+        None => None,
+    };
+
+    let has_auth = !web_redirect_uris.is_empty()
+        || !spa_redirect_uris.is_empty()
+        || !public_client_redirect_uris.is_empty()
+        || logout_url.is_some()
         || app.enable_access_token_issuance
         || app.enable_id_token_issuance
         || app.is_fallback_public_client;
     if has_auth {
         let patch = ApplicationAuthenticationPatch {
             web: Some(ApplicationWebPatch {
-                redirect_uris: Some(app.web_redirect_uris.clone()),
-                logout_url: Some(app.logout_url.clone().unwrap_or_default()),
+                redirect_uris: Some(web_redirect_uris.clone()),
+                logout_url: Some(logout_url.clone().unwrap_or_default()),
                 implicit_grant_settings: Some(ImplicitGrantSettingsPatch {
                     enable_access_token_issuance: Some(app.enable_access_token_issuance),
                     enable_id_token_issuance: Some(app.enable_id_token_issuance),
                 }),
             }),
             spa: Some(ApplicationSpaPatch {
-                redirect_uris: Some(app.spa_redirect_uris.clone()),
+                redirect_uris: Some(spa_redirect_uris.clone()),
             }),
             public_client: Some(ApplicationPublicClientPatch {
-                redirect_uris: Some(app.public_client_redirect_uris.clone()),
+                redirect_uris: Some(public_client_redirect_uris.clone()),
             }),
             is_fallback_public_client: Some(app.is_fallback_public_client),
         };
         if let Err(e) = client.patch_application_web(&c.new_object_id, &patch).await {
             session.note_code(e.ui_code());
             out.warnings.push(format!("authentication: {e}"));
+        } else {
+            // Surface what was actually written, the way a restored federated
+            // credential is surfaced: a reply URL is standing configuration an
+            // operator should be able to review after the fact.
+            for uri in web_redirect_uris
+                .iter()
+                .chain(&spa_redirect_uris)
+                .chain(&public_client_redirect_uris)
+            {
+                out.warnings.push(format!("restored reply URL: {uri}"));
+            }
         }
     }
 
@@ -1017,5 +1086,58 @@ mod tests {
         let blocked = build_restore_plan(&backup, "src-tenant".to_string(), "UsGov");
         assert!(blocked.cloud_mismatch.is_some());
         assert!(!blocked.tenant_changed);
+    }
+
+    /// A manifest is untrusted input — the same premise the federated-credential
+    /// loop states. Reply URLs are where auth codes are delivered, so a wildcard
+    /// or plaintext one must not reach the tenant just because it arrived in a
+    /// file rather than through the editor.
+    #[test]
+    fn restored_reply_urls_are_validated_like_editor_input() {
+        let uris = [
+            "https://good.contoso.com/cb",
+            "https://*.evil.example/cb",
+            "http://attacker.example/cb",
+            "http://localhost:5173/cb",
+        ]
+        .map(String::from);
+        let mut warnings = Vec::new();
+        let kept = checked_uris(&uris, "web redirect URIs", &mut warnings);
+
+        // Per-URI, not all-or-nothing: one bad entry must not discard the good
+        // ones, and loopback http stays legal exactly as it is in the editor.
+        assert_eq!(
+            kept,
+            vec![
+                "https://good.contoso.com/cb".to_string(),
+                "http://localhost:5173/cb".to_string()
+            ]
+        );
+        assert_eq!(
+            warnings.len(),
+            2,
+            "each rejection is reported: {warnings:?}"
+        );
+        assert!(warnings.iter().any(|w| w.contains("*.evil.example")));
+        assert!(warnings.iter().any(|w| w.contains("attacker.example")));
+        // The operator can tell which list it was.
+        assert!(
+            warnings
+                .iter()
+                .all(|w| w.starts_with("web redirect URIs: "))
+        );
+    }
+
+    /// An empty list restores nothing and warns about nothing — the common case
+    /// must stay silent.
+    #[test]
+    fn checked_uris_is_silent_when_everything_is_valid() {
+        let uris = ["https://a.contoso.com/cb"].map(String::from);
+        let mut warnings = Vec::new();
+        assert_eq!(
+            checked_uris(&uris, "web redirect URIs", &mut warnings).len(),
+            1
+        );
+        assert!(warnings.is_empty());
     }
 }

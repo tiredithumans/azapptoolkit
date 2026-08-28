@@ -29,6 +29,14 @@ pub fn validate_redirect_uri(uri: &str) -> Result<(), String> {
     if let Some(rest) = lower.strip_prefix("http://") {
         // Loopback is the only permitted plaintext-http case (native dev clients).
         let authority = rest.split('/').next().unwrap_or("");
+        // Userinfo comes first and is separated from the real host by the LAST
+        // `@`. Splitting the authority on `:` before considering it read
+        // `http://127.0.0.1:1@evil.com/cb` as host `127.0.0.1` — so the one
+        // intentional plaintext exception admitted a reply URL pointed at an
+        // arbitrary host. `localhost:80@evil.com` and `[::1]@evil.com` bypassed
+        // it the same way. `net::same_origin` rejects embedded credentials
+        // outright for the same reason.
+        let authority = authority.rsplit('@').next().unwrap_or("");
         let host = if let Some(bracketed) = authority.strip_prefix('[') {
             // IPv6 literal `[::1]:port` → `::1`.
             bracketed.split(']').next().unwrap_or("")
@@ -79,6 +87,32 @@ mod tests {
         // A hostname that merely starts with "localhost" is NOT loopback.
         assert!(validate_redirect_uri("http://localhost.evil.com/auth").is_err());
         assert!(validate_redirect_uri("urn:ietf:wg:oauth:2.0:oob").is_err());
+    }
+
+    /// Userinfo lets a plaintext reply URL name a loopback host it does not
+    /// actually resolve to. The authority was split on `:` before `@` was
+    /// considered, so everything before the first colon read as the host.
+    #[test]
+    fn rejects_a_loopback_host_disguised_by_userinfo() {
+        for uri in [
+            // `127.0.0.1:1` is userinfo; the real host is evil.com.
+            "http://127.0.0.1:1@evil.com/cb",
+            "http://localhost:80@evil.com/cb",
+            "http://[::1]@evil.com/cb",
+            // Multiple `@` — the LAST one separates the host, so an early
+            // loopback-looking segment must not win.
+            "http://localhost@127.0.0.1@evil.com/cb",
+            // Bare userinfo with no port.
+            "http://localhost@evil.com/cb",
+        ] {
+            assert!(
+                validate_redirect_uri(uri).is_err(),
+                "{uri} names evil.com, not a loopback host"
+            );
+        }
+        // The genuine loopback forms still pass, userinfo-free.
+        assert!(validate_redirect_uri("http://localhost:5173/callback").is_ok());
+        assert!(validate_redirect_uri("http://[::1]:8400/cb").is_ok());
     }
 
     #[test]

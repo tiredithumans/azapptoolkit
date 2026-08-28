@@ -1,5 +1,32 @@
 ## [Unreleased]
 
+### Added
+
+- **SharePoint access can now be scoped to a single library, folder or file.**
+  The toolkit modelled only one of Microsoft's four Selected permission scopes —
+  `Sites.Selected`, at the site-collection level. Adding
+  `Files.SelectedOperations.Selected` (or the `Lists.` / `ListItems.` siblings)
+  produced no scoping affordance at all: no "Scope…" button, no Scope badge, and
+  a Grant-access wizard that fell through to *"these permissions can't be scoped
+  together"* and granted org-wide — the exact opposite of what those scopes are
+  for. `ScopeKind::SharePointItem` is now a second SharePoint mechanism, with its
+  own target panel and apply path (`grant_selected_item_access`).
+
+  The panel **resolves every URL before granting** and shows what it found
+  ("Folder · Finance / Documents / Invoices"), for two reasons: a grant below the
+  site collection breaks SharePoint permission inheritance on the target and
+  consumes one of the library's unique permission scopes, and a URL can resolve
+  one level away from where it was aimed. A target the chosen permission cannot
+  reach is flagged in the panel and skipped by the backend rather than granted
+  one level up — `Files.*` reaches items in document libraries, `ListItems.*`
+  reaches those *and* items in plain lists, and neither reaches a site.
+
+  Unlike the site path this strips nothing: a Selected scope has no org-wide
+  predecessor to convert away from. Reach is also **not enumerable** — there is
+  no reverse `appId → items` lookup and no bounded walk of every folder in a
+  tenant, so grants are verified per resource by URL and an empty result means
+  "this resource has no app grants", never "this app has no item-level access".
+
 ### Fixed
 
 - **The shared retry loop replayed non-idempotent writes after a network error
@@ -35,17 +62,6 @@
   both callers page through. The helper's own doc claimed the cap was its cycle
   guard; it now has the explicit page limit its sibling always had.
 
-### Security
-
-- **The Exchange client followed `@odata.nextLink` with no same-origin check.**
-  `core::net` states the rule in its own module doc, and Graph, ARM and Key
-  Vault all enforce it — a paging link is attacker-influenced server output, so
-  a response body naming a foreign host got the Exchange admin bearer attached
-  to a request to that host. The doc header listed only "(Graph, Key Vault,
-  ARM)", which is how the gap stayed invisible.
-
-
-### Fixed
 
 - **Adding or removing one certificate stripped the certificate blob from every
   other credential on the app.** `keyCredentials` is a full-replace collection,
@@ -58,34 +74,55 @@
   shape the service-principal twin was deliberately written against for this
   reason, so `key` and every other unmodeled field survive byte-for-byte.
 
+### Security
 
-### Added
+- **A federated-credential issuer could disguise the host its signing keys are
+  fetched from.** `validate_issuer` checked the scheme and that a host segment
+  existed, but never rejected userinfo — so
+  `https://token.actions.githubusercontent.com@evil.example/` passed while Entra
+  fetched the OIDC metadata and signing keys from **evil.example**. This module
+  is the only control on the value (Graph accepts an incorrect issuer without
+  error), and both call sites depend on it, including the restore path. The
+  result was a secretless, non-expiring trust that read as GitHub in the UI.
+- **DR restore wrote reply URLs from an untrusted manifest without validating
+  them.** The interactive authentication editor rejects a wildcard or plaintext
+  reply URL before its PATCH; restore wrote them verbatim, so a manifest
+  carrying `https://*.evil.example/cb` created the app in the operator's tenant
+  with that URL and auth codes for it could be delivered to the attacker's host.
+  Each list is now validated per-URI — one bad entry no longer discards the good
+  ones — with every rejection named in the restore report, and the reply URLs
+  that *were* written are surfaced there too. A new repo invariant derives the
+  rule from the source tree, so a future command that builds an authentication
+  patch without validating is caught.
+- **The loopback-only exception for plaintext `http` reply URLs was defeated by
+  userinfo.** The authority was split on `:` before `@` was considered, so
+  `http://127.0.0.1:1@evil.com/cb` read as host `127.0.0.1` and passed —
+  as did `http://localhost:80@evil.com/cb` and `http://[::1]@evil.com/cb`. The
+  one intentional plaintext exception admitted a reply URL pointed at an
+  arbitrary host.
+- **A server-supplied ARM role-definition id was spliced onto the base URL with
+  the bearer attached.** Both call sites pass the value straight out of an ARM
+  `roleAssignments` response — the same attacker-influenced server-output class
+  the file already guards `nextLink` for — but it was concatenated with no
+  separator and no validation, so an id without a leading `/` reinterpreted the
+  authority of the composed URL. It must now be an absolute path free of
+  `?`/`#`, and the composed URL is re-checked against the ARM origin.
+- **The usage query's KQL literal used SQL-style quote doubling, which KQL does
+  not honour.** This is the only caller of the Log Analytics `query` endpoint,
+  so it is the whole KQL trust boundary. A non-verbatim `'…'` literal escapes an
+  inner quote with a backslash, not by doubling: `''` closed the literal and
+  opened another, which KQL silently concatenates, so a value containing `'`
+  filtered on the wrong string and a backslash was not neutralised at all. The
+  literal is now verbatim (`@'…'`), where `''` genuinely is the documented
+  escape.
 
-- **SharePoint access can now be scoped to a single library, folder or file.**
-  The toolkit modelled only one of Microsoft's four Selected permission scopes —
-  `Sites.Selected`, at the site-collection level. Adding
-  `Files.SelectedOperations.Selected` (or the `Lists.` / `ListItems.` siblings)
-  produced no scoping affordance at all: no "Scope…" button, no Scope badge, and
-  a Grant-access wizard that fell through to *"these permissions can't be scoped
-  together"* and granted org-wide — the exact opposite of what those scopes are
-  for. `ScopeKind::SharePointItem` is now a second SharePoint mechanism, with its
-  own target panel and apply path (`grant_selected_item_access`).
 
-  The panel **resolves every URL before granting** and shows what it found
-  ("Folder · Finance / Documents / Invoices"), for two reasons: a grant below the
-  site collection breaks SharePoint permission inheritance on the target and
-  consumes one of the library's unique permission scopes, and a URL can resolve
-  one level away from where it was aimed. A target the chosen permission cannot
-  reach is flagged in the panel and skipped by the backend rather than granted
-  one level up — `Files.*` reaches items in document libraries, `ListItems.*`
-  reaches those *and* items in plain lists, and neither reaches a site.
-
-  Unlike the site path this strips nothing: a Selected scope has no org-wide
-  predecessor to convert away from. Reach is also **not enumerable** — there is
-  no reverse `appId → items` lookup and no bounded walk of every folder in a
-  tenant, so grants are verified per resource by URL and an empty result means
-  "this resource has no app grants", never "this app has no item-level access".
-
+- **The Exchange client followed `@odata.nextLink` with no same-origin check.**
+  `core::net` states the rule in its own module doc, and Graph, ARM and Key
+  Vault all enforce it — a paging link is attacker-influenced server output, so
+  a response body naming a foreign host got the Exchange admin bearer attached
+  to a request to that host. The doc header listed only "(Graph, Key Vault,
+  ARM)", which is how the gap stayed invisible.
 
 ## [0.26.3] - 2026-08-20
 
