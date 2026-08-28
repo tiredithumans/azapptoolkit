@@ -97,3 +97,52 @@ async fn a_generated_certificate_reveals_its_private_key_once() {
         "the copy affordance the modal points at must be present"
     );
 }
+
+/// A FAILED generate must say why, inside the dialog.
+///
+/// The reported symptom — "it doesn't display the private key like the popup
+/// says" — is what this produces. On failure the dialog stays open (only success
+/// closes it) and no key appears, while the reason went to the tab-body banner
+/// **behind the modal backdrop**, where it is invisible. From the operator's
+/// side the app silently did nothing.
+#[wasm_bindgen_test]
+async fn a_failed_generate_explains_itself_inside_the_dialog() {
+    ts::reset();
+    ts::mock_err(
+        "generate_self_signed_certificate",
+        &azapptoolkit_dto::UiError::validation(
+            "cert_generation_failed",
+            "Subject contains an unsupported character.",
+        ),
+    );
+    let detail = Arc::new(fixtures::application_detail(
+        "obj-1",
+        "app-1",
+        "Contoso CRM",
+    ));
+    let _m = ts::mount_view(move || {
+        let detail = detail.clone();
+        let detail = Signal::derive(move || detail.clone());
+        view! { <CredentialsTab detail=detail on_changed=Callback::new(|()| {}) /> }
+    });
+
+    ts::wait_for(|| ts::body_contains("Generate certificate…")).await;
+    click_button("Generate certificate…");
+    ts::wait_for(|| ts::body_contains("shows the private key once")).await;
+    click_button("Generate");
+    ts::wait_for(|| ts::call_count("generate_self_signed_certificate") == 1).await;
+
+    ts::wait_for(|| ts::body_contains("unsupported character")).await;
+    // The reason must be INSIDE the still-open dialog, not on the page behind it.
+    let in_modal = ts::query_all(".modal .form-error").iter().any(|e| {
+        e.text_content()
+            .unwrap_or_default()
+            .contains("unsupported character")
+    });
+    assert!(
+        in_modal,
+        "the failure reason must render inside the modal; behind the backdrop it is invisible"
+    );
+    // And the dialog is still open, so the operator can correct and retry.
+    assert!(ts::body_contains("shows the private key once"));
+}
