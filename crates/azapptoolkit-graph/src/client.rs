@@ -236,6 +236,20 @@ impl GraphClient {
         format!("{}|{}", self.tenant_id, app_id)
     }
 
+    /// Cache key for a **resource** SP's appRoles / oauth2PermissionScopes,
+    /// which live under [`CacheKind::Permissions`] rather than
+    /// [`CacheKind::ServicePrincipal`].
+    ///
+    /// Its own `resource:` segment, mirroring how `grants:` separates the
+    /// tenant-wide grant matrices in the same bucket. Without a segment the
+    /// bucket held two unrelated families under indistinguishable
+    /// `{tenant}|{something}` keys, so there was no prefix that could sweep one
+    /// without the other — and the mutators that change these definitions
+    /// consequently swept neither.
+    fn resource_sp_cache_key(&self, app_id: &str) -> String {
+        format!("{}|resource:{}", self.tenant_id, app_id)
+    }
+
     /// Cache key for the audit's lean SP projection. Distinct `|lean` suffix so
     /// the three-field object never collides with — or overwrites — the full SP
     /// the detail pane caches under [`Self::sp_cache_key`].

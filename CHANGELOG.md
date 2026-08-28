@@ -1,5 +1,32 @@
 ## [Unreleased]
 
+### Fixed
+
+- **Deleting a service principal left the tenant-wide grant matrices reporting
+  its access.** The SP objects and the grant matrices live under different cache
+  kinds, and the delete swept only the first — no command compensated, because
+  `invalidate_app_lists` touches `Lists` and the audit cache, never the
+  `grants:` prefix. An operator deleted an over-privileged enterprise
+  application and the Security tab kept listing its application permissions as
+  live, which is the worst direction for a least-privilege view to be wrong in.
+- **Publishing an app role or an API scope didn't reach the picker.** The cached
+  resource-SP definitions were invalidated by none of the three mutators that
+  change them, so an operator published a role on their own API — which the
+  tenant app-role resource list exists to make grantable — opened the
+  Grant-access wizard, and the role wasn't there. The definitions now sit under
+  their own `resource:` key segment, mirroring how `grants:` separates the grant
+  matrices in the same bucket, so the sweep can be precise instead of taking
+  both families with it.
+
+### Performance
+
+- **A cache bucket at its entry cap ran a full TTL sweep on every write.** The
+  "has anything expired?" flag was computed and then ignored on the at-cap
+  branch, so past the cap every single `put` did a `retain` over the whole
+  bucket, a rebuild that clones every key, and a `min()` scan — all under the
+  mutex the interactive list reads contend on, and all provably removing nothing.
+
+
 ### Security
 
 - **A federated-credential issuer could disguise the host its signing keys are
