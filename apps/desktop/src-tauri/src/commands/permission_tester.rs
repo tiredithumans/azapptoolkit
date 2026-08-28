@@ -203,7 +203,14 @@ async fn entra_reach(
     let Some(policies) = policies else {
         return EntraReach::Unverified(perms);
     };
-    if !policies.iter().any(|p| p.app_id.as_deref() == Some(app_id)) {
+    // Casefolded for the reason `verdict::aap_verdict_for` documents: Exchange
+    // stores the AppId in whatever case it was given, and a case-sensitive
+    // compare reported a confined app as reaching every mailbox.
+    if !policies.iter().any(|p| {
+        p.app_id
+            .as_deref()
+            .is_some_and(|a| a.eq_ignore_ascii_case(app_id))
+    }) {
         return EntraReach::OrgWide(perms);
     }
     match exo.test_application_access_policy(app_id, mailbox).await {
