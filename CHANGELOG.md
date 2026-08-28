@@ -1,5 +1,33 @@
 ## [Unreleased]
 
+### Fixed
+
+- **"All credentials expired" was reported — and scored — for an app that still
+  holds a working credential.** The active count deliberately excludes
+  expiring-soon credentials so the expiring-soon rules can say "nothing but
+  expiring credentials left"; that exclusion is sound in the branch it was
+  written for and wrong in the branch above it. With one expired secret and one
+  expiring-soon secret the app was scored and labelled as dead while a working
+  credential was still authenticating, so an operator stopped looking and the
+  ranking overstated the risk. **Affects audit scores and issue text.**
+- **A legacy Application Access Policy was matched case-sensitively, against the
+  crate's own documented rule.** Exchange echoes the AppId back in whatever case
+  it stored it, and a GUID differing only in case is the same application. In a
+  tenant where `New-ApplicationAccessPolicy` ran with an upper-case GUID, a
+  confined app reported as **org-wide** on the Permissions-tab Scope column and
+  scored at full risk. Fixed at all three comparison sites (verdict, migration
+  filter, permission tester). **Affects audit scores and the Scope column.**
+- **An app confined by several Application Access Policies named only the
+  first.** Multiple RestrictAccess policies grant the *union* of their groups —
+  which is why the migration planner carries a vector of source policies — but
+  the verdict used `find`, so an app confined to Sales *and* Execs reported
+  `Sales` alone, with Sales' description as the recipient filter. That string is
+  operator-facing on three surfaces, including the permission tester's "which
+  mailboxes can this reach" answer. Scope names are now unioned, sorted and
+  deduped, and the per-policy description is dropped when the union spans more
+  than one policy rather than misdescribing the reach.
+
+
 ### Added
 
 - **SharePoint access can now be scoped to a single library, folder or file.**
