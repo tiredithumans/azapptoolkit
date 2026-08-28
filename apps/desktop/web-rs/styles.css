@@ -1994,6 +1994,29 @@ h3 {
   padding: var(--space-1) 0;
 }
 
+/* Resolved-target preview in the SharePoint item scope panel. Each row shows
+   what a pasted URL turned out to be, so a level mismatch is visible before the
+   grant runs rather than as a warning afterwards. */
+.resource-probe-list {
+  list-style: none;
+  margin: var(--space-2) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.resource-probe {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: var(--text-sm);
+}
+.resource-probe--bad {
+  /* The row is already carrying a danger badge; this just ties the line to it. */
+  color: var(--danger);
+}
+
 /* ---------- Modal ---------- */
 .modal-backdrop {
   position: fixed;

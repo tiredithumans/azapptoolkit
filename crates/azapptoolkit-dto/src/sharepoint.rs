@@ -1,6 +1,9 @@
-//! SharePoint Sites.Selected IPC DTOs.
+//! SharePoint Selected-permission IPC DTOs — the `Sites.Selected` site model
+//! and the sub-site `*.SelectedOperations.Selected` family.
 
 use serde::{Deserialize, Serialize};
+
+use azapptoolkit_core::scoping::SelectedScopeLevel;
 
 /// A site permission projected for the UI: the granted roles plus the
 /// application principal (when the entry is an app grant).
@@ -213,4 +216,67 @@ mod tests {
         let cancelled = AppSiteAccessDto::from_sweep(&sweep(Vec::new(), 0, true), "app-1");
         assert!(!cancelled.is_complete());
     }
+}
+
+// ---------------- Sub-site Selected scopes ----------------
+
+/// A SharePoint URL resolved to the securable a Selected grant would address.
+///
+/// Mirrors `azapptoolkit_core::models::ResolvedSharePointResource`, projected
+/// for the UI: the panel echoes `display_path` and `level` back to the operator
+/// *before* anything is granted, because a folder grant breaks permission
+/// inheritance and is not something to discover after the fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SharePointResourceRef {
+    /// The level the URL resolved to — not the level the operator's permission
+    /// grants at. The two are reconciled by
+    /// `azapptoolkit_core::scoping::selected_scope_accepts`.
+    pub level: SelectedScopeLevel,
+    pub site_id: String,
+    pub site_url: Option<String>,
+    pub site_name: Option<String>,
+    pub list_id: Option<String>,
+    pub list_name: Option<String>,
+    pub item_id: Option<String>,
+    pub drive_id: Option<String>,
+    pub is_folder: bool,
+    pub display_path: String,
+    /// The URL the operator supplied, echoed back so a panel row can be keyed
+    /// and re-rendered against its own input.
+    pub input_url: String,
+}
+
+/// A permission entry on a list, folder or file, projected for the UI.
+///
+/// Separate from [`SitePermissionDto`] because the principal arrives under a
+/// different field (`grantedToV2`, not `grantedToIdentities`) and the row needs
+/// to say which securable it was read from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SelectedItemPermissionDto {
+    pub id: String,
+    pub roles: Vec<String>,
+    pub app_id: Option<String>,
+    pub app_display_name: Option<String>,
+}
+
+/// One target granted (or attempted) during a `grant_selected_item_access` run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectedItemGrantDto {
+    pub resource: SharePointResourceRef,
+    pub permission: SelectedItemPermissionDto,
+}
+
+/// Outcome of `grant_selected_item_access`.
+///
+/// `warnings` carries the per-target failures. A run that granted nothing still
+/// returns `Ok` with an empty `granted` and the reasons in `warnings`, so the
+/// panel can show which URLs were rejected and why rather than collapsing the
+/// whole batch into one error.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectedItemScopeResult {
+    /// True when the Selected appRole had to be added (it is granted
+    /// idempotently, so a re-run reports false).
+    pub granted_role_added: bool,
+    pub granted: Vec<SelectedItemGrantDto>,
+    pub warnings: Vec<String>,
 }

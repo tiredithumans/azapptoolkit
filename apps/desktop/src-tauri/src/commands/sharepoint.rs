@@ -1,4 +1,4 @@
-//! SharePoint Sites.Selected commands.
+//! SharePoint Selected-permission commands.
 //!
 //! Grants/lists/revokes per-site application permissions via Microsoft Graph
 //! (`/sites/{id}/permissions`) — the supported "current-context / delegated"
@@ -12,8 +12,13 @@ use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cache::{Cache, CacheKind};
-use azapptoolkit_core::models::{Site, SitePermission};
-use azapptoolkit_core::scoping::is_sharepoint_orgwide;
+use azapptoolkit_core::models::{
+    ResolvedSharePointResource, SelectedPermission, Site, SitePermission,
+};
+use azapptoolkit_core::scoping::{
+    MICROSOFT_GRAPH_APP_ID, SelectedScopeLevel, is_sharepoint_orgwide, selected_scope_accepts,
+    selected_scope_level_for,
+};
 
 use crate::commands::applications::invalidate_app_lists;
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
@@ -23,8 +28,9 @@ use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
 use crate::dto::sharepoint::{
-    AppSiteAccessDto, GrantSiteAccessResult, SiteAppGrantRow, SiteGrantDto, SitePermissionDto,
-    SiteScopeResult, SiteSweepProgress, SiteSweepResult,
+    AppSiteAccessDto, GrantSiteAccessResult, SelectedItemGrantDto, SelectedItemPermissionDto,
+    SelectedItemScopeResult, SharePointResourceRef, SiteAppGrantRow, SiteGrantDto,
+    SitePermissionDto, SiteScopeResult, SiteSweepProgress, SiteSweepResult,
 };
 use crate::state::AppState;
 
@@ -33,6 +39,27 @@ use crate::state::AppState;
 /// access because every site grant failed.
 fn should_remove_orgwide(remove_orgwide: bool, any_site_granted: bool) -> bool {
     remove_orgwide && any_site_granted
+}
+
+/// The distinct resources in a pasted target list, in the order given.
+///
+/// Two spellings of one resource would create two permission entries on it, each
+/// consuming another of the library's unique permission scopes for no extra
+/// access — and a repeated line in a pasted block is easy not to notice.
+/// Compared case- and trailing-slash-insensitively, which is how SharePoint
+/// treats its own URLs.
+fn dedupe_targets(urls: &[String]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for url in urls {
+        let key = url.trim().trim_end_matches('/').to_ascii_lowercase();
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        out.push(url.clone());
+    }
+    out
 }
 
 /// Pre-acquires the `Sites.FullControl.All` token with a typed call — so a
@@ -286,6 +313,320 @@ pub async fn convert_site_access_to_selected(
         removed_orgwide_grants,
         warnings,
     })
+}
+
+// ---------------- Sub-site Selected scopes ----------------
+//
+// `Lists.`/`ListItems.`/`Files.SelectedOperations.Selected` confine an app to a
+// single list, folder or file. Same three-step model as `Sites.Selected`
+// (consent the scope → grant a per-resource permission → present a token
+// carrying the scope), one level down — and the same reason a consented scope
+// alone grants nothing.
+//
+// Two properties the site path does not have:
+//
+// * **Reach is not enumerable.** `sweep_site_permissions` can walk every site in
+//   the tenant; nothing can walk every folder. There is no sweep here and no
+//   cached index, so a caller must never read "no rows" as "no grants" — it
+//   means "nothing was asked about". See `get_selected_item_permissions`.
+// * **A grant breaks permission inheritance** on its target and consumes one of
+//   the library's unique permission scopes. The UI warns before granting; the
+//   backend just records it in the result.
+
+fn to_item_dto(p: SelectedPermission) -> SelectedItemPermissionDto {
+    SelectedItemPermissionDto {
+        id: p.id.clone(),
+        roles: p.roles.clone(),
+        app_id: p.app_id().map(str::to_string),
+        app_display_name: p.app_display_name().map(str::to_string),
+    }
+}
+
+fn to_resource_ref(r: ResolvedSharePointResource, input_url: String) -> SharePointResourceRef {
+    SharePointResourceRef {
+        level: r.level,
+        site_id: r.site_id,
+        site_url: r.site_url,
+        site_name: r.site_name,
+        list_id: r.list_id,
+        list_name: r.list_name,
+        item_id: r.item_id,
+        drive_id: r.drive_id,
+        is_folder: r.is_folder,
+        display_path: r.display_path,
+        input_url,
+    }
+}
+
+/// Resolves a SharePoint URL to the securable a Selected grant would address,
+/// so the UI can echo *what* it is about to touch before the operator commits.
+#[tauri::command]
+pub async fn resolve_sharepoint_resource(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    url: String,
+) -> Result<SharePointResourceRef, UiError> {
+    let client = sharepoint_client_checked(&state, &tenant_id).await?;
+    let resolved = client
+        .resolve_sharepoint_resource(&url)
+        .await
+        .map_err(sharepoint_err)?;
+    Ok(to_resource_ref(resolved, url))
+}
+
+/// Grants `app_id` the `role` on each resolved target — the sub-site sibling of
+/// [`convert_site_access_to_selected`].
+///
+/// Ordering matches the site path: grant the Selected appRole first
+/// (idempotently), then the per-resource permissions. Nothing org-wide is
+/// stripped here, because these scopes have no org-wide predecessor to strip —
+/// an operator reaching for `Files.SelectedOperations.Selected` is granting
+/// least-privilege access from the start, not converting an existing broad
+/// grant. (Converting `Files.Read.All` is a separate, audit-driven flow.)
+///
+/// **Fail-closed on level.** Each target is checked with
+/// [`selected_scope_accepts`] against the level `permission_value` grants at. A
+/// mismatch — a site URL pasted while the cart holds a file scope — is recorded
+/// as a warning and skipped, never granted one level up. This is the whole point
+/// of resolving the URL first.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn grant_selected_item_access(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    sp_object_id: String,
+    app_id: String,
+    app_display_name: String,
+    permission_value: String,
+    target_urls: Vec<String>,
+    role: String,
+) -> Result<SelectedItemScopeResult, UiError> {
+    let scope_level = selected_scope_level_for(Some(MICROSOFT_GRAPH_APP_ID), &permission_value)
+        .filter(|l| l.breaks_inheritance())
+        .ok_or_else(|| {
+            UiError::validation(
+                "unsupported_permission",
+                format!(
+                    "{permission_value} is not a sub-site Selected scope on Microsoft Graph; \
+                 site-level access is granted with Sites.Selected"
+                ),
+            )
+        })?;
+
+    let client = sharepoint_client_checked(&state, &tenant_id).await?;
+    let (graph_sp_id, role_value_by_id) = graph_role_index(&client).await?;
+
+    let role_id = role_value_by_id
+        .iter()
+        .find(|(_, value)| value.as_str() == permission_value)
+        .map(|(id, _)| id.clone())
+        .ok_or_else(|| {
+            UiError::not_found(
+                "role",
+                format!("{permission_value} application role not found on Microsoft Graph"),
+            )
+        })?;
+
+    let mut warnings = Vec::new();
+
+    // 1. Grant the Selected appRole (idempotent) — without it in the token, the
+    //    per-resource permissions below grant nothing at all.
+    let existing = client.list_app_role_assignments(&sp_object_id).await?;
+    let already_held = existing
+        .iter()
+        .any(|a| a.resource_id == graph_sp_id && a.app_role_id == role_id);
+    let mut granted_role_added = false;
+    if !already_held {
+        client
+            .grant_app_role(&sp_object_id, &graph_sp_id, &role_id)
+            .await
+            .map_err(|err| {
+                UiError::validation(
+                    "grant_failed",
+                    format!("failed to grant {permission_value}: {err}"),
+                )
+            })?;
+        granted_role_added = true;
+    }
+
+    // 2. Grant per resource. A target that fails to resolve, sits at the wrong
+    //    level, or is rejected by SharePoint is reported and skipped — one bad
+    //    URL must not discard the grants that did land.
+    let roles = vec![role];
+    let mut granted = Vec::new();
+    for url in &dedupe_targets(&target_urls) {
+        let resolved = match client.resolve_sharepoint_resource(url).await {
+            Ok(r) => r,
+            Err(err) => {
+                warnings.push(format!("could not resolve '{url}': {err}"));
+                continue;
+            }
+        };
+        if !selected_scope_accepts(scope_level, resolved.level) {
+            warnings.push(format!(
+                "'{url}' is a {}, which {permission_value} cannot grant against — it grants at the {} level",
+                resolved.level.label(),
+                scope_level.label()
+            ));
+            continue;
+        }
+        let outcome = match resolved.level {
+            SelectedScopeLevel::List => {
+                grant_on_list(&client, &resolved, &app_id, &app_display_name, &roles).await
+            }
+            SelectedScopeLevel::ListItem | SelectedScopeLevel::File => {
+                grant_on_item(&client, &resolved, &app_id, &app_display_name, &roles).await
+            }
+            // Unreachable: `selected_scope_accepts` rejects a site target for
+            // every sub-site scope, and `scope_level` is sub-site by construction.
+            SelectedScopeLevel::Site => Err(UiError::validation(
+                "level_mismatch",
+                "site-level access is granted with Sites.Selected".to_string(),
+            )),
+        };
+        match outcome {
+            Ok(perm) => granted.push(SelectedItemGrantDto {
+                resource: to_resource_ref(resolved, url.clone()),
+                permission: perm,
+            }),
+            Err(err) => warnings.push(format!(
+                "failed to grant access to '{url}': {}",
+                err.message
+            )),
+        }
+    }
+
+    // The Selected appRole grant changes the SP's app-role assignments the
+    // cached lists reflect. Invalidate only on this success path.
+    //
+    // The per-resource permissions are deliberately NOT swept into
+    // `invalidate_site_sweep`: that index holds `/sites/{id}/permissions` rows,
+    // and a list or item grant creates none of those. Busting it here would
+    // force a tenant-wide re-sweep for a change it cannot observe.
+    invalidate_app_lists(&state.cache, &tenant_id);
+
+    Ok(SelectedItemScopeResult {
+        granted_role_added,
+        granted,
+        warnings,
+    })
+}
+
+async fn grant_on_list(
+    client: &azapptoolkit_graph::GraphClient,
+    resolved: &ResolvedSharePointResource,
+    app_id: &str,
+    app_display_name: &str,
+    roles: &[String],
+) -> Result<SelectedItemPermissionDto, UiError> {
+    let list_id = resolved
+        .list_id
+        .as_deref()
+        .ok_or_else(|| UiError::validation("unresolved", "no list id for this target"))?;
+    client
+        .grant_list_permission(&resolved.site_id, list_id, app_id, app_display_name, roles)
+        .await
+        .map(to_item_dto)
+        .map_err(sharepoint_err)
+}
+
+async fn grant_on_item(
+    client: &azapptoolkit_graph::GraphClient,
+    resolved: &ResolvedSharePointResource,
+    app_id: &str,
+    app_display_name: &str,
+    roles: &[String],
+) -> Result<SelectedItemPermissionDto, UiError> {
+    let (Some(list_id), Some(item_id)) = (resolved.list_id.as_deref(), resolved.item_id.as_deref())
+    else {
+        return Err(UiError::validation(
+            "unresolved",
+            "no list/item id for this target",
+        ));
+    };
+    client
+        .grant_list_item_permission(
+            &resolved.site_id,
+            list_id,
+            item_id,
+            app_id,
+            app_display_name,
+            roles,
+        )
+        .await
+        .map(to_item_dto)
+        .map_err(sharepoint_err)
+}
+
+/// Lists the application permissions on the resource `url` names.
+///
+/// This is a **verify-by-URL** read, not a reverse lookup: there is no
+/// `appId → items` index and no way to enumerate every folder in a tenant, so
+/// an empty result means "this resource has no app grants", never "this app has
+/// no item-level access anywhere".
+#[tauri::command]
+pub async fn list_selected_item_permissions(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    url: String,
+) -> Result<Vec<SelectedItemPermissionDto>, UiError> {
+    let client = sharepoint_client_checked(&state, &tenant_id).await?;
+    let resolved = client
+        .resolve_sharepoint_resource(&url)
+        .await
+        .map_err(sharepoint_err)?;
+    let perms = read_permissions(&client, &resolved).await?;
+    Ok(perms.into_iter().map(to_item_dto).collect())
+}
+
+async fn read_permissions(
+    client: &azapptoolkit_graph::GraphClient,
+    resolved: &ResolvedSharePointResource,
+) -> Result<Vec<SelectedPermission>, UiError> {
+    match (resolved.list_id.as_deref(), resolved.item_id.as_deref()) {
+        (Some(list_id), Some(item_id)) => client
+            .list_list_item_permissions(&resolved.site_id, list_id, item_id)
+            .await
+            .map_err(sharepoint_err),
+        (Some(list_id), None) => client
+            .list_list_permissions(&resolved.site_id, list_id)
+            .await
+            .map_err(sharepoint_err),
+        // A site URL: the site endpoint owns that read.
+        (None, _) => Err(UiError::validation(
+            "level_mismatch",
+            "use the site permissions view for a site collection".to_string(),
+        )),
+    }
+}
+
+/// Revokes one permission from the resource `url` names.
+#[tauri::command]
+pub async fn remove_selected_item_permission(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    url: String,
+    permission_id: String,
+) -> Result<(), UiError> {
+    let client = sharepoint_client_checked(&state, &tenant_id).await?;
+    let resolved = client
+        .resolve_sharepoint_resource(&url)
+        .await
+        .map_err(sharepoint_err)?;
+    match (resolved.list_id.as_deref(), resolved.item_id.as_deref()) {
+        (Some(list_id), Some(item_id)) => client
+            .remove_list_item_permission(&resolved.site_id, list_id, item_id, &permission_id)
+            .await
+            .map_err(sharepoint_err),
+        (Some(list_id), None) => client
+            .remove_list_permission(&resolved.site_id, list_id, &permission_id)
+            .await
+            .map_err(sharepoint_err),
+        (None, _) => Err(UiError::validation(
+            "level_mismatch",
+            "use the site permissions view for a site collection".to_string(),
+        )),
+    }
 }
 
 // ---------------- Site-permission sweep (reverse lookup) ----------------
@@ -715,5 +1056,63 @@ mod tests {
         );
         assert_eq!((scanned, failed, rows.len()), (1, 0, 1));
         assert_eq!(rows[0].permission_id, "perm-a");
+    }
+
+    #[test]
+    fn dedupe_targets_collapses_the_spellings_sharepoint_treats_as_one() {
+        let urls = [
+            "https://contoso.sharepoint.com/sites/Finance/Shared Documents/Invoices",
+            // Trailing slash, and SharePoint paths are case-insensitive.
+            "https://contoso.sharepoint.com/sites/Finance/Shared Documents/invoices/",
+            "  https://contoso.sharepoint.com/sites/Finance/Shared Documents/Invoices  ",
+            // A genuinely different folder survives.
+            "https://contoso.sharepoint.com/sites/Finance/Shared Documents/Receipts",
+        ]
+        .map(String::from);
+        let out = dedupe_targets(&urls);
+        assert_eq!(out.len(), 2, "three spellings of one folder are one target");
+        // The first spelling wins, so the operator sees back what they typed.
+        assert_eq!(out[0], urls[0]);
+        assert_eq!(out[1], urls[3]);
+    }
+
+    /// The gate that keeps a `Files.*` grant off a site or a plain list item.
+    /// Held here as well as in `azapptoolkit-core` because this command is the
+    /// only caller that can act on the answer.
+    #[test]
+    fn the_grant_refuses_a_target_the_scope_cannot_reach() {
+        use azapptoolkit_core::scoping::SelectedScopeLevel::{File, List, ListItem, Site};
+
+        // A folder in a document library resolves at File level, which is what
+        // both item scopes are for.
+        assert!(selected_scope_accepts(File, File));
+        assert!(selected_scope_accepts(ListItem, File));
+        // A site URL pasted while a file scope is in the cart — the mistake the
+        // resolve-first step exists to catch.
+        assert!(!selected_scope_accepts(File, Site));
+        assert!(!selected_scope_accepts(List, Site));
+        // And a file scope never reaches an item in a plain list.
+        assert!(!selected_scope_accepts(File, ListItem));
+    }
+
+    /// Only the three sub-site scopes drive this command; `Sites.Selected` has
+    /// its own conversion path and must not be routed here.
+    #[test]
+    fn only_sub_site_selected_scopes_reach_the_item_grant() {
+        use azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID;
+        let level = |v: &str| {
+            selected_scope_level_for(Some(MICROSOFT_GRAPH_APP_ID), v)
+                .filter(|l| l.breaks_inheritance())
+        };
+        for v in [
+            "Files.SelectedOperations.Selected",
+            "Lists.SelectedOperations.Selected",
+            "ListItems.SelectedOperations.Selected",
+        ] {
+            assert!(level(v).is_some(), "{v} drives the item grant");
+        }
+        for v in ["Sites.Selected", "Sites.Read.All", "Files.Read.All"] {
+            assert!(level(v).is_none(), "{v} must not route to the item grant");
+        }
     }
 }

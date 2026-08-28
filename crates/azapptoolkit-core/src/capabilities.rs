@@ -242,9 +242,9 @@ pub static CAPABILITIES: &[Capability] = &[
     Capability {
         key: "sharepoint_sites_selected",
         plane: Plane::EntraDirectory,
-        label: "SharePoint site access (Sites.Selected)",
-        description: "List, grant, and revoke a site's per-app permissions; convert org-wide \
-                      Sites.* to Sites.Selected.",
+        label: "SharePoint resource access (Selected permissions)",
+        description: "List, grant, and revoke a site's, list's, folder's or file's per-app \
+                      permissions; convert org-wide Sites.* to Sites.Selected.",
         directory_roles_any: &[
             ("SharePoint Administrator", Some(TID_SHAREPOINT_ADMIN)),
             ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
@@ -252,9 +252,10 @@ pub static CAPABILITIES: &[Capability] = &[
         role_detect: RoleDetect::DirectoryRole,
         scopes: &["Sites.FullControl.All"],
         scope_feature: Some("sharepoint"),
-        remediation: "Managing SharePoint site permissions requires the SharePoint Administrator \
+        remediation: "Managing SharePoint permissions requires the SharePoint Administrator \
                       role (or Global Administrator) and the Sites.FullControl.All scope — the \
-                      site-permission endpoints need it even for reads.",
+                      permission endpoints need it even for reads, at every level from a site \
+                      collection down to a single file.",
     },
     Capability {
         key: "group_membership",

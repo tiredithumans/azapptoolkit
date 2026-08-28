@@ -1,4 +1,4 @@
-//! SharePoint Sites.Selected IPC bindings. DTOs come from the shared
+//! SharePoint Selected-permission IPC bindings. DTOs come from the shared
 //! `azapptoolkit-dto` crate (re-exported here for callers).
 
 use azapptoolkit_dto::UiError;
@@ -159,6 +159,115 @@ pub async fn convert_site_access_to_selected(
             site_urls,
             role,
             remove_orgwide,
+        },
+    )
+    .await
+}
+
+// ---------------- Sub-site Selected scopes ----------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceUrlArgs<'a> {
+    tenant_id: &'a str,
+    url: &'a str,
+}
+
+/// Resolves a SharePoint URL to the securable a Selected grant would address.
+///
+/// The panel calls this **before** offering to grant, so the operator sees
+/// *"Folder · Finance / Documents / Invoices / 2026"* rather than discovering
+/// after the fact that a grant landed somewhere else — and so a level mismatch
+/// is caught while it is still a correctable typo.
+pub async fn resolve_sharepoint_resource(
+    tenant_id: &str,
+    url: &str,
+) -> Result<SharePointResourceRef, UiError> {
+    invoke_result(
+        "resolve_sharepoint_resource",
+        ResourceUrlArgs { tenant_id, url },
+    )
+    .await
+}
+
+/// The application permissions on the resource `url` names.
+///
+/// A **verify-by-URL** read: there is no `appId → items` reverse lookup, so an
+/// empty result means "this resource has no app grants", never "this app has no
+/// item-level access".
+pub async fn list_selected_item_permissions(
+    tenant_id: &str,
+    url: &str,
+) -> Result<Vec<SelectedItemPermissionDto>, UiError> {
+    invoke_result(
+        "list_selected_item_permissions",
+        ResourceUrlArgs { tenant_id, url },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveSelectedItemArgs<'a> {
+    tenant_id: &'a str,
+    url: &'a str,
+    permission_id: &'a str,
+}
+
+pub async fn remove_selected_item_permission(
+    tenant_id: &str,
+    url: &str,
+    permission_id: &str,
+) -> Result<(), UiError> {
+    invoke_result(
+        "remove_selected_item_permission",
+        RemoveSelectedItemArgs {
+            tenant_id,
+            url,
+            permission_id,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GrantSelectedItemArgs<'a> {
+    tenant_id: &'a str,
+    sp_object_id: &'a str,
+    app_id: &'a str,
+    app_display_name: &'a str,
+    permission_value: &'a str,
+    target_urls: &'a [String],
+    role: &'a str,
+}
+
+/// Grants a service principal access to specific lists, folders or files under
+/// one of the `*.SelectedOperations.Selected` scopes.
+///
+/// Unlike `convert_site_access_to_selected` this strips nothing: these scopes
+/// have no org-wide predecessor to remove — the operator is granting
+/// least-privilege access from the start.
+#[allow(clippy::too_many_arguments)]
+pub async fn grant_selected_item_access(
+    tenant_id: &str,
+    sp_object_id: &str,
+    app_id: &str,
+    app_display_name: &str,
+    permission_value: &str,
+    target_urls: &[String],
+    role: &str,
+) -> Result<SelectedItemScopeResult, UiError> {
+    invoke_result(
+        "grant_selected_item_access",
+        GrantSelectedItemArgs {
+            tenant_id,
+            sp_object_id,
+            app_id,
+            app_display_name,
+            permission_value,
+            target_urls,
+            role,
         },
     )
     .await

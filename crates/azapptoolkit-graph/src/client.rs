@@ -10,11 +10,14 @@ use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{
     ActiveDirectoryRole, AppRoleAssignment, Application, ApplicationExposeApi,
     ApplicationServicePrincipal, ApplicationTemplate, ClaimsMappingPolicy, ConditionalAccessPolicy,
-    DirectoryAuditLog, DirectoryObject, FederatedIdentityCredential, GroupSummary, KeyCredential,
-    NewKeyCredential, OAuth2PermissionGrant, OAuth2PermissionScope, Organization, Paged,
-    PasswordCredential, PreAuthorizedApplication, RequiredResourceAccess, SelfSignedCertificate,
-    ServicePrincipal, ServicePrincipalSignInActivity, Site, SitePermission, SynchronizationJob,
+    DirectoryAuditLog, DirectoryObject, Drive, DriveItem, FederatedIdentityCredential,
+    GroupSummary, KeyCredential, NewKeyCredential, OAuth2PermissionGrant, OAuth2PermissionScope,
+    Organization, Paged, PasswordCredential, PreAuthorizedApplication, RequiredResourceAccess,
+    ResolvedSharePointResource, SelectedPermission, SelfSignedCertificate, ServicePrincipal,
+    ServicePrincipalSignInActivity, Site, SiteList, SitePermission, SynchronizationJob,
 };
+use azapptoolkit_core::scoping::SelectedScopeLevel;
+use url::Url;
 
 use azapptoolkit_core::http_retry::{Attempt, parse_retry_after_seconds, with_retries};
 use azapptoolkit_core::net::same_origin;

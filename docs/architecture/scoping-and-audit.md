@@ -214,6 +214,48 @@ Permissions-tab "Scope" column / audit facets reuse the same name check. Graph h
 access section on the Permissions tab). `Sites.ReadWrite.All` is scored high-risk (a deliberate net-new deviation from the PowerShell
 source, alongside `Sites.FullControl.All`).
 
+### The Selected family is four levels, not one
+
+`Sites.Selected` is the site-collection member of a family Microsoft applies at four levels of the
+same hierarchy, all with identical three-step semantics — consent the scope, POST a per-resource
+permission, present a token carrying the scope; miss any step and there is **no** access:
+
+| Scope | Level | Grant endpoint | `ScopeKind` |
+|---|---|---|---|
+| `Sites.Selected` | site collection | `POST /sites/{siteId}/permissions` | `SharePoint` |
+| `Lists.SelectedOperations.Selected` | list / document library | `POST /sites/{siteId}/lists/{listId}/permissions` | `SharePointItem` |
+| `ListItems.SelectedOperations.Selected` | list item (incl. folders) | `.../lists/{listId}/items/{itemId}/permissions` | `SharePointItem` |
+| `Files.SelectedOperations.Selected` | file or **library** folder | same listItem endpoint | `SharePointItem` |
+
+Four things about the sub-site three that the site path does not have to deal with:
+
+- **The request body differs.** `POST /sites/{id}/permissions` takes `grantedToIdentities` (an
+  array); the list / listItem / driveItem endpoints take **`grantedToV2`** (a single identity set)
+  and Graph's driveItem reference rejects the array forms outright. Two builders,
+  deliberately — `granted_to_v2_body` is separate from the site body so writing the wrong shape
+  cannot be a one-character mistake, and a unit test pins the split.
+- **The level must be checked, and the check is not equality.** All files are list items, but not
+  all list items are files: `ListItems.*` can grant against an item in a document library, while
+  `Files.*` cannot reach an item in a plain list. `scoping::selected_scope_accepts` is that
+  relation. A URL is resolved *before* anything is granted
+  (`GraphClient::resolve_sharepoint_resource`: site → drives → path-addressed driveItem, at most
+  three reads) and a mismatch is **skipped with a warning, never granted one level up**.
+- **Nothing is stripped.** These scopes have no org-wide predecessor — an operator reaching for
+  `Files.SelectedOperations.Selected` is granting least privilege from the start, so
+  `remove_orgwide` has nothing to remove. Converting `Files.Read.All` would be a different,
+  audit-driven flow.
+- **Reach is not enumerable — worse than the site blind spot.** `sweep_site_permissions` can walk
+  every site in the tenant; *nothing* walks every folder, and there is no reverse `appId → items`
+  lookup either. So there is no sweep, no cached index, and
+  `list_selected_item_permissions` is a **verify-by-URL** read. An empty result means "this resource
+  has no app grants", never "this app has no item-level access". Any future panel must say so.
+
+A grant at any sub-site level also **breaks SharePoint permission inheritance** on its target and
+consumes one of the library's unique permission scopes (guidance: stay under 5 000 per library).
+`ItemSelectionPanel` warns before granting and nudges toward a dedicated library — or a dedicated
+site, where `Sites.Selected` applies and inheritance is untouched, because a site collection is the
+root of inheritance.
+
 ## Scoped grants reuse one Exchange core
 
 The scoped-mailbox grant body (register Exchange SP → management scope from groups → scoped role
@@ -359,6 +401,13 @@ Per-mechanism apply (each does grant-before-strip, so a failure never strands th
   per-site access → **only if ≥1 site grant landed** strip the broad `Sites.*` grant
   (`should_remove_orgwide`). Targets: `SiteSelectionPanel` (site URLs + read/write). Graph has **no
   reverse `appId → sites` lookup**, so the site URL(s) are user-supplied.
+- **SharePoint item** — `commands::sharepoint::grant_selected_item_access`: grant the Selected
+  appRole (idempotent) → resolve each target URL → reject any whose level the scope cannot reach →
+  grant per resource. Strips nothing (see above). Targets: `ItemSelectionPanel`, which resolves each
+  URL as you type and renders what it found, so a level mismatch is a correctable typo rather than a
+  post-hoc warning. The cart must be level-**homogeneous** as well as mechanism-homogeneous:
+  `Lists.*` and `Files.*` address different securables, so a cart holding both has no single target
+  panel and falls back to org-wide, exactly as a mixed-mechanism cart does.
 
 Graph appRole id↔value resolution lives in `commands::graph_roles::graph_role_index` (shared by
 exchange + sharepoint); SharePoint org-wide detection is name-based (`is_sharepoint_orgwide`, defined

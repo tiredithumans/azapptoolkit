@@ -305,6 +305,18 @@ fn register_fixtures() {
         site_access_by_app.get(app).cloned()
     });
 
+    // The sub-site Selected scopes. Both commands are fallible, so the demo
+    // survives without them — but the "Grant access" wizard resolves every
+    // pasted URL as you type, and an unmocked resolve turns the panel into a
+    // wall of errors that reads like a broken build rather than a demo.
+    mock_each("resolve_sharepoint_resource", |args| {
+        let url = args.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+        Some(f::sharepoint_resource_ref(url))
+    });
+    mock_each("list_selected_item_permissions", |_args| {
+        Some(Vec::<azapptoolkit_dto::sharepoint::SelectedItemPermissionDto>::new())
+    });
+
     let scopes_by_id: HashMap<String, Vec<MailScopeEntry>> = apps
         .iter()
         .map(|a| (obj_id(a.name), a.mail_scopes.clone()))
