@@ -18,7 +18,10 @@ impl GraphClient {
     /// conversion all count on the full set).
     pub async fn list_site_permissions(&self, site_id: &str) -> Result<Vec<SitePermission>> {
         let token = self.sharepoint_token()?;
-        let url = format!("{}/sites/{site_id}/permissions", self.base_url);
+        let url = format!(
+            "{}/sites/{site_id}/permissions?$top={MAX_PAGE_SIZE}",
+            self.base_url
+        );
         let page: Paged<SitePermission> = self.scoped_get_retried(token, &url).await?;
         self.collect_pages_from(
             page,
@@ -46,11 +49,17 @@ impl GraphClient {
         let token = self.sharepoint_token()?;
         let urls: Vec<String> = site_ids
             .iter()
-            .map(|id| format!("/sites/{id}/permissions"))
+            // `$top` matters more here than on an ordinary paged read: without
+            // it Graph's small default makes overflow common, and every
+            // overflowing site then needs a continuation.
+            .map(|id| format!("/sites/{id}/permissions?$top={MAX_PAGE_SIZE}"))
             .collect();
         let pages: Vec<Result<Paged<SitePermission>>> =
             self.batch_get_json_scoped(token, &urls).await?;
-        self.finish_paged_batch(pages).await
+        // Scoped, not the plain `finish_paged_batch`: these sub-requests need
+        // `Sites.FullControl.All`, and the unscoped continuation would fall back
+        // to the verb-selected read token and 403 on page 2.
+        self.finish_paged_batch_scoped(token, pages).await
     }
 
     /// Enumerates the tenant's SharePoint sites via `GET /sites?search=*`,

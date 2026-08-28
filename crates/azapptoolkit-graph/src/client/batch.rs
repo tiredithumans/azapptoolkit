@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use azapptoolkit_core::http_retry::RetryClass;
 use reqwest::Method;
 use serde::de::DeserializeOwned;
 
@@ -175,6 +176,39 @@ impl GraphClient {
         Ok(out)
     }
 
+    /// [`Self::finish_paged_batch`] for a batch issued under a **specific**
+    /// token.
+    ///
+    /// The unscoped version continues through `get_json_absolute`, which selects
+    /// its provider by verb and therefore picks the default read token. That is
+    /// right for the batches whose sub-requests the read token already covers,
+    /// and wrong for a batch deliberately issued via `batch_get_json_scoped`:
+    /// `/sites/{id}/permissions` needs `Sites.FullControl.All`, which the
+    /// verb-selected Directory.Read.All token does not carry, so page 2 of a
+    /// site whose grant list overflowed came back 403 while page 1 succeeded.
+    ///
+    /// `collect_pages_from` re-applies the same-origin guard on every hop, so
+    /// the scoped bearer never leaves the Graph origin.
+    pub(crate) async fn finish_paged_batch_scoped<T: DeserializeOwned + Send>(
+        &self,
+        token: &Arc<dyn BearerProvider>,
+        pages: Vec<Result<Paged<T>>>,
+    ) -> Result<Vec<Result<Vec<T>>>> {
+        let mut out = Vec::with_capacity(pages.len());
+        for page in pages {
+            match page {
+                Ok(p) => out.push(
+                    self.collect_pages_from(p, |u| async move {
+                        self.scoped_get_retried(token, &u).await
+                    })
+                    .await,
+                ),
+                Err(e) => out.push(Err(e)),
+            }
+        }
+        Ok(out)
+    }
+
     /// One `$batch` POST for `urls` (already ≤ `BATCH_MAX`), with inner-429 retry.
     /// `headers`, when non-empty, are attached to every sub-request.
     async fn batch_chunk<T: DeserializeOwned>(
@@ -214,6 +248,14 @@ impl GraphClient {
             let bytes = self
                 .send_core_url_with(
                     token,
+                    // A POST by transport, a read by semantics: every
+                    // sub-request this helper builds is a GET (`batch_sub_url`
+                    // takes no body and the callers are all `batch_get_*`), so
+                    // replaying the batch cannot double-commit anything. Stated
+                    // explicitly rather than inferred from the verb, which would
+                    // read this as a mutation and stop retrying it — `$batch` is
+                    // the throttle-happiest endpoint in the API.
+                    RetryClass::Idempotent,
                     Method::POST,
                     &batch_url,
                     &[],

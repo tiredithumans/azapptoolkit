@@ -105,6 +105,39 @@ pub async fn sleep_with_jitter(base_ms: u64) {
     tokio::time::sleep(Duration::from_millis(total)).await;
 }
 
+/// Why an attempt is being retried — the half of the classification the loop
+/// cannot infer and the caller cannot act on alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryReason {
+    /// An explicit throttle (429). The service rejected the request **before**
+    /// doing any work, so replaying it is safe for any verb.
+    Throttled,
+    /// A network failure or a 5xx: there may be no response at all, so a write
+    /// may already have committed server-side. Safe to replay only when the
+    /// request is idempotent.
+    Transient,
+}
+
+/// Whether a request can be safely re-sent when its outcome is unknown.
+///
+/// This distinction has to live at this seam. `with_retries` re-invokes the
+/// caller's whole closure — request send included — and the transport routes
+/// every verb through it, so a `POST /applications/{id}/addPassword` that hit a
+/// connection reset or a 502 *after* Graph committed the write was replayed up
+/// to three more times. The registration ended up with several client secrets
+/// while the operator only ever saw the plaintext of the last one: an orphaned,
+/// never-rotated credential, which is exactly the class of thing this tool
+/// exists to surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryClass {
+    /// GET/HEAD/PUT/DELETE, or a POST that is semantically a read (a `$batch`
+    /// of GET sub-requests). Every transient class is retried.
+    Idempotent,
+    /// A POST/PATCH that creates or mutates. Only [`RetryReason::Throttled`] is
+    /// retried.
+    NonIdempotent,
+}
+
 /// How one attempt ended, as the calling client classifies it.
 ///
 /// The classification stays in the caller because mapping an HTTP status to a
@@ -113,10 +146,12 @@ pub async fn sleep_with_jitter(base_ms: u64) {
 pub enum Attempt<T, E> {
     /// Terminal, success or failure. Returned to the caller as-is.
     Done(Result<T, E>),
-    /// Transient. Retried while budget remains; once exhausted, `err` is
-    /// returned. `retry_after_secs` comes from the response header, honored
-    /// exactly (see [`sleep_before_retry`]).
+    /// Transient. Retried while budget remains **and** `reason` is safe for the
+    /// request's [`RetryClass`]; once exhausted or refused, `err` is returned.
+    /// `retry_after_secs` comes from the response header, honored exactly (see
+    /// [`sleep_before_retry`]).
     Retry {
+        reason: RetryReason,
         retry_after_secs: Option<u64>,
         err: E,
     },
@@ -134,7 +169,15 @@ pub enum Attempt<T, E> {
 /// `attempt` receives the zero-based attempt number (for its own logging) and
 /// does its own send, status mapping and body reading; everything about
 /// *whether and when to go round again* lives here.
-pub async fn with_retries<T, E, F, Fut>(label: &str, mut attempt: F) -> Result<T, E>
+///
+/// `class` is **required**, not defaulted: a caller that has not decided whether
+/// its request may be replayed has not thought about the failure that matters,
+/// and the safe answer differs per call site rather than per crate.
+pub async fn with_retries<T, E, F, Fut>(
+    label: &str,
+    class: RetryClass,
+    mut attempt: F,
+) -> Result<T, E>
 where
     F: FnMut(u32) -> Fut,
     Fut: std::future::Future<Output = Attempt<T, E>>,
@@ -144,9 +187,20 @@ where
         match attempt(budget.attempt()).await {
             Attempt::Done(result) => return result,
             Attempt::Retry {
+                reason,
                 retry_after_secs,
                 err,
             } => {
+                // A transient failure leaves the outcome unknown, so replaying a
+                // mutation risks committing it twice. A 429 does not: the
+                // service refused before doing the work.
+                if reason == RetryReason::Transient && class == RetryClass::NonIdempotent {
+                    tracing::debug!(
+                        label,
+                        "not replaying a non-idempotent request after a transient failure"
+                    );
+                    return Err(err);
+                }
                 if !budget.may_retry() {
                     return Err(err);
                 }
@@ -298,7 +352,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn with_retries_returns_a_terminal_outcome_without_waiting() {
         let mut calls = 0;
-        let out: Result<&str, &str> = with_retries("test", |_| {
+        let out: Result<&str, &str> = with_retries("test", RetryClass::Idempotent, |_| {
             calls += 1;
             async { Attempt::Done(Ok("ok")) }
         })
@@ -308,7 +362,7 @@ mod tests {
 
         // A terminal *failure* is equally final — only `Retry` goes round again.
         let mut calls = 0;
-        let out: Result<&str, &str> = with_retries("test", |_| {
+        let out: Result<&str, &str> = with_retries("test", RetryClass::Idempotent, |_| {
             calls += 1;
             async { Attempt::Done(Err("forbidden")) }
         })
@@ -320,10 +374,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn with_retries_stops_after_max_retries_and_returns_the_last_error() {
         let mut calls = 0;
-        let out: Result<(), &str> = with_retries("test", |n| {
+        let out: Result<(), &str> = with_retries("test", RetryClass::Idempotent, |n| {
             calls += 1;
             async move {
                 Attempt::Retry {
+                    reason: RetryReason::Transient,
                     retry_after_secs: None,
                     err: if n >= MAX_RETRIES {
                         "last"
@@ -339,12 +394,76 @@ mod tests {
         assert_eq!(calls, MAX_RETRIES + 1);
     }
 
+    /// The bug this class exists for: `with_retries` re-invokes the caller's
+    /// whole closure, request send included. A `POST .../addPassword` that got
+    /// a connection reset or a 502 *after* Graph committed the write was
+    /// replayed up to three more times, leaving the registration with several
+    /// client secrets while the operator saw the plaintext of only the last —
+    /// an orphaned, never-rotated credential.
+    #[tokio::test(start_paused = true)]
+    async fn a_non_idempotent_request_is_not_replayed_after_a_transient_failure() {
+        let mut calls = 0;
+        let out: Result<(), &str> = with_retries("test", RetryClass::NonIdempotent, |_| {
+            calls += 1;
+            async {
+                Attempt::Retry {
+                    reason: RetryReason::Transient,
+                    retry_after_secs: None,
+                    err: "reset",
+                }
+            }
+        })
+        .await;
+        assert_eq!(out, Err("reset"));
+        assert_eq!(calls, 1, "the write must be attempted exactly once");
+
+        // The same failure IS replayed when the request is idempotent.
+        let mut calls = 0;
+        let out: Result<(), &str> = with_retries("test", RetryClass::Idempotent, |_| {
+            calls += 1;
+            async {
+                Attempt::Retry {
+                    reason: RetryReason::Transient,
+                    retry_after_secs: None,
+                    err: "reset",
+                }
+            }
+        })
+        .await;
+        assert_eq!(out, Err("reset"));
+        assert_eq!(calls, MAX_RETRIES + 1);
+    }
+
+    /// A 429 is rejected *before* the service does the work, so replaying it
+    /// cannot double-commit — every verb keeps its throttle retries, which is
+    /// what stops this change turning a busy tenant into a wall of failures.
+    #[tokio::test(start_paused = true)]
+    async fn a_throttle_is_retried_for_every_verb() {
+        for class in [RetryClass::Idempotent, RetryClass::NonIdempotent] {
+            let mut calls = 0;
+            let out: Result<(), &str> = with_retries("test", class, |_| {
+                calls += 1;
+                async {
+                    Attempt::Retry {
+                        reason: RetryReason::Throttled,
+                        retry_after_secs: Some(1),
+                        err: "429",
+                    }
+                }
+            })
+            .await;
+            assert_eq!(out, Err("429"));
+            assert_eq!(calls, MAX_RETRIES + 1, "{class:?} must retry a throttle");
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn with_retries_backs_off_exponentially_and_honors_retry_after() {
         // Without a header: BASE, then doubling. With one: exactly the header.
         let waited = virtual_elapsed(async {
-            let _: Result<(), ()> = with_retries("test", |_| async {
+            let _: Result<(), ()> = with_retries("test", RetryClass::Idempotent, |_| async {
                 Attempt::Retry {
+                    reason: RetryReason::Transient,
                     retry_after_secs: None,
                     err: (),
                 }
@@ -360,8 +479,9 @@ mod tests {
         );
 
         let waited = virtual_elapsed(async {
-            let _: Result<(), ()> = with_retries("test", |_| async {
+            let _: Result<(), ()> = with_retries("test", RetryClass::Idempotent, |_| async {
                 Attempt::Retry {
+                    reason: RetryReason::Transient,
                     retry_after_secs: Some(7),
                     err: (),
                 }
@@ -379,12 +499,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn with_retries_can_succeed_on_a_later_attempt() {
         let mut calls = 0;
-        let out: Result<&str, &str> = with_retries("test", |_| {
+        let out: Result<&str, &str> = with_retries("test", RetryClass::Idempotent, |_| {
             calls += 1;
             let attempt = calls;
             async move {
                 if attempt < 3 {
                     Attempt::Retry {
+                        reason: RetryReason::Transient,
                         retry_after_secs: None,
                         err: "transient",
                     }

@@ -216,8 +216,21 @@ const APP_BACKUP_SELECT: &str = "id,appId,displayName,description,signInAudience
 /// the credential dashboard all do.
 pub const DEFAULT_APP_PAGE_SIZE: u32 = 999;
 
+/// Whether an [`AppListQuery`] makes an **advanced query** — i.e. one that must
+/// carry `ConsistencyLevel: eventual`.
+///
+/// Single-sourced because page one and every continuation have to agree: only a
+/// `$search` needs it, and `$expand` combined with an advanced query is an
+/// officially unsupported combination that "might fail silently" — Graph
+/// answers 200 with the expanded property missing. Two copies of this predicate
+/// is exactly how page two drifted from page one.
+fn is_advanced_query(q: &AppListQuery) -> bool {
+    q.search.is_some()
+}
+
 impl GraphClient {
     pub async fn list_applications(&self, q: AppListQuery) -> Result<Paged<Application>> {
+        let eventual = is_advanced_query(&q);
         let select = q
             .select
             .unwrap_or_else(|| default_application_select().to_vec())
@@ -243,7 +256,6 @@ impl GraphClient {
         // expanding call: per Graph's documented query-parameter limitations,
         // `$expand` is not supported together with advanced queries, and such
         // combinations "might fail silently" rather than erroring.
-        let eventual = q.search.is_some();
         if let Some(s) = &q.search {
             // Neutralize double quotes so a term like `Test"App` can't break the
             // `$search` phrase (matches search_applications_by_name).
@@ -324,12 +336,18 @@ impl GraphClient {
         q: AppListQuery,
         cap: Option<usize>,
     ) -> Result<(Vec<Application>, bool)> {
+        // The SAME predicate page one was issued with. Threading it — rather
+        // than letting the paging helper default to `true` — is what stops an
+        // `$expand` enumeration silently losing `owners` from page two onward:
+        // Graph answers an advanced query that also expands with a 200 and the
+        // expanded property simply missing.
+        let eventual = is_advanced_query(&q);
         let page = self.list_applications(q).await?;
         // `None` disables the cap: `collect_all_pages_capped` with `usize::MAX`
         // paginates to exhaustion (never reaching the bound) without the
         // hard-error past page limit that `collect_all_pages` raises — the right
         // degradation for a tenant-wide scan.
-        self.collect_all_pages_capped(page, cap.unwrap_or(usize::MAX))
+        self.collect_all_pages_capped(page, cap.unwrap_or(usize::MAX), eventual)
             .await
     }
 
@@ -356,8 +374,9 @@ impl GraphClient {
         let params: [(&str, &str); 2] =
             [("$select", "id,appId,displayName"), ("$top", MAX_PAGE_SIZE)];
         let page: Paged<Application> = self.get_json("/applications", &params, false).await?;
+        // A bare `$select` — not an advanced query, as the `false` above says.
         let (items, _truncated) = self
-            .collect_all_pages_capped(page, cap.unwrap_or(usize::MAX))
+            .collect_all_pages_capped(page, cap.unwrap_or(usize::MAX), false)
             .await?;
         Ok(items)
     }

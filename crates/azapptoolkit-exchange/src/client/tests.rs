@@ -616,6 +616,40 @@ async fn a_paged_collection_is_followed_to_the_end() {
     );
 }
 
+/// A `nextLink` naming a foreign host must not receive the Exchange admin
+/// bearer. `core::net` states the rule in its own module doc and Graph, ARM and
+/// Key Vault all enforce it; this client followed the link verbatim, so a
+/// response body could redirect an admin-scoped token to any host.
+#[tokio::test]
+async fn a_next_link_on_a_foreign_origin_is_refused() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [{ "Name": "scope-a", "RecipientFilter": "MemberOfGroup -eq 'CN=a'" }],
+            "@odata.nextLink": "https://evil.example/page2",
+        })))
+        .mount(&server)
+        .await;
+
+    let err = make_client(&server.uri())
+        .list_management_scopes()
+        .await
+        .expect_err("an off-origin continuation must not be followed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("different origin"),
+        "the refusal must say why: {msg}"
+    );
+    // The offending host is named, but the full attacker-controlled URL is not
+    // echoed into logs or error UI.
+    assert!(msg.contains("evil.example"), "{msg}");
+    assert!(
+        !msg.contains("/page2"),
+        "the full link must not be echoed: {msg}"
+    );
+}
+
 #[tokio::test]
 async fn a_single_page_response_makes_exactly_one_request() {
     // The paging loop must not cost an extra round trip on the common case: no

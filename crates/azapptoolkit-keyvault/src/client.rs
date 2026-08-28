@@ -13,7 +13,9 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use azapptoolkit_core::http_retry::{Attempt, parse_retry_after_seconds, with_retries};
+use azapptoolkit_core::http_retry::{
+    Attempt, RetryClass, RetryReason, parse_retry_after_seconds, with_retries,
+};
 use azapptoolkit_core::net::{redacted_host, same_origin};
 use azapptoolkit_core::token::{BearerProvider, TokenError};
 
@@ -170,7 +172,7 @@ impl KeyVaultClient {
 
         // Retry budget, backoff and `Retry-After` handling live in
         // `http_retry::with_retries`; this closure only classifies one attempt.
-        with_retries("key vault", |_| {
+        with_retries("key vault", retry_class_for(&method), |_| {
             let http = self.http.clone();
             let headers = headers.clone();
             let method = method.clone();
@@ -189,6 +191,7 @@ impl KeyVaultClient {
                     // loop falls back to jittered exponential backoff.
                     Err(err) => {
                         return Attempt::Retry {
+                            reason: RetryReason::Transient,
                             retry_after_secs: None,
                             err: KeyVaultError::Network(err.to_string()),
                         };
@@ -225,6 +228,11 @@ impl KeyVaultClient {
                 }
 
                 Attempt::Retry {
+                    reason: if code == 429 {
+                        RetryReason::Throttled
+                    } else {
+                        RetryReason::Transient
+                    },
                     retry_after_secs: retry_after,
                     err: if code == 429 {
                         KeyVaultError::Throttled {
@@ -247,6 +255,19 @@ impl KeyVaultClient {
     /// before the bearer is attached.
     async fn send_core_absolute(&self, method: Method, url: &str) -> Result<bytes::Bytes> {
         self.send_core_url(method, url, false, None, true).await
+    }
+}
+
+/// The retry class for an HTTP verb.
+///
+/// `GET`/`HEAD`/`PUT`/`DELETE` are idempotent by definition, so replaying one
+/// whose outcome is unknown is safe. `POST`/`PATCH` may have already committed
+/// — a Key Vault `setSecret` replayed after a 502 writes a second version — so
+/// only an explicit throttle is replayed for them.
+fn retry_class_for(method: &Method) -> RetryClass {
+    match *method {
+        Method::GET | Method::HEAD | Method::PUT | Method::DELETE => RetryClass::Idempotent,
+        _ => RetryClass::NonIdempotent,
     }
 }
 
