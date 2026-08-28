@@ -122,8 +122,33 @@ impl ArmClient {
 
     /// Resolves a role-definition id (an absolute ARM path) to its definition,
     /// so the UI can show the role name instead of a GUID.
+    ///
+    /// `role_definition_id` is never a caller constant: both call sites pass
+    /// `RoleAssignmentProperties::role_definition_id` straight out of an ARM
+    /// `roleAssignments` response. That is the same attacker-influenced
+    /// server-output class `collect_paged` guards `nextLink` for, so the
+    /// composed URL is re-checked against the ARM origin rather than trusted —
+    /// a value like `@evil.example/x` reinterprets the authority of a
+    /// `format!`-spliced URL, and the bearer would follow it.
     pub async fn get_role_definition(&self, role_definition_id: &str) -> Result<RoleDefinition> {
+        // Structure first: an ARM resource id is an absolute path, so anything
+        // that could reinterpret the *shape* of the composed URL is refused
+        // before it is composed. `?`/`#` would inject a second `api-version` or
+        // truncate the query the call depends on.
+        if !role_definition_id.starts_with('/') || role_definition_id.contains(['?', '#']) {
+            return Err(ArmError::Protocol(
+                "refusing a role definition id that is not an absolute ARM path".into(),
+            ));
+        }
         let url = format!("{}{role_definition_id}", self.base_url);
+        // Then the authority: `@` turns everything composed so far into
+        // userinfo, so the bearer would be sent to whatever follows it.
+        if !same_origin(&self.base_url, &url) {
+            return Err(ArmError::Protocol(format!(
+                "refusing a role definition id that redirects off the ARM origin (host: {})",
+                redacted_host(&url)
+            )));
+        }
         self.get_json(&url, &[("api-version", AUTHORIZATION_API)])
             .await
     }
@@ -539,5 +564,64 @@ mod tests {
             got[0].properties.scope.as_deref(),
             Some("/subscriptions/sub-1")
         );
+    }
+
+    /// `role_definition_id` comes straight out of an ARM response, so it is
+    /// attacker-influenced server output — the same class `nextLink` is guarded
+    /// for. Spliced with `format!` and no leading slash it reinterprets the
+    /// authority of the composed URL and sends the ARM bearer to another host;
+    /// with `?`/`#` it rewrites the query the call depends on.
+    ///
+    /// Note an `@` *after* a leading `/` is inert — it sits in the path, past
+    /// the authority — which is why the structural check, not the origin check,
+    /// is what closes this.
+    #[tokio::test]
+    async fn get_role_definition_refuses_an_id_that_redirects_off_origin() {
+        let server = MockServer::start().await;
+        let client = client(&server.uri());
+        for id in [
+            // No leading slash, so `@` lands in the *authority*: everything
+            // composed before it becomes userinfo and the real host is
+            // evil.example. This is the form the finding describes.
+            "@evil.example/x",
+            "evil.example/x",
+            // Not an absolute path at all.
+            "https://evil.example/x",
+            // Injects a second api-version / truncates the query the call needs.
+            "/subscriptions/s/roleDefinitions/r?api-version=2015-01-01",
+            "/subscriptions/s/roleDefinitions/r#frag",
+        ] {
+            let err = client.get_role_definition(id).await.unwrap_err();
+            assert!(
+                matches!(err, ArmError::Protocol(_)),
+                "{id} must be refused, got {err:?}"
+            );
+        }
+        // No request should have reached the mock at all.
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+        );
+    }
+
+    /// The ordinary absolute-path form still resolves.
+    #[tokio::test]
+    async fn get_role_definition_resolves_an_ordinary_arm_path() {
+        let server = MockServer::start().await;
+        let id = "/subscriptions/sub-1/providers/Microsoft.Authorization/roleDefinitions/def-1";
+        Mock::given(method("GET"))
+            .and(path(id))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": id,
+                "properties": { "roleName": "Reader" }
+            })))
+            .mount(&server)
+            .await;
+        let client = client(&server.uri());
+        let def = client.get_role_definition(id).await.unwrap();
+        assert_eq!(def.properties.role_name.as_deref(), Some("Reader"));
     }
 }

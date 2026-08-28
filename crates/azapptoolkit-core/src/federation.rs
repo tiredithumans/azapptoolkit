@@ -112,9 +112,23 @@ fn validate_issuer(issuer: &str) -> Result<(), String> {
             "issuer must be an https URL (the external provider's OpenID Connect issuer): {issuer}"
         ));
     };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     // `https://` with nothing after it names no provider.
-    if rest.split('/').next().unwrap_or("").is_empty() {
+    if authority.is_empty() {
         return Err(format!("issuer URL has no host: {issuer}"));
+    }
+    // Userinfo is separated from the real host by `@`, so
+    // `https://token.actions.githubusercontent.com@evil.example/` fetches its
+    // OIDC metadata and signing keys from **evil.example** while reading as
+    // GitHub everywhere the value is displayed. This module is the only control
+    // on the issuer — Graph accepts an incorrect one silently (see the module
+    // doc) — and both call sites depend on it, including the untrusted restore
+    // path. The result would be a secretless, non-expiring trust.
+    if authority.contains('@') {
+        return Err(format!(
+            "issuer URL embeds credentials, which hide the host the keys are \
+             actually fetched from: {issuer}"
+        ));
     }
     Ok(())
 }
@@ -204,6 +218,38 @@ mod tests {
         // fetches the signing keys from this URL server-side.
         assert!(check("ok-name", "http://localhost:8080", "sub").is_err());
         assert!(check("ok-name", "https://", "sub").is_err());
+    }
+
+    /// A federated credential is a secretless, non-expiring trust, and the
+    /// issuer is the URL Entra fetches the signing keys from. Userinfo lets that
+    /// URL read as a well-known provider while pointing somewhere else — and
+    /// Graph accepts an incorrect issuer without error, so this is the only
+    /// place it can be caught.
+    #[test]
+    fn rejects_a_userinfo_disguised_host() {
+        for issuer in [
+            "https://token.actions.githubusercontent.com@evil.example/",
+            "https://token.actions.githubusercontent.com@evil.example",
+            "https://accounts.google.com@evil.example/o/oauth2",
+            // The last `@` wins, so an early legitimate-looking segment is not
+            // a way through.
+            "https://a@token.actions.githubusercontent.com@evil.example/",
+        ] {
+            assert!(
+                check("ok-name", issuer, "sub").is_err(),
+                "{issuer} fetches keys from evil.example"
+            );
+        }
+        // The real issuers still pass.
+        assert!(
+            check(
+                "ok-name",
+                "https://token.actions.githubusercontent.com",
+                "sub"
+            )
+            .is_ok()
+        );
+        assert!(check("ok-name", "https://accounts.google.com", "sub").is_ok());
     }
 
     #[test]
