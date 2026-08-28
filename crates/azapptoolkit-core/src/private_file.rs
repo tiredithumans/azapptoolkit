@@ -29,6 +29,36 @@ use std::path::Path;
 /// directory the operator chose, and the app's own config directory already
 /// sits under the per-user profile.
 pub fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    // Written to a sibling temp and renamed over the target, never truncated in
+    // place. `settings.json` carries the tenant defaults and the Key Vault
+    // bindings the rotation flow needs to find a secret again, and truncating
+    // first meant any interruption between the truncate and a completed
+    // `write_all`/`sync_all` left the file empty or torn. `UserSettings` then
+    // failed to parse it, the caller swallowed that behind `unwrap_or_default()`
+    // with a `warn!` the user never sees, and the next writer serialized the
+    // defaults back over the top — permanently losing both.
+    //
+    // `rename` is atomic within a filesystem and preserves the temp's mode, so
+    // a reader sees either the old file or the new one, never a partial write,
+    // and the 0600 permission tests still hold.
+    let temp = temp_sibling(path);
+    let result = write_then_rename(&temp, path, contents);
+    if result.is_err() {
+        // Best effort: leaving a 0600 temp behind is untidy but harmless, and
+        // the original error is what the caller needs.
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+/// A temp path beside `path`, so the rename stays within one filesystem.
+fn temp_sibling(path: &Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".tmp{}", std::process::id()));
+    path.with_file_name(name)
+}
+
+fn write_then_rename(temp: &Path, path: &Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -37,18 +67,21 @@ pub fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .open(path)?;
+            .open(temp)?;
+        // Explicit, not just `OpenOptions::mode`, which applies only at
+        // creation — a temp left behind by a crashed run is reused here.
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         let mut file = file;
         file.write_all(contents)?;
-        file.sync_all()
+        file.sync_all()?;
     }
     #[cfg(not(unix))]
     {
-        let mut file = std::fs::File::create(path)?;
+        let mut file = std::fs::File::create(temp)?;
         file.write_all(contents)?;
-        file.sync_all()
+        file.sync_all()?;
     }
+    std::fs::rename(temp, path)
 }
 
 #[cfg(test)]
@@ -74,6 +107,50 @@ mod tests {
         ));
         std::fs::create_dir_all(&p).unwrap();
         TempDir(p)
+    }
+
+    /// The write must never truncate the target in place.
+    ///
+    /// `settings.json` carries the tenant defaults and the vault bindings the
+    /// rotation flow needs to find a secret again. Truncating first meant an
+    /// interruption before `write_all` completed left the file empty or torn,
+    /// `UserSettings::from_file` then failed to parse it, the caller swallowed
+    /// that behind `unwrap_or_default()`, and the next writer serialized the
+    /// defaults back over the top — permanently losing both.
+    #[test]
+    fn a_rewrite_never_truncates_the_target_in_place() {
+        let dir = tempdir();
+        let path = dir.0.join("settings.json");
+        write_owner_only(&path, b"{\"first\":true}").unwrap();
+
+        write_owner_only(&path, b"{\"second\":true}").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"second\":true}");
+
+        // No temp file survives a successful write.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
+
+    /// The rename must carry the 0600 mode, or the atomicity fix would quietly
+    /// widen the permissions the rest of this module exists to enforce.
+    #[cfg(unix)]
+    #[test]
+    fn the_renamed_file_keeps_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        let path = dir.0.join("settings.json");
+        write_owner_only(&path, b"a").unwrap();
+        write_owner_only(&path, b"b").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "got {mode:o}");
     }
 
     #[test]

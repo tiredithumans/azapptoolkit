@@ -109,18 +109,56 @@ pub fn aap_verdict_for(
     policies: &[ExoApplicationAccessPolicy],
     app_id: &str,
 ) -> Option<MailPermissionScope> {
-    let policy = policies.iter().find(|p| {
-        p.app_id.as_deref() == Some(app_id)
-            && p.access_right
+    // `filter`, not `find`: several RestrictAccess policies on one app grant the
+    // UNION of their groups, which is why `AapMigrationItem` carries
+    // `source_policy_identities` as a vector. Naming only the first understated
+    // the confinement on three operator-facing surfaces, including the
+    // permission tester's "which mailboxes can this reach" answer. The same bug
+    // was already fixed in `verdict_from_rows`; this sibling was missed.
+    //
+    // The app id is casefolded because Exchange echoes back whatever case it
+    // stored, and a GUID differing only in case is the same application —
+    // `aap.rs` states that precondition explicitly and every other comparison in
+    // that module already honours it. Left case-sensitive here, a tenant whose
+    // `New-ApplicationAccessPolicy` ran with an upper-case GUID reported a
+    // confined app as org-wide and scored it at full risk.
+    let matching: Vec<&ExoApplicationAccessPolicy> = policies
+        .iter()
+        .filter(|p| {
+            p.app_id
                 .as_deref()
-                .is_some_and(|r| r.eq_ignore_ascii_case("RestrictAccess"))
-    })?;
+                .is_some_and(|a| a.eq_ignore_ascii_case(app_id))
+                && p.access_right
+                    .as_deref()
+                    .is_some_and(|r| r.eq_ignore_ascii_case("RestrictAccess"))
+        })
+        .collect();
+    if matching.is_empty() {
+        return None;
+    }
+
+    let mut names: Vec<String> = matching
+        .iter()
+        .filter_map(|p| p.scope_name.clone().or_else(|| p.scope_identity.clone()))
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+
     Some(MailPermissionScope::Scoped {
-        scope_name: policy
-            .scope_name
-            .clone()
-            .or_else(|| policy.scope_identity.clone()),
-        recipient_filter: policy.description.clone(),
+        scope_name: match names.len() {
+            0 => None,
+            1 => names.pop(),
+            _ => Some(names.join(", ")),
+        },
+        // A description belongs to ONE policy, but the confinement spans all of
+        // them — showing the first policy's filter beside a multi-scope name
+        // would misdescribe the reach. Dropped unless exactly one policy matched.
+        recipient_filter: match matching.as_slice() {
+            [only] => only.description.clone(),
+            _ => None,
+        },
         group_count: None,
         mechanism: ScopeMechanism::LegacyApplicationAccessPolicy,
     })
@@ -439,6 +477,78 @@ mod tests {
         assert!(aap_verdict_for(&policies, "app-3").is_none());
         // Case-insensitive on AccessRight, matching the migration planner.
         assert!(aap_verdict_for(&[policy("a", "restrictaccess", "S")], "a").is_some());
+    }
+
+    /// Exchange echoes the AppId back in whatever case it stored, and a GUID
+    /// differing only in case is the same application — `aap.rs` states that
+    /// precondition explicitly. This comparison was the one that still didn't
+    /// honour it, so in a tenant where `New-ApplicationAccessPolicy` ran with an
+    /// upper-case GUID a confined app reported as org-wide and scored at full
+    /// risk.
+    #[test]
+    fn the_app_id_match_is_case_insensitive_like_the_rest_of_the_module() {
+        let stored = policy(
+            "11111111-AAAA-2222-BBBB-333333333333",
+            "RestrictAccess",
+            "Sales",
+        );
+        for queried in [
+            "11111111-aaaa-2222-bbbb-333333333333",
+            "11111111-AAAA-2222-BBBB-333333333333",
+            "11111111-AaAa-2222-BbBb-333333333333",
+        ] {
+            assert!(
+                aap_verdict_for(std::slice::from_ref(&stored), queried).is_some(),
+                "{queried} is the same application as the stored GUID"
+            );
+        }
+        // A genuinely different app is still not confined.
+        assert!(aap_verdict_for(&[stored], "44444444-4444-4444-4444-444444444444").is_none());
+    }
+
+    /// Several RestrictAccess policies on one app grant the UNION of their
+    /// groups — which is why `AapMigrationItem` carries a vector of source
+    /// policies. Naming only the first understated the confinement on three
+    /// operator-facing surfaces, including the permission tester's "which
+    /// mailboxes can this reach" answer. `verdict_from_rows` already unions;
+    /// this sibling was missed.
+    #[test]
+    fn several_restrict_access_policies_union_their_scopes() {
+        let policies = vec![
+            policy("app-1", "RestrictAccess", "Sales"),
+            policy("app-1", "RestrictAccess", "Execs"),
+            // Neither a match for this app nor a confining right.
+            policy("app-1", "DenyAccess", "Interns"),
+            policy("app-2", "RestrictAccess", "Support"),
+        ];
+        match aap_verdict_for(&policies, "app-1") {
+            Some(MailPermissionScope::Scoped {
+                scope_name,
+                recipient_filter,
+                ..
+            }) => {
+                // Sorted and deduped, so the string is stable across Exchange's
+                // response ordering.
+                assert_eq!(scope_name.as_deref(), Some("Execs, Sales"));
+                // A description belongs to ONE policy; showing the first
+                // policy's filter beside a two-scope name would misdescribe the
+                // reach, so it is dropped when the union spans policies.
+                assert_eq!(recipient_filter, None);
+            }
+            other => panic!("expected a unioned legacy verdict, got {other:?}"),
+        }
+        // A single match still carries its own description.
+        match aap_verdict_for(&policies, "app-2") {
+            Some(MailPermissionScope::Scoped {
+                scope_name,
+                recipient_filter,
+                ..
+            }) => {
+                assert_eq!(scope_name.as_deref(), Some("Support"));
+                assert_eq!(recipient_filter.as_deref(), Some("desc"));
+            }
+            other => panic!("expected a single-scope verdict, got {other:?}"),
+        }
     }
 
     /// The legacy override must reach only the resources an Application Access
