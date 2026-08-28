@@ -77,6 +77,44 @@ impl UserSettings {
     /// application's secrets (`default_vault` / `app_vaults`), which is a map
     /// of where this tenant's credentials live. Written under the process
     /// umask it was commonly world-readable.
+    /// Read, modify and write `settings.json` under a process-wide lock.
+    ///
+    /// The file had three unsynchronized read-modify-write callers — the Key
+    /// Vault rotation flow, the auth config, and the tenant defaults — and the
+    /// last is a synchronous Tauri command on the main thread while the first is
+    /// async on the runtime pool, so they genuinely run on different OS threads.
+    /// Interleaved either way, one side's `stored()` predates the other's
+    /// `save()` and that write is silently dropped: the operator's just-saved
+    /// defaults, or the freshly recorded vault binding the rotation flow needs
+    /// to find the secret again.
+    ///
+    /// Every writer must go through here. Paired with the atomic
+    /// temp-and-rename in `private_file`, a concurrent *reader* also never sees
+    /// a partial file.
+    pub fn mutate<T>(
+        config_dir: &Path,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> std::io::Result<(T, Self)> {
+        static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // A poisoned lock means a previous writer panicked mid-mutation. The
+        // file itself is still consistent (the write is atomic), so recovering
+        // and carrying on beats refusing every subsequent save.
+        let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut settings = Self::stored(config_dir);
+        let out = f(&mut settings);
+        settings.save_locked(config_dir)?;
+        Ok((out, settings))
+    }
+
+    /// The write half of [`Self::mutate`]. Private so a caller cannot take the
+    /// read-modify-write apart and reintroduce the race.
+    fn save_locked(&self, config_dir: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(config_dir)?;
+        let json = serde_json::to_vec_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        crate::private_file::write_owner_only(&config_dir.join(SETTINGS_FILE), &json)
+    }
+
     pub fn save(&self, config_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(config_dir)?;
         let json = serde_json::to_vec_pretty(self)
@@ -323,5 +361,67 @@ mod tests {
         ));
         std::fs::create_dir_all(&p).unwrap();
         TempDir(p)
+    }
+
+    /// Concurrent read-modify-write must not lose a field.
+    ///
+    /// `settings.json` had three unsynchronized writers, one of them a
+    /// synchronous Tauri command on the main thread while another is async on
+    /// the runtime pool — so they genuinely run on different OS threads.
+    /// Interleave `stored()`/`save()` either way and one side's write vanishes:
+    /// the operator's just-saved defaults, or the vault binding the next
+    /// rotation needs to find the secret again.
+    #[test]
+    fn concurrent_mutations_do_not_lose_each_others_writes() {
+        let dir = tempdir();
+        let path = dir.0.clone();
+
+        // Two writers touching DIFFERENT fields — the case a lost update
+        // silently corrupts rather than merely reorders.
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let path = path.clone();
+                scope.spawn(move || {
+                    if i % 2 == 0 {
+                        UserSettings::mutate(&path, |s| {
+                            s.client_id = Some("client".to_string());
+                        })
+                        .unwrap();
+                    } else {
+                        UserSettings::mutate(&path, |s| {
+                            s.tenant_id = Some("tenant".to_string());
+                        })
+                        .unwrap();
+                    }
+                });
+            }
+        });
+
+        let final_settings = UserSettings::stored(&path);
+        assert_eq!(final_settings.client_id.as_deref(), Some("client"));
+        assert_eq!(
+            final_settings.tenant_id.as_deref(),
+            Some("tenant"),
+            "one writer's field was lost to an interleaved read-modify-write"
+        );
+    }
+
+    /// `mutate` reads the file each time, so a later mutation sees the earlier
+    /// one — the property that makes it a safe replacement for
+    /// `stored()` + `save()`.
+    #[test]
+    fn mutate_observes_the_previous_write() {
+        let dir = tempdir();
+        UserSettings::mutate(&dir.0, |s| s.client_id = Some("first".into())).unwrap();
+        let (seen, _) = UserSettings::mutate(&dir.0, |s| {
+            let seen = s.client_id.clone();
+            s.tenant_id = Some("t".into());
+            seen
+        })
+        .unwrap();
+        assert_eq!(seen.as_deref(), Some("first"));
+        let stored = UserSettings::stored(&dir.0);
+        assert_eq!(stored.client_id.as_deref(), Some("first"));
+        assert_eq!(stored.tenant_id.as_deref(), Some("t"));
     }
 }

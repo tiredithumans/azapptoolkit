@@ -27,7 +27,7 @@ impl GraphClient {
     /// staleness — the UI would show access that no longer exists, or hide
     /// access that does. Routing every mutator through here makes the
     /// invalidation correct by construction rather than by remembering.
-    fn invalidate_grant_cache(&self) {
+    pub(crate) fn invalidate_grant_cache(&self) {
         self.cache.invalidate_prefix(
             CacheKind::Permissions,
             &format!("{}|grants:", self.tenant_id),

@@ -454,6 +454,49 @@ impl GraphClient {
             .invalidate_prefix(CacheKind::ServicePrincipal, &format!("{}|", self.tenant_id));
     }
 
+    /// Drops this tenant's cached **resource**-SP definitions — the appRoles and
+    /// oauth2PermissionScopes `resolve_resource_sp` caches.
+    ///
+    /// Called by every mutator that changes them. None of the three did before:
+    /// `set_application_app_roles` invalidated nothing,
+    /// `set_service_principal_app_roles` swept only `ServicePrincipal`, and
+    /// `patch_application_expose_api` invalidated nothing — while
+    /// `invalidate_app_details` sweeps only `Lists`. So an operator published a
+    /// new app role on their own API (which `list_tenant_app_role_resources`
+    /// exists to make grantable), opened the Grant-access wizard, and the role
+    /// was not there.
+    ///
+    /// A tenant-wide sweep rather than a targeted key because the mutators are
+    /// addressed by *object* id and the cache is keyed by *app* id; the bucket
+    /// is small and the alternative is an extra read per write.
+    pub(crate) fn invalidate_resource_sp_cache(&self) {
+        self.cache.invalidate_prefix(
+            CacheKind::Permissions,
+            &format!("{}|resource:", self.tenant_id),
+        );
+    }
+
+    /// Drops **everything** cached about this tenant's service principals: the
+    /// SP objects themselves and the tenant-wide grant matrices that describe
+    /// what they can reach.
+    ///
+    /// The two live under different `CacheKind`s, so `invalidate_sp_cache`
+    /// alone left `{tenant}|grants:oauth2_all` and
+    /// `{tenant}|grants:assigned_to:{sp_id}` intact after a **delete** — and no
+    /// command compensated, because `invalidate_app_lists` touches `Lists` and
+    /// the audit cache, never the `grants:` prefix. An operator deleted an
+    /// over-privileged enterprise application and the Security tab kept
+    /// reporting its application permissions as live, which is the worst
+    /// direction for a least-privilege view to be wrong in.
+    ///
+    /// Lives on the client for the same reason `invalidate_grant_cache` does:
+    /// grants are written from seven command files, and spreading the pairing
+    /// across them is how the halves drifted apart.
+    pub(crate) fn invalidate_principal_caches(&self) {
+        self.invalidate_sp_cache();
+        self.invalidate_grant_cache();
+    }
+
     /// Creates a service principal for `app_id` if one does not exist. Returns
     /// the SP and whether it was **newly created** — callers bust the Lists
     /// caches (the shared SP index / search corpus) only on first creation,
@@ -560,7 +603,7 @@ impl GraphClient {
         let path = format!("/servicePrincipals/{object_id}");
         self.send_no_content::<()>(Method::DELETE, &path, None)
             .await?;
-        self.invalidate_sp_cache();
+        self.invalidate_principal_caches();
         Ok(())
     }
 
@@ -608,7 +651,11 @@ impl GraphClient {
         roles: &[serde_json::Value],
     ) -> Result<()> {
         let body = serde_json::json!({ "appRoles": roles });
-        self.patch_service_principal(object_id, &body).await
+        self.patch_service_principal(object_id, &body).await?;
+        // These roles ARE the resource-SP definitions the permission picker
+        // reads. Only on the success path.
+        self.invalidate_resource_sp_cache();
+        Ok(())
     }
 
     /// Looks up a resource SP by app id to resolve permission display names
@@ -618,7 +665,7 @@ impl GraphClient {
         &self,
         resource_app_id: &str,
     ) -> Result<Option<ServicePrincipal>> {
-        let cache_key = self.sp_cache_key(resource_app_id);
+        let cache_key = self.resource_sp_cache_key(resource_app_id);
         if let Some(cached) = self
             .cache
             .get::<Option<ServicePrincipal>>(CacheKind::Permissions, &cache_key)
@@ -651,7 +698,7 @@ impl GraphClient {
             CacheKind::Permissions,
             RESOURCE_SP_SELECT,
             "resource-SP",
-            |id| self.sp_cache_key(id),
+            |id| self.resource_sp_cache_key(id),
         )
         .await
     }

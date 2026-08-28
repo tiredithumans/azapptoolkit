@@ -155,6 +155,15 @@ impl EntraAuthService {
         let url = format!("{authority}/oauth2/v2.0/token");
         let resp = self.http.post(&url).form(params).send().await?;
         let status = resp.status();
+        // Captured before the body consumes `resp`: on the non-Entra branch
+        // below it is the one genuinely diagnostic, non-content signal — an
+        // `text/html` here says "a proxy answered", which is the actual
+        // question an operator is asking.
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let bytes = resp.bytes().await?;
         if !status.is_success() {
             if let Ok(err_body) = serde_json::from_slice::<TokenErrorBody>(&bytes) {
@@ -171,11 +180,19 @@ impl EntraAuthService {
                 );
                 return Err(classify_token_error(&err_body));
             }
-            // Body wasn't a TokenErrorBody — log raw, surface generic.
+            // Body wasn't a TokenErrorBody. Tracing is wired to a daily rolling
+            // FILE appender at info, so this lands on disk — and every other AAD
+            // error path here is meticulously redacted (`redacted_aad_error`
+            // drops `error_description` because it embeds tenant/user GUIDs and
+            // client IPs). This branch fires precisely when the responder is
+            // NOT Entra: a TLS-intercepting proxy, WAF or captive portal, which
+            // commonly echo the offending request back in the block page. So
+            // only non-content metadata is logged.
             tracing::warn!(
                 target: "auth",
                 %status,
-                body = %String::from_utf8_lossy(&bytes),
+                bytes = bytes.len(),
+                content_type = content_type.as_deref().unwrap_or("<none>"),
                 "AAD token endpoint returned non-success without TokenErrorBody"
             );
             return Err(AuthError::TokenExchange(format!("HTTP {status}")));
@@ -772,7 +789,10 @@ mod tests {
         // The refresh token and session survive a missing-consent rejection.
         assert!(matches!(result, Err(AuthError::ConsentRequired(_))));
         assert_eq!(
-            load_refresh_token(tenant, oid).unwrap().as_deref(),
+            load_refresh_token(tenant, oid)
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
             Some("stored-refresh-token")
         );
         assert!(svc.known_tenants.lock().get(tenant).is_some());
@@ -808,7 +828,10 @@ mod tests {
         assert_eq!(cached.token, "freshly-minted");
         // The session is intact: the keyring refresh token and tenant survive.
         assert_eq!(
-            load_refresh_token(tenant, oid).unwrap().as_deref(),
+            load_refresh_token(tenant, oid)
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
             Some("stored-refresh-token")
         );
         assert!(svc.known_tenants.lock().get(tenant).is_some());

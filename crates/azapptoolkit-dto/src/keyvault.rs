@@ -57,12 +57,27 @@ pub struct KvSecretItemDto {
     pub content_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct KvSecretValueDto {
     pub name: String,
     pub value: String,
     pub content_type: Option<String>,
     pub expires: Option<String>,
+}
+// Hand-written rather than derived: the workspace treats a derived `Debug` on
+// a secret as a defect, because any `?dto` in a `tracing` macro puts the
+// plaintext straight into the daily rolling log file. Mirrors
+// `dto::backup::RegeneratedSecret`, `core::models::PasswordCredential`,
+// `auth::AccessToken`, `keyvault::SecretValue` and `cert::GeneratedCert`.
+impl std::fmt::Debug for KvSecretValueDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KvSecretValueDto")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .field("content_type", &self.content_type)
+            .field("expires", &self.expires)
+            .finish()
+    }
 }
 
 /// Returned by `kv_set_secret` — metadata only, never the secret value.
@@ -73,7 +88,7 @@ pub struct KvSecretMetadataDto {
     pub expires: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KvSetSecretInput {
     pub vault_name: String,
@@ -82,6 +97,22 @@ pub struct KvSetSecretInput {
     pub content_type: Option<String>,
     /// RFC3339 timestamp.
     pub expires: Option<String>,
+}
+// Hand-written rather than derived: the workspace treats a derived `Debug` on
+// a secret as a defect, because any `?dto` in a `tracing` macro puts the
+// plaintext straight into the daily rolling log file. Mirrors
+// `dto::backup::RegeneratedSecret`, `core::models::PasswordCredential`,
+// `auth::AccessToken`, `keyvault::SecretValue` and `cert::GeneratedCert`.
+impl std::fmt::Debug for KvSetSecretInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KvSetSecretInput")
+            .field("vault_name", &self.vault_name)
+            .field("secret_name", &self.secret_name)
+            .field("value", &"<redacted>")
+            .field("content_type", &self.content_type)
+            .field("expires", &self.expires)
+            .finish()
+    }
 }
 
 /// Input for rotating an application's client secret into Key Vault: mint a
@@ -116,4 +147,38 @@ pub struct RotateCredentialResult {
     pub expires: Option<String>,
     pub removed_key_ids: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A derived `Debug` on a secret-bearing DTO is a defect in this workspace:
+    /// any `?dto` in a `tracing` macro puts the plaintext straight into the
+    /// daily rolling log file. Pinned rather than left to convention, which is
+    /// what let four of these opt out.
+    #[test]
+    fn secret_bearing_dtos_redact_their_secret_in_debug() {
+        let read = KvSecretValueDto {
+            name: "app-secret".into(),
+            value: "s3cr3t-value".into(),
+            content_type: None,
+            expires: None,
+        };
+        let dbg = format!("{read:?}");
+        assert!(!dbg.contains("s3cr3t-value"), "{dbg}");
+        assert!(dbg.contains("<redacted>"), "{dbg}");
+        // Non-secret fields stay useful for diagnosis.
+        assert!(dbg.contains("app-secret"), "{dbg}");
+
+        let write = KvSetSecretInput {
+            vault_name: "kv-contoso".into(),
+            secret_name: "app-secret".into(),
+            value: "s3cr3t-value".into(),
+            ..Default::default()
+        };
+        let dbg = format!("{write:?}");
+        assert!(!dbg.contains("s3cr3t-value"), "{dbg}");
+        assert!(dbg.contains("kv-contoso"), "{dbg}");
+    }
 }
