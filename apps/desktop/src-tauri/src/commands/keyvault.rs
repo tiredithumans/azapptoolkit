@@ -156,16 +156,17 @@ pub async fn rotate_app_credential(
     // never the secret.
     if let Some(app_id) = input.app_id.as_deref() {
         let config_dir = crate::config_directory();
-        let mut settings = UserSettings::stored(&config_dir);
-        settings.set_app_vault_binding(
-            &tenant_id,
-            app_id,
-            AppVaultBinding {
-                vault_name: input.vault_name.clone(),
-                secret_name: Some(input.secret_name.clone()),
-            },
-        );
-        if let Err(e) = settings.save(&config_dir) {
+        let binding = AppVaultBinding {
+            vault_name: input.vault_name.clone(),
+            secret_name: Some(input.secret_name.clone()),
+        };
+        // Serialized with the other two writers: this binding is what the next
+        // rotation uses to find the secret again, and it was the write most
+        // likely to be lost — it lands while the operator may well be saving
+        // defaults on the main thread.
+        if let Err(e) = UserSettings::mutate(&config_dir, |settings| {
+            settings.set_app_vault_binding(&tenant_id, app_id, binding);
+        }) {
             warnings.push(format!(
                 "rotation succeeded, but couldn't remember the vault for next time: {e}"
             ));

@@ -1,5 +1,31 @@
 ## [Unreleased]
 
+### Fixed
+
+- **A tenant name pattern missing `{appId}` collapsed every app onto one shared
+  scope, group and secret.** The substitution is a no-op when the pattern omits
+  the placeholder, so with `scope_name_pattern = "contoso_app_scope"` every app
+  in the tenant resolved to the same name. Scoping app A created a management
+  scope filtered to A's group; scoping app B then got A's scope back untouched
+  (the ensure step is create-only) and **B's scoped Exchange roles were attached
+  to a scope pointing at A's mailboxes**. The same collapse cross-wired Key Vault
+  secret names between apps. Such a pattern is now rejected when saved, and the
+  resolvers fall back to the built-in per-app default if one reaches them anyway.
+- **An interrupted settings write could destroy the tenant defaults and vault
+  bindings.** `settings.json` was truncated in place, so any interruption before
+  the write completed left it empty or torn; parsing then failed, the caller
+  swallowed it behind a default, and the next writer serialized those defaults
+  back over the file. The write is now a temp-and-rename, which is atomic and
+  keeps the owner-only mode.
+- **Three unsynchronized writers of `settings.json` could lose a vault
+  binding.** The rotation flow, the auth config and the tenant defaults each did
+  their own read-modify-write, and the last runs synchronously on the main
+  thread while the first is async on the runtime pool — so they genuinely
+  interleave. Either order silently dropped one side's write: the operator's
+  just-saved defaults, or the freshly recorded binding the next rotation needs to
+  find the secret again. All three now go through one serialized helper.
+
+
 ### Added
 
 - **SharePoint access can now be scoped to a single library, folder or file.**

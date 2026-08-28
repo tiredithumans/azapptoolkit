@@ -7,7 +7,7 @@
 //! the vault bindings on [`TenantDefaults`] are preserved as-is (they're owned by
 //! the credential-rotation flow — see [`UserSettings::apply_tenant_defaults`]).
 
-use azapptoolkit_core::defaults::TenantDefaults;
+use azapptoolkit_core::defaults::{SCOPE_NAME_PLACEHOLDER, TenantDefaults};
 use azapptoolkit_core::settings::UserSettings;
 
 use crate::dto::UiError;
@@ -45,12 +45,34 @@ pub fn set_tenant_defaults(tenant_id: String, defaults: TenantDefaults) -> Resul
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty());
 
+    // A non-blank pattern MUST carry the placeholder. Without it the
+    // substitution is a no-op and every app in the tenant resolves to the same
+    // name: `ensure_management_scope` is create-only, so scoping app B returns
+    // app A's scope untouched and attaches B's roles to a filter pointing at
+    // A's mailboxes. The same collapse cross-wires Key Vault secret names.
+    for (label, pattern) in [
+        ("scope_name_pattern", &defaults.scope_name_pattern),
+        ("group_name_pattern", &defaults.group_name_pattern),
+        ("secret_name_pattern", &defaults.secret_name_pattern),
+    ] {
+        if let Some(pat) = pattern
+            && !pat.contains(SCOPE_NAME_PLACEHOLDER)
+        {
+            return Err(UiError::validation(
+                "invalid_pattern",
+                format!(
+                    "{label} must contain {SCOPE_NAME_PLACEHOLDER}, or every app in the tenant \
+                     resolves to the same name and they share one scope, group or secret."
+                ),
+            ));
+        }
+    }
+
     let config_dir = crate::config_directory();
-    let mut settings = UserSettings::stored(&config_dir);
-    settings.apply_tenant_defaults(&tenant_id, defaults);
-    settings
-        .save(&config_dir)
-        .map_err(|e| UiError::io(format!("Could not write settings.json: {e}")))?;
+    UserSettings::mutate(&config_dir, |settings| {
+        settings.apply_tenant_defaults(&tenant_id, defaults);
+    })
+    .map_err(|e| UiError::io(format!("Could not write settings.json: {e}")))?;
     Ok(())
 }
 
