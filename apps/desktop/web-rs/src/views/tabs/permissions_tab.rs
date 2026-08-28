@@ -34,7 +34,10 @@ use crate::hooks::use_command::use_command;
 use crate::state::{Session, use_session};
 use crate::views::tabs::usage_panel::UsagePanel;
 use azapptoolkit_core::audit::{MailPermissionScope, downgrade_alternatives};
-use azapptoolkit_core::scoping::{ScopeKind, is_scopable_sharepoint_resource_permission};
+use azapptoolkit_core::scoping::{
+    ScopeKind, is_scopable_sharepoint_resource_permission,
+    is_scoped_sharepoint_item_resource_permission,
+};
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::permissions::{PermissionKind, ResolvedPermission};
 
@@ -63,8 +66,16 @@ struct PendingDowngrade {
 /// toolkit reads and writes. The row's own `resource_app_id` settles it, so the
 /// button appears only where the conversion can actually be performed.
 fn row_scope_kind(resource_app_id: Option<&str>, value: &str) -> Option<ScopeKind> {
-    is_scopable_sharepoint_resource_permission(resource_app_id, value)
-        .then_some(ScopeKind::SharePoint)
+    if is_scopable_sharepoint_resource_permission(resource_app_id, value) {
+        return Some(ScopeKind::SharePoint);
+    }
+    // The sub-site Selected scopes get the button for the opposite reason: not
+    // to convert an org-wide grant away, but because the scope grants **nothing**
+    // until a resource is picked. A held `Files.SelectedOperations.Selected` with
+    // no per-item grants is an app that cannot read a single file, and this is
+    // the row an operator lands on when they go looking for why.
+    is_scoped_sharepoint_item_resource_permission(resource_app_id, value)
+        .then_some(ScopeKind::SharePointItem)
 }
 
 /// Runs the admin-consent grant for the app in `detail`, reporting via toasts.

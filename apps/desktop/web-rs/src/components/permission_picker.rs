@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use azapptoolkit_core::audit::{
     downgrade_alternatives, is_risky_delegated_scope, least_privilege_alternative,
 };
-use azapptoolkit_core::scoping::is_sharepoint_orgwide;
+use azapptoolkit_core::scoping::{
+    SP_FILES_SELECTED, SP_LIST_ITEMS_SELECTED, SP_LISTS_SELECTED, is_sharepoint_orgwide,
+};
 use leptos::prelude::*;
 use thaw::{Body1, Input};
 
@@ -259,6 +261,23 @@ fn scope_hint(value: &str) -> AnyView {
         return view! {
             <span class="permission-picker__row-note permission-picker__row-note--ok">
                 "Scoped — per-site access (least privilege)"
+            </span>
+        }
+        .into_any();
+    }
+    // The sub-site Selected family. Named individually rather than by prefix so
+    // the note can say which securable each one confines to — "Selected" alone
+    // tells an operator nothing about whether they are picking a library or a
+    // file, and picking the wrong one is the mistake this whole flow guards.
+    if let Some(target) = match value {
+        SP_LISTS_SELECTED => Some("one list or document library"),
+        SP_LIST_ITEMS_SELECTED => Some("individual list items, folders and files"),
+        SP_FILES_SELECTED => Some("individual files and library folders"),
+        _ => None,
+    } {
+        return view! {
+            <span class="permission-picker__row-note permission-picker__row-note--ok">
+                {format!("Scoped — grants nothing until you pick {target} (least privilege)")}
             </span>
         }
         .into_any();

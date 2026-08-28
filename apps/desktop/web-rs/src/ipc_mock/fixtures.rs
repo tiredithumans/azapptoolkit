@@ -825,6 +825,56 @@ pub fn app_site_access(app_id: &str) -> azapptoolkit_dto::sharepoint::AppSiteAcc
     }
 }
 
+/// A resolved SharePoint resource for the demo's "Grant access" wizard.
+///
+/// Classifies from the URL's own shape so the demo shows the real distinction:
+/// a bare site resolves as a site (which a `Files.*` scope must reject), one
+/// segment below it as a library, deeper as a folder. A path ending in a
+/// file extension resolves as a file.
+pub fn sharepoint_resource_ref(url: &str) -> azapptoolkit_dto::sharepoint::SharePointResourceRef {
+    use azapptoolkit_core::scoping::SelectedScopeLevel;
+    use azapptoolkit_dto::sharepoint::SharePointResourceRef;
+
+    let path = url
+        .split_once("://")
+        .map_or(url, |(_, rest)| rest)
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url);
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    // host / "sites" / <name> is the site collection; anything after it is
+    // library, then folders, then possibly a file.
+    let below: Vec<&str> = segs.iter().skip(3).copied().collect();
+    let last = below.last().copied().unwrap_or_default();
+    let looks_like_file = last.contains('.') && !last.ends_with('/');
+    let level = match below.len() {
+        0 => SelectedScopeLevel::Site,
+        1 => SelectedScopeLevel::List,
+        _ => SelectedScopeLevel::File,
+    };
+    let site_name = segs.get(2).copied().unwrap_or("Finance").to_string();
+    let display_path = std::iter::once(site_name.as_str())
+        .chain(below.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" / ")
+        .replace("%20", " ");
+
+    SharePointResourceRef {
+        level,
+        site_id: format!("contoso.sharepoint.com,{}", guid(&site_name)),
+        site_url: Some(format!("https://contoso.sharepoint.com/sites/{site_name}")),
+        site_name: Some(site_name),
+        list_id: (level != SelectedScopeLevel::Site)
+            .then(|| guid(below.first().unwrap_or(&"Documents"))),
+        list_name: below.first().map(|l| l.replace("%20", " ")),
+        item_id: (level == SelectedScopeLevel::File).then(|| guid(last)),
+        drive_id: (level != SelectedScopeLevel::Site).then(|| guid("drive")),
+        is_folder: level == SelectedScopeLevel::File && !looks_like_file,
+        display_path,
+        input_url: url.to_string(),
+    }
+}
+
 pub fn site_sweep_progress(done: usize, total: usize) -> SiteSweepProgress {
     SiteSweepProgress {
         done,

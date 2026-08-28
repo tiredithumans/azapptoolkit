@@ -11,8 +11,12 @@
 //! - **SharePoint:** picking `Sites.Read.All` + a site URL routes to
 //!   `convert_site_access_to_selected` with `removeOrgwide = true` and never
 //!   touches Exchange RBAC.
+//! - **SharePoint item:** picking `Files.SelectedOperations.Selected` + a folder
+//!   URL routes to `grant_selected_item_access`, resolving each URL first so the
+//!   operator sees what it is about to touch.
 //! - **Mixed (not homogeneously scopable):** selecting permissions from two
-//!   mechanisms hides scoping entirely and grants org-wide.
+//!   mechanisms — or two *levels* of the Selected family — hides scoping
+//!   entirely and grants org-wide.
 //! - **Pre-seed:** opening with a permission pre-selected jumps to the
 //!   choose-access step.
 #![cfg(target_arch = "wasm32")]
@@ -36,6 +40,8 @@ const CATALOG: &[&str] = &[
     "Mail.ReadWrite",
     "Mail.Send",
     "Sites.Read.All",
+    "Files.SelectedOperations.Selected",
+    "Lists.SelectedOperations.Selected",
     "User.Read.All",
 ];
 
@@ -71,6 +77,36 @@ fn site_scope_result() -> SiteScopeResult {
         sites_granted: Vec::new(),
         removed_orgwide_grants: vec!["Sites.Read.All".to_string()],
         warnings: Vec::new(),
+    }
+}
+
+fn selected_item_scope_result() -> azapptoolkit_dto::sharepoint::SelectedItemScopeResult {
+    azapptoolkit_dto::sharepoint::SelectedItemScopeResult {
+        granted_role_added: true,
+        granted: Vec::new(),
+        warnings: Vec::new(),
+    }
+}
+
+/// A resolved target at `level`, as `resolve_sharepoint_resource` would return.
+fn resource_ref(
+    level: azapptoolkit_core::scoping::SelectedScopeLevel,
+    display_path: &str,
+) -> azapptoolkit_dto::sharepoint::SharePointResourceRef {
+    use azapptoolkit_core::scoping::SelectedScopeLevel;
+    azapptoolkit_dto::sharepoint::SharePointResourceRef {
+        level,
+        site_id: "contoso.sharepoint.com,site-1".to_string(),
+        site_url: Some("https://contoso.sharepoint.com/sites/Finance".to_string()),
+        site_name: Some("Finance".to_string()),
+        list_id: (level != SelectedScopeLevel::Site).then(|| "list-1".to_string()),
+        list_name: Some("Documents".to_string()),
+        item_id: (level == SelectedScopeLevel::File).then(|| "item-1".to_string()),
+        drive_id: Some("drive-1".to_string()),
+        is_folder: level == SelectedScopeLevel::File,
+        display_path: display_path.to_string(),
+        input_url: "https://contoso.sharepoint.com/sites/Finance/Shared Documents/Invoices"
+            .to_string(),
     }
 }
 
@@ -360,4 +396,108 @@ async fn preseed_jumps_to_the_choose_access_step() {
         ts::body_contains("Step 2 of 3"),
         "preseed should jump straight to the choose-access step"
     );
+}
+
+#[wasm_bindgen_test]
+async fn selected_item_path_grants_against_the_resolved_folder() {
+    // The reported gap: `Files.SelectedOperations.Selected` produced no scoping
+    // affordance at all and fell through to an org-wide grant.
+    use azapptoolkit_core::scoping::SelectedScopeLevel;
+    let _m = mount_wizard(None);
+    ts::mock_ok(
+        "resolve_sharepoint_resource",
+        &resource_ref(SelectedScopeLevel::File, "Finance / Documents / Invoices"),
+    );
+    ts::mock_ok("grant_selected_item_access", &selected_item_scope_result());
+
+    ts::wait_for(|| ts::body_contains("Files.SelectedOperations.Selected")).await;
+    select_permission("Files.SelectedOperations.Selected");
+    ts::wait_for(next_enabled).await;
+    click_button("Next");
+
+    // Step 2 offers the item panel, NOT the "can't be scoped" fallback.
+    ts::wait_for(|| ts::body_contains("Library, folder or file URLs")).await;
+    assert!(
+        !ts::body_contains("can't be scoped together"),
+        "a homogeneous Selected cart is scopable and must not fall through to org-wide"
+    );
+    ts::set_textarea_value(
+        ".modal textarea",
+        "https://contoso.sharepoint.com/sites/Finance/Shared Documents/Invoices",
+    );
+
+    // The panel resolves the URL and shows what it found, before any grant runs.
+    ts::wait_for(|| ts::body_contains("Finance / Documents / Invoices")).await;
+    assert!(ts::body_contains("Folder"));
+
+    click_button("Next");
+    ts::wait_for(|| ts::body_contains("permission inheritance is broken")).await;
+    click_button("Grant access");
+    ts::wait_for(|| ts::call_count("grant_selected_item_access") == 1).await;
+
+    // The item path only — never the site conversion or the org-wide grant.
+    assert_eq!(ts::call_count("convert_site_access_to_selected"), 0);
+    assert_eq!(ts::call_count("grant_single_permission"), 0);
+    let call = ts::last_call("grant_selected_item_access").unwrap();
+    assert_eq!(
+        call.args.get("permissionValue").and_then(|v| v.as_str()),
+        Some("Files.SelectedOperations.Selected")
+    );
+    assert_eq!(
+        call.args
+            .get("targetUrls")
+            .and_then(|u| u.as_array())
+            .map(|a| a.len()),
+        Some(1)
+    );
+}
+
+#[wasm_bindgen_test]
+async fn a_target_the_permission_cannot_reach_is_flagged_before_granting() {
+    // Pointing a file-level scope at a site URL is the mistake the resolve step
+    // exists to catch. The backend fails closed on it either way; the panel has
+    // to say so while it is still a correctable typo.
+    use azapptoolkit_core::scoping::SelectedScopeLevel;
+    let _m = mount_wizard(None);
+    ts::mock_ok(
+        "resolve_sharepoint_resource",
+        &resource_ref(SelectedScopeLevel::Site, "Finance"),
+    );
+
+    ts::wait_for(|| ts::body_contains("Files.SelectedOperations.Selected")).await;
+    select_permission("Files.SelectedOperations.Selected");
+    ts::wait_for(next_enabled).await;
+    click_button("Next");
+
+    ts::wait_for(|| ts::body_contains("Library, folder or file URLs")).await;
+    ts::set_textarea_value(
+        ".modal textarea",
+        "https://contoso.sharepoint.com/sites/Finance",
+    );
+
+    ts::wait_for(|| ts::body_contains("level this permission can't grant against")).await;
+    assert!(ts::body_contains("Site"));
+}
+
+#[wasm_bindgen_test]
+async fn two_selected_levels_in_one_cart_fall_back_to_org_wide() {
+    // `Lists.*` grants against a library and `Files.*` against an item inside
+    // one — two securables, two endpoints. There is no single target panel that
+    // honours both, so the cart is not scopable even though both items share a
+    // mechanism.
+    let _m = mount_wizard(None);
+    ts::mock_ok("grant_single_permission", &fixtures::grant_result());
+
+    ts::wait_for(|| ts::body_contains("Lists.SelectedOperations.Selected")).await;
+    select_permission("Files.SelectedOperations.Selected");
+    select_permission("Lists.SelectedOperations.Selected");
+    ts::wait_for(next_enabled).await;
+    click_button("Next");
+
+    ts::wait_for(|| ts::body_contains("can't be scoped together")).await;
+    assert!(
+        !ts::body_contains("Library, folder or file URLs"),
+        "a mixed-level cart must not offer a target panel it cannot apply"
+    );
+    assert_eq!(ts::call_count("grant_selected_item_access"), 0);
 }

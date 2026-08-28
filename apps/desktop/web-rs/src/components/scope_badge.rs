@@ -33,7 +33,9 @@ use crate::components::ui::Badge;
 // scopable). The value-only core predicate stays available to the *backend*, whose
 // audit gate legitimately scans a flattened value list.
 pub use azapptoolkit_core::scoping::is_scopable_exchange_resource_permission as is_exchange_scopable_on;
-pub use azapptoolkit_core::scoping::is_sharepoint_orgwide;
+pub use azapptoolkit_core::scoping::{
+    is_scoped_sharepoint_item_resource_permission, is_sharepoint_orgwide,
+};
 
 /// Risk badge (`High risk` / `Medium`, with a tooltip) for an application
 /// permission a principal **holds**, or an empty view when it isn't classified
@@ -72,6 +74,9 @@ enum ScopeCell {
     SitesSelected,
     /// A broad `Sites.*` — org-wide, derived from the name.
     SitesOrgWide,
+    /// A sub-site Selected scope (`Lists.`/`ListItems.`/`Files.SelectedOperations.Selected`)
+    /// — confined to individually-granted lists, folders or files.
+    ItemsSelected,
     /// Not scopable by any mechanism.
     NotApplicable,
 }
@@ -110,6 +115,13 @@ fn scope_cell_for(
     match value {
         Some("Sites.Selected") => ScopeCell::SitesSelected,
         Some(v) if is_sharepoint_orgwide(v) => ScopeCell::SitesOrgWide,
+        // Resource-aware, unlike the two name-derived arms above: a
+        // `Files.SelectedOperations.Selected` on Office 365 SharePoint Online
+        // is a grant this toolkit can neither read back nor manage, so it earns
+        // no confident "Scoped" badge.
+        Some(v) if is_scoped_sharepoint_item_resource_permission(resource_app_id, v) => {
+            ScopeCell::ItemsSelected
+        }
         _ => ScopeCell::NotApplicable,
     }
 }
@@ -157,6 +169,14 @@ pub fn permission_scope_cell(
                 label="Org-wide"
                 tone="danger"
                 title="Grants access to every site in the tenant"
+            />
+        }
+        .into_any(),
+        ScopeCell::ItemsSelected => view! {
+            <Badge
+                label="Scoped (selected items)"
+                tone="ok"
+                title="Confined to individually-granted lists, folders or files. Reach is not enumerable — check a specific resource to see its grants."
             />
         }
         .into_any(),

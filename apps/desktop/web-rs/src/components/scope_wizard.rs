@@ -10,6 +10,10 @@
 //! - **SharePoint** (`Sites.*`) → confine to specific sites via `Sites.Selected`
 //!   (`convert_site_access_to_selected` grants the narrow role + per-site access
 //!   and strips the broad grant).
+//! - **SharePoint item** (`Lists.`/`ListItems.`/`Files.SelectedOperations.Selected`)
+//!   → confine to specific libraries, folders or files
+//!   (`grant_selected_item_access`). Strips nothing: these scopes have no
+//!   org-wide predecessor — they are least-privilege from the start.
 //!
 //! Step 1 is the full live permission catalog (the [`PermissionPicker`]) as a
 //! multi-select cart, so any permission — scopable or not — can be granted from
@@ -25,6 +29,7 @@ use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize, Textarea};
 use crate::bindings::exchange::{self, ExchangeScopeGroupDto};
 use crate::bindings::{auth, managed_identity, permissions, sharepoint};
 use crate::components::group_autocomplete::GroupAutocomplete;
+use crate::components::item_selection_panel::ItemSelectionPanel;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
 use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
 use crate::components::requires_role::RequiresRole;
@@ -34,7 +39,9 @@ use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
 use crate::util::parse_lines;
-use azapptoolkit_core::scoping::{ScopeKind, scope_kind_for};
+use azapptoolkit_core::scoping::{
+    ScopeKind, SelectedScopeLevel, scope_kind_for, selected_scope_level_for,
+};
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::permissions::PermissionKind;
 
@@ -62,6 +69,7 @@ enum ScopeMode {
     Managed,
     Existing,
     Sites,
+    Items,
     OrgWide,
 }
 
@@ -70,6 +78,7 @@ fn default_mode(kind: ScopeKind) -> ScopeMode {
     match kind {
         ScopeKind::Exchange => ScopeMode::Managed,
         ScopeKind::SharePoint => ScopeMode::Sites,
+        ScopeKind::SharePointItem => ScopeMode::Items,
     }
 }
 
@@ -92,6 +101,17 @@ fn sharepoint_summary(r: &sharepoint::SiteScopeResult) -> String {
         r.sites_granted.len(),
         r.removed_orgwide_grants.len(),
     );
+    if !r.warnings.is_empty() {
+        s.push_str(&format!(" {} warning(s).", r.warnings.len()));
+    }
+    s
+}
+
+fn sharepoint_item_summary(r: &sharepoint::SelectedItemScopeResult) -> String {
+    let mut s = format!("Scoped to {} resource(s).", r.granted.len());
+    if r.granted_role_added {
+        s.push_str(" Added the Selected permission.");
+    }
     if !r.warnings.is_empty() {
         s.push_str(&format!(" {} warning(s).", r.warnings.len()));
     }
@@ -151,6 +171,39 @@ async fn apply_exchange_scoped(
 /// SharePoint scoped path: grant `Sites.Selected` + per-site access on the given
 /// sites and strip the org-wide `Sites.*` grant (`convert_site_access_to_selected`
 /// handles the grant-before-strip ordering).
+/// SharePoint per-item path: grant the Selected appRole plus per-resource
+/// access on each target.
+///
+/// No org-wide strip, deliberately — unlike the site path there is no broad
+/// grant to convert away from. A `Files.SelectedOperations.Selected` grant
+/// starts confined, so "remove the org-wide grant" has nothing to remove and a
+/// caller passing `remove_orgwide` would be describing a different flow.
+async fn apply_sharepoint_item_scoped(
+    tenant_id: String,
+    target: ScopeTarget,
+    target_urls: Vec<String>,
+    role: &'static str,
+    permission_value: String,
+) -> Result<String, UiError> {
+    if target.sp_object_id.is_empty() {
+        return Err(UiError::validation(
+            "no_service_principal",
+            "This app has no service principal yet — create one before scoping resource access.",
+        ));
+    }
+    let r = sharepoint::grant_selected_item_access(
+        &tenant_id,
+        &target.sp_object_id,
+        &target.app_id,
+        &target.display_name,
+        &permission_value,
+        &target_urls,
+        role,
+    )
+    .await?;
+    Ok(sharepoint_item_summary(&r))
+}
+
 async fn apply_sharepoint_scoped(
     tenant_id: String,
     target: ScopeTarget,
@@ -284,7 +337,35 @@ fn cart_mechanism(cart: &[PickerSelection]) -> Option<ScopeKind> {
             _ => return None,
         }
     }
+    // Within the item mechanism the *level* must agree too. `Lists.*` grants
+    // against a library and `Files.*` against an item inside one — two
+    // securables, two endpoints — so a cart holding both has no single target
+    // panel to show and falls back to org-wide, exactly as a mixed-mechanism
+    // cart does. One level is what makes the resolved-target preview meaningful.
+    if kind == Some(ScopeKind::SharePointItem) && cart_level(cart).is_none() {
+        return None;
+    }
     kind
+}
+
+/// The single [`SelectedScopeLevel`] every item in the cart grants at, or `None`
+/// when the cart is empty, mixed, or holds something that isn't a sub-site
+/// Selected scope.
+///
+/// Also the level the target panel checks resolved URLs against, so the
+/// wizard's "can this be scoped" question and its "can this URL be granted"
+/// question are answered from one place.
+fn cart_level(cart: &[PickerSelection]) -> Option<SelectedScopeLevel> {
+    let mut level: Option<SelectedScopeLevel> = None;
+    for item in cart {
+        let l = selected_scope_level_for(Some(&item.resource_app_id), &item.permission_value)?;
+        match level {
+            None => level = Some(l),
+            Some(prev) if prev == l => {}
+            _ => return None,
+        }
+    }
+    level
 }
 
 /// Whether a SharePoint site grant needs write access: true unless every item
@@ -334,6 +415,12 @@ pub fn ScopeWizard(
     // SharePoint target state.
     let site_urls = RwSignal::new(String::new());
     let site_write = RwSignal::new(false);
+    let item_urls = RwSignal::new(String::new());
+    let item_write = RwSignal::new(false);
+    // The level the cart grants at — drives the target panel's per-URL
+    // accept/reject preview. `None` whenever the cart isn't a homogeneous
+    // sub-site Selected selection, which is also when the panel isn't shown.
+    let cart_scope_level = Signal::derive(move || selected.with(|s| cart_level(s)));
 
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -429,6 +516,7 @@ pub fn ScopeWizard(
         enum Plan {
             ExchangeScoped(Vec<String>),
             SharePointScoped(Vec<String>, &'static str),
+            SharePointItemScoped(Vec<String>, &'static str, String),
             OrgWide,
         }
         let plan = if mode == ScopeMode::OrgWide {
@@ -474,6 +562,26 @@ pub fn ScopeWizard(
                     };
                     Plan::SharePointScoped(urls, role)
                 }
+                (ScopeKind::SharePointItem, ScopeMode::Items) => {
+                    let urls = parse_lines(&item_urls.get_untracked());
+                    if urls.is_empty() {
+                        error.set(Some(
+                            "Enter at least one library, folder or file URL (one per line).".into(),
+                        ));
+                        return;
+                    }
+                    // The cart is level-homogeneous whenever the mechanism
+                    // resolved, so any item's value names the scope to grant.
+                    let Some(value) = items.first().map(|i| i.permission_value.clone()) else {
+                        return;
+                    };
+                    let role = if item_write.get_untracked() {
+                        "write"
+                    } else {
+                        "read"
+                    };
+                    Plan::SharePointItemScoped(urls, role, value)
+                }
                 _ => return,
             }
         };
@@ -489,6 +597,9 @@ pub fn ScopeWizard(
                 }
                 Plan::SharePointScoped(urls, role) => {
                     apply_sharepoint_scoped(tenant_id, target, urls, role).await
+                }
+                Plan::SharePointItemScoped(urls, role, value) => {
+                    apply_sharepoint_item_scoped(tenant_id, target, urls, role, value).await
                 }
             };
             match res {
@@ -517,7 +628,9 @@ pub fn ScopeWizard(
             return;
         };
         let scope = match mechanism.get_untracked() {
-            Some(ScopeKind::SharePoint) => "sharepoint",
+            // Both SharePoint mechanisms ride the same Sites.FullControl.All
+            // consent — the permission endpoints need it at every level.
+            Some(ScopeKind::SharePoint | ScopeKind::SharePointItem) => "sharepoint",
             _ => "exchange",
         };
         busy.set(true);
@@ -551,6 +664,9 @@ pub fn ScopeWizard(
             ),
             ScopeMode::Sites => format!(
                 "Grant {perms}, scoped to the chosen site(s) via Sites.Selected. The app will not have org-wide site access.",
+            ),
+            ScopeMode::Items => format!(
+                "Grant {perms}, scoped to the chosen library/folder/file(s). The app reaches nothing else, and permission inheritance is broken on each target.",
             ),
         }
     };
@@ -630,6 +746,19 @@ pub fn ScopeWizard(
                             </Show>
                         </Show>
 
+                        <Show
+                            when=move || mechanism.get() == Some(ScopeKind::SharePointItem)
+                            fallback=|| ()
+                        >
+                            <Show when=move || scope_mode.get() == ScopeMode::Items fallback=|| ()>
+                                <ItemSelectionPanel
+                                    target_urls=item_urls
+                                    write=item_write
+                                    scope_level=cart_scope_level
+                                />
+                            </Show>
+                        </Show>
+
                         // Org-wide: a de-emphasized alternative when the cart is
                         // scopable; the only path otherwise.
                         {move || {
@@ -659,7 +788,7 @@ pub fn ScopeWizard(
                                 .then(|| {
                                     view! {
                                         <Body1 class="hint">
-                                            "These permissions can't be scoped together — they'll be granted org-wide. To scope instead, select only mailbox permissions, or only SharePoint site permissions, in one pass."
+                                            "These permissions can't be scoped together — they'll be granted org-wide. To scope instead, select only mailbox permissions, only SharePoint site permissions, or only one Selected permission for libraries/folders/files, in one pass."
                                         </Body1>
                                     }
                                 })

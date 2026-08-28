@@ -1,5 +1,33 @@
 ## [Unreleased]
 
+### Added
+
+- **SharePoint access can now be scoped to a single library, folder or file.**
+  The toolkit modelled only one of Microsoft's four Selected permission scopes —
+  `Sites.Selected`, at the site-collection level. Adding
+  `Files.SelectedOperations.Selected` (or the `Lists.` / `ListItems.` siblings)
+  produced no scoping affordance at all: no "Scope…" button, no Scope badge, and
+  a Grant-access wizard that fell through to *"these permissions can't be scoped
+  together"* and granted org-wide — the exact opposite of what those scopes are
+  for. `ScopeKind::SharePointItem` is now a second SharePoint mechanism, with its
+  own target panel and apply path (`grant_selected_item_access`).
+
+  The panel **resolves every URL before granting** and shows what it found
+  ("Folder · Finance / Documents / Invoices"), for two reasons: a grant below the
+  site collection breaks SharePoint permission inheritance on the target and
+  consumes one of the library's unique permission scopes, and a URL can resolve
+  one level away from where it was aimed. A target the chosen permission cannot
+  reach is flagged in the panel and skipped by the backend rather than granted
+  one level up — `Files.*` reaches items in document libraries, `ListItems.*`
+  reaches those *and* items in plain lists, and neither reaches a site.
+
+  Unlike the site path this strips nothing: a Selected scope has no org-wide
+  predecessor to convert away from. Reach is also **not enumerable** — there is
+  no reverse `appId → items` lookup and no bounded walk of every folder in a
+  tenant, so grants are verified per resource by URL and an empty result means
+  "this resource has no app grants", never "this app has no item-level access".
+
+
 ## [0.26.3] - 2026-08-20
 
 ### Security
