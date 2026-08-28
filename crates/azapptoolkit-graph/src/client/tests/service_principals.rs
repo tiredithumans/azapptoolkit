@@ -620,3 +620,101 @@ async fn patch_service_principal_sends_sso_mode() {
         .await
         .unwrap();
 }
+
+/// Deleting a service principal must drop the tenant-wide **grant matrices**
+/// too, not just the SP objects.
+///
+/// The two live under different `CacheKind`s, and no command compensated:
+/// `invalidate_app_lists` touches `Lists` and the audit cache, never the
+/// `grants:` prefix. So an operator deleted an over-privileged enterprise
+/// application and the Security tab kept reporting its application permissions
+/// as live — the worst direction for a least-privilege view to be wrong in.
+#[tokio::test]
+async fn deleting_a_service_principal_drops_the_grant_matrices() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/servicePrincipals/sp-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+
+    // Seed both families the way the read-throughs do.
+    client.cache.put(
+        CacheKind::Permissions,
+        "tenant-test|grants:oauth2_all".to_string(),
+        &serde_json::json!([{ "clientId": "sp-1" }]),
+    );
+    client.cache.put(
+        CacheKind::Permissions,
+        "tenant-test|grants:assigned_to:sp-1".to_string(),
+        &serde_json::json!([{ "appRoleId": "r" }]),
+    );
+
+    client.delete_service_principal("sp-1").await.unwrap();
+
+    for key in [
+        "tenant-test|grants:oauth2_all",
+        "tenant-test|grants:assigned_to:sp-1",
+    ] {
+        assert!(
+            client
+                .cache
+                .get::<serde_json::Value>(CacheKind::Permissions, key)
+                .is_none(),
+            "{key} still reports the deleted principal's access"
+        );
+    }
+}
+
+/// Publishing a new app role must drop the cached resource-SP definitions the
+/// permission picker reads.
+///
+/// None of the three mutators reached that bucket, so an operator published a
+/// role on their own API — which `list_tenant_app_role_resources` exists to
+/// make grantable — opened the Grant-access wizard, and the role was not there.
+#[tokio::test]
+async fn publishing_app_roles_drops_the_cached_resource_definitions() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servicePrincipals/sp-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+
+    // What `resolve_resource_sp` caches, under its own `resource:` segment.
+    client.cache.put(
+        CacheKind::Permissions,
+        "tenant-test|resource:api-app-id".to_string(),
+        &serde_json::json!({ "appRoles": [] }),
+    );
+    // A grant matrix in the same bucket, which this mutation does NOT change.
+    client.cache.put(
+        CacheKind::Permissions,
+        "tenant-test|grants:oauth2_all".to_string(),
+        &serde_json::json!([]),
+    );
+
+    client
+        .set_service_principal_app_roles("sp-1", &[serde_json::json!({ "value": "Orders.Read" })])
+        .await
+        .unwrap();
+
+    assert!(
+        client
+            .cache
+            .get::<serde_json::Value>(CacheKind::Permissions, "tenant-test|resource:api-app-id")
+            .is_none(),
+        "the stale role list would leave the new role out of the picker"
+    );
+    // The `resource:` segment is what makes this sweep precise — the grant
+    // matrices are a different family in the same bucket and must survive.
+    assert!(
+        client
+            .cache
+            .get::<serde_json::Value>(CacheKind::Permissions, "tenant-test|grants:oauth2_all")
+            .is_some(),
+        "an unrelated family was swept; the key segmenting is not working"
+    );
+}
