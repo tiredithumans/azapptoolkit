@@ -2,10 +2,19 @@
 //! authorization-code flows. The caller (`run_auth_code_flow`) bounds the
 //! whole wait with a 300s timeout; nothing here needs its own deadline.
 
+use std::time::Duration;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::error::{AuthError, Result};
+
+/// How long one connection may hold the accept loop before it is dropped.
+///
+/// Generous next to a redirect that arrives in milliseconds, and short next to
+/// the caller's 300s sign-in timeout — which is what an idle preconnect used to
+/// consume in full.
+const PER_CONNECTION_READ_TIMEOUT_SECS: u64 = 5;
 
 /// Waits on `listener` for the browser's OAuth redirect and extracts the
 /// authorization code (validating the CSRF `state` against `expected_state`).
@@ -23,9 +32,24 @@ pub(super) async fn listen_for_code(listener: TcpListener, expected_state: &str)
             .await
             .map_err(|e| AuthError::Loopback(e.to_string()))?;
 
-        // A speculative preconnect that closed without sending anything —
-        // keep listening for the real redirect.
-        let Ok(request) = read_request_head(&mut socket).await else {
+        // Each connection is bounded INDEPENDENTLY, not just the batch.
+        //
+        // The accept loop reads one connection to completion before accepting
+        // the next, and `read_request_head` returns only on EOF, a complete
+        // head, or 16 KiB. That covered a preconnect which *closes*; it did not
+        // cover one that stays open idle — which is what browsers actually do,
+        // holding speculative sockets in the pool for seconds. The browser opens
+        // an idle socket, sends the redirect on a second one, and this loop sits
+        // parked on the first — never accepting the second — until the caller's
+        // 300s timeout fires. The user sees sign-in hang after a successful
+        // consent.
+        let read = tokio::time::timeout(
+            Duration::from_secs(PER_CONNECTION_READ_TIMEOUT_SECS),
+            read_request_head(&mut socket),
+        )
+        .await;
+        // A silent or stalled peer is dropped and we go back to `accept()`.
+        let Ok(Ok(request)) = read else {
             continue;
         };
 
@@ -123,11 +147,12 @@ pub(super) fn open_system_browser(url: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// The failure mode this pins: a browser preconnect (opens, sends nothing)
-    /// and a stray probe (favicon) arrive before the real redirect. The old
-    /// single-accept implementation lost the redirect to the first connection;
-    /// the loop must survive both and still deliver the code — including when
-    /// the redirect's request line is split across TCP segments.
+    /// The failure mode this pins: a browser preconnect that CLOSES, one that
+    /// stays open IDLE, and a stray probe (favicon) all arrive before the real
+    /// redirect. The old single-accept implementation lost the redirect to the
+    /// first connection; an unbounded per-connection read then parked the loop
+    /// on the idle one. It must survive all three and still deliver the code —
+    /// including when the redirect's request line is split across TCP segments.
     #[tokio::test]
     async fn stray_connections_do_not_consume_the_redirect() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -136,6 +161,14 @@ mod tests {
 
         // 1: speculative preconnect — opens and closes without sending.
         drop(TcpStream::connect(addr).await.unwrap());
+
+        // 1b: the case the old mitigation did NOT cover — a socket that opens
+        // and stays open, sending nothing. Chrome and Edge hold speculative
+        // sockets in the pool for seconds, so this is what browsers actually do.
+        // Held for the whole test: without a per-connection read bound the
+        // accept loop parks here and never reaches the real redirect below,
+        // hanging sign-in until the caller's 300s timeout.
+        let _idle = TcpStream::connect(addr).await.unwrap();
 
         // 2: stray probe — must get a 404, not steal the redirect slot.
         {

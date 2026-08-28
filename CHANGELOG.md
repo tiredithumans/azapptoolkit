@@ -1,32 +1,5 @@
 ## [Unreleased]
 
-### Security
-
-- **An unparseable `/token` error body was written verbatim to the on-disk
-  log.** Tracing is wired to a daily rolling *file* appender at info, so this
-  warning lands on disk — while every other AAD error path here is meticulously
-  redacted, dropping `error_description` because it embeds tenant/user GUIDs and
-  client IPs. The branch fires precisely when the responder is **not** Entra: a
-  TLS-intercepting proxy, WAF or captive portal, which commonly echo the
-  offending request back in the block page. It now logs only the status, the
-  body length and the response content type — which is the signal an operator
-  actually wants ("a proxy answered"), without the content.
-- **Four secret-bearing IPC types derived `Debug`, opting out of the workspace
-  redaction convention.** A plaintext RSA private key, two Key Vault secret
-  values and an OIDC client secret would each be written in full by any `?dto`
-  in a tracing macro — into the same rolling log file. Six sibling types
-  hand-write a redacting impl for exactly this reason; these four now do too,
-  and each is pinned by a test rather than left to convention.
-- **Reassembling a refresh token left plaintext copies on the heap the caller's
-  `Zeroizing` could not reach.** Each keyring chunk was a fully-materialized
-  plaintext string dropped un-wiped, and the accumulator reallocated as it grew,
-  stranding the earlier buffer too — a refresh token spans one to two 2048-byte
-  chunks, so at least one growth realloc happened on every refresh. Chunks are
-  now wiped after appending, the buffer is preallocated, and the function
-  returns `Zeroizing<String>` so the contract is structural rather than
-  something each caller has to remember.
-
-
 ### Added
 
 - **SharePoint access can now be scoped to a single library, folder or file.**
@@ -55,6 +28,33 @@
   "this resource has no app grants", never "this app has no item-level access".
 
 ### Fixed
+
+- **Concurrent token refreshes could splice two refresh tokens together and kill
+  the session.** The refresh lock is keyed per (tenant, scope set) *by design*,
+  so refreshes for different audiences run concurrently — Access Readiness fans
+  about six out at once — and every one of them writes the rotated refresh token
+  to the same chunked keyring entries with no lock of its own. Interleave a
+  three-chunk writer with a two-chunk one and the store holds one token's first
+  chunk followed by another's tail; the loader had "no length, no checksum, and
+  nothing marking where this token ends", so it returned the splice. The next
+  silent refresh then failed `invalid_grant` and the session was purged, reading
+  as a revoked token rather than a corrupt one.
+
+  The whole read-modify-write of a chunk set is now serialized, and chunk 0
+  carries the set's total count so a torn set — which a crash mid-write or a
+  second app instance can still produce — **fails closed as "no stored session"**
+  rather than loading as a plausible token. Entries written before this still
+  load, so upgrading doesn't sign anyone out.
+- **One idle socket could block sign-in for the full five-minute timeout.** The
+  accept loop read each connection to completion before accepting the next, with
+  no deadline — so it returned only on EOF, a complete request head, or 16 KiB.
+  The existing mitigation covered a speculative preconnect that *closes*; it did
+  not cover one that stays open idle, which is what browsers actually do (Chrome
+  and Edge hold speculative sockets in the pool for seconds). The browser opened
+  an idle socket, sent the redirect on a second one, and the listener sat parked
+  on the first — never accepting the second. The user saw sign-in hang after a
+  successful consent. Each connection is now bounded independently.
+
 
 - **A tenant name pattern missing `{appId}` collapsed every app onto one shared
   scope, group and secret.** The substitution is a no-op when the pattern omits
@@ -177,6 +177,32 @@
   mutex the interactive list reads contend on, and all provably removing nothing.
 
 ### Security
+
+- **An unparseable `/token` error body was written verbatim to the on-disk
+  log.** Tracing is wired to a daily rolling *file* appender at info, so this
+  warning lands on disk — while every other AAD error path here is meticulously
+  redacted, dropping `error_description` because it embeds tenant/user GUIDs and
+  client IPs. The branch fires precisely when the responder is **not** Entra: a
+  TLS-intercepting proxy, WAF or captive portal, which commonly echo the
+  offending request back in the block page. It now logs only the status, the
+  body length and the response content type — which is the signal an operator
+  actually wants ("a proxy answered"), without the content.
+- **Four secret-bearing IPC types derived `Debug`, opting out of the workspace
+  redaction convention.** A plaintext RSA private key, two Key Vault secret
+  values and an OIDC client secret would each be written in full by any `?dto`
+  in a tracing macro — into the same rolling log file. Six sibling types
+  hand-write a redacting impl for exactly this reason; these four now do too,
+  and each is pinned by a test rather than left to convention.
+- **Reassembling a refresh token left plaintext copies on the heap the caller's
+  `Zeroizing` could not reach.** Each keyring chunk was a fully-materialized
+  plaintext string dropped un-wiped, and the accumulator reallocated as it grew,
+  stranding the earlier buffer too — a refresh token spans one to two 2048-byte
+  chunks, so at least one growth realloc happened on every refresh. Chunks are
+  now wiped after appending, the buffer is preallocated, and the function
+  returns `Zeroizing<String>` so the contract is structural rather than
+  something each caller has to remember.
+
+
 
 - **A federated-credential issuer could disguise the host its signing keys are
   fetched from.** `validate_issuer` checked the scheme and that a host segment
