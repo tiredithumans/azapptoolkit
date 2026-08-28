@@ -145,7 +145,10 @@ async fn collect_all_pages_capped_truncates_instead_of_erroring() {
         next_link: Some(format!("{base}/sp?page=2")),
         total_count: None,
     };
-    let (items, truncated) = client.collect_all_pages_capped(page1, 3).await.unwrap();
+    let (items, truncated) = client
+        .collect_all_pages_capped(page1, 3, false)
+        .await
+        .unwrap();
     assert_eq!(items.len(), 3);
     assert!(truncated, "rows existed beyond the cap");
 }
@@ -169,15 +172,19 @@ async fn collect_all_pages_capped_returns_full_set_under_the_cap() {
         next_link: Some(format!("{base}/sp?page=2")),
         total_count: None,
     };
-    let (items, truncated) = client.collect_all_pages_capped(page1, 100).await.unwrap();
+    let (items, truncated) = client
+        .collect_all_pages_capped(page1, 100, false)
+        .await
+        .unwrap();
     assert_eq!(items.len(), 3);
     assert!(!truncated, "everything fit under the cap");
 }
 
 #[tokio::test]
 async fn collect_all_pages_capped_stops_a_cyclic_next_link() {
-    // A self-referential nextLink must terminate at the cap, not loop forever
-    // or error — the cap is its own cyclic guard.
+    // A self-referential nextLink returning ROWS terminates at the cap. This is
+    // the case the cap does cover — see the empty-page sibling below for the one
+    // it does not.
     let server = MockServer::start().await;
     let base = server.uri();
     let cycle = format!("{base}/sp?cycle=1");
@@ -197,9 +204,52 @@ async fn collect_all_pages_capped_stops_a_cyclic_next_link() {
         next_link: Some(cycle.clone()),
         total_count: None,
     };
-    let (items, truncated) = client.collect_all_pages_capped(page1, 5).await.unwrap();
+    let (items, truncated) = client
+        .collect_all_pages_capped(page1, 5, false)
+        .await
+        .unwrap();
     assert_eq!(items.len(), 5);
     assert!(truncated);
+}
+
+/// The item cap is **not** a cycle guard, which the old doc comment claimed.
+/// Only a non-empty page advances toward it, so an empty page carrying a
+/// `nextLink` spun without bound — and Graph legitimately returns exactly that
+/// on filtered directory collections, which is what both callers of this helper
+/// page through.
+#[tokio::test]
+async fn collect_all_pages_capped_stops_an_empty_page_cycle() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+    let cycle = format!("{base}/sp?cycle=1");
+    Mock::given(method("GET"))
+        .and(path("/sp"))
+        .and(query_param("cycle", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "@odata.nextLink": cycle,
+            // Empty — so `out.len()` never grows and the cap is never reached.
+            "value": []
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&base);
+    let page1 = Paged::<serde_json::Value> {
+        items: vec![serde_json::json!(0)],
+        next_link: Some(cycle.clone()),
+        total_count: None,
+    };
+    // Terminates via MAX_PAGES. Degrades rather than erroring, matching this
+    // helper's contract — before the page guard this call never returned.
+    let (items, truncated) = client
+        .collect_all_pages_capped(page1, 5, false)
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 1, "only the caller's first page had rows");
+    assert!(
+        truncated,
+        "a run cut short by the page guard is not full coverage"
+    );
 }
 
 #[tokio::test]

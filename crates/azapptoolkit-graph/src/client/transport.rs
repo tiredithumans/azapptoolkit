@@ -62,7 +62,16 @@ impl GraphClient {
         url: &str,
     ) -> Result<T> {
         let bytes = self
-            .send_core_url_with(token, Method::GET, url, &[], false, None, None)
+            .send_core_url_with(
+                token,
+                RetryClass::Idempotent,
+                Method::GET,
+                url,
+                &[],
+                false,
+                None,
+                None,
+            )
             .await?;
         serde_json::from_slice(&bytes).map_err(|e| GraphError::Deserialize(e.to_string()))
     }
@@ -161,7 +170,21 @@ impl GraphClient {
     /// failure.
     pub(crate) async fn collect_all_pages<T: DeserializeOwned>(
         &self,
+        page: Paged<T>,
+    ) -> Result<Vec<T>> {
+        // Advanced-query continuation is the default; see
+        // [`Self::collect_all_pages_with`] for why an `$expand` enumeration
+        // must opt out.
+        self.collect_all_pages_with(page, true).await
+    }
+
+    /// [`Self::collect_all_pages`] carrying the originating request's
+    /// consistency choice, so an `$expand` enumeration keeps `false` on every
+    /// page instead of silently dropping the expansion from page two.
+    pub(crate) async fn collect_all_pages_with<T: DeserializeOwned>(
+        &self,
         mut page: Paged<T>,
+        consistency_eventual: bool,
     ) -> Result<Vec<T>> {
         // Bound a pathological/cyclic nextLink; legitimate paging is far under
         // this. (Origin safety is enforced by `get_json_absolute`'s same-origin
@@ -176,7 +199,9 @@ impl GraphClient {
                     "paging exceeded the page limit".into(),
                 ));
             }
-            page = self.get_json_absolute(&next).await?;
+            page = self
+                .get_json_absolute_with(&next, consistency_eventual)
+                .await?;
             out.append(&mut page.items);
             pages += 1;
         }
@@ -189,24 +214,46 @@ impl GraphClient {
     /// degrade to a truncated-but-usable list: failing the Enterprise Apps
     /// list, the App Registrations pairing join, and global search outright is
     /// strictly worse than returning the first N rows. The cap also bounds a
-    /// pathological/cyclic `nextLink` (paging stops once `max_items` is
-    /// reached), so this needs no separate page guard. Returns
-    /// `(items, truncated)` — `truncated` is `true` when rows existed beyond
-    /// the cap, so the caller can log/surface that coverage is partial.
+    /// Returns `(items, truncated)` — `truncated` is `true` when rows existed
+    /// beyond the cap, so the caller can log/surface that coverage is partial.
+    ///
+    /// `consistency_eventual` must match the choice the **first** page was
+    /// issued with: an `$expand` enumeration that pages as an advanced query
+    /// gets a 200 with the expanded property missing, not an error.
+    ///
+    /// The item cap is **not** a cycle guard, despite what this doc used to
+    /// claim. Only a non-empty page advances toward it, so
+    /// `{"value": [], "@odata.nextLink": "<same url>"}` spun without bound —
+    /// and Graph legitimately returns empty pages carrying a `nextLink` on
+    /// filtered directory collections, which is exactly what both callers page
+    /// through. Hence the explicit `MAX_PAGES`, matching the sibling
+    /// `collect_all_pages`; since this helper's contract is to degrade rather
+    /// than fail, hitting it reports `truncated` instead of erroring.
     pub(crate) async fn collect_all_pages_capped<T: DeserializeOwned>(
         &self,
         mut page: Paged<T>,
         max_items: usize,
+        consistency_eventual: bool,
     ) -> Result<(Vec<T>, bool)> {
+        const MAX_PAGES: usize = 200;
         let mut out = Vec::new();
         out.append(&mut page.items);
+        let mut pages = 1usize;
         while out.len() < max_items {
             let Some(next) = page.next_link.take() else {
                 // Exhausted within the cap — full coverage.
                 return Ok((out, false));
             };
-            page = self.get_json_absolute(&next).await?;
+            if pages >= MAX_PAGES {
+                // Cyclic or pathologically empty paging. Degrade, don't hang.
+                out.truncate(max_items);
+                return Ok((out, true));
+            }
+            page = self
+                .get_json_absolute_with(&next, consistency_eventual)
+                .await?;
             out.append(&mut page.items);
+            pages += 1;
         }
         // Reached the cap. More rows remain iff we overshot the last page or a
         // further nextLink is still pending.
@@ -255,28 +302,56 @@ impl GraphClient {
     /// Issues a GET against an absolute URL (e.g. an `@odata.nextLink`) and
     /// decodes the response body. All retry + throttle-observer behavior
     /// applies identically to path-relative requests.
-    pub async fn get_json_absolute<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
-        // A `nextLink` is attacker-influenced server output; never send the
-        // bearer token to a host other than the one we're already talking to.
-        if !same_origin(&self.base_url, url) {
-            // Surface only the offending host. The full URL is attacker-
-            // influenced (a malicious nextLink in a server response) and may
-            // contain tokens, paths, or query material we do not want
-            // persisted in logs/audit/error UI.
-            let host = url::Url::parse(url)
-                .ok()
-                .and_then(|u| u.host_str().map(str::to_string))
-                .unwrap_or_else(|| "<unparseable>".into());
-            return Err(GraphError::Protocol(format!(
-                "refusing to follow nextLink to a different origin (host: {host})"
-            )));
-        }
-        // `nextLink` for count/search queries still requires `ConsistencyLevel`
-        // so we always attach it — harmless on queries that don't need it.
+    /// [`Self::get_json_absolute`] with the originating request's consistency
+    /// choice.
+    ///
+    /// `ConsistencyLevel: eventual` turns a request into an *advanced query*,
+    /// and Graph answers an advanced query that also `$expand`s with a 200 whose
+    /// expanded property is simply **missing** — no error. `list_applications`
+    /// computes `let eventual = q.search.is_some();` for exactly that reason,
+    /// but page one was the only request that honoured it: the paging helpers
+    /// went through `get_json_absolute`, which sent `true` unconditionally. In a
+    /// tenant past one page of applications, every page after the first silently
+    /// dropped `owners`, and the audit's ownerless-app finding fired on apps
+    /// that have owners.
+    pub async fn get_json_absolute_with<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        consistency_eventual: bool,
+    ) -> Result<T> {
+        self.guard_absolute_origin(url)?;
         let bytes = self
-            .send_core_url(Method::GET, url, &[], true, None)
+            .send_core_url(Method::GET, url, &[], consistency_eventual, None)
             .await?;
         serde_json::from_slice::<T>(&bytes).map_err(|e| GraphError::Deserialize(e.to_string()))
+    }
+
+    /// The same-origin guard every absolute-URL read shares. A `nextLink` is
+    /// attacker-influenced server output; never send the bearer to a host other
+    /// than the one we are already talking to.
+    fn guard_absolute_origin(&self, url: &str) -> Result<()> {
+        if same_origin(&self.base_url, url) {
+            return Ok(());
+        }
+        // Surface only the offending host. The full URL is attacker-influenced
+        // and may contain tokens, paths, or query material we do not want
+        // persisted in logs/audit/error UI.
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_else(|| "<unparseable>".into());
+        Err(GraphError::Protocol(format!(
+            "refusing to follow nextLink to a different origin (host: {host})"
+        )))
+    }
+
+    pub async fn get_json_absolute<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
+        // Defaults to the advanced-query header, which a `$search`/`$count`
+        // continuation requires. A caller whose first page deliberately did NOT
+        // use it — an `$expand` enumeration — must page with
+        // [`Self::get_json_absolute_with`] instead, or the expansion silently
+        // vanishes from page two onward.
+        self.get_json_absolute_with(url, true).await
     }
 
     pub(crate) async fn get_json<T: DeserializeOwned>(
@@ -306,6 +381,7 @@ impl GraphClient {
         let bytes = self
             .send_core_url_with(
                 &self.read_token,
+                RetryClass::Idempotent,
                 Method::GET,
                 &url,
                 query,
@@ -382,8 +458,10 @@ impl GraphClient {
         } else {
             &self.write_token
         };
+        let retry_class = retry_class_for(&method);
         self.send_core_url_with(
             provider,
+            retry_class,
             method,
             url,
             query,
@@ -406,6 +484,7 @@ impl GraphClient {
     pub(crate) async fn send_core_url_with(
         &self,
         provider: &Arc<dyn BearerProvider>,
+        retry_class: RetryClass,
         method: Method,
         url: &str,
         query: &[(&str, &str)],
@@ -470,7 +549,7 @@ impl GraphClient {
             // `http_retry::with_retries`; this closure only classifies one
             // attempt. `headers` is read fresh per call, so the re-minted bearer
             // below is picked up on the next pass.
-            let outcome = with_retries("graph", |_| {
+            let outcome = with_retries("graph", retry_class, |_| {
                 let http = self.http.clone();
                 let headers = headers.clone();
                 let method = method.clone();
@@ -487,6 +566,7 @@ impl GraphClient {
                         // shared loop falls back to jittered backoff.
                         Err(err) => {
                             return Attempt::Retry {
+                                reason: RetryReason::Transient,
                                 retry_after_secs: None,
                                 err: GraphError::Network(err.to_string()),
                             };
@@ -552,6 +632,11 @@ impl GraphClient {
                     }
 
                     Attempt::Retry {
+                        reason: if code == 429 {
+                            RetryReason::Throttled
+                        } else {
+                            RetryReason::Transient
+                        },
                         retry_after_secs: retry_after,
                         err: if code == 429 {
                             GraphError::Throttled {
@@ -680,5 +765,20 @@ fn map_error_status(code: u16, body: String, retry_after: Option<u64>) -> GraphE
         },
         c if c >= 500 => GraphError::Server { status: c, body },
         _ => GraphError::Api { status: code, body },
+    }
+}
+
+/// The retry class for an HTTP verb.
+///
+/// `GET`/`HEAD`/`PUT`/`DELETE` are idempotent by definition, so replaying one
+/// whose outcome is unknown is safe. `POST`/`PATCH` may already have committed
+/// server-side — `addPassword` replayed after a 502 mints a second client
+/// secret the operator never sees the plaintext of — so only an explicit
+/// throttle is replayed for them. A POST that is semantically a read passes
+/// [`RetryClass::Idempotent`] explicitly instead of coming through here.
+fn retry_class_for(method: &Method) -> RetryClass {
+    match *method {
+        Method::GET | Method::HEAD | Method::PUT | Method::DELETE => RetryClass::Idempotent,
+        _ => RetryClass::NonIdempotent,
     }
 }

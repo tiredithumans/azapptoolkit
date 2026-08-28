@@ -8,7 +8,9 @@ use std::sync::Arc;
 use reqwest::Method;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
-use azapptoolkit_core::http_retry::{Attempt, parse_retry_after_seconds, with_retries};
+use azapptoolkit_core::http_retry::{
+    Attempt, RetryClass, RetryReason, parse_retry_after_seconds, with_retries,
+};
 use azapptoolkit_core::token::{BearerProvider, TokenError};
 
 use crate::error::{ArmError, Result};
@@ -38,7 +40,7 @@ pub(crate) async fn send_with_retry(
 
     // Retry budget, backoff and `Retry-After` handling all live in
     // `http_retry::with_retries`; this closure only classifies one attempt.
-    with_retries(label, |_| {
+    with_retries(label, retry_class_for(&method), |_| {
         let http = http.clone();
         let headers = headers.clone();
         let method = method.clone();
@@ -53,6 +55,7 @@ pub(crate) async fn send_with_retry(
                 // falls back to jittered exponential backoff.
                 Err(err) => {
                     return Attempt::Retry {
+                        reason: RetryReason::Transient,
                         retry_after_secs: None,
                         err: ArmError::Network(err.to_string()),
                     };
@@ -94,6 +97,11 @@ pub(crate) async fn send_with_retry(
             // 429 and 5xx: retryable, and this is the error the shared loop
             // surfaces once the budget is spent.
             Attempt::Retry {
+                reason: if code == 429 {
+                    RetryReason::Throttled
+                } else {
+                    RetryReason::Transient
+                },
                 retry_after_secs: retry_after,
                 err: if code == 429 {
                     ArmError::Throttled {
@@ -109,4 +117,17 @@ pub(crate) async fn send_with_retry(
         }
     })
     .await
+}
+
+/// The retry class for an HTTP verb.
+///
+/// `GET`/`HEAD`/`PUT`/`DELETE` are idempotent by definition, so replaying one
+/// whose outcome is unknown is safe. `POST`/`PATCH` may have already committed,
+/// so only an explicit throttle is replayed for them — see
+/// [`azapptoolkit_core::http_retry::RetryClass`].
+fn retry_class_for(method: &Method) -> RetryClass {
+    match *method {
+        Method::GET | Method::HEAD | Method::PUT | Method::DELETE => RetryClass::Idempotent,
+        _ => RetryClass::NonIdempotent,
+    }
 }

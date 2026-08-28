@@ -2,6 +2,7 @@
 //! envelope POST, the retry loop with its diagnostics-header capture (the
 //! bodyless-403 semantics live here), and the shared result projections.
 
+use azapptoolkit_core::net::{redacted_host, same_origin};
 use azapptoolkit_core::token::TokenError;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::de::DeserializeOwned;
@@ -99,6 +100,19 @@ impl ExchangeClient {
             out.extend(env.value);
             match env.next_link.as_deref().map(str::trim) {
                 Some(link) if !link.is_empty() => {
+                    // A paging `nextLink` is attacker-influenced server output,
+                    // so it never carries the Exchange admin bearer to another
+                    // host. Graph enforces this at four sites, ARM at one and
+                    // Key Vault at one; this client was the gap — `net.rs`'s own
+                    // doc header listed only "(Graph, Key Vault, ARM)", which is
+                    // how it stayed invisible.
+                    if !same_origin(&self.base_url, link) {
+                        return Err(ExchangeError::Protocol(format!(
+                            "{cmdlet} returned an @odata.nextLink on a different origin \
+                             (host: {}); refusing to follow it",
+                            redacted_host(link)
+                        )));
+                    }
                     tracing::debug!(cmdlet, page, "following @odata.nextLink");
                     target = link.to_string();
                 }

@@ -1,5 +1,79 @@
 ## [Unreleased]
 
+### Added
+
+- **SharePoint access can now be scoped to a single library, folder or file.**
+  The toolkit modelled only one of Microsoft's four Selected permission scopes —
+  `Sites.Selected`, at the site-collection level. Adding
+  `Files.SelectedOperations.Selected` (or the `Lists.` / `ListItems.` siblings)
+  produced no scoping affordance at all: no "Scope…" button, no Scope badge, and
+  a Grant-access wizard that fell through to *"these permissions can't be scoped
+  together"* and granted org-wide — the exact opposite of what those scopes are
+  for. `ScopeKind::SharePointItem` is now a second SharePoint mechanism, with its
+  own target panel and apply path (`grant_selected_item_access`).
+
+  The panel **resolves every URL before granting** and shows what it found
+  ("Folder · Finance / Documents / Invoices"), for two reasons: a grant below the
+  site collection breaks SharePoint permission inheritance on the target and
+  consumes one of the library's unique permission scopes, and a URL can resolve
+  one level away from where it was aimed. A target the chosen permission cannot
+  reach is flagged in the panel and skipped by the backend rather than granted
+  one level up — `Files.*` reaches items in document libraries, `ListItems.*`
+  reaches those *and* items in plain lists, and neither reaches a site.
+
+  Unlike the site path this strips nothing: a Selected scope has no org-wide
+  predecessor to convert away from. Reach is also **not enumerable** — there is
+  no reverse `appId → items` lookup and no bounded walk of every folder in a
+  tenant, so grants are verified per resource by URL and an empty result means
+  "this resource has no app grants", never "this app has no item-level access".
+
+### Fixed
+
+- **The shared retry loop replayed non-idempotent writes after a network error
+  or a 5xx.** `with_retries` re-invokes the caller's whole closure — request
+  send included — with no notion of the verb, and the transports route
+  everything through it. A `POST /applications/{id}/addPassword` that hit a
+  connection reset or a 502 *after* Graph committed the write was replayed up to
+  three more times, so the registration ended up holding several client secrets
+  while the operator only ever saw the plaintext of the last one — an orphaned,
+  never-rotated credential, exactly the class of thing this tool exists to
+  surface. Retries now carry a reason and a class: a 429 is still retried for
+  every verb (the service refused *before* doing the work), while a transient
+  failure is only replayed for an idempotent request. A repo invariant keeps a
+  verb-dispatching transport from hard-coding the safe-looking answer.
+- **A scoped `$batch` fetched its second page with the wrong token.**
+  `finish_paged_batch` continued through the verb-selected read token, but
+  `batch_list_site_permissions` deliberately uses the SharePoint token because
+  `/sites/{id}/permissions` needs `Sites.FullControl.All`. A site whose
+  `Sites.Selected` grant list overflowed one page therefore failed with 403 on
+  page 2 — and the sub-requests sent no `$top`, so Graph's small default made
+  overflow common. Both are fixed.
+- **Paging hard-coded `ConsistencyLevel: eventual`, silently dropping `$expand`
+  results after page one.** `list_applications` computes whether the request is
+  an advanced query precisely because Graph answers an advanced query that also
+  expands with a 200 and the expanded property *missing* — but only page one
+  honoured that decision. In a tenant past one page of applications, every
+  subsequent page lost `owners`, and the audit's ownerless-app finding fired on
+  apps that have owners. The choice now travels with the paging.
+- **The capped paging helper could spin forever.** Only a non-empty page
+  advances toward the item cap, so a response of `{"value": [], "@odata.nextLink":
+  "<same url>"}` looped without bound — and Graph legitimately returns empty
+  pages carrying a `nextLink` on filtered directory collections, which is what
+  both callers page through. The helper's own doc claimed the cap was its cycle
+  guard; it now has the explicit page limit its sibling always had.
+
+
+- **Adding or removing one certificate stripped the certificate blob from every
+  other credential on the app.** `keyCredentials` is a full-replace collection,
+  so both application-side mutators re-read the array and PATCH it back whole —
+  but they round-tripped it through the typed `KeyCredential`, which does not
+  model `key`. Graph returns `key` on exactly the `$select=keyCredentials` read
+  those paths issue, so every *surviving* certificate was written back keyless.
+  The audit's one-click "remove expired credentials" Fix reaches this on any app
+  that also holds a live certificate. Both paths now round-trip raw JSON, the
+  shape the service-principal twin was deliberately written against for this
+  reason, so `key` and every other unmodeled field survive byte-for-byte.
+
 ### Security
 
 - **A federated-credential issuer could disguise the host its signing keys are
@@ -42,47 +116,13 @@
   literal is now verbatim (`@'…'`), where `''` genuinely is the documented
   escape.
 
-### Fixed
 
-- **Adding or removing one certificate stripped the certificate blob from every
-  other credential on the app.** `keyCredentials` is a full-replace collection,
-  so both application-side mutators re-read the array and PATCH it back whole —
-  but they round-tripped it through the typed `KeyCredential`, which does not
-  model `key`. Graph returns `key` on exactly the `$select=keyCredentials` read
-  those paths issue, so every *surviving* certificate was written back keyless.
-  The audit's one-click "remove expired credentials" Fix reaches this on any app
-  that also holds a live certificate. Both paths now round-trip raw JSON, the
-  shape the service-principal twin was deliberately written against for this
-  reason, so `key` and every other unmodeled field survive byte-for-byte.
-
-
-### Added
-
-- **SharePoint access can now be scoped to a single library, folder or file.**
-  The toolkit modelled only one of Microsoft's four Selected permission scopes —
-  `Sites.Selected`, at the site-collection level. Adding
-  `Files.SelectedOperations.Selected` (or the `Lists.` / `ListItems.` siblings)
-  produced no scoping affordance at all: no "Scope…" button, no Scope badge, and
-  a Grant-access wizard that fell through to *"these permissions can't be scoped
-  together"* and granted org-wide — the exact opposite of what those scopes are
-  for. `ScopeKind::SharePointItem` is now a second SharePoint mechanism, with its
-  own target panel and apply path (`grant_selected_item_access`).
-
-  The panel **resolves every URL before granting** and shows what it found
-  ("Folder · Finance / Documents / Invoices"), for two reasons: a grant below the
-  site collection breaks SharePoint permission inheritance on the target and
-  consumes one of the library's unique permission scopes, and a URL can resolve
-  one level away from where it was aimed. A target the chosen permission cannot
-  reach is flagged in the panel and skipped by the backend rather than granted
-  one level up — `Files.*` reaches items in document libraries, `ListItems.*`
-  reaches those *and* items in plain lists, and neither reaches a site.
-
-  Unlike the site path this strips nothing: a Selected scope has no org-wide
-  predecessor to convert away from. Reach is also **not enumerable** — there is
-  no reverse `appId → items` lookup and no bounded walk of every folder in a
-  tenant, so grants are verified per resource by URL and an empty result means
-  "this resource has no app grants", never "this app has no item-level access".
-
+- **The Exchange client followed `@odata.nextLink` with no same-origin check.**
+  `core::net` states the rule in its own module doc, and Graph, ARM and Key
+  Vault all enforce it — a paging link is attacker-influenced server output, so
+  a response body naming a foreign host got the Exchange admin bearer attached
+  to a request to that host. The doc header listed only "(Graph, Key Vault,
+  ARM)", which is how the gap stayed invisible.
 
 ## [0.26.3] - 2026-08-20
 

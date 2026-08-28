@@ -117,3 +117,76 @@ fn every_command_that_writes_a_redirect_uri_validates_it_first() {
          each rejection, the way `restore.rs::checked_uris` does."
     );
 }
+
+/// Every `with_retries` call site states its [`RetryClass`] explicitly.
+///
+/// The loop re-invokes the caller's whole closure, request send included, so a
+/// non-idempotent write replayed after a connection reset or a 5xx may commit
+/// twice — `POST .../addPassword` left registrations holding several client
+/// secrets, only the last of which the operator ever saw in plaintext.
+///
+/// The class is a required parameter, so the compiler already forces *an*
+/// answer. What it cannot force is that the answer was derived rather than
+/// guessed: this rule keeps a verb-dispatching transport from hard-coding
+/// `Idempotent` just to compile. Such a transport must route through a
+/// `retry_class_for` helper; only a call site whose verb is a literal at that
+/// line may state the class directly.
+#[test]
+fn every_retry_call_site_derives_its_idempotency_class() {
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../crates")
+        .canonicalize()
+        .expect("crates dir");
+    let mut files = Vec::new();
+    rust_files(&crates, &mut files);
+    assert!(!files.is_empty(), "the source walk found no crate sources");
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut found = 0usize;
+    for src in files {
+        let text = std::fs::read_to_string(&src).expect("read source");
+        // The definition itself, not a call site.
+        if src.ends_with("http_retry.rs") || !text.contains("with_retries(") {
+            continue;
+        }
+        found += 1;
+        let derived = text.contains("retry_class_for(");
+        let pinned_to_a_literal_verb =
+            text.contains("RetryClass::Idempotent") && text.contains("Method::");
+        if !derived && !pinned_to_a_literal_verb {
+            offenders.push(
+                src.strip_prefix(&crates)
+                    .unwrap_or(&src)
+                    .display()
+                    .to_string(),
+            );
+        }
+    }
+
+    assert!(
+        found >= 3,
+        "only {found} file(s) call with_retries — the source walk is broken, and a rule that \
+         scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "with_retries call site(s) that neither derive their class from the verb nor pin it to a \
+         literal one: {offenders:#?}\n\
+         Route the transport through a `retry_class_for(&method)` helper so a POST/PATCH cannot \
+         silently inherit a GET's replay policy."
+    );
+}
