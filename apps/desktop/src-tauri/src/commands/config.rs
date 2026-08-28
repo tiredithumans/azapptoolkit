@@ -46,12 +46,14 @@ pub fn set_auth_config(client_id: String, tenant_id: String) -> Result<(), UiErr
     }
 
     let config_dir = crate::config_directory();
-    let mut settings = UserSettings::stored(&config_dir);
-    settings.client_id = Some(client_id);
-    settings.tenant_id = Some(tenant_id);
-    settings
-        .save(&config_dir)
-        .map_err(|e| UiError::io(format!("Could not write settings.json: {e}")))?;
+    // Through `mutate`, not `stored` + `save`: three commands read-modify-write
+    // this file from different threads, and an interleaved pair silently drops
+    // one side's write.
+    UserSettings::mutate(&config_dir, |settings| {
+        settings.client_id = Some(client_id);
+        settings.tenant_id = Some(tenant_id);
+    })
+    .map_err(|e| UiError::io(format!("Could not write settings.json: {e}")))?;
     Ok(())
 }
 
