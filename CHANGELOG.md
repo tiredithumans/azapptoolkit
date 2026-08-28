@@ -1,5 +1,34 @@
 ## [Unreleased]
 
+### Fixed
+
+- **Concurrent token refreshes could splice two refresh tokens together and kill
+  the session.** The refresh lock is keyed per (tenant, scope set) *by design*,
+  so refreshes for different audiences run concurrently — Access Readiness fans
+  about six out at once — and every one of them writes the rotated refresh token
+  to the same chunked keyring entries with no lock of its own. Interleave a
+  three-chunk writer with a two-chunk one and the store holds one token's first
+  chunk followed by another's tail; the loader had "no length, no checksum, and
+  nothing marking where this token ends", so it returned the splice. The next
+  silent refresh then failed `invalid_grant` and the session was purged, reading
+  as a revoked token rather than a corrupt one.
+
+  The whole read-modify-write of a chunk set is now serialized, and chunk 0
+  carries the set's total count so a torn set — which a crash mid-write or a
+  second app instance can still produce — **fails closed as "no stored session"**
+  rather than loading as a plausible token. Entries written before this still
+  load, so upgrading doesn't sign anyone out.
+- **One idle socket could block sign-in for the full five-minute timeout.** The
+  accept loop read each connection to completion before accepting the next, with
+  no deadline — so it returned only on EOF, a complete request head, or 16 KiB.
+  The existing mitigation covered a speculative preconnect that *closes*; it did
+  not cover one that stays open idle, which is what browsers actually do (Chrome
+  and Edge hold speculative sockets in the pool for seconds). The browser opened
+  an idle socket, sent the redirect on a second one, and the listener sat parked
+  on the first — never accepting the second. The user saw sign-in hang after a
+  successful consent. Each connection is now bounded independently.
+
+
 ### Added
 
 - **SharePoint access can now be scoped to a single library, folder or file.**

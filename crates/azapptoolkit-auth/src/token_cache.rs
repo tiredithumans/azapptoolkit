@@ -172,6 +172,34 @@ fn chunk_account(tenant_id: &str, account_oid: &str, idx: usize) -> String {
     }
 }
 
+/// Marks a chunk-0 value that carries the set's chunk count, e.g. `azapp1:3:`.
+///
+/// The count is what makes a torn set **detectable**. `CHUNK_SET_LOCK`
+/// serializes writers within one process, but it cannot cover a hard crash
+/// mid-write (the rollback is best-effort and may itself fail) or a second app
+/// instance writing the same keyring. Without the count there is "no length, no
+/// checksum, and nothing marking where this token ends", so a partial set loads
+/// as a splice of two tokens; Entra then rejects it as `invalid_grant`, which
+/// reads as a revoked session rather than a corrupt one.
+///
+/// Absent on a value written before this existed — those are read as a legacy
+/// set and concatenated as before, so an upgrade does not sign everyone out.
+const CHUNK_COUNT_PREFIX: &str = "azapp1:";
+
+/// Builds chunk 0's stored value: the marker, the total chunk count, and the
+/// payload.
+fn encode_chunk_zero(total: usize, payload: &str) -> String {
+    format!("{CHUNK_COUNT_PREFIX}{total}:{payload}")
+}
+
+/// Splits chunk 0's stored value into `(declared count, payload)`, or `None`
+/// when it predates the marker.
+fn decode_chunk_zero(stored: &str) -> Option<(usize, &str)> {
+    let rest = stored.strip_prefix(CHUNK_COUNT_PREFIX)?;
+    let (count, payload) = rest.split_once(':')?;
+    Some((count.parse().ok()?, payload))
+}
+
 /// Splits `token` into chunks that each fit under the Windows blob limit,
 /// cutting only on `char` boundaries. Always returns at least one chunk (an
 /// empty token yields a single empty chunk) so the stored entry count is never
@@ -193,8 +221,35 @@ fn split_into_chunks(token: &str) -> Vec<&str> {
     chunks
 }
 
+/// Serializes every read-modify-write of one account's chunk set.
+///
+/// `refresh_lock_for` is keyed per `(tenant, scope_key)` BY DESIGN, so refreshes
+/// for different audiences run concurrently — Access Readiness fans about six
+/// out at once — and every one of them ends in `store_token_outcome`, writing
+/// the rotated refresh token to the same `(tenant, oid)` chunk set on the
+/// blocking pool. Interleave a 3-chunk writer with a 2-chunk writer and the
+/// store holds `B0|A1|A2`; `load_refresh_token` has, in its own words, "no
+/// length, no checksum, and nothing marking where this token ends", so it
+/// returns the splice. The next silent refresh fails `invalid_grant` and the
+/// session is purged — reading as a revoked token rather than a corrupt one.
+///
+/// A single global mutex rather than a per-account map: these are OS keyring
+/// syscalls on a blocking thread, contention is a handful of writers, and a map
+/// is one more thing to get wrong for no measurable gain.
+static CHUNK_SET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes [`CHUNK_SET_LOCK`], recovering from poisoning.
+///
+/// A panic mid-write leaves the store possibly torn — which is the state the
+/// load path already fails closed on — so refusing every later read and write
+/// would turn a recoverable "sign in again" into a permanently broken keyring.
+fn chunk_set_guard() -> std::sync::MutexGuard<'static, ()> {
+    CHUNK_SET_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn save_refresh_token(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
     ensure_keyring_store()?;
+    let _guard = chunk_set_guard();
     // A refresh token is stored across N keyring entries, and `load` simply
     // concatenates entries 0, 1, 2, … until one is missing. There is no length,
     // no checksum, and nothing marking where this token ends — so a write that
@@ -209,7 +264,8 @@ pub fn save_refresh_token(tenant_id: &str, account_oid: &str, token: &str) -> Re
     if let Err(err) = write_chunks(tenant_id, account_oid, token) {
         // Best-effort: if the keyring is failing, the cleanup may fail too.
         // Either way the original error is what the caller needs.
-        let _ = delete_refresh_token(tenant_id, account_oid);
+        // The lock-free form: this thread already holds the guard.
+        let _ = delete_chunks(tenant_id, account_oid);
         return Err(err);
     }
     Ok(())
@@ -221,7 +277,16 @@ fn write_chunks(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
     let chunks = split_into_chunks(token);
     for (idx, chunk) in chunks.iter().enumerate() {
         let account = chunk_account(tenant_id, account_oid, idx);
-        keyring_core::Entry::new(KEYRING_SERVICE, &account)?.set_password(chunk)?;
+        // Chunk 0 carries the set's total count, so a load can tell a complete
+        // set from a torn one. Written FIRST, so a crash part-way through leaves
+        // a count that exceeds what is actually stored — which fails closed —
+        // rather than a plausible-looking short set.
+        let value = if idx == 0 {
+            encode_chunk_zero(chunks.len(), chunk)
+        } else {
+            (*chunk).to_string()
+        };
+        keyring_core::Entry::new(KEYRING_SERVICE, &account)?.set_password(&value)?;
     }
     let mut idx = chunks.len();
     loop {
@@ -237,13 +302,29 @@ fn write_chunks(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
 
 pub fn load_refresh_token(tenant_id: &str, account_oid: &str) -> Result<Option<String>> {
     ensure_keyring_store()?;
+    // Held for the read too: without it a load can observe a half-written set
+    // and return a splice of two tokens as though it were one.
+    let _guard = chunk_set_guard();
     let mut combined = String::new();
     let mut idx = 0;
+    let mut declared: Option<usize> = None;
     loop {
         let account = chunk_account(tenant_id, account_oid, idx);
         match keyring_core::Entry::new(KEYRING_SERVICE, &account)?.get_password() {
             Ok(part) => {
-                combined.push_str(&part);
+                if idx == 0 {
+                    match decode_chunk_zero(&part) {
+                        Some((total, payload)) => {
+                            declared = Some(total);
+                            combined.push_str(payload);
+                        }
+                        // Written before the marker existed: always a complete
+                        // set by construction, so read it as before.
+                        None => combined.push_str(&part),
+                    }
+                } else {
+                    combined.push_str(&part);
+                }
                 idx += 1;
             }
             Err(keyring_core::Error::NoEntry) => break,
@@ -251,14 +332,36 @@ pub fn load_refresh_token(tenant_id: &str, account_oid: &str) -> Result<Option<S
         }
     }
     if idx == 0 {
-        Ok(None)
-    } else {
-        Ok(Some(combined))
+        return Ok(None);
     }
+    // Fail closed on a set that does not match its own declared length. "No
+    // session" is a state the app already handles — it prompts to sign in — and
+    // a spliced token is not: it looks like a stored session right up until
+    // Entra rejects it as revoked.
+    if let Some(total) = declared
+        && total != idx
+    {
+        tracing::warn!(
+            target: "auth",
+            expected = total,
+            found = idx,
+            "refresh token chunk set is incomplete; treating as no stored session"
+        );
+        return Ok(None);
+    }
+    Ok(Some(combined))
 }
 
 pub fn delete_refresh_token(tenant_id: &str, account_oid: &str) -> Result<()> {
     ensure_keyring_store()?;
+    let _guard = chunk_set_guard();
+    delete_chunks(tenant_id, account_oid)
+}
+
+/// The deletion itself, without taking the lock — for callers already holding
+/// it. Split out so `save_refresh_token`'s rollback cannot deadlock on its own
+/// guard.
+fn delete_chunks(tenant_id: &str, account_oid: &str) -> Result<()> {
     let mut idx = 0;
     loop {
         let account = chunk_account(tenant_id, account_oid, idx);
@@ -466,5 +569,63 @@ mod tests {
         );
         cache.invalidate_tenant("tenant");
         assert!(cache.get("tenant", &scopes).is_none());
+    }
+
+    /// A set whose chunks do not match its own declared count must load as "no
+    /// session", not as a splice.
+    ///
+    /// The lock serializes writers within one process; it cannot cover a hard
+    /// crash mid-write or a second app instance. Without the count there is
+    /// nothing marking where the token ends, so a partial set loaded as a
+    /// plausible-looking token, Entra rejected it as `invalid_grant`, and the
+    /// failure read as a revoked session rather than a corrupt one.
+    #[test]
+    fn a_torn_chunk_set_fails_closed_instead_of_splicing() {
+        init_mock_keyring();
+        let (tenant, oid) = ("tenant-torn", "oid-torn");
+
+        // A three-chunk token, then the tail deleted behind the loader's back —
+        // exactly what a crash between chunk writes leaves.
+        let big: String = "x".repeat(MAX_CHUNK_UTF16_BYTES * 2 + 17);
+        save_refresh_token(tenant, oid, &big).unwrap();
+        let last = chunk_account(tenant, oid, 2);
+        keyring_core::Entry::new(KEYRING_SERVICE, &last)
+            .unwrap()
+            .delete_credential()
+            .unwrap();
+
+        assert_eq!(
+            load_refresh_token(tenant, oid).unwrap(),
+            None,
+            "a short set must not load as a token"
+        );
+    }
+
+    /// A value written before the count marker existed still loads, so shipping
+    /// this does not sign every existing user out.
+    #[test]
+    fn a_legacy_unmarked_entry_still_loads() {
+        init_mock_keyring();
+        let (tenant, oid) = ("tenant-legacy", "oid-legacy");
+        // The pre-marker shape: one entry, bare payload, no prefix.
+        keyring_core::Entry::new(KEYRING_SERVICE, &chunk_account(tenant, oid, 0))
+            .unwrap()
+            .set_password("legacy-refresh-token")
+            .unwrap();
+        assert_eq!(
+            load_refresh_token(tenant, oid).unwrap().as_deref(),
+            Some("legacy-refresh-token")
+        );
+    }
+
+    /// The marker is stripped, not returned as part of the secret.
+    #[test]
+    fn the_count_marker_never_leaks_into_the_token() {
+        init_mock_keyring();
+        let (tenant, oid) = ("tenant-marker", "oid-marker");
+        save_refresh_token(tenant, oid, "plain-token").unwrap();
+        let loaded = load_refresh_token(tenant, oid).unwrap().unwrap();
+        assert_eq!(loaded, "plain-token");
+        assert!(!loaded.contains(CHUNK_COUNT_PREFIX));
     }
 }
