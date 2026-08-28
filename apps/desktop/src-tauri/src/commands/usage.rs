@@ -163,13 +163,24 @@ async fn discover_workspace(
 }
 
 /// KQL summarizing one app's Graph calls by (method, GUID-normalized path),
-/// most frequent first. The appId is escaped for the KQL single-quote literal
-/// (defense in depth — it's a GUID in practice).
+/// most frequent first.
+///
+/// This is the only caller of `LogAnalyticsClient::query`, which passes the KQL
+/// straight into the request body — so it is the whole KQL trust boundary, and
+/// the appId is escaped as defense in depth even though it is a GUID in
+/// practice.
+///
+/// The literal is **verbatim** (`@'…'`), which is the form where doubling a
+/// quote genuinely is the escape and a backslash is an ordinary character. In a
+/// non-verbatim KQL literal an inner quote is escaped with a backslash, not by
+/// doubling: `''` there closes the literal and opens another, and KQL silently
+/// concatenates the two — so a value containing `'` filtered on the wrong
+/// string and a backslash was not neutralised at all.
 fn usage_kql(app_id: &str) -> String {
     let app = app_id.replace('\'', "''");
     format!(
         "MicrosoftGraphActivityLogs \
-         | where AppId == '{app}' \
+         | where AppId == @'{app}' \
          | extend Path = replace_regex(tostring(parse_url(RequestUri).Path), \
            @'[0-9a-fA-F]{{8}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{12}}', '{{id}}') \
          | summarize Count = count(), LastSeen = max(TimeGenerated) by RequestMethod, Path \
@@ -264,11 +275,21 @@ mod tests {
     #[test]
     fn usage_kql_filters_the_app_and_escapes_quotes() {
         let kql = usage_kql("11111111-2222-3333-4444-555555555555");
-        assert!(kql.contains("AppId == '11111111-2222-3333-4444-555555555555'"));
+        assert!(kql.contains("AppId == @'11111111-2222-3333-4444-555555555555'"));
         assert!(kql.contains("MicrosoftGraphActivityLogs"));
-        // A single quote can't break out of the KQL string literal.
+        // The literal must be VERBATIM. `''` is the documented escape only
+        // there; in a plain `'…'` literal KQL escapes an inner quote with a
+        // backslash, and `''` instead closes the literal and opens another —
+        // which KQL then silently concatenates, filtering on the wrong string.
         let kql = usage_kql("x' | union evil");
-        assert!(kql.contains("AppId == 'x'' | union evil'"));
+        assert!(kql.contains("AppId == @'x'' | union evil'"));
+        // And a backslash is an ordinary character in a verbatim literal, so it
+        // cannot start an escape sequence of its own.
+        let kql = usage_kql(r"x\' | union evil");
+        assert!(
+            kql.contains(r"AppId == @'x\'' | union evil'"),
+            "backslash must survive as a literal, not neutralise the doubled quote: {kql}"
+        );
     }
 
     #[test]
