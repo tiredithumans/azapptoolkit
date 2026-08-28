@@ -42,6 +42,19 @@
   literal is now verbatim (`@'…'`), where `''` genuinely is the documented
   escape.
 
+### Fixed
+
+- **Adding or removing one certificate stripped the certificate blob from every
+  other credential on the app.** `keyCredentials` is a full-replace collection,
+  so both application-side mutators re-read the array and PATCH it back whole —
+  but they round-tripped it through the typed `KeyCredential`, which does not
+  model `key`. Graph returns `key` on exactly the `$select=keyCredentials` read
+  those paths issue, so every *surviving* certificate was written back keyless.
+  The audit's one-click "remove expired credentials" Fix reaches this on any app
+  that also holds a live certificate. Both paths now round-trip raw JSON, the
+  shape the service-principal twin was deliberately written against for this
+  reason, so `key` and every other unmodeled field survive byte-for-byte.
+
 
 ### Added
 

@@ -141,9 +141,36 @@ impl GraphClient {
             .await
     }
 
+    /// Reads an application's live `keyCredentials` as **raw JSON**.
+    ///
+    /// The typed [`KeyCredential`] deliberately does not model `key` (the
+    /// base64 DER certificate blob), and Graph returns it precisely on a
+    /// `$select=keyCredentials` read of a single application. Since
+    /// `keyCredentials` is a not-nullable, full-replace collection, a typed
+    /// round-trip on the fetch-modify-PATCH path writes every *surviving*
+    /// certificate back **without its key** — silently destroying live
+    /// credentials on an operation that was supposed to touch one entry.
+    ///
+    /// So both mutators below go through raw JSON, which round-trips `key` and
+    /// every other unmodeled field byte-for-byte. This is the same shape
+    /// [`Self::remove_service_principal_key_credential`] was written against for
+    /// exactly this reason.
+    async fn live_key_credentials(&self, object_id: &str) -> Result<Vec<serde_json::Value>> {
+        let path = format!("/applications/{object_id}");
+        let params: [(&str, &str); 1] = [("$select", "keyCredentials")];
+        let app: serde_json::Value = self.get_json(&path, &params, false).await?;
+        Ok(app
+            .get("keyCredentials")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
     /// Appends a certificate-credential entry to the application's
     /// `keyCredentials` array. Graph requires the full array on PATCH, so we
-    /// fetch the current state first, append, and send the new list back.
+    /// fetch the current state first, append, and send the new list back —
+    /// as raw JSON, so the surviving entries keep their `key` (see
+    /// [`Self::live_key_credentials`]).
     ///
     /// Note: this writes a "verify-only" credential (no private key), which
     /// is what users typically upload when an external issuer holds the
@@ -155,15 +182,7 @@ impl GraphClient {
         object_id: &str,
         new_cred: NewKeyCredential,
     ) -> Result<()> {
-        let existing = self.get_application(object_id).await?.key_credentials;
-        // Round-trip each existing entry through serde so we preserve whatever
-        // Graph gave us on read. A serialization failure must abort: PATCH
-        // replaces the whole array, so a dropped entry would delete a live
-        // credential.
-        let mut entries = existing
-            .into_iter()
-            .map(serde_json::to_value)
-            .collect::<std::result::Result<Vec<serde_json::Value>, _>>()?;
+        let mut entries = self.live_key_credentials(object_id).await?;
         entries.push(serde_json::to_value(&new_cred)?);
         let body = serde_json::json!({ "keyCredentials": entries });
         let path = format!("/applications/{object_id}");
@@ -172,12 +191,16 @@ impl GraphClient {
     }
 
     /// Drops a certificate credential by `key_id`. Mirrors `add_key_credential`'s
-    /// fetch-modify-patch shape.
+    /// fetch-modify-patch shape, raw JSON included — the audit's one-click
+    /// "remove expired credentials" Fix reaches this on apps that also hold a
+    /// live certificate, so stripping `key` from the survivors here is the
+    /// worst case of the bug it guards against.
     pub async fn remove_key_credential(&self, object_id: &str, key_id: &str) -> Result<()> {
-        let existing = self.get_application(object_id).await?.key_credentials;
-        let entries: Vec<KeyCredential> = existing
+        let entries: Vec<serde_json::Value> = self
+            .live_key_credentials(object_id)
+            .await?
             .into_iter()
-            .filter(|c| c.key_id != key_id)
+            .filter(|c| c.get("keyId").and_then(|v| v.as_str()) != Some(key_id))
             .collect();
         let body = serde_json::json!({ "keyCredentials": entries });
         let path = format!("/applications/{object_id}");

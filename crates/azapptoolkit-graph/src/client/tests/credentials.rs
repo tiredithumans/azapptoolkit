@@ -94,7 +94,7 @@ async fn remove_password_posts_key_id() {
 }
 
 #[tokio::test]
-async fn add_key_credential_fetches_then_patches_with_appended_entry() {
+async fn add_key_credential_preserves_the_surviving_certificate_blob() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/applications/obj-1"))
@@ -106,7 +106,16 @@ async fn add_key_credential_fetches_then_patches_with_appended_entry() {
                 "keyId": "existing",
                 "displayName": "existing-cert",
                 "type": "AsymmetricX509Cert",
-                "usage": "Verify"
+                "usage": "Verify",
+                // The certificate blob itself. `KeyCredential` does not model
+                // it, so a typed round-trip here wrote the survivor back
+                // keyless — silently destroying a live credential. Graph
+                // returns it on exactly this `$select=keyCredentials` read.
+                //
+                // Deliberately not base64-DER-shaped: the assertion is that the
+                // value survives byte-for-byte, and an `MII…` placeholder reads
+                // as a real certificate to the secrets scanner.
+                "key": "cert-blob-existing-must-survive"
             }]
         })))
         .mount(&server)
@@ -119,7 +128,8 @@ async fn add_key_credential_fetches_then_patches_with_appended_entry() {
                     "keyId": "existing",
                     "displayName": "existing-cert",
                     "type": "AsymmetricX509Cert",
-                    "usage": "Verify"
+                    "usage": "Verify",
+                    "key": "cert-blob-existing-must-survive"
                 },
                 {
                     "displayName": "new-cert",
@@ -149,33 +159,34 @@ async fn add_key_credential_fetches_then_patches_with_appended_entry() {
 }
 
 #[tokio::test]
-async fn remove_key_credential_patches_filtered_array() {
+async fn remove_key_credential_preserves_the_surviving_certificate_blob() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-            .and(path("/applications/obj-1"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "id": "obj-1",
-                    "appId": "app-1",
-                    "displayName": "Demo",
-                    "keyCredentials": [
-                        {"keyId": "keep", "displayName": "keep", "type": "AsymmetricX509Cert", "usage": "Verify"},
-                        {"keyId": "drop", "displayName": "drop", "type": "AsymmetricX509Cert", "usage": "Verify"}
-                    ]
-                })),
-            )
-            .mount(&server)
-            .await;
+        .and(path("/applications/obj-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "obj-1",
+            "appId": "app-1",
+            "displayName": "Demo",
+            "keyCredentials": [
+                {"keyId": "keep", "displayName": "keep", "type": "AsymmetricX509Cert",
+                 "usage": "Verify", "key": "cert-blob-keep-must-survive"},
+                {"keyId": "drop", "displayName": "drop", "type": "AsymmetricX509Cert",
+                 "usage": "Verify", "key": "cert-blob-drop"}
+            ]
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("PATCH"))
-            .and(path("/applications/obj-1"))
-            .and(wiremock::matchers::body_json(serde_json::json!({
-                "keyCredentials": [
-                    {"keyId": "keep", "displayName": "keep", "type": "AsymmetricX509Cert", "usage": "Verify"}
-                ]
-            })))
-            .respond_with(ResponseTemplate::new(204))
-            .mount(&server)
-            .await;
+        .and(path("/applications/obj-1"))
+        .and(wiremock::matchers::body_json(serde_json::json!({
+            "keyCredentials": [
+                {"keyId": "keep", "displayName": "keep", "type": "AsymmetricX509Cert",
+                 "usage": "Verify", "key": "cert-blob-keep-must-survive"}
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
     let client = make_client(&server.uri());
     client.remove_key_credential("obj-1", "drop").await.unwrap();
 }
