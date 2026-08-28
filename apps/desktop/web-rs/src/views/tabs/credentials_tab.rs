@@ -288,6 +288,7 @@ pub fn CredentialsTab(
     // the binding's remembered name → a Key-Vault-safe name from the app name.
     // Shared by the section header button and the per-row "Rotate" shortcut.
     let open_rotate = move || {
+        error.set(None);
         rotate_open.set(true);
         let tid = session
             .active_tenant
@@ -594,7 +595,10 @@ pub fn CredentialsTab(
                         </Button>
                         <Button
                             appearance=Signal::derive(|| ButtonAppearance::Primary)
-                            on_click=Box::new(move |_| add_open.set(true))
+                            on_click=Box::new(move |_| {
+                                error.set(None);
+                                add_open.set(true);
+                            })
                         >
                             "+ New secret"
                         </Button>
@@ -717,7 +721,10 @@ pub fn CredentialsTab(
                     <div class="actions-row">
                         <Button
                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                            on_click=Box::new(move |_| gencert_open.set(true))
+                            on_click=Box::new(move |_| {
+                                error.set(None);
+                                gencert_open.set(true);
+                            })
                         >
                             "Generate certificate…"
                         </Button>
@@ -809,6 +816,10 @@ pub fn CredentialsTab(
                 on_close=Callback::new(move |()| cert_open.set(false))
                 on_uploaded=on_changed
             />
+            // The tab-body banner, for failures raised OUTSIDE a modal (inline
+            // delete/remove). A modal keeps its own copy: this one renders behind
+            // the backdrop, where it is invisible to someone who just watched an
+            // action do nothing.
             {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
             <ModalShell
                 open=Signal::derive(move || add_open.get())
@@ -816,6 +827,11 @@ pub fn CredentialsTab(
                 busy=Signal::derive(move || cmd_create.busy.get())
                 on_close=Callback::new(move |()| add_open.set(false))
             >
+                // Failures from this dialog's action land here, not only in the
+                // tab body behind the backdrop. Without it a failed generate left
+                // the dialog open, no key shown, and the reason hidden — which
+                // reads as "the app silently did nothing".
+                {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
                 <Body1 class="hint">
                     "Consider a certificate or federated identity credential instead — \
                      they're more secure than client secrets, which shouldn't be used in production."
@@ -892,6 +908,11 @@ pub fn CredentialsTab(
                 busy=Signal::derive(move || cmd_gencert.busy.get())
                 on_close=Callback::new(move |()| gencert_open.set(false))
             >
+                // Failures from this dialog's action land here, not only in the
+                // tab body behind the backdrop. Without it a failed generate left
+                // the dialog open, no key shown, and the reason hidden — which
+                // reads as "the app silently did nothing".
+                {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
                 <Body1>
                     "Creates an RSA-2048 certificate, adds the public part to this app as a verify-only credential, and shows the private key once. Use the private key to authenticate the app (client assertion)."
                 </Body1>
@@ -981,6 +1002,11 @@ pub fn CredentialsTab(
                 busy=Signal::derive(move || cmd_rotate.busy.get())
                 on_close=Callback::new(move |()| rotate_open.set(false))
             >
+                // Failures from this dialog's action land here, not only in the
+                // tab body behind the backdrop. Without it a failed generate left
+                // the dialog open, no key shown, and the reason hidden — which
+                // reads as "the app silently did nothing".
+                {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
                 <Body1>
                     "Mints a new client secret, stores it as a new version of the vault secret below, then optionally removes the existing secret(s). The value is written only to Key Vault — it is never shown here."
                 </Body1>
