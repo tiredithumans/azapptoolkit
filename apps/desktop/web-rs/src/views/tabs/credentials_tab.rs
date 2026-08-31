@@ -975,7 +975,8 @@ pub fn CredentialsTab(
                             <Body1>
                                 "Copy the private key now — it is never stored and cannot be retrieved again. The public certificate has already been added to the application."
                             </Body1>
-                            <Body1 class="mono">{format!("Thumbprint: {}", r.thumbprint)}</Body1>
+                            <Body1 class="mono">{format!("Thumbprint (SHA-1): {}", r.thumbprint)}</Body1>
+                            <Body1 class="mono">{format!("SHA-256: {}", r.thumbprint_sha256)}</Body1>
                             <Body1 class="mono">{format!("Expires: {}", r.expires)}</Body1>
                             <strong>"Private key (PKCS#8 PEM)"</strong>
                             <pre class="secret-reveal">{r.private_key_pem.clone()}</pre>

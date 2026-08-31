@@ -362,6 +362,7 @@ name = "azapptoolkit-core"
 version = "0.28.1"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "parking_lot",
  "serde",
@@ -1088,6 +1089,7 @@ version = "0.28.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "aws-lc-rs",
  "azapptoolkit-arm",
  "azapptoolkit-auth",
  "azapptoolkit-core",
@@ -1105,7 +1107,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

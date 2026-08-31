@@ -157,6 +157,7 @@ pub async fn generate_self_signed_certificate(
 
     Ok(GeneratedCertificateResult {
         thumbprint: std::mem::take(&mut generated.thumbprint),
+        thumbprint_sha256: std::mem::take(&mut generated.thumbprint_sha256),
         certificate_pem: std::mem::take(&mut generated.cert_pem),
         private_key_pem: std::mem::take(&mut generated.private_key_pem),
         expires: expires_dt.map(|d| d.to_rfc3339()).unwrap_or_default(),

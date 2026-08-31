@@ -1,5 +1,31 @@
 ## [Unreleased]
 
+### Fixed
+
+- **The generated certificate's thumbprint now matches the one the Credentials
+  tab shows.** The reveal modal computed its own **SHA-256** digest of the
+  certificate while the Credentials tab renders the **SHA-1** thumbprint Entra
+  derives into `customKeyIdentifier` — two algorithms over the same certificate,
+  so the two values could never agree, and neither could the Azure portal's
+  Thumbprint column. An operator who copied the value out of the reveal was
+  holding a string that identified the certificate nowhere, and is not the `x5t`
+  a client-assertion config needs. The reveal now shows **Thumbprint (SHA-1)** —
+  the value Entra, the portal and the Credentials tab all agree on — with the
+  SHA-256 digest kept alongside it on its own labelled line for anyone verifying
+  or pinning on the stronger hash.
+
+- **A hand-uploaded certificate's thumbprint no longer renders as 60 characters
+  of garbage.** The Credentials tab base64-decoded `customKeyIdentifier`
+  unconditionally, but a certificate uploaded by hand can carry that identifier
+  already written as hex — and a 40-character hex string is *also* valid base64,
+  so the decode quietly succeeded, produced 30 meaningless bytes, and rendered a
+  plausible-looking thumbprint that belonged to no certificate. Both trees now
+  share one converter (`core::thumbprint::canonical`), which recognises the hex
+  form instead of decoding it. A DR backup's certificate thumbprints now go
+  through it too — the field exists so an operator can match a certificate
+  against their PKI, and it was exporting Graph's raw base64, which matches
+  neither their PKI nor the portal.
+
 ## [0.28.1] - 2026-08-31
 
 ### Fixed

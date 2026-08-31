@@ -181,11 +181,47 @@ probe reads the public metadata endpoint (a backend `reqwest` call — `connect-
 webview only) and can fail for reasons unrelated to the rollover; blocking on it would strand an
 operator mid-window. It is an unchecked precondition in the UI instead, and a failed probe renders as
 "couldn't check", never as "not published" — a false negative there talks an operator out of a safe
-activation. The probe compares base64 DER bodies rather than thumbprints: deriving a thumbprint means
-SHA-1, which `cert.rs` deliberately keeps out of the tree.
+activation. The probe compares base64 DER bodies rather than thumbprints: the bodies are what the metadata
+document actually publishes, so the comparison needs no digest at all.
 
 **Bulk.** Staging is additive, reversible, and changes nothing for users, so it is the only phase safe
 to fan out (via `run_bulk_seq`, like the other bulk remediations). Activation stays per-app and gated.
+
+### Thumbprints — one algorithm, one converter
+
+A certificate thumbprint in Entra is the **SHA-1** digest of the certificate DER. That is not a
+choice we make; it is what Entra derives, and it is the value the portal's Thumbprint column shows,
+the value a JWT client assertion carries as `x5t`, and the only value an operator can look up. Any
+other digest displayed as "the thumbprint" sends them hunting for a string that exists nowhere.
+
+It reaches us written **three ways**, and mixing them up has broken this codebase twice:
+
+| Where | Encoding | Example |
+|---|---|---|
+| `keyCredentials[].customKeyIdentifier` | `Edm.Binary` → base64 of the 20 SHA-1 bytes | `2iD8ppbE+D6Kmu1ZvjM2jtQh88E=` |
+| `preferredTokenSigningKeyThumbprint` | String → hex of the same 20 bytes | `DA20FCA696C4F83E8A9AED59BE33368ED421F3C1` |
+| a hand-uploaded `customKeyIdentifier` | already hex, case not guaranteed | `da20fca6…` |
+
+`azapptoolkit-core::thumbprint::canonical` is the **single** converter: it normalises all three to
+uppercase hex, and every display and every comparison in both trees goes through it — the backend
+(`commands::sso::canonical_thumbprint`) and the WASM frontend (`util::thumbprint_hex`) are thin
+delegates. Two failures are pinned by its tests:
+
+- **Comparing base64 to hex raw** matched nothing, so no certificate ever read as active: every app
+  showed "Staged", every expiry "Unknown", the work-queue filter matched nothing, and bulk staging
+  silently skipped every app. Nothing errored.
+- **Blindly base64-decoding an already-hex identifier.** A 40-character hex string is *also* valid
+  base64 (length divisible by 4, every character in the alphabet), so the decode succeeds, yields 30
+  meaningless bytes, and renders 60 plausible-looking hex characters. `canonical` checks for the hex
+  form first and passes it through.
+
+**Generation follows the same rule.** `cert.rs::generate_self_signed` digests SHA-1 over the DER it
+just produced — via `aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY`, the same aws-lc-rs backend rcgen
+signs with, so no crate enters the graph and no `sha2` dependency is declared. SHA-1 is used **only**
+as this identifier, never as a security primitive. A SHA-256 thumbprint is returned alongside it for
+operators who verify or pin on the stronger digest, and wherever both are shown they are **labelled
+by algorithm**; the reveal modal previously showed only the SHA-256 value under the bare label
+"Thumbprint", which never matched the Credentials tab row for the same certificate.
 
 ### The tenant-wide expiry board
 

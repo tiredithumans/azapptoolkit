@@ -204,7 +204,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Full-collection PATCH for `appRoles` / `oauth2PermissionScopes`.** Graph **full-replaces** these not-nullable arrays — re-read live state, mutate, write the whole array back (never merge a cached payload). Deleting an enabled entry needs two PATCHes: disable, then remove. Exposed **app roles** edit the **paired application** when one exists (else the SP) and round-trip as **raw JSON** so the `value: null` SAML default survives byte-for-byte. Bust with `invalidate_app_details` only.
 
-- **SAML signing-cert rollover: phase derives from live SP state, not stored.** Entra auto-promotes a staged cert when the active expires. [auth-and-consent.md](docs/architecture/auth-and-consent.md).
+- **SAML signing-cert rollover: phase derives from live SP state, not stored.** Entra auto-promotes a staged cert when the active expires. A cert **thumbprint is SHA-1**; `core::thumbprint::canonical` is its ONE converter — 40 hex chars are *also* valid base64, so never hand-roll the decode. [auth-and-consent.md](docs/architecture/auth-and-consent.md).
 
 - **Auth trusts are validated wherever minted.** Federated credentials go through `core::federation` on **every** path (Graph accepts a bad issuer silently); SAML cert lifetimes are bounded. Pinned by `repo_invariants/trust.rs`.
 
