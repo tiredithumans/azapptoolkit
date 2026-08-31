@@ -117,15 +117,16 @@ pub fn cert_payload_from_bytes(bytes: &[u8]) -> String {
     }
 }
 
-/// Renders Graph's `customKeyIdentifier` (base64-encoded SHA-1 thumbprint
-/// bytes) as the uppercase hex string the portal shows in its Thumbprint
-/// column. Returns `None` when the value isn't valid base64.
-pub fn thumbprint_hex(custom_key_identifier_b64: &str) -> Option<String> {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-
-    let bytes = STANDARD.decode(custom_key_identifier_b64).ok()?;
-    Some(bytes.iter().map(|b| format!("{b:02X}")).collect())
+/// Renders Graph's `customKeyIdentifier` as the uppercase hex string the portal
+/// shows in its Thumbprint column.
+///
+/// One definition only: [`azapptoolkit_core::thumbprint::canonical`], shared
+/// with the backend. Decoding it here by hand is what made a hand-uploaded
+/// certificate — whose identifier is already hex, and whose 40 hex characters
+/// are *also* valid base64 — render 60 characters of garbage instead of its
+/// thumbprint.
+pub fn thumbprint_hex(custom_key_identifier: &str) -> Option<String> {
+    azapptoolkit_core::thumbprint::canonical(custom_key_identifier)
 }
 
 /// Splits a free-text box into trimmed, non-empty entries, accepting newline-,
@@ -211,6 +212,12 @@ mod tests {
         // base64 of bytes [0xAB, 0xCD, 0x01]
         assert_eq!(thumbprint_hex("q80B").as_deref(), Some("ABCD01"));
         assert!(thumbprint_hex("!!notbase64!!").is_none());
+        // An already-hex identifier passes through instead of being decoded as
+        // base64 (which it also is) into 60 characters of garbage.
+        assert_eq!(
+            thumbprint_hex("0f7a2c9b1e4d6a8f3b5c2e1d9a4f6b8c0e2d4a6f").as_deref(),
+            Some("0F7A2C9B1E4D6A8F3B5C2E1D9A4F6B8C0E2D4A6F"),
+        );
     }
 
     #[test]
