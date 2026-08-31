@@ -129,6 +129,10 @@ pub async fn remove_site_permission(
 struct ConvertArgs<'a> {
     tenant_id: &'a str,
     sp_object_id: &'a str,
+    /// The app-registration object id, when the principal has one — `None` for a
+    /// bare service principal (enterprise app / managed identity), which has no
+    /// manifest to declare the permission on.
+    object_id: Option<&'a str>,
     app_id: &'a str,
     app_display_name: &'a str,
     site_urls: &'a [String],
@@ -143,6 +147,7 @@ struct ConvertArgs<'a> {
 pub async fn convert_site_access_to_selected(
     tenant_id: &str,
     sp_object_id: &str,
+    object_id: Option<&str>,
     app_id: &str,
     app_display_name: &str,
     site_urls: &[String],
@@ -154,6 +159,7 @@ pub async fn convert_site_access_to_selected(
         ConvertArgs {
             tenant_id,
             sp_object_id,
+            object_id,
             app_id,
             app_display_name,
             site_urls,
@@ -235,6 +241,8 @@ pub async fn remove_selected_item_permission(
 struct GrantSelectedItemArgs<'a> {
     tenant_id: &'a str,
     sp_object_id: &'a str,
+    /// See [`ConvertArgs::object_id`].
+    object_id: Option<&'a str>,
     app_id: &'a str,
     app_display_name: &'a str,
     permission_value: &'a str,
@@ -252,6 +260,7 @@ struct GrantSelectedItemArgs<'a> {
 pub async fn grant_selected_item_access(
     tenant_id: &str,
     sp_object_id: &str,
+    object_id: Option<&str>,
     app_id: &str,
     app_display_name: &str,
     permission_value: &str,
@@ -263,6 +272,7 @@ pub async fn grant_selected_item_access(
         GrantSelectedItemArgs {
             tenant_id,
             sp_object_id,
+            object_id,
             app_id,
             app_display_name,
             permission_value,

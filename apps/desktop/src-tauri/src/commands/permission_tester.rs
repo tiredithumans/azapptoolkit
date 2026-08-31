@@ -30,8 +30,10 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_core::audit::{AuditPrincipalKind, MailPermissionScope};
+use azapptoolkit_core::models::{ResolvedSharePointResource, SelectedPermission};
 use azapptoolkit_core::scoping::{
-    MICROSOFT_GRAPH_APP_ID, is_scopable_exchange_resource_permission, is_sharepoint_orgwide,
+    MICROSOFT_GRAPH_APP_ID, SelectedScopeLevel, is_scopable_exchange_resource_permission,
+    is_sharepoint_orgwide, selected_scope_accepts, selected_scope_level_for,
 };
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_exchange::models::{
@@ -847,13 +849,205 @@ fn classify_reacher(
     }
 }
 
-/// Tests whether `app_id` can access the SharePoint site at `site_url`. Combines
-/// the two access paths: (1) an org-wide `Sites.*` (≠ `Sites.Selected`) app-role
-/// grant reaches every site regardless of per-site permissions; (2) a per-site
-/// permission entry naming this app. Pre-acquires the `Sites.FullControl.All`
-/// scope so a missing-consent rejection surfaces as `consent_required` (the page
-/// shows a "Grant consent" button) — the site-permission endpoints require it
-/// even for reads.
+/// The SharePoint grants a principal holds on Microsoft Graph, read once.
+///
+/// Both halves matter: an org-wide `Sites.*` reaches every resource on its own,
+/// while a Selected scope grants nothing by itself — it only lets a *permission
+/// entry* on a resource take effect. `None` from [`sharepoint_grants_held`]
+/// means the assignments couldn't be read, which is never the same as "holds
+/// none".
+struct HeldSharePointGrants {
+    /// Org-wide `Sites.*` values (everything but `Sites.Selected`).
+    orgwide: Vec<String>,
+    /// Held Selected scope values, paired with the level each grants at.
+    selected: Vec<(String, SelectedScopeLevel)>,
+}
+
+impl HeldSharePointGrants {
+    /// Whether a permission entry found at `level` is actually backed by a scope
+    /// in this principal's token. Reuses the grant path's own fail-closed level
+    /// check, so the tester and the granter agree on which scope reaches what —
+    /// including the one asymmetry (`ListItems.*` covers a file, `Files.*` does
+    /// not cover a plain-list item).
+    fn scope_for_level(&self, level: SelectedScopeLevel) -> Option<&str> {
+        self.selected
+            .iter()
+            .find(|(_, held)| selected_scope_accepts(*held, level))
+            .map(|(value, _)| value.as_str())
+    }
+}
+
+/// Reads `app_id`'s granted Microsoft Graph app-roles and classifies the
+/// SharePoint ones. `None` when the principal or its assignments can't be read —
+/// the caller must then report `unknown` rather than "no access".
+async fn sharepoint_grants_held(
+    client: &azapptoolkit_graph::GraphClient,
+    app_id: &str,
+) -> Option<HeldSharePointGrants> {
+    let sp = client
+        .get_service_principal_by_app_id(app_id)
+        .await
+        .ok()??;
+    let (_, role_value_by_id) = graph_role_index(client).await.ok()?;
+    let assignments = client.list_app_role_assignments(&sp.id).await.ok()?;
+
+    let mut orgwide = Vec::new();
+    let mut selected = Vec::new();
+    for a in &assignments {
+        let Some(value) = role_value_by_id.get(&a.app_role_id) else {
+            continue;
+        };
+        if is_sharepoint_orgwide(value) {
+            orgwide.push(value.clone());
+        } else if let Some(level) = selected_scope_level_for(Some(MICROSOFT_GRAPH_APP_ID), value) {
+            selected.push((value.clone(), level));
+        }
+    }
+    orgwide.sort();
+    orgwide.dedup();
+    Some(HeldSharePointGrants { orgwide, selected })
+}
+
+/// One permission entry naming the tested app, and the securable it sits on.
+struct EntryHit {
+    level: SelectedScopeLevel,
+    /// Human label for the securable the entry is on — the same securable when
+    /// the entry is on the target, an ancestor when it was inherited.
+    where_label: String,
+    roles: Vec<String>,
+}
+
+/// The roles `app_id` is granted by `perms`, or `None` when no entry names it.
+fn roles_for_app(perms: &[SelectedPermission], app_id: &str) -> Option<Vec<String>> {
+    let mut roles: Vec<String> = perms
+        .iter()
+        .filter(|p| p.app_id().is_some_and(|id| id.eq_ignore_ascii_case(app_id)))
+        .flat_map(|p| p.roles.clone())
+        .collect();
+    if roles.is_empty() {
+        return None;
+    }
+    roles.sort();
+    roles.dedup();
+    Some(roles)
+}
+
+/// Walks the securable chain from `resolved` up to its site collection, looking
+/// for a permission entry naming `app_id`. Nearest match wins.
+///
+/// Walking upward is not an optimization — it is how SharePoint answers the
+/// question. Microsoft's access calculation finds the application record "on the
+/// resource **or a securable hierarchical parent**", so a file with no entry of
+/// its own is still reachable through the library's or the site collection's.
+/// Reading only the exact URL would report "no access" for access that exists.
+async fn find_entry_in_chain(
+    client: &azapptoolkit_graph::GraphClient,
+    resolved: &ResolvedSharePointResource,
+    app_id: &str,
+) -> Result<Option<EntryHit>, UiError> {
+    let site_label = resolved
+        .site_name
+        .clone()
+        .or_else(|| resolved.site_url.clone())
+        .unwrap_or_else(|| resolved.site_id.clone());
+
+    // 1. The item itself (a folder or a file).
+    if let (Some(list_id), Some(item_id)) =
+        (resolved.list_id.as_deref(), resolved.item_id.as_deref())
+    {
+        let perms = client
+            .list_list_item_permissions(&resolved.site_id, list_id, item_id)
+            .await
+            .map_err(sharepoint_test_err)?;
+        if let Some(roles) = roles_for_app(&perms, app_id) {
+            return Ok(Some(EntryHit {
+                level: resolved.level,
+                where_label: resolved.display_path.clone(),
+                roles,
+            }));
+        }
+    }
+
+    // 2. The list / document library holding it.
+    if let Some(list_id) = resolved.list_id.as_deref() {
+        let perms = client
+            .list_list_permissions(&resolved.site_id, list_id)
+            .await
+            .map_err(sharepoint_test_err)?;
+        if let Some(roles) = roles_for_app(&perms, app_id) {
+            return Ok(Some(EntryHit {
+                level: SelectedScopeLevel::List,
+                where_label: resolved
+                    .list_name
+                    .clone()
+                    .unwrap_or_else(|| "the list".to_string()),
+                roles,
+            }));
+        }
+    }
+
+    // 3. The site collection — the root of inheritance.
+    let perms = client
+        .list_site_permissions(&resolved.site_id)
+        .await
+        .map_err(sharepoint_test_err)?;
+    let mut roles: Vec<String> = perms
+        .into_iter()
+        .filter(|p| {
+            p.granted_to_identities.iter().any(|s| {
+                s.application
+                    .as_ref()
+                    .and_then(|a| a.id.as_deref())
+                    .map(|id| id.eq_ignore_ascii_case(app_id))
+                    .unwrap_or(false)
+            })
+        })
+        .flat_map(|p| p.roles)
+        .collect();
+    roles.sort();
+    roles.dedup();
+    if roles.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(EntryHit {
+        level: SelectedScopeLevel::Site,
+        where_label: site_label,
+        roles,
+    }))
+}
+
+/// A 403 from the tester's reads means the *operator* lacks rights on the site,
+/// not that the tested app does — so it carries the sub-site capability's
+/// guidance rather than a bare Graph body. Mirrors `commands::sharepoint`.
+fn sharepoint_test_err(err: azapptoolkit_graph::GraphError) -> UiError {
+    let mut ui = UiError::from(err);
+    if let Some(remediation) =
+        crate::commands::graph_err::forbidden_remediation(&ui, "sharepoint_selected_items")
+    {
+        tracing::warn!(detail = %ui.message, "permission tester: SharePoint read forbidden");
+        ui.message = remediation.to_string();
+    }
+    ui
+}
+
+/// Tests whether `app_id` can access the SharePoint resource at `site_url` — a
+/// site collection, a list or document library, a folder, or a single file.
+///
+/// Three access paths, in the order SharePoint itself resolves them:
+///
+/// 1. An org-wide `Sites.*` (≠ `Sites.Selected`) app-role grant reaches every
+///    resource regardless of per-resource permissions.
+/// 2. A permission entry naming the app, on the target **or any securable
+///    parent** ([`find_entry_in_chain`]).
+/// 3. …which only takes effect if the app also holds a Selected scope reaching
+///    that level. Microsoft's model needs all three of consent, entry, and token
+///    scope; miss one and the app has no access. An entry without the scope is
+///    the most common half-finished state, so it is reported as `no_access` with
+///    the missing half named, never as access the app doesn't have.
+///
+/// Pre-acquires `Sites.FullControl.All` so a missing-consent rejection surfaces
+/// as `consent_required` (the page shows a "Grant consent" button) — the
+/// permission endpoints require it even for reads, at every level.
 #[tauri::command]
 pub async fn test_site_access(
     state: State<'_, AppState>,
@@ -867,78 +1061,105 @@ pub async fn test_site_access(
         .map_err(UiError::from)?;
     let client = state.graph_for(&tenant_id);
 
-    // Path 1: org-wide grant. Look up the app's SP, enumerate its granted Graph
-    // app-roles, and flag any broad `Sites.*`. A failure here is non-fatal — fall
-    // through to the per-site check.
-    let mut orgwide_roles: Vec<String> = Vec::new();
-    if let Ok(Some(sp)) = client.get_service_principal_by_app_id(&app_id).await
-        && let Ok((_, role_value_by_id)) = graph_role_index(&client).await
-        && let Ok(assignments) = client.list_app_role_assignments(&sp.id).await
+    // Read the principal's grants once — both paths below need them, and a
+    // failure here must not be read as "holds nothing".
+    let held = sharepoint_grants_held(&client, &app_id).await;
+
+    let resolved = client
+        .resolve_sharepoint_resource(&site_url)
+        .await
+        .map_err(sharepoint_test_err)?;
+    let label = resolved.display_path.clone();
+
+    // Path 1: org-wide, which needs no entry at all.
+    if let Some(h) = &held
+        && !h.orgwide.is_empty()
     {
-        for a in &assignments {
-            if let Some(value) = role_value_by_id.get(&a.app_role_id)
-                && is_sharepoint_orgwide(value)
-            {
-                orgwide_roles.push(value.clone());
-            }
-        }
-    }
-
-    let site = client.get_site_by_url(&site_url).await?;
-    let label = site.display_name.clone().unwrap_or_else(|| site.id.clone());
-
-    if !orgwide_roles.is_empty() {
-        orgwide_roles.sort();
-        orgwide_roles.dedup();
         return Ok(PermissionTestResult {
             has_access: true,
             verdict: "org_wide".into(),
-            roles: orgwide_roles,
+            roles: h.orgwide.clone(),
             detail: Some(format!(
-                "The app holds an organization-wide SharePoint permission and can access “{label}” (and every other site)."
+                "The app holds an organization-wide SharePoint permission and can access “{label}” (and every other site, library and file in the tenant)."
             )),
             resource_label: label,
         });
     }
 
-    // Path 2: per-site permission entry naming this app.
-    let perms = client.list_site_permissions(&site.id).await?;
-    let mut site_roles: Vec<String> = perms
-        .into_iter()
-        .filter(|p| {
-            p.granted_to_identities.iter().any(|s| {
-                s.application
-                    .as_ref()
-                    .and_then(|a| a.id.as_deref())
-                    .map(|id| id.eq_ignore_ascii_case(&app_id))
-                    .unwrap_or(false)
-            })
-        })
-        .flat_map(|p| p.roles)
-        .collect();
-    site_roles.sort();
-    site_roles.dedup();
-
-    if site_roles.is_empty() {
-        Ok(PermissionTestResult {
+    // Path 2: a permission entry on the target or an ancestor.
+    let Some(hit) = find_entry_in_chain(&client, &resolved, &app_id).await? else {
+        return Ok(PermissionTestResult {
             has_access: false,
             verdict: "no_access".into(),
             roles: Vec::new(),
             detail: Some(format!(
-                "The app has no permission on “{label}”, and no organization-wide SharePoint grant."
+                "No permission entry names this app on “{label}” or anything above it, and it holds no organization-wide SharePoint grant."
             )),
             resource_label: label,
-        })
+        });
+    };
+
+    let inherited = hit.where_label != label;
+    let via = if inherited {
+        format!(" (inherited from “{}”)", hit.where_label)
     } else {
-        Ok(PermissionTestResult {
+        String::new()
+    };
+
+    // Path 3: the entry only bites if the token can carry a scope for its level.
+    let Some(held) = held else {
+        return Ok(PermissionTestResult {
+            has_access: false,
+            verdict: "unknown".into(),
+            roles: hit.roles,
+            detail: Some(format!(
+                "“{label}” grants this app access{via}, but its app-role assignments couldn't be read, so whether it holds the matching Selected scope is unknown."
+            )),
+            resource_label: label,
+        });
+    };
+
+    match held.scope_for_level(hit.level) {
+        Some(scope) => Ok(PermissionTestResult {
             has_access: true,
             verdict: "scoped".into(),
-            roles: site_roles,
+            roles: hit.roles,
             detail: Some(format!(
-                "The app is granted access to “{label}” specifically (Sites.Selected model)."
+                "The app is granted access to “{label}” specifically{via}, and holds {scope} — the Selected model's grant and scope halves are both in place."
             )),
             resource_label: label,
-        })
+        }),
+        None => Ok(PermissionTestResult {
+            has_access: false,
+            verdict: "no_access".into(),
+            roles: hit.roles,
+            detail: Some(format!(
+                "“{label}” grants this app access{via}, but the app doesn't hold a Selected permission reaching {}. A permission entry alone grants nothing until the matching scope is in the app's token — grant {} as well.",
+                level_noun(hit.level),
+                required_scope_for(hit.level),
+            )),
+            resource_label: label,
+        }),
+    }
+}
+
+/// The securable a level names, for the "doesn't reach …" sentence.
+fn level_noun(level: SelectedScopeLevel) -> &'static str {
+    match level {
+        SelectedScopeLevel::Site => "a site collection",
+        SelectedScopeLevel::List => "a list or document library",
+        SelectedScopeLevel::ListItem => "a list item or folder",
+        SelectedScopeLevel::File => "a file",
+    }
+}
+
+/// The Selected scope an entry at `level` needs in the token to take effect.
+fn required_scope_for(level: SelectedScopeLevel) -> &'static str {
+    match level {
+        SelectedScopeLevel::Site => "Sites.Selected",
+        SelectedScopeLevel::List => "Lists.SelectedOperations.Selected",
+        SelectedScopeLevel::ListItem => "ListItems.SelectedOperations.Selected",
+        SelectedScopeLevel::File => "Files.SelectedOperations.Selected",
     }
 }
 

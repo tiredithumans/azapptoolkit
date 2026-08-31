@@ -20,10 +20,11 @@ use azapptoolkit_core::scoping::{
     selected_scope_level_for,
 };
 
-use crate::commands::applications::invalidate_app_lists;
+use crate::commands::applications::{invalidate_app_detail_state, invalidate_app_lists};
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
 use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::graph_roles::graph_role_index;
+use crate::commands::permissions::declare_resource_access;
 use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
@@ -39,6 +40,53 @@ use crate::state::AppState;
 /// access because every site grant failed.
 fn should_remove_orgwide(remove_orgwide: bool, any_site_granted: bool) -> bool {
     remove_orgwide && any_site_granted
+}
+
+/// Declares `role_id` as a Microsoft Graph **application** permission on the app
+/// registration, mirroring what the ordinary grant path
+/// (`permissions::grant_single_permission_core`) does before it creates the
+/// assignment. Returns whether a declaration was actually added.
+///
+/// Both SharePoint apply paths used to create the app-role assignment and stop
+/// there. The permission was genuinely granted, but the Permissions tab renders
+/// `requiredResourceAccess` and joins runtime assignments **onto** declared rows
+/// (`applications::permissions_resolve`), so a grant with no declaration was
+/// invisible on the app registration — and the wizard's picker is the full live
+/// catalog, not the declared set, so undeclared is the *normal* case here.
+///
+/// `object_id` is `None` for a service-principal-only principal (enterprise app
+/// or managed identity): there is no local app registration to declare on, and
+/// the app-role assignment is the whole story.
+async fn declare_graph_role(
+    client: &azapptoolkit_graph::GraphClient,
+    cache: &Cache,
+    tenant_id: &str,
+    object_id: Option<&str>,
+    role_id: &str,
+) -> Result<bool, UiError> {
+    let Some(object_id) = object_id else {
+        return Ok(false);
+    };
+    let mut app = client.get_application(object_id).await?;
+    if !declare_resource_access(
+        &mut app.required_resource_access,
+        MICROSOFT_GRAPH_APP_ID,
+        role_id,
+        "Role",
+    ) {
+        return Ok(false);
+    }
+    let patch = azapptoolkit_graph::client::AppPatch {
+        required_resource_access: Some(app.required_resource_access.clone()),
+        ..Default::default()
+    };
+    client.update_application(object_id, &patch).await?;
+    // The manifest PATCH is a completed mutation on its own, and the steps after
+    // it can still fail. Invalidate here rather than only on the command's final
+    // `Ok`, or a later failure leaves the detail cache showing an app that
+    // doesn't declare what it was just given.
+    invalidate_app_detail_state(cache, tenant_id);
+    Ok(true)
 }
 
 /// The distinct resources in a pasted target list, in the order given.
@@ -80,15 +128,46 @@ async fn sharepoint_client_checked(
     Ok(state.graph_for(tenant_id))
 }
 
-/// Maps a SharePoint Graph error to a `UiError`, replacing a 403's message with
-/// the `sharepoint_sites_selected` role guidance. A forbidden *after* the
-/// `Sites.FullControl.All` scope is consented means the signed-in user lacks the
-/// SharePoint Administrator role — not a consent gap (that surfaces earlier as
-/// `consent_required` from `ensure_sharepoint_token`). Single copy of the text
-/// lives in the capability catalog.
+/// Maps a **site-collection** SharePoint Graph error to a `UiError`, replacing a
+/// 403's message with the `sharepoint_sites_selected` role guidance. A forbidden
+/// *after* the `Sites.FullControl.All` scope is consented means the signed-in
+/// user lacks the SharePoint Administrator role — not a consent gap (that
+/// surfaces earlier as `consent_required` from `ensure_sharepoint_token`).
+/// Single copy of the text lives in the capability catalog.
 fn sharepoint_err(err: azapptoolkit_graph::GraphError) -> UiError {
+    map_sharepoint_err(err, "sharepoint_sites_selected")
+}
+
+/// The **sub-site** sibling of [`sharepoint_err`], for the list / folder / file
+/// endpoints.
+///
+/// A separate capability key rather than a reworded copy: the two levels differ
+/// on the *user* half, not the scope. A delegated call is the intersection of
+/// the token's scopes and the caller's own SharePoint permissions, and a grant
+/// below the site collection writes a role assignment onto a securable inside
+/// the site's content — which the tenant SharePoint Administrator role doesn't
+/// reach. Sending both through one message told an operator whose site-level
+/// grants worked that they lacked a role they demonstrably held.
+fn sharepoint_item_err(err: azapptoolkit_graph::GraphError) -> UiError {
+    map_sharepoint_err(err, "sharepoint_selected_items")
+}
+
+/// Shared body: swap a 403's message for `capability_key`'s catalog remediation,
+/// **after** recording what Graph actually said.
+///
+/// The substitution is lossy by design (never leak a raw Graph body into the
+/// UI), but Graph's `error.code`/`error.message` is the only thing that
+/// separates "you lack rights on this site" from any other denial, and nothing
+/// else on these paths logs it. Without this line the sole record of a 403 was
+/// a fixed sentence naming a role the operator may well already hold.
+fn map_sharepoint_err(err: azapptoolkit_graph::GraphError, capability_key: &str) -> UiError {
     let mut ui = UiError::from(err);
-    if let Some(remediation) = forbidden_remediation(&ui, "sharepoint_sites_selected") {
+    if let Some(remediation) = forbidden_remediation(&ui, capability_key) {
+        tracing::warn!(
+            capability = capability_key,
+            detail = %ui.message,
+            "SharePoint call forbidden; replacing message with catalog remediation"
+        );
         ui.message = remediation.to_string();
     }
     ui
@@ -197,6 +276,7 @@ pub async fn convert_site_access_to_selected(
     state: State<'_, AppState>,
     tenant_id: String,
     sp_object_id: String,
+    object_id: Option<String>,
     app_id: String,
     app_display_name: String,
     site_urls: Vec<String>,
@@ -224,6 +304,19 @@ pub async fn convert_site_access_to_selected(
     // Snapshot the current assignments once: drives both the idempotency check
     // for the Sites.Selected grant and the org-wide-removal scan below.
     let existing = client.list_app_role_assignments(&sp_object_id).await?;
+
+    // 0. Declare Sites.Selected on the app registration, so the grant below is
+    //    visible in the Permissions tab. Ordered first for the same reason the
+    //    ordinary grant path declares first: the manifest should never promise
+    //    less than what is assigned.
+    let declared_permission = declare_graph_role(
+        &client,
+        &state.cache,
+        &tenant_id,
+        object_id.as_deref(),
+        &sites_selected_id,
+    )
+    .await?;
 
     // 1. Grant Sites.Selected (idempotent).
     let already_selected = existing
@@ -309,6 +402,7 @@ pub async fn convert_site_access_to_selected(
 
     Ok(SiteScopeResult {
         granted_role_added,
+        declared_permission,
         sites_granted,
         removed_orgwide_grants,
         warnings,
@@ -370,7 +464,7 @@ pub async fn resolve_sharepoint_resource(
     let resolved = client
         .resolve_sharepoint_resource(&url)
         .await
-        .map_err(sharepoint_err)?;
+        .map_err(sharepoint_item_err)?;
     Ok(to_resource_ref(resolved, url))
 }
 
@@ -395,6 +489,7 @@ pub async fn grant_selected_item_access(
     state: State<'_, AppState>,
     tenant_id: String,
     sp_object_id: String,
+    object_id: Option<String>,
     app_id: String,
     app_display_name: String,
     permission_value: String,
@@ -428,6 +523,19 @@ pub async fn grant_selected_item_access(
         })?;
 
     let mut warnings = Vec::new();
+
+    // 0. Declare the Selected permission on the app registration. The picker is
+    //    the full live catalog, so this is usually a permission the app has
+    //    never declared — and an assignment with no declaration doesn't appear
+    //    in the Permissions tab at all.
+    let declared_permission = declare_graph_role(
+        &client,
+        &state.cache,
+        &tenant_id,
+        object_id.as_deref(),
+        &role_id,
+    )
+    .await?;
 
     // 1. Grant the Selected appRole (idempotent) — without it in the token, the
     //    per-resource permissions below grant nothing at all.
@@ -507,6 +615,7 @@ pub async fn grant_selected_item_access(
 
     Ok(SelectedItemScopeResult {
         granted_role_added,
+        declared_permission,
         granted,
         warnings,
     })
@@ -527,7 +636,7 @@ async fn grant_on_list(
         .grant_list_permission(&resolved.site_id, list_id, app_id, app_display_name, roles)
         .await
         .map(to_item_dto)
-        .map_err(sharepoint_err)
+        .map_err(sharepoint_item_err)
 }
 
 async fn grant_on_item(
@@ -555,7 +664,7 @@ async fn grant_on_item(
         )
         .await
         .map(to_item_dto)
-        .map_err(sharepoint_err)
+        .map_err(sharepoint_item_err)
 }
 
 /// Lists the application permissions on the resource `url` names.
@@ -574,7 +683,7 @@ pub async fn list_selected_item_permissions(
     let resolved = client
         .resolve_sharepoint_resource(&url)
         .await
-        .map_err(sharepoint_err)?;
+        .map_err(sharepoint_item_err)?;
     let perms = read_permissions(&client, &resolved).await?;
     Ok(perms.into_iter().map(to_item_dto).collect())
 }
@@ -587,11 +696,11 @@ async fn read_permissions(
         (Some(list_id), Some(item_id)) => client
             .list_list_item_permissions(&resolved.site_id, list_id, item_id)
             .await
-            .map_err(sharepoint_err),
+            .map_err(sharepoint_item_err),
         (Some(list_id), None) => client
             .list_list_permissions(&resolved.site_id, list_id)
             .await
-            .map_err(sharepoint_err),
+            .map_err(sharepoint_item_err),
         // A site URL: the site endpoint owns that read.
         (None, _) => Err(UiError::validation(
             "level_mismatch",
@@ -612,16 +721,16 @@ pub async fn remove_selected_item_permission(
     let resolved = client
         .resolve_sharepoint_resource(&url)
         .await
-        .map_err(sharepoint_err)?;
+        .map_err(sharepoint_item_err)?;
     match (resolved.list_id.as_deref(), resolved.item_id.as_deref()) {
         (Some(list_id), Some(item_id)) => client
             .remove_list_item_permission(&resolved.site_id, list_id, item_id, &permission_id)
             .await
-            .map_err(sharepoint_err),
+            .map_err(sharepoint_item_err),
         (Some(list_id), None) => client
             .remove_list_permission(&resolved.site_id, list_id, &permission_id)
             .await
-            .map_err(sharepoint_err),
+            .map_err(sharepoint_item_err),
         (None, _) => Err(UiError::validation(
             "level_mismatch",
             "use the site permissions view for a site collection".to_string(),

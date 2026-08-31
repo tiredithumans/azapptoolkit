@@ -1,5 +1,62 @@
 ## [Unreleased]
 
+### Added
+
+- **The permission tester now takes any SharePoint resource, not just a site
+  collection.** Paste a library, folder or file URL and it resolves the
+  securable, then answers in the order SharePoint itself does: an org-wide
+  `Sites.*` grant wins outright; otherwise it walks the chain **upward** —
+  item, list, site collection — because Microsoft's access calculation finds the
+  application record "on the resource *or a securable hierarchical parent*", so a
+  file with no entry of its own still reports the access it inherits from the
+  library or the site.
+
+  It also checks the half that used to go unasked. A Selected permission entry
+  grants nothing until the app's token carries a matching scope, so an entry with
+  no matching `*.SelectedOperations.Selected` assignment is now reported as **no
+  access**, naming the missing half, instead of as scoped access the app doesn't
+  have. Pairing reuses `selected_scope_accepts`, so the tester and the granter
+  agree on which scope reaches what — including the asymmetry where `ListItems.*`
+  covers a file but `Files.*` doesn't cover a plain-list item. If the app's
+  assignments can't be read, the verdict is `unknown`, never "no access".
+
+### Fixed
+
+- **A Selected permission granted through the wizard never appeared in the
+  Permissions tab.** Both SharePoint apply paths created the app-role assignment
+  and stopped there. The permission was genuinely granted and effective, but the
+  tab renders the app registration's `requiredResourceAccess` and joins runtime
+  assignments *onto* declared rows — so an assignment with no declaration was
+  invisible. The wizard's picker is the full live catalog rather than the declared
+  set, which made "granted but never declared" the normal case for
+  `Files.` / `Lists.SelectedOperations.Selected`, not an edge one.
+
+  `grant_selected_item_access` and `convert_site_access_to_selected` now declare
+  the permission before assigning it, exactly as the ordinary grant path does, and
+  report it back as `declared_permission`. Service-principal-only principals
+  (enterprise apps, managed identities) have no registration to declare on and are
+  unchanged.
+
+- **A 403 on a list/folder/file Selected grant blamed a role the operator already
+  held.** Every SharePoint 403 was rewritten to one fixed sentence — "requires the
+  SharePoint Administrator role (or Global Administrator) and the
+  Sites.FullControl.All scope" — and Graph's own `error.code`/`error.message` was
+  dropped on the floor, logged nowhere. An operator who *was* a SharePoint
+  Administrator, whose site-collection grants worked, got told they were not.
+
+  The requirement genuinely differs by level, so the sub-site endpoints now carry
+  their own capability (`sharepoint_selected_items`), which
+  `ScopeKind::SharePointItem` resolves to: a delegated call is the intersection of
+  the token's scopes and the caller's *own* SharePoint permissions, and a grant
+  below the site collection writes onto a securable inside the site's content —
+  which the tenant SharePoint Administrator role doesn't reach. It also needs Full
+  Control on the target site (site collection administrator, or the site's Owners
+  group). That is now what the 403 message, the readiness row and the proactive
+  "Requires:" tooltip say for those levels.
+
+  The raw Graph 403 body is also logged at `warn` before the substitution, so the
+  log file can distinguish "you lack rights on this site" from any other denial.
+
 ## [0.27.0] - 2026-08-28
 
 ### Added

@@ -141,6 +141,20 @@ then sign out and back in so a fresh token is issued.
    permission — effective access needs **SharePoint Administrator** (or Global Admin). Add a
    PIM-eligible SharePoint Administrator role if you use that feature.
 
+   **The sub-site levels need more than that role.** A delegated call is the intersection of the
+   token's scopes and the *signed-in user's own SharePoint permissions*
+   ([Selected permissions overview][sel]: "in all delegated cases the current user also needs
+   sufficient permissions to manage access by calling the API"). A grant at the list, folder or
+   file level (`Lists.` / `ListItems.` / `Files.SelectedOperations.Selected`) writes a role
+   assignment onto a securable **inside** the site's content and breaks inheritance there, so it
+   additionally needs **Full Control on that site** — site collection administrator, or the site's
+   Owners group. The tenant SharePoint Administrator role reaches the site-collection root and
+   stops. This is why site-level grants can succeed while list/file grants 403 for the same
+   operator; the catalog keys them separately (`sharepoint_sites_selected` vs
+   `sharepoint_selected_items`).
+
+[sel]: https://learn.microsoft.com/graph/permissions-selected-overview
+
 3. **Delegated OAuth scopes still required** (the second half above). The operator's consented
    scopes must include: `Directory.Read.All`, `Application.ReadWrite.All`,
    `AppRoleAssignment.ReadWrite.All`, `DelegatedPermissionGrant.ReadWrite.All`, and — optionally,

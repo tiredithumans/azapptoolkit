@@ -256,6 +256,50 @@ consumes one of the library's unique permission scopes (guidance: stay under 5 0
 site, where `Sites.Selected` applies and inheritance is untouched, because a site collection is the
 root of inheritance.
 
+### Declare, then assign
+
+Both SharePoint apply paths run `declare_graph_role` before granting the appRole: it patches the app
+registration's `requiredResourceAccess`, exactly as `permissions::grant_single_permission_core`
+does. This is not cosmetic. The Permissions tab renders **declarations** and joins runtime
+assignments *onto* those rows (`applications::permissions_resolve` iterates `declared`), so an
+assignment with no declaration is invisible on the app registration — and the wizard's picker is the
+full live catalog rather than the declared set, so "granted but never declared" is the *normal* case
+here, not an edge one. The PATCH invalidates the detail cache itself, because the steps after it can
+still fail. `object_id` is `None` for a service-principal-only principal (enterprise app / managed
+identity): there is no registration to declare on, and `declared_permission` comes back false.
+
+### Who may grant: the site collection is not the sub-site
+
+The scope requirement is the same (`Sites.FullControl.All`), but the **user** requirement is not, and
+this is the difference operators actually hit. A delegated call is the intersection of the token's
+scopes and the caller's own SharePoint permissions ([Selected permissions overview][sel]: "in all
+delegated cases the current user also needs sufficient permissions to manage access by calling the
+API"). `POST /sites/{id}/permissions` is administrative at the root of the site collection and the
+tenant SharePoint Administrator role covers it; a sub-site grant writes a role assignment onto a
+securable *inside* the site's content, which that role does not reach — the operator also needs Full
+Control on the site (site collection administrator, or its Owners group). So site-level grants can
+succeed while list/file grants 403 for the same operator with the same token.
+
+The two levels therefore key to **different** capabilities — `sharepoint_sites_selected` and
+`sharepoint_selected_items` (`ScopeKind::capability_key`) — so the 403 message, the readiness row and
+the proactive "Requires:" tooltip name the right requirement. `commands::sharepoint::map_sharepoint_err`
+logs Graph's real 403 body at `warn` before replacing the message, since the substitution is
+otherwise the only record and it names a role, not the actual denial.
+
+[sel]: https://learn.microsoft.com/graph/permissions-selected-overview
+
+### Testing reach: `test_site_access`
+
+The permission tester takes any level, not just a site collection. It resolves the URL, then answers
+in the order SharePoint itself does: an org-wide `Sites.*` grant wins outright; otherwise it walks
+the securable chain **upward** (item → list → site collection), because Microsoft's access
+calculation finds the application record "on the resource *or a securable hierarchical parent*" — so
+a file with no entry of its own still reports the access it inherits. A found entry is then checked
+against the scopes the principal actually holds, reusing `selected_scope_accepts` so the tester and
+the granter agree on which scope reaches what. **An entry with no matching scope reports
+`no_access`**, naming the missing half: the three-step model means a permission entry alone grants
+nothing. A failure to read the assignments reports `unknown`, never "no access".
+
 ## Scoped grants reuse one Exchange core
 
 The scoped-mailbox grant body (register Exchange SP → management scope from groups → scoped role

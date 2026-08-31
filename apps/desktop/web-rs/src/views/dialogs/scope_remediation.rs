@@ -257,6 +257,9 @@ pub fn ScopeSharePointButton(
                     } => sharepoint::convert_site_access_to_selected(
                         &t.tenant_id,
                         sp_object_id,
+                        // SP-only target: no app registration exists to declare
+                        // Sites.Selected on, so the assignment is the whole fix.
+                        None,
                         app_id,
                         display_name,
                         &site_urls,

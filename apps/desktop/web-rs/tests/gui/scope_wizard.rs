@@ -74,6 +74,7 @@ fn missing_scope_group() -> ExchangeScopeGroupDto {
 fn site_scope_result() -> SiteScopeResult {
     SiteScopeResult {
         granted_role_added: true,
+        declared_permission: true,
         sites_granted: Vec::new(),
         removed_orgwide_grants: vec!["Sites.Read.All".to_string()],
         warnings: Vec::new(),
@@ -83,6 +84,7 @@ fn site_scope_result() -> SiteScopeResult {
 fn selected_item_scope_result() -> azapptoolkit_dto::sharepoint::SelectedItemScopeResult {
     azapptoolkit_dto::sharepoint::SelectedItemScopeResult {
         granted_role_added: true,
+        declared_permission: true,
         granted: Vec::new(),
         warnings: Vec::new(),
     }
@@ -348,6 +350,11 @@ async fn sharepoint_path_converts_to_sites_selected() {
     assert_eq!(ts::call_count("grant_exchange_mailbox_access"), 0);
     assert_eq!(ts::call_count("declare_app_permission"), 0);
     let call = ts::last_call("convert_site_access_to_selected").unwrap();
+    // Same contract on the site path: declare Sites.Selected, don't just assign it.
+    assert_eq!(
+        call.args.get("objectId").and_then(|v| v.as_str()),
+        Some("obj-app")
+    );
     assert_eq!(
         call.args
             .get("siteUrls")
@@ -446,6 +453,15 @@ async fn selected_item_path_grants_against_the_resolved_folder() {
     assert_eq!(
         call.args.get("permissionValue").and_then(|v| v.as_str()),
         Some("Files.SelectedOperations.Selected")
+    );
+    // The app-registration object id rides along so the backend can DECLARE the
+    // permission, not just assign it. Without it the grant was real but
+    // invisible: the Permissions tab renders `requiredResourceAccess` and joins
+    // runtime assignments onto declared rows, so an undeclared assignment shows
+    // nowhere — and this picker is the full catalog, so undeclared is the norm.
+    assert_eq!(
+        call.args.get("objectId").and_then(|v| v.as_str()),
+        Some("obj-app")
     );
     assert_eq!(
         call.args

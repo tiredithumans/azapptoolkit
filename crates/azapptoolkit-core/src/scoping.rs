@@ -465,11 +465,15 @@ impl ScopeKind {
     pub fn capability_key(self) -> &'static str {
         match self {
             ScopeKind::Exchange => "exchange_rbac",
-            // Deliberately the same key as `SharePoint`: the caller-side
-            // requirement is identical (Sites.FullControl.All + SharePoint
-            // Administrator or Global Administrator), so both mechanisms surface
-            // the same role hint.
-            ScopeKind::SharePoint | ScopeKind::SharePointItem => "sharepoint_sites_selected",
+            ScopeKind::SharePoint => "sharepoint_sites_selected",
+            // NOT the same key as `SharePoint`, despite the identical scope:
+            // the two mechanisms differ on the *user* half. A delegated call is
+            // the intersection of the token's scopes and the caller's own
+            // SharePoint permissions, and a sub-site grant writes onto a
+            // securable inside the site's content — which the tenant
+            // SharePoint Administrator role does not reach. Sharing one key
+            // made the proactive hint promise a role that isn't sufficient.
+            ScopeKind::SharePointItem => "sharepoint_selected_items",
         }
     }
 
@@ -916,8 +920,12 @@ mod tests {
             scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), "Sites.Read.All"),
             Some(ScopeKind::SharePoint)
         );
-        // Both SharePoint mechanisms answer to the same operator capability.
-        assert_eq!(
+        // The two SharePoint mechanisms answer to DIFFERENT operator
+        // capabilities. Same scope, different user-side requirement: a sub-site
+        // grant also needs Full Control on the target site, which the tenant
+        // SharePoint Administrator role doesn't confer. Sharing one key made
+        // the hint name a role that isn't sufficient.
+        assert_ne!(
             ScopeKind::SharePointItem.capability_key(),
             ScopeKind::SharePoint.capability_key()
         );
@@ -1065,6 +1073,12 @@ mod tests {
         assert_eq!(
             ScopeKind::SharePoint.capability_key(),
             "sharepoint_sites_selected"
+        );
+        // The sub-site mechanism carries its OWN key: same scope, different
+        // user-side requirement (Full Control on the target site).
+        assert_eq!(
+            ScopeKind::SharePointItem.capability_key(),
+            "sharepoint_selected_items"
         );
         assert!(ScopeKind::Exchange.admin_applicable());
         assert!(ScopeKind::SharePoint.admin_applicable());
