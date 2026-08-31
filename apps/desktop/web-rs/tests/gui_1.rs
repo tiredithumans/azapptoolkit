@@ -21,6 +21,8 @@ mod application_list;
 mod authentication_tab;
 #[path = "gui/certificate_reveal.rs"]
 mod certificate_reveal;
+#[path = "gui/credential_sweep.rs"]
+mod credential_sweep;
 #[path = "gui/enterprise_application_list.rs"]
 mod enterprise_application_list;
 #[path = "gui/open_items_dock.rs"]

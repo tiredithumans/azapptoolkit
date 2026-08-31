@@ -17,7 +17,7 @@ use crate::bindings::applications::{
 };
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{Callout, CopyableId};
+use crate::components::ui::CopyableId;
 use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -236,7 +236,6 @@ pub fn CredentialsTab(
     let cert_open = RwSignal::new(false);
     let removing_cert: RwSignal<Option<String>> = RwSignal::new(None);
     let cmd_expire = use_command();
-    let expired_result: RwSignal<Option<RemoveExpiredResult>> = RwSignal::new(None);
     let pending_secret: RwSignal<Option<String>> = RwSignal::new(None);
     let pending_cert: RwSignal<Option<String>> = RwSignal::new(None);
     // Name the exact credential a Remove will destroy. An app with six secrets
@@ -279,7 +278,6 @@ pub fn CredentialsTab(
     let rotate_secret_name = RwSignal::new(String::new());
     let rotate_lifetime = RwSignal::new("180".to_string());
     let cmd_rotate = use_command();
-    let rotate_result: RwSignal<Option<RotateCredentialResult>> = RwSignal::new(None);
 
     let app_name = Signal::derive(move || detail.with(|d| d.application.display_name.clone()));
     // Opens the rotate dialog and prefills empty fields (never clobbering an
@@ -459,8 +457,25 @@ pub fn CredentialsTab(
         let id = object_id.get();
         let on_changed_cb = on_changed;
         cmd_expire.run_with(
-            move |r| {
-                expired_result.set(Some(r));
+            move |r: RemoveExpiredResult| {
+                // The confirmation goes on the session toast stack, like
+                // `remove_secret`/`remove_cert` above — NOT into a local signal.
+                // `on_changed` re-runs the resource this subtree is built from,
+                // so anything held here is unmounted before it can be read; the
+                // toast host lives at the shell root and survives. A partial
+                // failure rides an error toast, which lingers longer.
+                let removed = r.removed_key_ids.len();
+                if r.failures.is_empty() {
+                    session.toast_success(format!("Removed {removed} expired secret(s)."));
+                } else {
+                    session.toast_error(
+                        format!(
+                            "Removed {removed} expired secret(s); {} could not be removed.",
+                            r.failures.len(),
+                        ),
+                        None,
+                    );
+                }
                 on_changed_cb.run(());
             },
             move |e| error.set(Some(e.message)),
@@ -472,7 +487,6 @@ pub fn CredentialsTab(
 
     let do_rotate = move |remove_existing: bool| {
         error.set(None);
-        rotate_result.set(None);
         let id = object_id.get();
         let app = app_id.get();
         let vault = rotate_vault.get().trim().to_string();
@@ -502,7 +516,23 @@ pub fn CredentialsTab(
                 if let Some(t) = session.active_tenant.get_untracked() {
                     ls_set(&last_vault_key(&t.tenant_id), &r.vault_name);
                 }
-                rotate_result.set(Some(r));
+                // Same reason as `remove_expired`: `on_changed` unmounts this
+                // subtree, so the confirmation has to outlive it on the session
+                // toast stack. Warnings ride an error toast so they linger.
+                let msg = format!(
+                    "Rotated into Key Vault \u{201c}{}\u{201d} as secret \u{201c}{}\u{201d}; new credential created, {} old removed.",
+                    r.vault_name,
+                    r.secret_name,
+                    r.removed_key_ids.len(),
+                );
+                if r.warnings.is_empty() {
+                    session.toast_success(msg);
+                } else {
+                    session.toast_error(
+                        format!("{msg} {} warning(s) \u{2014} see the log.", r.warnings.len()),
+                        None,
+                    );
+                }
                 on_changed_cb.run(());
             },
             move |e| error.set(Some(e.message)),
@@ -535,12 +565,16 @@ pub fn CredentialsTab(
             .parse::<u32>()
             .unwrap_or(365)
             .clamp(1, 1095);
-        let on_changed_cb = on_changed;
         cmd_gencert.run_with(
             move |r| {
                 gencert_open.set(false);
+                // Defer the detail reload until the reveal is dismissed — same
+                // reason as `create_secret` above. The reload re-runs the
+                // resource this whole subtree (incl. `gencert_result`) is built
+                // from, so calling it here tore the modal down before it
+                // painted: the operator saw the dialog promise a one-time
+                // private key and then never got one.
                 gencert_result.set(Some(r));
-                on_changed_cb.run(());
             },
             move |e| error.set(Some(e.message)),
             move |tenant_id| {
@@ -555,6 +589,14 @@ pub fn CredentialsTab(
             },
         );
     };
+
+    // Dismissing the reveal is what releases the deferred reload: the public
+    // half of the new certificate is already on the app, so the list behind the
+    // modal is stale until this runs.
+    let dismiss_gencert = Callback::new(move |()| {
+        gencert_result.set(None);
+        on_changed.run(());
+    });
 
     view! {
         <div class="credentials-tab">
@@ -674,45 +716,6 @@ pub fn CredentialsTab(
                         }
                             .into_any()
                     }
-                }}
-                {move || {
-                    expired_result
-                        .get()
-                        .map(|r| {
-                            let tone = if r.failures.is_empty() { "ok" } else { "warn" };
-                            view! {
-                                <Callout tone=tone>
-                                    {format!(
-                                        "Removed {} expired secret(s){}",
-                                        r.removed_key_ids.len(),
-                                        if !r.failures.is_empty() {
-                                            format!("; {} failed", r.failures.len())
-                                        } else {
-                                            String::new()
-                                        },
-                                    )}
-                                </Callout>
-                            }
-                        })
-                }}
-                {move || {
-                    rotate_result
-                        .get()
-                        .map(|r| {
-                            let tone = if r.warnings.is_empty() { "ok" } else { "warn" };
-                            let msg = format!(
-                                "Rotated into Key Vault “{}” as secret “{}”; new credential created, {} old removed{}.",
-                                r.vault_name,
-                                r.secret_name,
-                                r.removed_key_ids.len(),
-                                if r.warnings.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(", {} warning(s)", r.warnings.len())
-                                },
-                            );
-                            view! { <Callout tone=tone>{msg}</Callout> }
-                        })
                 }}
             </section>
             <section>
@@ -949,7 +952,7 @@ pub fn CredentialsTab(
             <ModalShell
                 open=Signal::derive(move || gencert_result.with(|r| r.is_some()))
                 title="Certificate generated"
-                on_close=Callback::new(move |()| gencert_result.set(None))
+                on_close=dismiss_gencert
                 wide=true
             >
             {move || {
@@ -987,7 +990,7 @@ pub fn CredentialsTab(
                                 </Button>
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                    on_click=Box::new(move |_| gencert_result.set(None))
+                                    on_click=Box::new(move |_| dismiss_gencert.run(()))
                                 >
                                     "Done"
                                 </Button>
