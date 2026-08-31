@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.28.0] - 2026-08-31
+
 ### Added
 
 - **The permission tester now takes any SharePoint resource, not just a site
