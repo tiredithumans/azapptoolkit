@@ -224,7 +224,15 @@ pub struct GenerateCertificateInput {
 /// sensitive — shown once and never persisted by the backend.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GeneratedCertificateResult {
+    /// SHA-1 thumbprint, uppercase hex — the thumbprint Entra stores as
+    /// `customKeyIdentifier`, the Credentials tab lists, the portal displays,
+    /// and a client assertion carries as `x5t`. Unqualified "thumbprint" means
+    /// this one everywhere in Entra, so this is the value an operator acts on.
     pub thumbprint: String,
+    /// SHA-256 thumbprint of the same DER, uppercase hex. Offered alongside for
+    /// verification/pinning; it matches nothing Entra reports, so it is always
+    /// labelled as SHA-256 where it is shown.
+    pub thumbprint_sha256: String,
     pub certificate_pem: String,
     pub private_key_pem: String,
     /// RFC3339 certificate expiry.
@@ -240,6 +248,7 @@ impl std::fmt::Debug for GeneratedCertificateResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GeneratedCertificateResult")
             .field("thumbprint", &self.thumbprint)
+            .field("thumbprint_sha256", &self.thumbprint_sha256)
             .field("certificate_pem", &self.certificate_pem)
             .field("private_key_pem", &"<redacted>")
             .field("expires", &self.expires)
@@ -287,7 +296,8 @@ mod tests {
     #[test]
     fn a_generated_private_key_is_redacted_in_debug() {
         let result = GeneratedCertificateResult {
-            thumbprint: "AA:BB".into(),
+            thumbprint: "AABB".into(),
+            thumbprint_sha256: "CCDD".into(),
             certificate_pem: "-----BEGIN CERTIFICATE-----".into(),
             private_key_pem: "-----BEGIN PRIVATE KEY-----MIIsecret".into(),
             expires: "2027-01-01T00:00:00Z".into(),
@@ -295,7 +305,8 @@ mod tests {
         let dbg = format!("{result:?}");
         assert!(!dbg.contains("MIIsecret"), "{dbg}");
         assert!(dbg.contains("<redacted>"), "{dbg}");
-        assert!(dbg.contains("AA:BB"), "{dbg}");
+        assert!(dbg.contains("AABB"), "{dbg}");
+        assert!(dbg.contains("CCDD"), "{dbg}");
     }
     use azapptoolkit_core::models::KeyCredential;
 

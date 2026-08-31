@@ -19,7 +19,8 @@ use azapptoolkit_web_rs::views::tabs::credentials_tab::CredentialsTab;
 
 fn generated() -> GeneratedCertificateResult {
     GeneratedCertificateResult {
-        thumbprint: "AABBCCDD".to_string(),
+        thumbprint: "SHA1THUMB".to_string(),
+        thumbprint_sha256: "SHA256THUMB".to_string(),
         certificate_pem: "-----BEGIN CERTIFICATE-----\nPUBLICPART\n-----END CERTIFICATE-----"
             .to_string(),
         private_key_pem: "-----BEGIN PRIVATE KEY-----\nPRIVATEPART\n-----END PRIVATE KEY-----"
@@ -91,7 +92,18 @@ async fn a_generated_certificate_reveals_its_private_key_once() {
         ts::body_contains("PRIVATEPART"),
         "the private key must be shown — it cannot be retrieved again"
     );
-    assert!(ts::body_contains("AABBCCDD"), "thumbprint");
+    // Both thumbprints, each labelled by algorithm. The SHA-1 one is the value
+    // the Credentials tab and the Entra portal show for this same certificate;
+    // an unlabelled or SHA-256-only reveal sent the operator looking for a
+    // thumbprint that exists nowhere else.
+    assert!(
+        ts::body_contains("Thumbprint (SHA-1): SHA1THUMB"),
+        "SHA-1 thumbprint, labelled"
+    );
+    assert!(
+        ts::body_contains("SHA-256: SHA256THUMB"),
+        "SHA-256 thumbprint, labelled"
+    );
     assert!(ts::body_contains("PUBLICPART"), "certificate PEM");
 
     // And inside the copyable reveal block, not merely somewhere in the DOM:

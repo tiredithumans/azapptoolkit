@@ -911,12 +911,20 @@ fn cred_meta_from_password(c: &PasswordCredential) -> CredentialMeta {
 
 /// Certificate metadata — public thumbprint only; the private key never reaches
 /// Graph and so is never in the backup.
+///
+/// The thumbprint is normalised to uppercase hex on the way out. This field's
+/// whole job is to tell an operator which certificate to re-supply from their
+/// PKI, and hex is what their PKI and the Entra portal show — Graph's raw
+/// base64 `customKeyIdentifier` matches neither.
 fn cred_meta_from_key(c: &KeyCredential) -> CredentialMeta {
     CredentialMeta {
         display_name: c.display_name.clone(),
         start_date_time: c.start_date_time,
         end_date_time: c.end_date_time,
-        thumbprint: c.custom_key_identifier.clone(),
+        thumbprint: c
+            .custom_key_identifier
+            .as_deref()
+            .and_then(azapptoolkit_core::thumbprint::canonical),
     }
 }
 
@@ -995,14 +1003,17 @@ mod tests {
         let json = serde_json::to_string(&meta).unwrap();
         assert!(!json.contains("super-secret-value"));
 
+        // The thumbprint is exported as hex, not Graph's raw base64: an
+        // operator matches this against their PKI and the portal, and both
+        // show hex. (Microsoft's own documented pair for one certificate.)
         let cert = KeyCredential {
             key_id: "c".into(),
-            custom_key_identifier: Some("THUMBPRINT==".into()),
+            custom_key_identifier: Some("2iD8ppbE+D6Kmu1ZvjM2jtQh88E=".into()),
             ..Default::default()
         };
         assert_eq!(
             cred_meta_from_key(&cert).thumbprint.as_deref(),
-            Some("THUMBPRINT==")
+            Some("DA20FCA696C4F83E8A9AED59BE33368ED421F3C1")
         );
     }
 

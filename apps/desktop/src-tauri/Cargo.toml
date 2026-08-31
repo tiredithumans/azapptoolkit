@@ -56,9 +56,13 @@ reqwest = { workspace = true }
 # already compiled into the tree via rustls, so this adds no new build toolchain
 # and keeps the `rsa` crate (RUSTSEC-2023-0071) out of the dependency graph.
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
+# Certificate thumbprints (SHA-1 as Entra derives `customKeyIdentifier`, plus
+# SHA-256) come from the SAME aws-lc-rs rcgen already signs with — the feature
+# spec mirrors rcgen's `aws_lc_rs` feature exactly so resolution unifies and no
+# new crate enters the graph. This is why there is no direct `sha2` here.
+aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys"] }
 rand = "0.8"
 zeroize = { workspace = true }
-sha2 = "0.10"
 time = "0.3"
 
 [dev-dependencies]

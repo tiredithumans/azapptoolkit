@@ -1424,47 +1424,14 @@ fn parse_signing_certs(xml: &str) -> Vec<String> {
 /// The canonical (uppercase hex) thumbprint for a `keyCredentials` entry's
 /// `customKeyIdentifier`.
 ///
-/// **The two fields are in different encodings, and this is the bug that made
-/// the whole rollover feature silently inert.** `customKeyIdentifier` is
-/// `Edm.Binary`, so Graph serializes it as **base64 of the SHA-1 thumbprint
-/// bytes** (`"2iD8ppbE+D6Kmu1ZvjM2jtQh88E="`), while
-/// `preferredTokenSigningKeyThumbprint` is a String holding the **hex** form
-/// (`"DA20FCA696C4F83E8A9AED59BE33368ED421F3C1"`) — the same 20 bytes, written
-/// two ways. Comparing them directly never matches, so no certificate was ever
-/// recognised as active: every app read as "Staged", every expiry read
-/// "Unknown", the work-queue filter matched nothing, and bulk staging skipped
-/// every app. Nothing errored; the board simply reported all-clear forever.
-///
-/// Both the display value and the `preferredTokenSigningKeyThumbprint` we PATCH
-/// come from here, so what an operator reads matches what the Entra portal shows
-/// and what activation actually writes.
-///
-/// Accepts the hex form unchanged: a certificate uploaded by hand (rather than
-/// minted by `addTokenSigningCertificate`) can carry `customKeyIdentifier`
-/// already written as hex, and Microsoft's own upload guidance describes it as
-/// "the certificate thumbprint hash".
+/// One definition only: [`azapptoolkit_core::thumbprint::canonical`], which
+/// carries the full rationale — `customKeyIdentifier` is base64 while
+/// `preferredTokenSigningKeyThumbprint` is hex, and comparing them raw is the
+/// bug that once made this whole rollover feature silently inert. The WASM
+/// frontend renders through the same function, so display and comparison
+/// cannot drift.
 pub(crate) fn canonical_thumbprint(custom_key_identifier: &str) -> Option<String> {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-
-    let raw = custom_key_identifier.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    // Already hex (40 chars = 20 SHA-1 bytes) — normalise case only.
-    if raw.len() == 40 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Some(raw.to_ascii_uppercase());
-    }
-    // Otherwise base64 of the raw thumbprint bytes.
-    let bytes = STANDARD.decode(raw).ok()?;
-    if bytes.is_empty() {
-        return None;
-    }
-    Some(bytes.iter().fold(String::new(), |mut acc, b| {
-        use std::fmt::Write as _;
-        let _ = write!(acc, "{b:02X}");
-        acc
-    }))
+    azapptoolkit_core::thumbprint::canonical(custom_key_identifier)
 }
 
 /// True when a `keyCredentials` entry's `customKeyIdentifier` denotes the same
@@ -1982,16 +1949,11 @@ mod tests {
     fn the_two_thumbprint_fields_are_different_encodings_of_the_same_bytes() {
         // The pair Microsoft's own `addTokenSigningCertificate` reference returns
         // for ONE certificate — `customKeyIdentifier` base64, `thumbprint` hex.
-        // Copied verbatim from the API docs, so this test fails if the
-        // normalisation ever stops handling what Graph actually sends.
+        // The encodings themselves are pinned in `core::thumbprint`; what this
+        // test holds is that the *comparison* normalises both sides.
         const DOC_CKI: &str = "2iD8ppbE+D6Kmu1ZvjM2jtQh88E=";
         const DOC_THUMBPRINT: &str = "DA20FCA696C4F83E8A9AED59BE33368ED421F3C1";
 
-        assert_eq!(
-            canonical_thumbprint(DOC_CKI).as_deref(),
-            Some(DOC_THUMBPRINT),
-            "base64 customKeyIdentifier must normalise to the hex thumbprint",
-        );
         assert!(
             is_preferred_key(DOC_CKI, DOC_THUMBPRINT),
             "these two ARE the same certificate; comparing them raw is what made \
@@ -2003,25 +1965,12 @@ mod tests {
             DOC_CKI,
             &DOC_THUMBPRINT.to_ascii_lowercase()
         ));
-
         // A hand-uploaded certificate can carry the identifier already in hex.
-        assert_eq!(
-            canonical_thumbprint(DOC_THUMBPRINT).as_deref(),
-            Some(DOC_THUMBPRINT),
-        );
-        assert_eq!(
-            canonical_thumbprint(&DOC_THUMBPRINT.to_ascii_lowercase()).as_deref(),
-            Some(DOC_THUMBPRINT),
-            "hex is normalised to upper case so display and comparison agree",
-        );
-
-        // Undecodable input yields None rather than a value that silently
-        // matches nothing and cannot be activated.
-        assert_eq!(canonical_thumbprint(""), None);
-        assert_eq!(canonical_thumbprint("   "), None);
-        assert_eq!(canonical_thumbprint("not base64 !!"), None);
-        // And the raw base64 never equals the hex — the original bug, pinned.
-        assert_ne!(DOC_CKI, DOC_THUMBPRINT);
+        assert!(is_preferred_key(DOC_THUMBPRINT, DOC_THUMBPRINT));
+        // An identifier that cannot be normalised matches nothing rather than
+        // matching everything.
+        assert!(!is_preferred_key("not base64 !!", DOC_THUMBPRINT));
+        assert!(!is_preferred_key("", DOC_THUMBPRINT));
     }
 
     #[test]

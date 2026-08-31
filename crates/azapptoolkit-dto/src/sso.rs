@@ -399,9 +399,11 @@ pub struct SigningCertRolloverDto {
 /// app consumed it; only sign-in telemetry can do that. The field names say
 /// "publishes" for exactly that reason.
 ///
-/// Certificates are compared by their base64 DER body, not by thumbprint:
-/// deriving a thumbprint means SHA-1, and `cert.rs` deliberately keeps that
-/// class of dependency out of the tree.
+/// Certificates are compared by their base64 DER body, not by thumbprint: the
+/// bodies are what federation metadata actually publishes, so comparing them
+/// needs no digest at all. (`cert.rs` does derive SHA-1 thumbprints, via
+/// aws-lc-rs's `SHA1_FOR_LEGACY_USE_ONLY` — but purely as the identifier Entra
+/// reports, never as a security primitive.)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetadataProbeDto {
     pub fetched_at: String,

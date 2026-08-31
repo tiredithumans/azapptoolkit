@@ -115,6 +115,7 @@ name = "azapptoolkit-core"
 version = "0.28.1"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "parking_lot",
  "serde",

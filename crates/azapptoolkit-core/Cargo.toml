@@ -8,6 +8,9 @@ publish.workspace = true
 description = "Core domain types, cache, and risk scoring for azapptoolkit"
 
 [dependencies]
+# `thumbprint` decodes Graph's base64 `customKeyIdentifier`; it is ungated
+# because the WASM frontend renders the same value.
+base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
