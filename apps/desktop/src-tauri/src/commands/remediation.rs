@@ -148,6 +148,9 @@ pub async fn remediate_scope_sharepoint_access(
         state,
         tenant_id,
         sp.id,
+        // Rule 12's Fix always runs against a local app registration, so the
+        // Sites.Selected it grants is declared there too.
+        Some(object_id),
         app.app_id,
         app.display_name,
         site_urls,

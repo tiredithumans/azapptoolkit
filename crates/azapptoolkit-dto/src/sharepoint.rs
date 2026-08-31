@@ -139,6 +139,10 @@ pub struct SiteScopeResult {
     /// True when the `Sites.Selected` app role had to be granted (it wasn't
     /// already held).
     pub granted_role_added: bool,
+    /// True when `Sites.Selected` had to be added to the app registration's
+    /// `requiredResourceAccess`. Always false for a service-principal-only
+    /// principal, which has no registration to declare on.
+    pub declared_permission: bool,
     /// The sites the principal was granted access to.
     pub sites_granted: Vec<SiteGrantDto>,
     /// The org-wide `Sites.*` permission values that were removed so the scoped
@@ -277,6 +281,12 @@ pub struct SelectedItemScopeResult {
     /// True when the Selected appRole had to be added (it is granted
     /// idempotently, so a re-run reports false).
     pub granted_role_added: bool,
+    /// True when the Selected permission had to be added to the app
+    /// registration's `requiredResourceAccess` — what makes the grant visible in
+    /// the Permissions tab, which renders declarations and joins runtime
+    /// assignments onto them. Always false for a service-principal-only
+    /// principal, which has no registration to declare on.
+    pub declared_permission: bool,
     pub granted: Vec<SelectedItemGrantDto>,
     pub warnings: Vec<String>,
 }

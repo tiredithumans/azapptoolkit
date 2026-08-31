@@ -101,6 +101,9 @@ fn sharepoint_summary(r: &sharepoint::SiteScopeResult) -> String {
         r.sites_granted.len(),
         r.removed_orgwide_grants.len(),
     );
+    if r.declared_permission {
+        s.push_str(" Added Sites.Selected to the app registration.");
+    }
     if !r.warnings.is_empty() {
         s.push_str(&format!(" {} warning(s).", r.warnings.len()));
     }
@@ -110,7 +113,10 @@ fn sharepoint_summary(r: &sharepoint::SiteScopeResult) -> String {
 fn sharepoint_item_summary(r: &sharepoint::SelectedItemScopeResult) -> String {
     let mut s = format!("Scoped to {} resource(s).", r.granted.len());
     if r.granted_role_added {
-        s.push_str(" Added the Selected permission.");
+        s.push_str(" Granted the Selected permission.");
+    }
+    if r.declared_permission {
+        s.push_str(" Added it to the app registration.");
     }
     if !r.warnings.is_empty() {
         s.push_str(&format!(" {} warning(s).", r.warnings.len()));
@@ -194,6 +200,7 @@ async fn apply_sharepoint_item_scoped(
     let r = sharepoint::grant_selected_item_access(
         &tenant_id,
         &target.sp_object_id,
+        target.object_id.as_deref(),
         &target.app_id,
         &target.display_name,
         &permission_value,
@@ -219,6 +226,7 @@ async fn apply_sharepoint_scoped(
     let r = sharepoint::convert_site_access_to_selected(
         &tenant_id,
         &target.sp_object_id,
+        target.object_id.as_deref(),
         &target.app_id,
         &target.display_name,
         &site_urls,

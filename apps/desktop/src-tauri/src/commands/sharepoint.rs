@@ -20,10 +20,11 @@ use azapptoolkit_core::scoping::{
     selected_scope_level_for,
 };
 
-use crate::commands::applications::invalidate_app_lists;
+use crate::commands::applications::{invalidate_app_detail_state, invalidate_app_lists};
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
 use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::graph_roles::graph_role_index;
+use crate::commands::permissions::declare_resource_access;
 use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
@@ -39,6 +40,53 @@ use crate::state::AppState;
 /// access because every site grant failed.
 fn should_remove_orgwide(remove_orgwide: bool, any_site_granted: bool) -> bool {
     remove_orgwide && any_site_granted
+}
+
+/// Declares `role_id` as a Microsoft Graph **application** permission on the app
+/// registration, mirroring what the ordinary grant path
+/// (`permissions::grant_single_permission_core`) does before it creates the
+/// assignment. Returns whether a declaration was actually added.
+///
+/// Both SharePoint apply paths used to create the app-role assignment and stop
+/// there. The permission was genuinely granted, but the Permissions tab renders
+/// `requiredResourceAccess` and joins runtime assignments **onto** declared rows
+/// (`applications::permissions_resolve`), so a grant with no declaration was
+/// invisible on the app registration — and the wizard's picker is the full live
+/// catalog, not the declared set, so undeclared is the *normal* case here.
+///
+/// `object_id` is `None` for a service-principal-only principal (enterprise app
+/// or managed identity): there is no local app registration to declare on, and
+/// the app-role assignment is the whole story.
+async fn declare_graph_role(
+    client: &azapptoolkit_graph::GraphClient,
+    cache: &Cache,
+    tenant_id: &str,
+    object_id: Option<&str>,
+    role_id: &str,
+) -> Result<bool, UiError> {
+    let Some(object_id) = object_id else {
+        return Ok(false);
+    };
+    let mut app = client.get_application(object_id).await?;
+    if !declare_resource_access(
+        &mut app.required_resource_access,
+        MICROSOFT_GRAPH_APP_ID,
+        role_id,
+        "Role",
+    ) {
+        return Ok(false);
+    }
+    let patch = azapptoolkit_graph::client::AppPatch {
+        required_resource_access: Some(app.required_resource_access.clone()),
+        ..Default::default()
+    };
+    client.update_application(object_id, &patch).await?;
+    // The manifest PATCH is a completed mutation on its own, and the steps after
+    // it can still fail. Invalidate here rather than only on the command's final
+    // `Ok`, or a later failure leaves the detail cache showing an app that
+    // doesn't declare what it was just given.
+    invalidate_app_detail_state(cache, tenant_id);
+    Ok(true)
 }
 
 /// The distinct resources in a pasted target list, in the order given.
@@ -228,6 +276,7 @@ pub async fn convert_site_access_to_selected(
     state: State<'_, AppState>,
     tenant_id: String,
     sp_object_id: String,
+    object_id: Option<String>,
     app_id: String,
     app_display_name: String,
     site_urls: Vec<String>,
@@ -255,6 +304,19 @@ pub async fn convert_site_access_to_selected(
     // Snapshot the current assignments once: drives both the idempotency check
     // for the Sites.Selected grant and the org-wide-removal scan below.
     let existing = client.list_app_role_assignments(&sp_object_id).await?;
+
+    // 0. Declare Sites.Selected on the app registration, so the grant below is
+    //    visible in the Permissions tab. Ordered first for the same reason the
+    //    ordinary grant path declares first: the manifest should never promise
+    //    less than what is assigned.
+    let declared_permission = declare_graph_role(
+        &client,
+        &state.cache,
+        &tenant_id,
+        object_id.as_deref(),
+        &sites_selected_id,
+    )
+    .await?;
 
     // 1. Grant Sites.Selected (idempotent).
     let already_selected = existing
@@ -340,6 +402,7 @@ pub async fn convert_site_access_to_selected(
 
     Ok(SiteScopeResult {
         granted_role_added,
+        declared_permission,
         sites_granted,
         removed_orgwide_grants,
         warnings,
@@ -426,6 +489,7 @@ pub async fn grant_selected_item_access(
     state: State<'_, AppState>,
     tenant_id: String,
     sp_object_id: String,
+    object_id: Option<String>,
     app_id: String,
     app_display_name: String,
     permission_value: String,
@@ -459,6 +523,19 @@ pub async fn grant_selected_item_access(
         })?;
 
     let mut warnings = Vec::new();
+
+    // 0. Declare the Selected permission on the app registration. The picker is
+    //    the full live catalog, so this is usually a permission the app has
+    //    never declared — and an assignment with no declaration doesn't appear
+    //    in the Permissions tab at all.
+    let declared_permission = declare_graph_role(
+        &client,
+        &state.cache,
+        &tenant_id,
+        object_id.as_deref(),
+        &role_id,
+    )
+    .await?;
 
     // 1. Grant the Selected appRole (idempotent) — without it in the token, the
     //    per-resource permissions below grant nothing at all.
@@ -538,6 +615,7 @@ pub async fn grant_selected_item_access(
 
     Ok(SelectedItemScopeResult {
         granted_role_added,
+        declared_permission,
         granted,
         warnings,
     })

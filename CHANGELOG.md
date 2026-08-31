@@ -2,6 +2,21 @@
 
 ### Fixed
 
+- **A Selected permission granted through the wizard never appeared in the
+  Permissions tab.** Both SharePoint apply paths created the app-role assignment
+  and stopped there. The permission was genuinely granted and effective, but the
+  tab renders the app registration's `requiredResourceAccess` and joins runtime
+  assignments *onto* declared rows — so an assignment with no declaration was
+  invisible. The wizard's picker is the full live catalog rather than the declared
+  set, which made "granted but never declared" the normal case for
+  `Files.` / `Lists.SelectedOperations.Selected`, not an edge one.
+
+  `grant_selected_item_access` and `convert_site_access_to_selected` now declare
+  the permission before assigning it, exactly as the ordinary grant path does, and
+  report it back as `declared_permission`. Service-principal-only principals
+  (enterprise apps, managed identities) have no registration to declare on and are
+  unchanged.
+
 - **A 403 on a list/folder/file Selected grant blamed a role the operator already
   held.** Every SharePoint 403 was rewritten to one fixed sentence — "requires the
   SharePoint Administrator role (or Global Administrator) and the
