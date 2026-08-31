@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.28.2] - 2026-08-31
+
 ### Fixed
 
 - **The generated certificate's thumbprint now matches the one the Credentials
