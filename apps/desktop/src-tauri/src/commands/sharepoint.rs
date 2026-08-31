@@ -80,15 +80,46 @@ async fn sharepoint_client_checked(
     Ok(state.graph_for(tenant_id))
 }
 
-/// Maps a SharePoint Graph error to a `UiError`, replacing a 403's message with
-/// the `sharepoint_sites_selected` role guidance. A forbidden *after* the
-/// `Sites.FullControl.All` scope is consented means the signed-in user lacks the
-/// SharePoint Administrator role — not a consent gap (that surfaces earlier as
-/// `consent_required` from `ensure_sharepoint_token`). Single copy of the text
-/// lives in the capability catalog.
+/// Maps a **site-collection** SharePoint Graph error to a `UiError`, replacing a
+/// 403's message with the `sharepoint_sites_selected` role guidance. A forbidden
+/// *after* the `Sites.FullControl.All` scope is consented means the signed-in
+/// user lacks the SharePoint Administrator role — not a consent gap (that
+/// surfaces earlier as `consent_required` from `ensure_sharepoint_token`).
+/// Single copy of the text lives in the capability catalog.
 fn sharepoint_err(err: azapptoolkit_graph::GraphError) -> UiError {
+    map_sharepoint_err(err, "sharepoint_sites_selected")
+}
+
+/// The **sub-site** sibling of [`sharepoint_err`], for the list / folder / file
+/// endpoints.
+///
+/// A separate capability key rather than a reworded copy: the two levels differ
+/// on the *user* half, not the scope. A delegated call is the intersection of
+/// the token's scopes and the caller's own SharePoint permissions, and a grant
+/// below the site collection writes a role assignment onto a securable inside
+/// the site's content — which the tenant SharePoint Administrator role doesn't
+/// reach. Sending both through one message told an operator whose site-level
+/// grants worked that they lacked a role they demonstrably held.
+fn sharepoint_item_err(err: azapptoolkit_graph::GraphError) -> UiError {
+    map_sharepoint_err(err, "sharepoint_selected_items")
+}
+
+/// Shared body: swap a 403's message for `capability_key`'s catalog remediation,
+/// **after** recording what Graph actually said.
+///
+/// The substitution is lossy by design (never leak a raw Graph body into the
+/// UI), but Graph's `error.code`/`error.message` is the only thing that
+/// separates "you lack rights on this site" from any other denial, and nothing
+/// else on these paths logs it. Without this line the sole record of a 403 was
+/// a fixed sentence naming a role the operator may well already hold.
+fn map_sharepoint_err(err: azapptoolkit_graph::GraphError, capability_key: &str) -> UiError {
     let mut ui = UiError::from(err);
-    if let Some(remediation) = forbidden_remediation(&ui, "sharepoint_sites_selected") {
+    if let Some(remediation) = forbidden_remediation(&ui, capability_key) {
+        tracing::warn!(
+            capability = capability_key,
+            detail = %ui.message,
+            "SharePoint call forbidden; replacing message with catalog remediation"
+        );
         ui.message = remediation.to_string();
     }
     ui
@@ -370,7 +401,7 @@ pub async fn resolve_sharepoint_resource(
     let resolved = client
         .resolve_sharepoint_resource(&url)
         .await
-        .map_err(sharepoint_err)?;
+        .map_err(sharepoint_item_err)?;
     Ok(to_resource_ref(resolved, url))
 }
 
@@ -527,7 +558,7 @@ async fn grant_on_list(
         .grant_list_permission(&resolved.site_id, list_id, app_id, app_display_name, roles)
         .await
         .map(to_item_dto)
-        .map_err(sharepoint_err)
+        .map_err(sharepoint_item_err)
 }
 
 async fn grant_on_item(
@@ -555,7 +586,7 @@ async fn grant_on_item(
         )
         .await
         .map(to_item_dto)
-        .map_err(sharepoint_err)
+        .map_err(sharepoint_item_err)
 }
 
 /// Lists the application permissions on the resource `url` names.
@@ -574,7 +605,7 @@ pub async fn list_selected_item_permissions(
     let resolved = client
         .resolve_sharepoint_resource(&url)
         .await
-        .map_err(sharepoint_err)?;
+        .map_err(sharepoint_item_err)?;
     let perms = read_permissions(&client, &resolved).await?;
     Ok(perms.into_iter().map(to_item_dto).collect())
 }
@@ -587,11 +618,11 @@ async fn read_permissions(
         (Some(list_id), Some(item_id)) => client
             .list_list_item_permissions(&resolved.site_id, list_id, item_id)
             .await
-            .map_err(sharepoint_err),
+            .map_err(sharepoint_item_err),
         (Some(list_id), None) => client
             .list_list_permissions(&resolved.site_id, list_id)
             .await
-            .map_err(sharepoint_err),
+            .map_err(sharepoint_item_err),
         // A site URL: the site endpoint owns that read.
         (None, _) => Err(UiError::validation(
             "level_mismatch",
@@ -612,16 +643,16 @@ pub async fn remove_selected_item_permission(
     let resolved = client
         .resolve_sharepoint_resource(&url)
         .await
-        .map_err(sharepoint_err)?;
+        .map_err(sharepoint_item_err)?;
     match (resolved.list_id.as_deref(), resolved.item_id.as_deref()) {
         (Some(list_id), Some(item_id)) => client
             .remove_list_item_permission(&resolved.site_id, list_id, item_id, &permission_id)
             .await
-            .map_err(sharepoint_err),
+            .map_err(sharepoint_item_err),
         (Some(list_id), None) => client
             .remove_list_permission(&resolved.site_id, list_id, &permission_id)
             .await
-            .map_err(sharepoint_err),
+            .map_err(sharepoint_item_err),
         (None, _) => Err(UiError::validation(
             "level_mismatch",
             "use the site permissions view for a site collection".to_string(),

@@ -258,6 +258,41 @@ pub static CAPABILITIES: &[Capability] = &[
                       collection down to a single file.",
     },
     Capability {
+        key: "sharepoint_selected_items",
+        plane: Plane::EntraDirectory,
+        label: "SharePoint resource access (list, folder and file level)",
+        // The extra half lives in the *description*, not only the remediation:
+        // the checklist hides a remediation once both axes read "have", and
+        // both axes DO read "have" for a SharePoint Administrator who still
+        // can't call these endpoints. Stating it here keeps the row honest.
+        description: "List, grant, and revoke a list's, folder's or file's per-app permissions \
+                      (the Lists./ListItems./Files.SelectedOperations.Selected model). Also needs \
+                      Full Control on the target site itself, which the tenant SharePoint \
+                      Administrator role does not confer.",
+        directory_roles_any: &[
+            ("SharePoint Administrator", Some(TID_SHAREPOINT_ADMIN)),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
+        ],
+        role_detect: RoleDetect::DirectoryRole,
+        scopes: &["Sites.FullControl.All"],
+        scope_feature: Some("sharepoint"),
+        // Distinct from `sharepoint_sites_selected` because the requirement is
+        // genuinely different, not merely worded differently: a delegated call
+        // is the intersection of the token's scopes and the signed-in user's
+        // own SharePoint permissions, and a grant below the site collection
+        // writes a role assignment onto a securable inside the site's content.
+        // The tenant admin flag covers the site-collection root; it does not
+        // reach into the site's ACL.
+        remediation: "Granting at the list, folder or file level needs the Sites.FullControl.All \
+                      scope AND Full Control on the target site itself — a delegated call can \
+                      never exceed your own SharePoint permissions. The tenant SharePoint \
+                      Administrator role covers site-collection grants (Sites.Selected) but not \
+                      securables inside a site, so add yourself as a site collection \
+                      administrator, or to the site's Owners group, on that site. If the role was \
+                      only just assigned or is PIM-eligible, activate it and sign out and back in \
+                      so the new token carries it.",
+    },
+    Capability {
         key: "group_membership",
         plane: Plane::EntraDirectory,
         label: "Security-group membership",

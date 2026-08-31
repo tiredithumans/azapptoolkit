@@ -1,5 +1,27 @@
 ## [Unreleased]
 
+### Fixed
+
+- **A 403 on a list/folder/file Selected grant blamed a role the operator already
+  held.** Every SharePoint 403 was rewritten to one fixed sentence — "requires the
+  SharePoint Administrator role (or Global Administrator) and the
+  Sites.FullControl.All scope" — and Graph's own `error.code`/`error.message` was
+  dropped on the floor, logged nowhere. An operator who *was* a SharePoint
+  Administrator, whose site-collection grants worked, got told they were not.
+
+  The requirement genuinely differs by level, so the sub-site endpoints now carry
+  their own capability (`sharepoint_selected_items`), which
+  `ScopeKind::SharePointItem` resolves to: a delegated call is the intersection of
+  the token's scopes and the caller's *own* SharePoint permissions, and a grant
+  below the site collection writes onto a securable inside the site's content —
+  which the tenant SharePoint Administrator role doesn't reach. It also needs Full
+  Control on the target site (site collection administrator, or the site's Owners
+  group). That is now what the 403 message, the readiness row and the proactive
+  "Requires:" tooltip say for those levels.
+
+  The raw Graph 403 body is also logged at `warn` before the substitution, so the
+  log file can distinguish "you lack rights on this site" from any other denial.
+
 ## [0.27.0] - 2026-08-28
 
 ### Added
