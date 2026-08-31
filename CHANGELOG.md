@@ -1,5 +1,25 @@
 ## [Unreleased]
 
+### Fixed
+
+- **"Generate certificate" now actually shows the private key it promises.** The
+  success handler reloaded the application detail immediately, which re-runs the
+  resource the Credentials tab is rendered from — tearing the tab down and
+  rebuilding it before the reveal modal could paint. The dialog said it "shows
+  the private key once", the certificate was created, and the operator was left
+  with a public key on the app and no private half, unrecoverable. The reload is
+  now deferred until the reveal is dismissed, matching what the client-secret
+  reveal beside it has always done.
+
+- **"Remove N expired" and Key Vault rotation now confirm what they did.** Both
+  parked their result in a signal owned by the Credentials tab and then reloaded
+  the application detail, which unmounts that tab — so the confirmation was
+  destroyed on the tick it was created and never rendered. A partial sweep was
+  the worst case: some secrets refused removal, the list came back shorter, and
+  nothing said so. Both now report through the session toast stack, which lives
+  above the detail pane and survives the reload, with partial failures on an
+  error toast that lingers. Same route `remove_secret`/`remove_cert` already took.
+
 ## [0.28.0] - 2026-08-31
 
 ### Added

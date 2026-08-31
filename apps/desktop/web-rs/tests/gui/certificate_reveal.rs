@@ -44,7 +44,14 @@ fn click_button(label: &str) {
     panic!("no button labelled `{label}`; saw {seen:?}");
 }
 
-fn mount_tab() -> ts::Mounted {
+/// Mounts the tab, returning a counter of `on_changed` calls alongside it.
+///
+/// `on_changed` is not cosmetic here: in the real pane it is `bump_reload`,
+/// which re-runs the `LocalResource` this whole subtree — including the local
+/// `gencert_result` signal — is rendered from. Firing it while the reveal is up
+/// unmounts the reveal. A no-op callback cannot catch that, so the counter is
+/// the stand-in for the teardown.
+fn mount_tab_counting() -> (ts::Mounted, RwSignal<u32>) {
     ts::reset();
     ts::mock_ok("generate_self_signed_certificate", &generated());
     let detail = Arc::new(fixtures::application_detail(
@@ -52,11 +59,18 @@ fn mount_tab() -> ts::Mounted {
         "app-1",
         "Contoso CRM",
     ));
-    ts::mount_view(move || {
+    let changes = RwSignal::new(0_u32);
+    let mounted = ts::mount_view(move || {
         let detail = detail.clone();
         let detail = Signal::derive(move || detail.clone());
-        view! { <CredentialsTab detail=detail on_changed=Callback::new(|()| {}) /> }
-    })
+        let on_changed = Callback::new(move |()| changes.update(|n| *n += 1));
+        view! { <CredentialsTab detail=detail on_changed=on_changed /> }
+    });
+    (mounted, changes)
+}
+
+fn mount_tab() -> ts::Mounted {
+    mount_tab_counting().0
 }
 
 #[wasm_bindgen_test]
@@ -145,4 +159,41 @@ async fn a_failed_generate_explains_itself_inside_the_dialog() {
     );
     // And the dialog is still open, so the operator can correct and retry.
     assert!(ts::body_contains("shows the private key once"));
+}
+
+/// The reload must NOT fire while the one-time key is on screen.
+///
+/// Regression: the success handler called `on_changed` immediately, which in the
+/// real detail pane re-runs the resource the tab is built from. The tab — and
+/// with it `gencert_result` — was torn down and rebuilt empty, so the "shows the
+/// private key once" modal never painted and the key was gone for good. The
+/// sibling secret-create flow already defers the reload for exactly this reason;
+/// the certificate flow did not, and the isolated test above (a no-op
+/// `on_changed`) could not see the difference.
+#[wasm_bindgen_test]
+async fn the_reveal_defers_the_detail_reload_until_it_is_dismissed() {
+    let (_m, changes) = mount_tab_counting();
+
+    ts::wait_for(|| ts::body_contains("Generate certificate…")).await;
+    click_button("Generate certificate…");
+    ts::wait_for(|| ts::body_contains("shows the private key once")).await;
+    click_button("Generate");
+    ts::wait_for(|| ts::call_count("generate_self_signed_certificate") == 1).await;
+    ts::wait_for(|| ts::body_contains("PRIVATEPART")).await;
+
+    assert_eq!(
+        changes.get_untracked(),
+        0,
+        "reloading the detail here unmounts the subtree that owns the reveal"
+    );
+
+    // Dismissing it is what releases the reload — the app now holds a new
+    // public certificate, so the list behind the modal is stale until then.
+    click_button("Done");
+    ts::wait_for(|| !ts::body_contains("PRIVATEPART")).await;
+    assert_eq!(
+        changes.get_untracked(),
+        1,
+        "the deferred reload must still happen once the operator is done"
+    );
 }
