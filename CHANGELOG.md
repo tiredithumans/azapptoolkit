@@ -1,5 +1,25 @@
 ## [Unreleased]
 
+### Added
+
+- **The permission tester now takes any SharePoint resource, not just a site
+  collection.** Paste a library, folder or file URL and it resolves the
+  securable, then answers in the order SharePoint itself does: an org-wide
+  `Sites.*` grant wins outright; otherwise it walks the chain **upward** —
+  item, list, site collection — because Microsoft's access calculation finds the
+  application record "on the resource *or a securable hierarchical parent*", so a
+  file with no entry of its own still reports the access it inherits from the
+  library or the site.
+
+  It also checks the half that used to go unasked. A Selected permission entry
+  grants nothing until the app's token carries a matching scope, so an entry with
+  no matching `*.SelectedOperations.Selected` assignment is now reported as **no
+  access**, naming the missing half, instead of as scoped access the app doesn't
+  have. Pairing reuses `selected_scope_accepts`, so the tester and the granter
+  agree on which scope reaches what — including the asymmetry where `ListItems.*`
+  covers a file but `Files.*` doesn't cover a plain-list item. If the app's
+  assignments can't be read, the verdict is `unknown`, never "no access".
+
 ### Fixed
 
 - **A Selected permission granted through the wizard never appeared in the

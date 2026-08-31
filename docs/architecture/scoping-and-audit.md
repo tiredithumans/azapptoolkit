@@ -288,6 +288,18 @@ otherwise the only record and it names a role, not the actual denial.
 
 [sel]: https://learn.microsoft.com/graph/permissions-selected-overview
 
+### Testing reach: `test_site_access`
+
+The permission tester takes any level, not just a site collection. It resolves the URL, then answers
+in the order SharePoint itself does: an org-wide `Sites.*` grant wins outright; otherwise it walks
+the securable chain **upward** (item → list → site collection), because Microsoft's access
+calculation finds the application record "on the resource *or a securable hierarchical parent*" — so
+a file with no entry of its own still reports the access it inherits. A found entry is then checked
+against the scopes the principal actually holds, reusing `selected_scope_accepts` so the tester and
+the granter agree on which scope reaches what. **An entry with no matching scope reports
+`no_access`**, naming the missing half: the three-step model means a permission entry alone grants
+nothing. A failure to read the assignments reports `unknown`, never "no access".
+
 ## Scoped grants reuse one Exchange core
 
 The scoped-mailbox grant body (register Exchange SP → management scope from groups → scoped role

@@ -1,6 +1,10 @@
 //! Permission tester — a standalone tool to check whether a chosen identity
 //! (app registration, enterprise app, or managed identity) actually has access
-//! to a *specific* Exchange mailbox or SharePoint site ("identity → resource").
+//! to a *specific* Exchange mailbox or SharePoint resource ("identity →
+//! resource"). The SharePoint side takes any securable a Selected scope can
+//! address — a site collection, a list or document library, a folder, or a
+//! single file — and the backend walks the inheritance chain, so a file with no
+//! entry of its own still reports the access it inherits.
 //! It exercises the authoritative live checks on the backend (`test_mailbox_access`
 //! / `test_site_access`) rather than reading the declared manifest, so it reflects
 //! effective access (org-wide grant vs scoped vs none). Both checks are keyed on
@@ -170,7 +174,7 @@ pub fn PermissionTesterView() -> impl IntoView {
             error.set(Some(if tab == "exchange" {
                 "Enter a mailbox address.".into()
             } else {
-                "Enter a SharePoint site URL.".into()
+                "Enter a SharePoint site, library, folder or file URL.".into()
             }));
             return;
         }
@@ -237,7 +241,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                 crumb="Verify effective access".to_string()
             />
             <Body1>
-                "Check whether an app registration, enterprise app, or managed identity can actually reach a specific Exchange mailbox or SharePoint site. This runs the live authorization check — it reflects effective access (organization-wide grant, scoped grant, or none), not just what the identity declares."
+                "Check whether an app registration, enterprise app, or managed identity can actually reach a specific Exchange mailbox or SharePoint resource — a site collection, library, folder or file. This runs the live authorization check — it reflects effective access (organization-wide grant, scoped grant, or none), not just what the identity declares."
             </Body1>
 
             <Field label="Identity">
@@ -358,7 +362,7 @@ pub fn PermissionTesterView() -> impl IntoView {
             <TabBar
                 items=vec![
                     TabBarItem { value: "exchange", label: "Exchange mailbox" },
-                    TabBarItem { value: "sharepoint", label: "SharePoint site" },
+                    TabBarItem { value: "sharepoint", label: "SharePoint resource" },
                 ]
                 selected=resource_tab
             />
@@ -373,12 +377,15 @@ pub fn PermissionTesterView() -> impl IntoView {
                         .into_any()
                 } else {
                     view! {
-                        <Field label="Site URL">
+                        <Field label="Site, library, folder or file URL">
                             <Input
                                 value=site_url
-                                placeholder="https://contoso.sharepoint.com/sites/Marketing"
+                                placeholder="https://contoso.sharepoint.com/sites/Finance/Shared Documents/Invoices"
                             />
                         </Field>
+                        <Body1 class="hint hint--field">
+                            "Any level a Selected scope can address. A permission inherited from the library or site collection counts as access, and a grant that the app can't use — a permission entry with no matching Selected scope in its token — is reported as no access."
+                        </Body1>
                     }
                         .into_any()
                 }
