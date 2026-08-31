@@ -2,8 +2,10 @@
 //!
 //! Every file this toolkit puts on disk describes, or contains, tenant
 //! credentials: `settings.json` records which Key Vault holds which app's
-//! secrets, a backup manifest is the whole app estate, and a restore report
-//! carries **plaintext show-once client secrets** for redistribution. All of
+//! secrets, a backup manifest is the whole app estate, a restore report
+//! carries **plaintext show-once client secrets** for redistribution, and a
+//! generated certificate's `.pfx` carries a **private key** (encrypted, but
+//! under a password shown on the same screen). All of
 //! them were written through `std::fs::write`, which leaves the mode to the
 //! process umask — commonly `0644`, world-readable, on a shared or
 //! multi-account machine.

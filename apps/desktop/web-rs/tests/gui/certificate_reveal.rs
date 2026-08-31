@@ -25,6 +25,8 @@ fn generated() -> GeneratedCertificateResult {
             .to_string(),
         private_key_pem: "-----BEGIN PRIVATE KEY-----\nPRIVATEPART\n-----END PRIVATE KEY-----"
             .to_string(),
+        pfx_base64: "PFXCIPHERTEXT".to_string(),
+        pfx_password: "PFXPASSWORD".to_string(),
         expires: "2027-01-01T00:00:00Z".to_string(),
     }
 }
@@ -55,6 +57,10 @@ fn click_button(label: &str) {
 fn mount_tab_counting() -> (ts::Mounted, RwSignal<u32>) {
     ts::reset();
     ts::mock_ok("generate_self_signed_certificate", &generated());
+    ts::mock_ok(
+        "save_generated_certificate_pfx",
+        &Some("/tmp/contoso.pfx".to_string()),
+    );
     let detail = Arc::new(fixtures::application_detail(
         "obj-1",
         "app-1",
@@ -122,6 +128,93 @@ async fn a_generated_certificate_reveals_its_private_key_once() {
             .any(|e| e.text_content().unwrap_or_default().trim() == "Copy private key"),
         "the copy affordance the modal points at must be present"
     );
+
+    // The .pfx half. Its password is as unrecoverable as the key itself — the
+    // bundle is useless without it — so it has to be on screen, not merely
+    // available to a command.
+    assert!(
+        ts::body_contains("PFXPASSWORD"),
+        "the one-time .pfx password must be shown beside the bundle it opens"
+    );
+    assert!(
+        ts::query_all("button")
+            .iter()
+            .any(|e| e.text_content().unwrap_or_default().trim() == "Save .pfx…"),
+        "the .pfx save affordance the modal points at must be present"
+    );
+}
+
+/// Saving the .pfx must not release the deferred reload.
+///
+/// Same failure as `the_reveal_defers_the_detail_reload_until_it_is_dismissed`,
+/// one button along: `on_changed` re-runs the resource this subtree is built
+/// from, so firing it here would unmount the reveal mid-save and destroy the
+/// private key the operator has not finished with. A save is not a mutation of
+/// the application — nothing behind the modal went stale — so it has no reason
+/// to reload anything.
+#[wasm_bindgen_test]
+async fn saving_the_pfx_leaves_the_reveal_standing() {
+    let (_m, changes) = mount_tab_counting();
+
+    ts::wait_for(|| ts::body_contains("Generate certificate…")).await;
+    click_button("Generate certificate…");
+    ts::wait_for(|| ts::body_contains("shows the private key once")).await;
+    click_button("Generate");
+    ts::wait_for(|| ts::body_contains("PRIVATEPART")).await;
+
+    click_button("Save .pfx…");
+    ts::wait_for(|| ts::call_count("save_generated_certificate_pfx") == 1).await;
+    ts::wait_for(|| ts::body_contains("/tmp/contoso.pfx")).await;
+
+    assert_eq!(
+        changes.get_untracked(),
+        0,
+        "saving the bundle is not a mutation — it must not reload the detail"
+    );
+    assert!(
+        ts::body_contains("PRIVATEPART"),
+        "the private key must survive the save"
+    );
+    assert!(ts::body_contains("PFXPASSWORD"), "and so must the password");
+
+    click_button("Done");
+    ts::wait_for(|| !ts::body_contains("PRIVATEPART")).await;
+    assert_eq!(changes.get_untracked(), 1);
+}
+
+/// A FAILED save must say why, inside the reveal.
+///
+/// The tab-body error banner renders *behind* the modal backdrop (the 0.28.0
+/// bug), and this modal is the one screen where "the app appears to have done
+/// nothing" costs an unrecoverable private key: the operator dismisses it
+/// believing the file was written.
+#[wasm_bindgen_test]
+async fn a_failed_pfx_save_explains_itself_inside_the_reveal() {
+    let (_m, changes) = mount_tab_counting();
+    ts::mock_err(
+        "save_generated_certificate_pfx",
+        &azapptoolkit_dto::UiError::io("disk full"),
+    );
+
+    ts::wait_for(|| ts::body_contains("Generate certificate…")).await;
+    click_button("Generate certificate…");
+    ts::wait_for(|| ts::body_contains("shows the private key once")).await;
+    click_button("Generate");
+    ts::wait_for(|| ts::body_contains("PRIVATEPART")).await;
+
+    click_button("Save .pfx…");
+    ts::wait_for(|| ts::body_contains("disk full")).await;
+
+    let in_modal = ts::query_all(".modal .form-error")
+        .iter()
+        .any(|e| e.text_content().unwrap_or_default().contains("disk full"));
+    assert!(
+        in_modal,
+        "the failure must render inside the modal; behind the backdrop it is invisible"
+    );
+    // The key is still there to try again with, and nothing was reloaded.
+    assert!(ts::body_contains("PRIVATEPART"));
+    assert_eq!(changes.get_untracked(), 0);
 }
 
 /// A FAILED generate must say why, inside the dialog.

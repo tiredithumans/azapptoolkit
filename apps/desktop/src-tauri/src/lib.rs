@@ -87,6 +87,7 @@ pub fn run() {
             commands::applications::add_certificate_credential,
             commands::applications::remove_certificate_credential,
             commands::applications::generate_self_signed_certificate,
+            commands::applications::save_generated_certificate_pfx,
             commands::applications::list_federated_credentials,
             commands::applications::add_federated_credential,
             commands::applications::update_federated_credential,

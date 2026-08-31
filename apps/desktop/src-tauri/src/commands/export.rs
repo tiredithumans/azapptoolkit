@@ -66,12 +66,17 @@ pub(crate) async fn save_export_via_dialog(
 /// — every file-export command rides this instead. (Kept separate from
 /// [`save_export_via_dialog`]: callers with prebuilt single-format content —
 /// the CSV report exports — enter here directly.)
-pub(crate) async fn write_via_dialog(
+///
+/// Text callers use [`write_via_dialog`] below; this one takes bytes because
+/// the generated certificate's PKCS#12 bundle is binary and any text round-trip
+/// would corrupt it. Both end at the same `write_owner_only`, so the choke
+/// point stays one place.
+pub(crate) async fn write_bytes_via_dialog(
     app_handle: AppHandle,
     filter_name: &'static str,
     ext: &'static str,
     default_name: String,
-    content: String,
+    content: Vec<u8>,
 ) -> Result<Option<String>, UiError> {
     use tauri_plugin_dialog::DialogExt;
     tauri::async_runtime::spawn_blocking(move || {
@@ -89,17 +94,37 @@ pub(crate) async fn write_via_dialog(
             .map_err(|e| UiError::validation("invalid_path", e.to_string()))?;
         // Owner-only. This is the single choke point for every file the app
         // writes, and what goes through it is not neutral: a restore report
-        // carries plaintext show-once client secrets, a backup manifest is the
-        // whole app estate, and an export is directory data. Under the process
-        // umask these landed world-readable on a shared machine. It does not
-        // stop the operator sharing a file deliberately — only the default
-        // changes. (No-op on Windows, which has no mode bits; see the helper.)
-        azapptoolkit_core::private_file::write_owner_only(&path_buf, content.as_bytes())
+        // carries plaintext show-once client secrets, a generated certificate's
+        // .pfx carries a private key, a backup manifest is the whole app
+        // estate, and an export is directory data. Under the process umask
+        // these landed world-readable on a shared machine. It does not stop the
+        // operator sharing a file deliberately — only the default changes.
+        // (No-op on Windows, which has no mode bits; see the helper.)
+        azapptoolkit_core::private_file::write_owner_only(&path_buf, &content)
             .map_err(|e| UiError::io(e.to_string()))?;
         Ok(Some(path_buf.display().to_string()))
     })
     .await
     .map_err(|e| UiError::io(e.to_string()))?
+}
+
+/// [`write_bytes_via_dialog`] for the text exports — every CSV/JSON caller.
+/// `into_bytes` is a move, not a copy.
+pub(crate) async fn write_via_dialog(
+    app_handle: AppHandle,
+    filter_name: &'static str,
+    ext: &'static str,
+    default_name: String,
+    content: String,
+) -> Result<Option<String>, UiError> {
+    write_bytes_via_dialog(
+        app_handle,
+        filter_name,
+        ext,
+        default_name,
+        content.into_bytes(),
+    )
+    .await
 }
 
 /// CSV-only export: format guard + timestamped filename + save dialog.

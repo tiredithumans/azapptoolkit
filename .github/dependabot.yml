@@ -38,13 +38,27 @@ updates:
       # major in the graph (AGENTS.md "Crypto deps"). Drop these ignores once
       # oauth2/Tauri move first. sha2 is transitive-only: certificate
       # thumbprints digest on aws-lc-rs, the backend rcgen already signs with,
-      # so nothing here declares sha2 directly. NOTE: `rsa` is not in this graph
-      # at all — cert generation uses rcgen on the aws_lc_rs backend
-      # specifically to keep it out (RUSTSEC-2023-0071); don't reintroduce it.
+      # so nothing here declares sha2 directly — `p12-keystore` is the only
+      # direct consumer of the 0.10 line, and it is pinned below to keep it
+      # there. NOTE: `rsa` is not in this graph at all — cert generation uses
+      # rcgen on the aws_lc_rs backend specifically to keep it out
+      # (RUSTSEC-2023-0071); don't reintroduce it.
       - dependency-name: rand
         versions: [">=0.9"]
       - dependency-name: sha2
         versions: [">=0.11"]
+      # p12-keystore stays on 0.2.x. 0.3 depends on `cms 0.3.0-pre`, which pulls
+      # `der 0.8.0-rc`, `spki 0.8.0-rc` and `x509-cert 0.3.0-rc` as NON-optional
+      # deps — four pre-release crates in a credential tool's graph, under a
+      # deny.toml that sets `yanked = "deny"` as a required check, so upstream
+      # retiring a superseded rc breaks CI with no change here. 0.2.1 is
+      # all-stable and lands on majors the lock file already carries (sha2 0.10,
+      # hmac 0.12, cbc 0.1, rand 0.10, x509-parser 0.18, base64 0.22), adding no
+      # duplicate major at all. The output is identical either way: PBES2 /
+      # AES-256-CBC with an HMAC-SHA256 MAC is both versions' default.
+      # Drop this ignore once `cms 0.3.0` ships final.
+      - dependency-name: p12-keystore
+        versions: [">=0.3"]
       # base64 0.23 cannot be adopted yet, and taking it would make things worse
       # rather than better. Our direct `base64 = "0.22"` currently UNIFIES with the
       # copy the HTTP stack pulls (hyper-util / reqwest 0.12 + 0.13 all require

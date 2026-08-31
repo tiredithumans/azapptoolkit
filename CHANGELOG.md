@@ -1,5 +1,24 @@
 ## [Unreleased]
 
+### Added
+
+- **"Generate certificate" now also produces a password-protected `.pfx`.** The reveal has always
+  shown the private key as PKCS#8 PEM — which is what Linux and macOS hosts, the Python/Node MSAL
+  libraries, the Azure SDK's `certificate_path` and a Key Vault import all want, and what Windows
+  wants least. An operator running `Connect-MgGraph -CertificateThumbprint` needs the certificate
+  *with its private key* in `Cert:\CurrentUser\My`, and the only supported way in is
+  `Import-PfxCertificate`. Getting there meant pasting a one-time, unrecoverable private key into
+  an `openssl pkcs12 -export` invocation and inventing a password — and it left the system
+  clipboard as the key's only export channel. The reveal now carries a **Save .pfx…** button
+  beside the PEM blocks, bundling the certificate and its key into a PKCS#12 file encrypted with
+  **AES-256 (PBES2, HMAC-SHA256)** under a 192-bit password the app generates and shows once next
+  to it, with its own copy button. The bundle's `localKeyId` is the certificate's SHA-1
+  thumbprint — the same string the Credentials tab and the portal show — so Windows attaches the
+  private key rather than silently importing a certificate without one. The file is written
+  owner-only, and the reveal says to install it and then delete it. Windows Server 2016 and older
+  cannot read AES-256 `.pfx` files; the reveal points at the PEM for those, which is unchanged —
+  the bundle is an addition, not a replacement.
+
 ## [0.28.2] - 2026-08-31
 
 ### Fixed

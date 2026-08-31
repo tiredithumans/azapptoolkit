@@ -61,6 +61,28 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc
 # spec mirrors rcgen's `aws_lc_rs` feature exactly so resolution unifies and no
 # new crate enters the graph. This is why there is no direct `sha2` here.
 aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys"] }
+# PKCS#12 (.pfx) bundling of the generated certificate + its key, so an operator
+# can `Import-PfxCertificate` on Windows instead of hand-rolling `openssl
+# pkcs12 -export` around a one-time private key. Writes PBES2 / AES-256-CBC with
+# an HMAC-SHA256 MAC.
+#
+# Pinned to 0.2.x deliberately, NOT the current 0.3.x. 0.3 depends on
+# `cms 0.3.0-pre` -> `der 0.8.0-rc`, `spki 0.8.0-rc`, `x509-cert 0.3.0-rc` as
+# NON-optional deps: four pre-release crates in the graph of a credential tool,
+# under a `deny.toml` that sets `yanked = "deny"` as a required check — upstream
+# yanking a superseded rc breaks CI with no change here. 0.2.1 is all-stable and
+# lands entirely on majors already in the lock file (sha2 0.10, hmac 0.12,
+# cbc 0.1, rand 0.10, x509-parser 0.18, base64 0.22), so it adds no duplicate
+# major at all. Same output either way: the AES-256 + HMAC-SHA256 profile is
+# both versions' default. `default-features = false` drops the `pbes1` feature
+# (RC2/DES) — that decrypts legacy stores, and we only ever write our own.
+# Dependabot is told to hold the 0.2 line; see its `ignore` block for the drop
+# condition (`cms 0.3.0` final).
+#
+# `rsa` (RUSTSEC-2023-0071) stays out: `cms` has no default features, and its
+# `rsa` edge is reachable only through the `builder` feature, which nothing here
+# enables. `deny.toml`'s `[[bans.deny]] name = "rsa"` is what actually holds it.
+p12-keystore = { version = "0.2.1", default-features = false }
 rand = "0.8"
 zeroize = { workspace = true }
 time = "0.3"

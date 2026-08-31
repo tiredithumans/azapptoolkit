@@ -31,6 +31,18 @@ pub struct GeneratedCert {
     /// after the value is returned to the caller (which clones into the IPC
     /// reply path and drops the original almost immediately).
     pub private_key_pem: String,
+    /// PKCS#12 (.pfx) bundle: this same certificate and this same private key,
+    /// encrypted under `pfx_password`. Not an alternative identity — one key in
+    /// two encodings, so the public half Entra now holds authenticates either.
+    /// The PEM above stays primary (Linux/macOS hosts, Python/Node MSAL, the
+    /// Azure SDK's `certificate_path`, a Key Vault import); this is the form
+    /// Windows takes, via `Import-PfxCertificate`.
+    pub pfx_der: Vec<u8>,
+    /// The password protecting `pfx_der`, generated here rather than asked for.
+    /// The bundle is worth exactly the private key to anyone holding this, so
+    /// it gets the private key's treatment: surfaced once, never persisted,
+    /// zeroized on drop, redacted from `Debug`.
+    pub pfx_password: String,
     /// SHA-1 thumbprint (uppercase hex) of the cert DER — the same value Entra
     /// derives into `customKeyIdentifier`, so the reveal and the Credentials
     /// tab show one identical string for one certificate.
@@ -45,6 +57,9 @@ pub struct GeneratedCert {
 impl Drop for GeneratedCert {
     fn drop(&mut self) {
         self.private_key_pem.zeroize();
+        // The bundle and its password are the same secret in another wrapper.
+        self.pfx_password.zeroize();
+        self.pfx_der.zeroize();
     }
 }
 
@@ -54,6 +69,8 @@ impl std::fmt::Debug for GeneratedCert {
             .field("cert_der_base64", &"…")
             .field("cert_pem", &"…")
             .field("private_key_pem", &"<redacted>")
+            .field("pfx_der", &"<redacted>")
+            .field("pfx_password", &"<redacted>")
             .field("thumbprint", &self.thumbprint)
             .field("thumbprint_sha256", &self.thumbprint_sha256)
             .field("not_after", &self.not_after)
@@ -112,21 +129,107 @@ pub fn generate_self_signed(
     // SHA-1 first because it is the one an operator acts on: it is what Entra
     // returns as `customKeyIdentifier`, what the portal's Thumbprint column
     // shows, and what a client assertion carries as `x5t`.
-    let thumbprint = azapptoolkit_core::thumbprint::hex_upper(
-        digest::digest(&digest::SHA1_FOR_LEGACY_USE_ONLY, der_bytes).as_ref(),
-    );
+    // Bound once, not digested twice: the raw bytes are also the PKCS#12
+    // `localKeyId` below, and deriving the same digest in two places is how the
+    // two would eventually disagree.
+    let sha1 = digest::digest(&digest::SHA1_FOR_LEGACY_USE_ONLY, der_bytes);
+    let thumbprint = azapptoolkit_core::thumbprint::hex_upper(sha1.as_ref());
     let thumbprint_sha256 = azapptoolkit_core::thumbprint::hex_upper(
         digest::digest(&digest::SHA256, der_bytes).as_ref(),
     );
+
+    // `serialized_der()` borrows the PKCS#8 bytes rcgen already holds rather
+    // than handing back an owned copy, so the private key does not land on a
+    // second allocation that would need its own zeroization.
+    let pfx_password = random_pfx_password();
+    let pfx_der = build_pfx(
+        der_bytes,
+        key_pair.serialized_der(),
+        sha1.as_ref(),
+        cn,
+        &pfx_password,
+    )?;
 
     Ok(GeneratedCert {
         cert_der_base64: STANDARD.encode(der_bytes),
         cert_pem: cert.pem(),
         private_key_pem: pkcs8_pem,
+        pfx_der,
+        pfx_password,
         thumbprint,
         thumbprint_sha256,
         not_after,
     })
+}
+
+/// A random password for the generated PKCS#12 bundle.
+///
+/// 24 bytes of OS randomness as unpadded base64url: 192 bits in 32 characters,
+/// unbiased by construction — no modulo folding over a hand-rolled alphabet.
+///
+/// The alphabet is the point. `A-Za-z0-9-_` has no `+`, `/` or `=`, so the
+/// string survives a PowerShell `ConvertTo-SecureString`, an `openssl -passin
+/// pass:` argument, a URL and a YAML value without quoting games — and it is
+/// pure ASCII, which matters because a PKCS#12 password is encoded as a
+/// BMPString (UTF-16BE) and ASCII is the range every reader agrees on.
+///
+/// `OsRng` rather than the `thread_rng()` `commands::guid` uses: both are
+/// CSPRNGs, but this is a credential, and the OS source has no reseeding or
+/// thread-local state to reason about.
+fn random_pfx_password() -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use rand::RngCore as _;
+    use rand::rngs::OsRng;
+
+    let mut bytes = [0u8; 24];
+    OsRng.fill_bytes(&mut bytes);
+    let password = URL_SAFE_NO_PAD.encode(bytes);
+    bytes.zeroize();
+    password
+}
+
+/// Bundles the certificate and its PKCS#8 private key into a password-protected
+/// PKCS#12 blob (PBES2 / AES-256-CBC, HMAC-SHA256 MAC).
+///
+/// `local_key_id` must be the certificate's **SHA-1 digest** — the same 20 bytes
+/// Entra derives into `customKeyIdentifier` and the portal prints as the
+/// Thumbprint. Windows' PKCS#12 reader binds the key bag to the certificate bag
+/// through this attribute: get it wrong and `Import-PfxCertificate` *succeeds*
+/// with `HasPrivateKey = False`, which the operator discovers much later, when a
+/// client assertion won't sign.
+///
+/// The profile is set explicitly even though it is the writer's current default.
+/// A default that quietly moved to a legacy PBE would downgrade every bundle we
+/// mint, in a version bump with no diff to review.
+fn build_pfx(
+    cert_der: &[u8],
+    key_pkcs8_der: &[u8],
+    local_key_id: &[u8],
+    alias: &str,
+    password: &str,
+) -> Result<Vec<u8>, String> {
+    use p12_keystore::{
+        Certificate, EncryptionAlgorithm, KeyStore, KeyStoreEntry, MacAlgorithm, PrivateKeyChain,
+    };
+
+    let cert = Certificate::from_der(cert_der)
+        .map_err(|e| format!("PKCS#12 certificate encoding failed: {e}"))?;
+    // Both arguments are `AsRef<[u8]>` in the order (key, id), so transposing
+    // them compiles and yields a bundle no reader can open. That is what
+    // `the_pfx_holds_the_same_key_as_the_revealed_pem` is pinned against.
+    let chain = PrivateKeyChain::new(key_pkcs8_der, local_key_id, [cert]);
+
+    let mut store = KeyStore::new();
+    store.add_entry(alias, KeyStoreEntry::PrivateKeyChain(chain));
+    store
+        .writer(password)
+        .encryption_algorithm(EncryptionAlgorithm::PbeWithHmacSha256AndAes256)
+        .mac_algorithm(MacAlgorithm::HmacSha256)
+        // Iterations stay at the crate default (10 000). The password above
+        // carries ~192 bits, so the KDF work factor is not the control doing
+        // the work here, and a modest count keeps older readers happy.
+        .write()
+        .map_err(|e| format!("PKCS#12 write failed: {e}"))
 }
 
 #[cfg(test)]
@@ -179,6 +282,115 @@ mod tests {
             c.thumbprint, c.thumbprint_sha256,
             "premise: the two digests differ, so showing the wrong one is visible",
         );
+    }
+
+    /// Strips PKCS#8 PEM armour back to the DER the PEM encodes.
+    fn pem_body(pem: &str) -> Vec<u8> {
+        let b64: String = pem
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<Vec<_>>()
+            .concat();
+        STANDARD.decode(b64).expect("PEM body is base64")
+    }
+
+    fn open_pfx(c: &GeneratedCert) -> p12_keystore::KeyStore {
+        p12_keystore::KeyStore::from_pkcs12(&c.pfx_der, &c.pfx_password)
+            .expect("the bundle must open under the password shown beside it")
+    }
+
+    /// The claim the whole feature rests on: the `.pfx` and the PEM reveal are
+    /// **one identity**, not two.
+    ///
+    /// An operator imports the bundle on Windows and hands the PEM to a Linux
+    /// node; the single public half Entra holds has to authenticate both. If a
+    /// refactor ever mints a second key pair for the bundle, or transposes
+    /// `PrivateKeyChain::new`'s `(key, local_key_id)` — both `AsRef<[u8]>`, so
+    /// both compile — this is what fails.
+    #[test]
+    fn the_generated_pfx_is_the_same_identity_as_the_revealed_pem() {
+        let c = generate_self_signed("My App", 365).unwrap();
+        let ks = open_pfx(&c);
+        let (alias, chain) = ks.private_key_chain().expect("a private key bag");
+
+        assert_eq!(alias, "My App", "the bag is aliased by the subject");
+        assert_eq!(
+            chain.key(),
+            pem_body(&c.private_key_pem).as_slice(),
+            "the bundled key must BE the revealed key, not another one",
+        );
+        assert_eq!(
+            chain.chain().len(),
+            1,
+            "a self-signed leaf and nothing else",
+        );
+        assert_eq!(
+            chain.chain()[0].as_der(),
+            STANDARD.decode(&c.cert_der_base64).unwrap().as_slice(),
+            "the bundled certificate must be the one uploaded to Entra",
+        );
+    }
+
+    /// `localKeyId` is what binds the key bag to the certificate bag. Windows
+    /// imports a mismatched pair *successfully*, with `HasPrivateKey = False` —
+    /// a silent failure surfacing much later as an assertion that won't sign.
+    ///
+    /// Pinning it to the SHA-1 thumbprint also extends the 0.28.2 rule inward:
+    /// one certificate, one string, everywhere it appears.
+    #[test]
+    fn the_pfx_local_key_id_is_the_certificate_thumbprint() {
+        let c = generate_self_signed("My App", 365).unwrap();
+        let ks = open_pfx(&c);
+        let (_, chain) = ks.private_key_chain().unwrap();
+        assert_eq!(
+            azapptoolkit_core::thumbprint::hex_upper(chain.local_key_id()),
+            c.thumbprint,
+        );
+    }
+
+    /// Proves the encryption and MAC are actually applied. An unencrypted
+    /// PKCS#12 opens under *any* password, so without this the round-trip test
+    /// above would pass just as happily over a plaintext bundle.
+    #[test]
+    fn the_pfx_does_not_open_under_the_wrong_password() {
+        let c = generate_self_signed("My App", 365).unwrap();
+        assert!(p12_keystore::KeyStore::from_pkcs12(&c.pfx_der, "").is_err());
+        assert!(p12_keystore::KeyStore::from_pkcs12(&c.pfx_der, "not-it").is_err());
+        assert!(
+            p12_keystore::KeyStore::from_pkcs12(&c.pfx_der, &c.pfx_password).is_ok(),
+            "premise: the right password does open it",
+        );
+    }
+
+    /// The alphabet is load-bearing, not cosmetic: this string gets pasted into
+    /// a PowerShell `ConvertTo-SecureString` and an `openssl -passin pass:`
+    /// argument, and a PKCS#12 password is encoded as a BMPString. Pin it so a
+    /// future "nicer" alphabet cannot quietly introduce a quoting or encoding
+    /// hazard. Tested directly — no RSA keygen needed.
+    #[test]
+    fn each_pfx_password_is_fresh_and_paste_safe() {
+        let a = random_pfx_password();
+        let b = random_pfx_password();
+        assert_ne!(a, b, "a per-bundle password, not a constant");
+        assert_eq!(a.len(), 32, "24 bytes as unpadded base64url");
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "ASCII, and free of shell/URL metacharacters: {a}",
+        );
+    }
+
+    /// The daily rolling log writes whatever a `?value` in a `tracing` macro
+    /// produces, so a derived `Debug` here would put a plaintext private key on
+    /// disk. The bundle and its password are the same secret in another wrapper.
+    #[test]
+    fn the_generated_cert_debug_redacts_every_secret() {
+        let c = generate_self_signed("My App", 365).unwrap();
+        let dbg = format!("{c:?}");
+        assert!(!dbg.contains(&c.pfx_password), "{dbg}");
+        assert!(!dbg.contains("PRIVATE KEY"), "{dbg}");
+        // The thumbprint is not a secret — it is the whole point of the reveal.
+        assert!(dbg.contains(&c.thumbprint), "{dbg}");
     }
 
     #[test]
