@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.28.1] - 2026-08-31
+
 ### Fixed
 
 - **"Generate certificate" now actually shows the private key it promises.** The
