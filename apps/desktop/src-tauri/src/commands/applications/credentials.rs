@@ -1,4 +1,6 @@
-use tauri::State;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use tauri::{AppHandle, State};
 
 use azapptoolkit_core::models::{NewKeyCredential, PasswordCredential};
 
@@ -160,8 +162,75 @@ pub async fn generate_self_signed_certificate(
         thumbprint_sha256: std::mem::take(&mut generated.thumbprint_sha256),
         certificate_pem: std::mem::take(&mut generated.cert_pem),
         private_key_pem: std::mem::take(&mut generated.private_key_pem),
+        pfx_base64: STANDARD.encode(std::mem::take(&mut generated.pfx_der)),
+        pfx_password: std::mem::take(&mut generated.pfx_password),
         expires: expires_dt.map(|d| d.to_rfc3339()).unwrap_or_default(),
     })
+}
+
+/// Writes the generated PKCS#12 bundle to a file the operator chooses.
+///
+/// **Secret-bearing artifact.** The bundle holds the private key, encrypted
+/// under a password the same reveal shows once — so to anyone who has both, the
+/// file *is* the private key. It goes through `private_file::write_owner_only`
+/// like every other file this app writes (that module's doc records why these
+/// exceptions to "never write secrets to disk" exist), and the reveal tells the
+/// operator to install it and then delete it.
+///
+/// Deliberately separate from `generate_self_signed_certificate`: a blocking
+/// save dialog inside that call would hold the one-time reveal off the screen —
+/// the 0.28.1 failure — and would make a cancelled dialog indistinguishable
+/// from a failed generation, on the one screen where that difference is
+/// unrecoverable. Returns the chosen path, or `None` if the dialog was
+/// cancelled.
+#[tauri::command]
+pub async fn save_generated_certificate_pfx(
+    app_handle: AppHandle,
+    pfx_base64: String,
+    subject: String,
+) -> Result<Option<String>, UiError> {
+    let bytes = STANDARD
+        .decode(&pfx_base64)
+        .map_err(|e| UiError::validation("invalid_pfx", format!("not valid base64: {e}")))?;
+    let default_name = format!(
+        "{}-{}.pfx",
+        pfx_file_stem(&subject),
+        chrono::Utc::now().format("%Y%m%dT%H%M%S")
+    );
+    crate::commands::export::write_bytes_via_dialog(
+        app_handle,
+        "PKCS#12",
+        "pfx",
+        default_name,
+        bytes,
+    )
+    .await
+}
+
+/// A filename-safe stem from a certificate subject.
+///
+/// The common name is operator-typed, so it can hold path separators and shell
+/// metacharacters. This only seeds the save dialog — the operator still picks
+/// the real path — but a default containing `/` is a default nobody can accept.
+fn pfx_file_stem(subject: &str) -> String {
+    let cleaned: String = subject
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(64)
+        .collect();
+    let trimmed = cleaned.trim_matches(['-', '.']);
+    if trimmed.is_empty() {
+        "certificate".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[tauri::command]
@@ -182,9 +251,6 @@ pub async fn remove_certificate_credential(
 /// the `key` field on Graph's `keyCredentials`. Performs minimal validation:
 /// strips headers/whitespace and confirms the remainder is valid base64.
 fn normalize_cert_blob(input: &str) -> std::result::Result<String, String> {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-
     let stripped: String = input
         .lines()
         .filter(|line| !line.trim_start().starts_with("-----"))
@@ -331,7 +397,29 @@ mod password_window_tests {
 
 #[cfg(test)]
 mod cert_tests {
-    use super::normalize_cert_blob;
+    use super::{normalize_cert_blob, pfx_file_stem};
+
+    /// The subject is operator-typed and lands in a *filename*. It only seeds
+    /// the save dialog, but a default carrying a path separator is one nobody
+    /// can accept — and `..` in a suggested name is worth never emitting.
+    #[test]
+    fn a_pfx_filename_stem_survives_a_hostile_common_name() {
+        assert_eq!(pfx_file_stem("Contoso CRM"), "Contoso-CRM");
+        assert_eq!(pfx_file_stem("  spaced  "), "spaced");
+        assert_eq!(pfx_file_stem("app.contoso.com"), "app.contoso.com");
+        for hostile in ["../../etc/passwd", "a/b\\c", "x;rm -rf ~", "\"q\"", "$(id)"] {
+            let out = pfx_file_stem(hostile);
+            assert!(
+                !out.contains(['/', '\\', ';', '$', '"', '\'', ' ']),
+                "{hostile} -> {out}",
+            );
+            assert!(!out.contains(".."), "{hostile} -> {out}");
+        }
+        // Never empty: the dialog needs *some* name to offer.
+        assert_eq!(pfx_file_stem("///"), "certificate");
+        assert_eq!(pfx_file_stem(""), "certificate");
+        assert_eq!(pfx_file_stem("..."), "certificate");
+    }
 
     #[test]
     fn strips_pem_armour_and_whitespace() {

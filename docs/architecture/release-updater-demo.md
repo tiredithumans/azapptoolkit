@@ -123,11 +123,15 @@ Self-signed cert generation (`src-tauri/src/cert.rs`) uses `rcgen` on the **`aws
 the dependency graph — **do not reintroduce `rsa`** (the `src-tauri/Cargo.toml` comment records
 why).
 
-The direct `rand = "0.8"` / `sha2 = "0.10"` pins in `src-tauri/Cargo.toml` (random bytes for
-client secrets in `expose_api`/`app_roles`/`managed_identity`; the SHA-256 cert thumbprint) are
-held to match what **`oauth2` 5 + Tauri 2** already resolve. As of a full `cargo update` on
-**2026-07-13**, these are the **only two direct deps in the entire codebase behind a major**
-(web-rs is fully current), and both stay pinned. The re-eval trigger below has **not** fired:
+The direct `rand = "0.8"` pin in `src-tauri/Cargo.toml` (random bytes for the v4 GUIDs
+`commands/guid.rs` mints, which `expose_api`/`app_roles`/`managed_identity` consume) and the
+`sha2 0.10` line the tree resolves to are held to match what **`oauth2` 5 + Tauri 2** already
+resolve. Note `sha2` is **not** a direct dependency: both certificate thumbprints digest on
+`aws-lc-rs`, the same backend rcgen signs with (`src-tauri/Cargo.toml` says so at the
+`aws-lc-rs` block). The only direct consumer of the 0.10 line is `p12-keystore`, pinned below
+precisely to keep it there. As of a full `cargo update` on **2026-07-13**, `rand` is the only
+direct dep in the entire codebase behind a major (web-rs is fully current). The re-eval trigger
+below has **not** fired:
 
 - **`rand` (0.8.7 → 0.10.2):** `oauth2` 5.0.0 — the latest oauth2 — still resolves `rand 0.8.7` /
   `rand_core 0.6.4`. Bumping our direct dep to 0.10 leaves oauth2's `rand 0.8` in the tree
@@ -136,10 +140,47 @@ held to match what **`oauth2` 5 + Tauri 2** already resolve. As of a full `cargo
   (`tauri-codegen` / `wry`) and `secret-service`, all unified on `digest 0.10`. We'd be the *only*
   crate on 0.11, so the bump **adds** a second `sha2` **and** a second `digest` major — net *more*
   duplication, not less.
-- **Cost with no benefit:** both need code edits — `cert.rs` (`sha2::{Digest, Sha256}`, digest
-  trait API changed 0.10→0.11) and `commands/guid.rs` (`rand::thread_rng()` → `rng()`, renamed in
-  0.9+) — while `cargo audit` is clean on both held versions, so nothing forces the move.
+- **Cost with no benefit:** `rand` needs a code edit (`commands/guid.rs`: `rand::thread_rng()` →
+  `rng()`, renamed in 0.9+) and `cert.rs` uses `rand::rngs::OsRng` for the `.pfx` password — while
+  `cargo audit` is clean on both held versions, so nothing forces the move.
 
 **Re-evaluate only when `oauth2` (or Tauri) ships a release on `rand 0.9+` / `sha2 0.11`** — then a
 bump dedups the tree instead of duplicating it. Both lockfiles otherwise track the latest
 semver-compatible versions — a plain `cargo update` is a no-op.
+
+### `p12-keystore` is pinned to 0.2.x — the same rule, applied to a new dep
+
+The `.pfx` export (`cert.rs::build_pfx`) needs a PKCS#12 writer. `p12-keystore` **0.2.1** was
+taken over the current **0.3.1** deliberately, and the pin is enforced in `dependabot.yml`.
+
+0.3.x depends on `cms ^0.3.0-pre.1`, which requires `der 0.8.0-rc`, `spki 0.8.0-rc` and
+`x509-cert 0.3.0-rc` as **non-optional** deps — four pre-release crates in the dependency graph
+of a tool that handles tenant credentials. `deny.toml` sets `yanked = "deny"` as a required
+check, and RustCrypto routinely retires superseded release candidates, so that combination lets
+an upstream yank break CI with no change on our side. 0.3.x also rides the RustCrypto 0.11 hash
+line, which would add a second `sha2` **and** `digest` major — exactly what the `rand`/`sha2`
+reasoning above exists to avoid.
+
+0.2.1 is all-stable and lands entirely on majors the lock file already carries — `sha2 0.10`,
+`hmac 0.12`, `cbc 0.1`, `rand 0.10`, `x509-parser 0.18`, `base64 0.22`, `thiserror 2` — so
+`cargo tree -d` gains **no new duplicate major at all**. The 16 crates it does add (`cms 0.2.3`,
+`pkcs12 0.1`, `pkcs5 0.7`, `der 0.7`, `spki 0.7`, `x509-cert 0.2`, `const-oid 0.9`, `sha1 0.10`,
+`pbkdf2`, `scrypt`, `salsa20`, `base64ct`, `pem-rfc7468`, `flagset`, `der_derive`) are all
+stable releases under `Apache-2.0 OR MIT`.
+
+The output is identical either way: **PBES2 / AES-256-CBC with an HMAC-SHA256 MAC** at 10 000
+iterations is both versions' default, and `build_pfx` sets it explicitly regardless so a future
+default change cannot silently downgrade a bundle.
+
+`default-features = false` drops the crate's `pbes1` feature (RC2/DES) — those decrypt *legacy*
+stores, and this app only ever writes its own.
+
+**`rsa` stays out.** `cms` carries `rsa` as an optional dep, reachable only through its `builder`
+feature, which nothing here enables — `cargo tree -i rsa` returns "did not match any packages".
+That is a property to verify, not assume: `deny.toml`'s `[[bans.deny]] name = "rsa"` is what
+actually holds the line.
+
+**Drop this pin once `cms 0.3.0` ships final**, then take `p12-keystore` 0.3.x in one deliberate
+commit (its `PrivateKeyChain::new` reverses to `(local_key_id, key, certs)` and takes a typed
+`PrivateKey`, so the swap does not compile silently — but see
+`the_generated_pfx_is_the_same_identity_as_the_revealed_pem`, which is what proves it either way).

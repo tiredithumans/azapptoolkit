@@ -208,7 +208,7 @@ Running locally needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID`. For t
 
 - **Auth trusts are validated wherever minted.** Federated credentials go through `core::federation` on **every** path (Graph accepts a bad issuer silently); SAML cert lifetimes are bounded. Pinned by `repo_invariants/trust.rs`.
 
-- **Crypto/encoding deps — no `rsa`; `rand`/`sha2`/`base64` majors pinned on purpose.** `cert.rs` uses `rcgen` on the `aws_lc_rs` backend specifically to keep `rsa` (RUSTSEC-2023-0071) out of the graph — **don't reintroduce it**. The three pins match what `oauth2` 5 + Tauri 2 + the reqwest stack resolve; bumping one nothing else follows only *adds* a duplicate major. Rationale + drop conditions live in `dependabot.yml`'s `ignore` blocks.
+- **Crypto/encoding deps — no `rsa`; `rand`/`sha2`/`base64` majors and `p12-keystore` 0.2.x pinned on purpose.** `cert.rs` uses `rcgen` on the `aws_lc_rs` backend specifically to keep `rsa` (RUSTSEC-2023-0071) out of the graph. The pins match what `oauth2` 5 + Tauri 2 + the reqwest stack resolve; bumping one nothing else follows only *adds* a duplicate major. Rationale + drop conditions live in `dependabot.yml`'s `ignore` blocks.
 
 ## Coding fundamentals
 

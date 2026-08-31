@@ -17,7 +17,7 @@ use crate::bindings::applications::{
 };
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::CopyableId;
+use crate::components::ui::{Callout, CopyableId};
 use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -349,6 +349,13 @@ pub fn CredentialsTab(
     let gencert_validity = RwSignal::new("365".to_string());
     let cmd_gencert = use_command();
     let gencert_result: RwSignal<Option<GeneratedCertificateResult>> = RwSignal::new(None);
+    // Reported inside the reveal, not through the shared `error` banner (which
+    // renders in the tab body, behind the modal backdrop) and not through a
+    // toast (whose stacking above a modal is not something to bet a one-time
+    // private key on). The modal is what is on screen; the answer belongs in it.
+    let pfx_saving = RwSignal::new(false);
+    let pfx_saved: RwSignal<Option<String>> = RwSignal::new(None);
+    let pfx_error: RwSignal<Option<String>> = RwSignal::new(None);
 
     let expired_count = Signal::derive(move || {
         secrets.with(|list| {
@@ -595,6 +602,8 @@ pub fn CredentialsTab(
     // modal is stale until this runs.
     let dismiss_gencert = Callback::new(move |()| {
         gencert_result.set(None);
+        pfx_saved.set(None);
+        pfx_error.set(None);
         on_changed.run(());
     });
 
@@ -917,7 +926,7 @@ pub fn CredentialsTab(
                 // reads as "the app silently did nothing".
                 {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
                 <Body1>
-                    "Creates an RSA-2048 certificate, adds the public part to this app as a verify-only credential, and shows the private key once. Use the private key to authenticate the app (client assertion)."
+                    "Creates an RSA-2048 certificate, adds the public part to this app as a verify-only credential, and shows the private key once — as PEM text, and as a password-protected .pfx you can save. Use either to authenticate the app (client assertion)."
                 </Body1>
                 <Field label="Subject (common name)">
                     <Input value=gencert_subject />
@@ -971,23 +980,88 @@ pub fn CredentialsTab(
                                 }
                             });
                         };
+                        let pfx = r.pfx_base64.clone();
+                        // The CN the operator typed, so the file is named
+                        // after the certificate rather than its digest. The
+                        // backend sanitizes it and appends a timestamp.
+                        let pfx_subject = gencert_subject.get_untracked();
+                        let save_pfx = move |_| {
+                            if pfx_saving.get_untracked() {
+                                return;
+                            }
+                            pfx_error.set(None);
+                            pfx_saved.set(None);
+                            pfx_saving.set(true);
+                            let (pfx, subject) = (pfx.clone(), pfx_subject.clone());
+                            leptos::task::spawn_local(async move {
+                                // Never touches `on_changed`: releasing the
+                                // deferred reload here would unmount this very
+                                // modal and take the one-time key with it.
+                                match applications::save_generated_certificate_pfx(
+                                        &pfx,
+                                        &subject,
+                                    )
+                                    .await
+                                {
+                                    Ok(Some(path)) => pfx_saved.set(Some(path)),
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        pfx_error
+                                            .set(Some(format!("Couldn't save the .pfx: {}", e.message)));
+                                    }
+                                }
+                                pfx_saving.set(false);
+                            });
+                        };
                         view! {
                             <Body1>
-                                "Copy the private key now — it is never stored and cannot be retrieved again. The public certificate has already been added to the application."
+                                "Copy the private key or save the .pfx now — neither is stored, and neither can be retrieved again. The public certificate has already been added to the application."
                             </Body1>
                             <Body1 class="mono">{format!("Thumbprint (SHA-1): {}", r.thumbprint)}</Body1>
                             <Body1 class="mono">{format!("SHA-256: {}", r.thumbprint_sha256)}</Body1>
                             <Body1 class="mono">{format!("Expires: {}", r.expires)}</Body1>
+                            <strong>".pfx password"</strong>
+                            <CopyableId
+                                value=r.pfx_password.clone()
+                                label="PFX password"
+                                full=true
+                            />
+                            <Body1>
+                                "The .pfx holds this certificate and its private key, encrypted with the password above — import it with Import-PfxCertificate on Windows, then delete the file. Save both together: neither half is any use alone. Windows Server 2016 and older cannot read AES-256 .pfx files; use the PEM below there."
+                            </Body1>
                             <strong>"Private key (PKCS#8 PEM)"</strong>
                             <pre class="secret-reveal">{r.private_key_pem.clone()}</pre>
                             <strong>"Certificate (PEM)"</strong>
                             <pre class="secret-reveal">{r.certificate_pem.clone()}</pre>
+                            {move || {
+                                pfx_saved
+                                    .get()
+                                    .map(|path| {
+                                        view! {
+                                            <Callout tone="ok">
+                                                {format!("Saved {path}")}
+                                            </Callout>
+                                        }
+                                    })
+                            }}
+                            {move || {
+                                pfx_error
+                                    .get()
+                                    .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                            }}
                             <div class="actions-row">
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                     on_click=Box::new(copy_pk)
                                 >
                                     "Copy private key"
+                                </Button>
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                    disabled=Signal::derive(move || pfx_saving.get())
+                                    on_click=Box::new(save_pfx)
+                                >
+                                    "Save .pfx…"
                                 </Button>
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Primary)

@@ -335,6 +335,29 @@ pub async fn generate_self_signed_certificate(
     .await
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavePfxArgs<'a> {
+    pfx_base64: &'a str,
+    subject: &'a str,
+}
+
+/// Writes the generated certificate's `.pfx` through the OS save dialog.
+/// `Ok(None)` means the operator cancelled the dialog, which is not a failure.
+pub async fn save_generated_certificate_pfx(
+    pfx_base64: &str,
+    subject: &str,
+) -> Result<Option<String>, UiError> {
+    invoke_result(
+        "save_generated_certificate_pfx",
+        SavePfxArgs {
+            pfx_base64,
+            subject,
+        },
+    )
+    .await
+}
+
 // ---------------- Authentication (redirect URIs + flow toggles) ----------------
 
 /// Reads the Authentication-tab settings (per-platform reply URLs, logout URL,
