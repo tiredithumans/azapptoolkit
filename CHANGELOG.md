@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.29.0] - 2026-08-31
+
 ### Added
 
 - **"Generate certificate" now also produces a password-protected `.pfx`.** The reveal has always
