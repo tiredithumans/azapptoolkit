@@ -69,6 +69,34 @@ fn focus_list_filter() -> bool {
     true
 }
 
+/// Move the workspace focus one entry along the dock, wrapping at both ends.
+///
+/// Focuses rather than splits: `focus_item` also re-expands a collapsed
+/// workspace, so this is the keyboard route back in after Escape. Ordering is
+/// the dock's own (open order), not focus recency, so repeated presses walk a
+/// stable strip instead of ping-ponging between the last two items.
+fn step_open_item(session: Session, forward: bool) {
+    let items = session.open_items.get_untracked();
+    let len = items.len();
+    if len == 0 {
+        return;
+    }
+    // Anchor on the pane the operator is reading (the last-focused of a 2-up
+    // compare). Collapsed, there is no anchor — `]` then opens the first entry
+    // and `[` the last, so either key gets the workspace back.
+    let current = session
+        .shown_items
+        .with_untracked(|s| s.last().copied())
+        .and_then(|id| items.iter().position(|it| it.id == id));
+    let next = match (current, forward) {
+        (Some(i), true) => (i + 1) % len,
+        (Some(i), false) => (i + len - 1) % len,
+        (None, true) => 0,
+        (None, false) => len - 1,
+    };
+    session.focus_item(items[next].id, false);
+}
+
 /// Installs the global shortcuts for the authenticated shell.
 ///
 /// `show_help` is flipped by `?` so the shell can render the shortcut sheet.
@@ -89,13 +117,31 @@ pub fn use_shortcuts(session: Session, show_help: RwSignal<bool>) {
                 return;
             }
             // Cmd/Ctrl-W — close the focused open item (the workspace's tab-like
-            // working set), NOT the OS window.
+            // working set), NOT the OS window. `prevent_default` runs FIRST,
+            // unconditionally: with nothing shown — one Escape after a collapse
+            // is enough — the keystroke would otherwise fall through to the OS
+            // and take the whole window, the working set, the audit run and any
+            // in-flight dialog with it. macOS needs the other half of this too:
+            // an NSMenu key equivalent is consumed before the webview ever sees
+            // the event, which is why `src-tauri/src/lib.rs` builds a menu with
+            // no Close Window item.
             if key.eq_ignore_ascii_case("w") {
-                let closed = session.shown_items.with_untracked(|s| s.first().cloned());
-                if let Some(item) = closed {
-                    ev.prevent_default();
+                ev.prevent_default();
+                // The LAST shown pane is the most recently focused one
+                // (`focus_item` pushes), so a 2-up compare closes the pane the
+                // operator is reading rather than whichever is on the left.
+                if let Some(item) = session.shown_items.with_untracked(|s| s.last().copied()) {
                     session.close_item(item);
                 }
+                return;
+            }
+            // Cmd/Ctrl-] / Cmd/Ctrl-[ — step forward/back through the dock. The
+            // dock reads as a tab strip but had no keyboard route at all, and
+            // `focus_item` re-expands a workspace collapsed with Escape — which
+            // is what closes that one-way door.
+            if key == "]" || key == "[" {
+                ev.prevent_default();
+                step_open_item(session, key == "]");
                 return;
             }
             return;
@@ -136,7 +182,12 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         "Cmd/Ctrl + 1…5",
         "Home · App Registrations · Enterprise Apps · Managed Identities · Security",
     ),
-    ("Cmd/Ctrl + W", "Close the open item"),
+    ("Cmd/Ctrl + W", "Close the focused open item"),
+    ("Cmd/Ctrl + ]", "Next open item"),
+    (
+        "Cmd/Ctrl + [",
+        "Previous open item (either key re-opens a collapsed workspace)",
+    ),
     ("Esc", "Close a dialog, or collapse the open-item workspace"),
     ("↑ ↓ / Home / End", "Move between rows in a table"),
     ("←  →", "Move between tabs"),

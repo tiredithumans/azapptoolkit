@@ -24,6 +24,7 @@ use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::use_session;
 
 use super::controller::AuditController;
+use super::filter::issue_lines_for;
 use super::groups::{FindingGroup, GroupSection, group_bulk_actions, group_findings};
 use super::row::AuditRowActions;
 use super::{last_sign_in_cell, risk_class};
@@ -173,12 +174,7 @@ pub(crate) fn FindingsPane() -> impl IntoView {
                                     .iter()
                                     .map(|g| {
                                         finding_group_view(
-                                            FindingGroup {
-                                                spec: g.spec,
-                                                item_indices: g.item_indices.clone(),
-                                                worst: g.worst,
-                                                impact: g.impact,
-                                            },
+                                            g.clone(),
                                             ctrl,
                                             expanded,
                                             selection,
@@ -197,10 +193,12 @@ pub(crate) fn FindingsPane() -> impl IntoView {
     }
 }
 
-/// One finding group: a header row (tone dot, title, count, chevron, optional
-/// "Fix all N") plus the expandable panel (blurb, bulk bar, select-all, rows).
-/// `actionable` gates the checkbox column, Fix-all, and the bulk bar — Healthy
-/// groups render read-only rows.
+/// One finding group: a header row (severity-labelled tone dot, title, count,
+/// chevron, optional "Fix all N") plus the expandable panel (blurb, bulk bar,
+/// select-all, rows). `actionable` gates the checkbox column, Fix-all, and the
+/// bulk bar — Healthy groups render read-only rows. The row's Detail column is
+/// the group's own matched issue line(s), so the column set is a property of
+/// the finding, not of the item.
 fn finding_group_view(
     g: FindingGroup,
     ctrl: AuditController,
@@ -215,6 +213,10 @@ fn finding_group_view(
     let title = spec.title;
     let blurb = spec.blurb;
     let count = g.item_indices.len();
+    // Sign-in activity IS the unused rule's evidence, so that group keeps the
+    // column; everywhere else it is a fact about the app, not about the finding
+    // the operator opened the section for.
+    let shows_last_sign_in = key == "unused";
     let is_open = move || expanded.get().as_deref() == Some(key);
     let toggle = move |_| {
         expanded.update(|e| {
@@ -281,6 +283,14 @@ fn finding_group_view(
         azapptoolkit_core::audit::RiskLevel::Medium => "warning",
         azapptoolkit_core::audit::RiskLevel::Low => "ok",
     };
+    // The dot is the collapsed header's only severity signal, so the tier has to
+    // survive being unable to see colour: `role="img"` + `aria-label` folds it
+    // into the header button's accessible name (which was otherwise just
+    // "{title} {count} principals ▾"), and `title` gives the same word to a
+    // sighted operator who can't separate two reds. It deliberately does NOT go
+    // in `.finding-group__title` — a GUI test reads that element's text as the
+    // group's name.
+    let worst_label = format!("Worst: {}", g.worst.as_str());
     let head_class = if actionable {
         "finding-group"
     } else {
@@ -309,9 +319,12 @@ fn finding_group_view(
         <section class=head_class>
             <div class="finding-group__head">
                 <button type="button" class="finding-group__header" on:click=toggle>
-                    <span class=format!(
-                        "finding-group__tone finding-group__tone--{tone}",
-                    )></span>
+                    <span
+                        class=format!("finding-group__tone finding-group__tone--{tone}")
+                        role="img"
+                        aria-label=worst_label.clone()
+                        title=worst_label
+                    ></span>
                     <span class="finding-group__title">{title}</span>
                     <span class="finding-group__count">
                         {format!(
@@ -389,9 +402,21 @@ fn finding_group_view(
                                         }
                                     })}
                                 <th>"Application"</th>
+                                // This pane is organized BY finding, so the one
+                                // column it cannot omit is what the finding
+                                // actually says about each principal — which
+                                // mail permission is org-wide, on which
+                                // resource. Without it the grouped,
+                                // remediation-focused pane showed strictly less
+                                // finding detail than the ungrouped All-apps one.
+                                <th>"Detail"</th>
                                 <th>"Risk"</th>
                                 <th>"Score"</th>
-                                <th>"Last sign-in"</th>
+                                // Evidence in the unused group, dead weight in
+                                // every other — the scoping and ownership rules
+                                // say nothing about sign-in activity, and the
+                                // column's width is what pays for Detail.
+                                {shows_last_sign_in.then(|| view! { <th>"Last sign-in"</th> })}
                                 <th>"Actions"</th>
                             </tr>
                         </thead>
@@ -411,6 +436,12 @@ fn finding_group_view(
                                     );
                                     let is_app_reg = i.principal_kind
                                         == AuditPrincipalKind::Application;
+                                    // Owned: the view outlives this closure body,
+                                    // so it can't hold `&str`s borrowed from `i`.
+                                    let detail: Vec<String> = issue_lines_for(&i, key)
+                                        .into_iter()
+                                        .map(str::to_owned)
+                                        .collect();
                                     view! {
                                         <tr>
                                             {actionable
@@ -449,6 +480,29 @@ fn finding_group_view(
                                                     {i.app_id.clone()}
                                                 </div>
                                             </td>
+                                            <td class="finding-group__detail">
+                                                {if detail.is_empty() {
+                                                    view! {
+                                                        <span
+                                                            class="muted"
+                                                            title="Structured finding — evidenced by a field on this row rather than an issue line"
+                                                        >
+                                                            "—"
+                                                        </span>
+                                                    }
+                                                        .into_any()
+                                                } else {
+                                                    view! {
+                                                        <ul class="issues">
+                                                            {detail
+                                                                .into_iter()
+                                                                .map(|line| view! { <li>{line}</li> })
+                                                                .collect_view()}
+                                                        </ul>
+                                                    }
+                                                        .into_any()
+                                                }}
+                                            </td>
                                             <td>
                                                 <span class=format!(
                                                     "badge {}",
@@ -456,7 +510,8 @@ fn finding_group_view(
                                                 )>{i.risk_level.as_str()}</span>
                                             </td>
                                             <td>{i.risk_score}</td>
-                                            <td>{last_sign_in_cell(&i)}</td>
+                                            {shows_last_sign_in
+                                                .then(|| view! { <td>{last_sign_in_cell(&i)}</td> })}
                                             <td>
                                                 <AuditRowActions
                                                     item=i.clone()

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::Mutex;
 
 use azapptoolkit_arm::{ArmClient, LogAnalyticsClient};
-use azapptoolkit_auth::EntraAuthService;
+use azapptoolkit_auth::{EntraAuthService, TenantContext};
 use azapptoolkit_core::cache::Cache;
 use azapptoolkit_core::settings::UserSettings;
 use azapptoolkit_exchange::ExchangeClient;
@@ -331,6 +331,51 @@ impl AppState {
         } else {
             &self.tenant_id
         }
+    }
+
+    /// Records `tenant` in `settings.json` as the account to revive at the next
+    /// launch. The refresh token itself is already in the OS keyring; what is
+    /// missing across a restart is the `{tenant}:{oid}` key that addresses it,
+    /// and an oid is a directory object id, not a credential.
+    ///
+    /// Best-effort by design: an unwritable settings file costs the operator one
+    /// extra sign-in next launch and must never fail the sign-in that just
+    /// succeeded. Goes through `mutate` like every other writer — three commands
+    /// read-modify-write this file from different threads.
+    pub fn remember_account(&self, tenant: &TenantContext) {
+        let tenant = tenant.clone();
+        if let Err(e) = UserSettings::mutate(&crate::config_directory(), |settings| {
+            settings.last_account = Some(tenant);
+        }) {
+            tracing::warn!(
+                target: "auth",
+                error = %e,
+                "could not remember the signed-in account; the next launch will show sign-in"
+            );
+        }
+    }
+
+    /// Drops the remembered account on sign-out, so the next launch shows the
+    /// sign-in card. The keyring token is deleted by `EntraAuthService::sign_out`
+    /// in the same command; clearing the pointer too keeps the two from
+    /// disagreeing about whether anyone is signed in.
+    pub fn forget_account(&self) {
+        if let Err(e) = UserSettings::mutate(&crate::config_directory(), |settings| {
+            settings.last_account = None;
+        }) {
+            tracing::warn!(target: "auth", error = %e, "could not clear the remembered account");
+        }
+    }
+
+    /// The account a previous run remembered, if it belongs to the tenant *this*
+    /// run resolved (see `UserSettings::remembered_account_for` for why the
+    /// tenant guard is not optional). Read fresh from disk rather than cached at
+    /// startup: `AppState::new` snapshots `settings.json` before any sign-in has
+    /// happened, so a cached copy would be one launch behind.
+    pub fn remembered_account(&self) -> Option<TenantContext> {
+        UserSettings::stored(&crate::config_directory())
+            .remembered_account_for(&self.tenant_id)
+            .cloned()
     }
 
     /// Returns the single-flight gate for `key` (creating it on first use).

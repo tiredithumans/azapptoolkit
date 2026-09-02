@@ -585,6 +585,48 @@ impl EntraAuthService {
         Ok(())
     }
 
+    /// Revives a *previous process's* session for `tenant` from the refresh
+    /// token already in the OS keyring — no browser, no account picker.
+    ///
+    /// The keyring entry outlives the process, but it is keyed `{tenant}:{oid}`
+    /// and nothing in memory knows the oid at launch, so the caller supplies the
+    /// [`TenantContext`] it persisted at sign-in (`settings.json`'s
+    /// `last_account` — the pointer, never the token). From there this is an
+    /// ordinary silent acquisition of the sign-in read scopes: the same lazy
+    /// shared refresh every Graph call takes, which is also what makes it a real
+    /// proof of the session rather than a claim — a revoked or expired token
+    /// fails here, at launch, instead of on the operator's first click.
+    ///
+    /// Errors exactly as [`Self::refresh_session`] does, `RefreshTokenMissing`
+    /// included; a dead session is the *expected* outcome, so the caller shows
+    /// the normal sign-in card rather than an error.
+    pub async fn restore_session(&self, tenant: &TenantContext) -> Result<SignInOutcome> {
+        // `access_token_inner` resolves the account — and therefore the keyring
+        // key — through `known_tenants`, so the context has to be registered
+        // before the grant. This is the one flow where that entry comes off disk
+        // instead of a completed round trip, which is precisely why it must not
+        // outlive a failed attempt: an unproven context left behind would let
+        // any later command mint tokens for a session the operator was never
+        // shown as signed into. `InvalidGrant` already removes it; the removal
+        // is idempotent and also covers the failures that don't (a network
+        // outage, a locked keyring), leaving the service exactly as found.
+        self.known_tenants
+            .lock()
+            .insert(tenant.tenant_id.clone(), tenant.clone());
+        match self
+            .access_token_for_scopes(&tenant.tenant_id, &self.default_graph_read_scopes())
+            .await
+        {
+            Ok(_) => Ok(SignInOutcome {
+                tenant: tenant.clone(),
+            }),
+            Err(err) => {
+                self.known_tenants.lock().remove(&tenant.tenant_id);
+                Err(err)
+            }
+        }
+    }
+
     /// Interactively re-authenticates the already-signed-in account, minting a
     /// fresh refresh + access token *without* ending the session or dropping the
     /// tenant's data caches. This is the recovery path for a **dead** session —
@@ -835,6 +877,74 @@ mod tests {
             Some("stored-refresh-token")
         );
         assert!(svc.known_tenants.lock().get(tenant).is_some());
+    }
+
+    /// A fresh process at launch: the keyring still holds the refresh token but
+    /// nothing is in `known_tenants`, which is the state `restore_session` has
+    /// to work from.
+    fn relaunched_service(auth_root: String, tenant: &str, oid: &str) -> EntraAuthService {
+        let svc = signed_in_service(auth_root, tenant, oid);
+        svc.known_tenants.lock().clear();
+        svc
+    }
+
+    #[tokio::test]
+    async fn restore_session_revives_the_session_from_the_keyring() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("restore-tenant", "restore-oid");
+        mount_token_success(&server, tenant, "restored-token").await;
+        let svc = relaunched_service(server.uri(), tenant, oid);
+        let context = TenantContext {
+            tenant_id: tenant.into(),
+            account_oid: oid.into(),
+            username: Some("ada@contoso.com".into()),
+            display_name: None,
+        };
+
+        let outcome = svc.restore_session(&context).await.unwrap();
+
+        // The restored session is a real one: the read token is minted and
+        // cached, and the tenant is registered for every later command.
+        assert_eq!(outcome.tenant.account_oid, oid);
+        assert_eq!(
+            svc.cache
+                .get(tenant, &svc.default_graph_read_scopes())
+                .expect("read token cached")
+                .token,
+            "restored-token"
+        );
+        assert!(svc.tenant_context(tenant).is_some());
+    }
+
+    #[tokio::test]
+    async fn restore_session_leaves_no_session_behind_when_the_token_is_dead() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("restore-dead-tenant", "restore-dead-oid");
+        mount_token_error(
+            &server,
+            tenant,
+            serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "AADSTS70000: refresh token expired"
+            }),
+        )
+        .await;
+        let svc = relaunched_service(server.uri(), tenant, oid);
+        let context = TenantContext {
+            tenant_id: tenant.into(),
+            account_oid: oid.into(),
+            username: None,
+            display_name: None,
+        };
+
+        let result = svc.restore_session(&context).await;
+
+        // Revoked overnight: the operator lands on the normal sign-in card, and
+        // the context we speculatively registered is gone — a half-live session
+        // would let a later command mint tokens nobody signed in for.
+        assert!(matches!(result, Err(AuthError::RefreshTokenMissing(_))));
+        assert!(svc.tenant_context(tenant).is_none());
+        assert_eq!(load_refresh_token(tenant, oid).unwrap(), None);
     }
 
     #[test]

@@ -141,6 +141,62 @@ pub fn parse_lines(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// A timestamp rendered for display: the relative phrase a surface shows and
+/// the exact UTC stamp it hovers. Paired because a relative phrase alone is
+/// unciteable — an operator writing a change ticket needs the absolute time —
+/// and an absolute stamp alone is the thing nobody does the arithmetic on.
+pub struct TimeAgo {
+    pub relative: String,
+    pub exact: String,
+}
+
+/// Renders `then` as a short "how long ago" phrase relative to `now`.
+///
+/// Deliberately coarse: the question a posture surface answers is "are these
+/// numbers current?", not "how many seconds old are they?", so the buckets
+/// stop at days and a sub-minute age reads "just now". A `then` in the future
+/// (clock skew across a suspend/resume, or a machine whose clock drifted)
+/// reads "just now" as well rather than "in 3 minutes" — the phrase describes
+/// something that already happened.
+pub fn relative_time(
+    now: chrono::DateTime<chrono::Utc>,
+    then: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let secs = (now - then).num_seconds();
+    if secs < 60 {
+        return "just now".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins} min ago");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours} hour{} ago", plural(hours));
+    }
+    let days = hours / 24;
+    format!("{days} day{} ago", plural(days))
+}
+
+fn plural(n: i64) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Parses an RFC3339 timestamp (as every backend DTO carries one) into its
+/// display pair. `None` when the string isn't a timestamp — the caller renders
+/// nothing at all, because a stamp we can't read is a bug on our side, not a
+/// state an operator can act on.
+pub fn time_ago(rfc3339: &str) -> Option<TimeAgo> {
+    let then = chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    Some(TimeAgo {
+        relative: relative_time(chrono::Utc::now(), then),
+        // The same absolute format the Activity tab uses for a last sign-in.
+        exact: then.format("%Y-%m-%d %H:%M UTC").to_string(),
+    })
+}
+
 /// Inclusive `[after, before]` creation-date filter shared by the App
 /// Registration and Enterprise Application lists. Both bounds are day-granular
 /// and optional — an unset date picker leaves that side open, and with both
@@ -251,6 +307,48 @@ mod tests {
         // A missing creation date is excluded once any bound is active.
         assert!(!created_in_range(None, on(2024, 1, 1), None));
         assert!(!created_in_range(None, None, on(2024, 12, 31)));
+    }
+
+    #[test]
+    fn relative_time_buckets_by_minutes_hours_then_days() {
+        use chrono::{Duration, TimeZone, Utc};
+        let now = Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap();
+        let ago = |d: Duration| relative_time(now, now - d);
+
+        assert_eq!(ago(Duration::seconds(0)), "just now");
+        assert_eq!(ago(Duration::seconds(59)), "just now");
+        assert_eq!(ago(Duration::minutes(1)), "1 min ago");
+        assert_eq!(ago(Duration::minutes(12)), "12 min ago");
+        assert_eq!(ago(Duration::minutes(59)), "59 min ago");
+        assert_eq!(ago(Duration::hours(1)), "1 hour ago");
+        assert_eq!(ago(Duration::hours(3)), "3 hours ago");
+        assert_eq!(ago(Duration::hours(23)), "23 hours ago");
+        assert_eq!(ago(Duration::days(1)), "1 day ago");
+        assert_eq!(ago(Duration::days(9)), "9 days ago");
+        // Truncation, never rounding up: 89 minutes is "1 hour ago", so the
+        // phrase can never claim a scan is fresher than it is.
+        assert_eq!(ago(Duration::minutes(89)), "1 hour ago");
+    }
+
+    #[test]
+    fn a_future_timestamp_reads_as_just_now() {
+        // Clock skew (a suspended laptop, a drifted VM) must not produce
+        // "-3 min ago" on a security surface.
+        use chrono::{Duration, TimeZone, Utc};
+        let now = Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap();
+        assert_eq!(relative_time(now, now + Duration::hours(2)), "just now");
+    }
+
+    #[test]
+    fn time_ago_parses_rfc3339_and_pairs_it_with_the_exact_stamp() {
+        let t = time_ago("2026-09-02T09:30:00+00:00").expect("valid RFC3339");
+        assert_eq!(t.exact, "2026-09-02 09:30 UTC");
+        assert!(t.relative.ends_with("ago") || t.relative == "just now");
+        // A non-UTC offset is normalized to UTC rather than displayed as-is.
+        let offset = time_ago("2026-09-02T11:30:00+02:00").expect("valid RFC3339");
+        assert_eq!(offset.exact, "2026-09-02 09:30 UTC");
+        // Unparseable input renders nothing at all.
+        assert!(time_ago("not a timestamp").is_none());
     }
 }
 

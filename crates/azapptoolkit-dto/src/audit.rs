@@ -59,6 +59,72 @@ pub struct AuditRunResult {
     /// analysis is indistinguishable from a full one on the next read.
     #[serde(default)]
     pub degraded: Vec<AuditCoverageGap>,
+    /// When the run finished, RFC3339 UTC. `None` only for a run recorded
+    /// before this field existed.
+    ///
+    /// **Stamped by the runner and stored WITH the items** in the
+    /// `CacheKind::Audit` entry, so a cache hit reports the original run time
+    /// rather than the moment it was read back. Without it nothing on the
+    /// Security workbench or the Home posture card said how old the numbers
+    /// were: the cache is in-process with a 60-minute TTL, so the counts an
+    /// operator acts on could be an hour stale, and the "no audit" copy claimed
+    /// none had ever been run when the truth was that this session had not.
+    #[serde(default)]
+    pub completed_at: Option<String>,
+}
+
+/// One run's coverage caveats, minus its items — what an export needs in order
+/// to say what the scan did *not* cover.
+///
+/// The workbench is meticulous about never presenting a partial scan as an
+/// all-clear (the posture strip, the Findings pane and the empty state each
+/// qualify a cancelled, truncated or degraded run), but the exported file is
+/// the artifact that leaves the app and reaches an auditor, and it carried none
+/// of it: `save_audit_to_file` received a bare `Vec<AuditItem>` while every
+/// caveat stayed behind on [`AuditRunResult`]. A **cancelled** run is
+/// specifically the one that ships its items to the exporter (it is never
+/// cached), so the case with the most to disclose disclosed nothing.
+///
+/// A separate struct rather than the whole [`AuditRunResult`] so the
+/// by-reference export path keeps its property that the multi-MB item vector
+/// never round-trips the IPC bridge.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AuditExportCoverage {
+    /// Principals the run SET OUT to score — the denominator a partial run
+    /// needs (the numerator is the exported item count).
+    pub total_apps: usize,
+    pub cancelled: bool,
+    pub truncated: bool,
+    pub degraded: Vec<AuditCoverageGap>,
+    pub sign_in_report_available: bool,
+    /// RFC3339 UTC, from [`AuditRunResult::completed_at`].
+    pub completed_at: Option<String>,
+}
+
+impl AuditRunResult {
+    /// This run's caveats, for the exporter. Derived rather than restated so a
+    /// new coverage signal on the run reaches the export by editing one place.
+    pub fn coverage(&self) -> AuditExportCoverage {
+        AuditExportCoverage {
+            total_apps: self.total_apps,
+            cancelled: self.cancelled,
+            truncated: self.truncated,
+            degraded: self.degraded.clone(),
+            sign_in_report_available: self.sign_in_report_available,
+            completed_at: self.completed_at.clone(),
+        }
+    }
+}
+
+impl AuditExportCoverage {
+    /// `true` when the run reached every principal with its whole analysis
+    /// intact — the only shape that may be presented as a complete scan. Same
+    /// conjunction as the runner's cache guard (`run_is_cacheable`), for the
+    /// same reason: those three flags are what separates "clean" from
+    /// "unexamined".
+    pub fn is_complete(&self) -> bool {
+        !self.cancelled && !self.truncated && self.degraded.is_empty()
+    }
 }
 
 /// A read that failed, and what the audit could no longer do. Tenant-wide for
@@ -187,5 +253,65 @@ mod tests {
             serde_json::from_str::<AuditCoverageGap>("\"somethingFromANewerBuild\"").unwrap(),
             AuditCoverageGap::Other
         );
+    }
+
+    fn run() -> AuditRunResult {
+        AuditRunResult {
+            tenant_id: "t1".into(),
+            total_apps: 12,
+            items: Vec::new(),
+            cancelled: false,
+            sign_in_report_available: true,
+            sign_in_consent_required: false,
+            truncated: false,
+            degraded: Vec::new(),
+            completed_at: Some("2026-09-02T10:00:00+00:00".into()),
+        }
+    }
+
+    /// The export's honesty rests on `coverage()` carrying every caveat off the
+    /// run. A field added to [`AuditRunResult`] and forgotten here reaches the
+    /// exported file as silence.
+    #[test]
+    fn coverage_carries_every_caveat_off_the_run() {
+        let mut r = run();
+        r.cancelled = true;
+        r.truncated = true;
+        r.degraded = vec![AuditCoverageGap::PerPrincipalScoring];
+
+        let c = r.coverage();
+        assert_eq!(c.total_apps, 12);
+        assert!(c.cancelled);
+        assert!(c.truncated);
+        assert_eq!(c.degraded, vec![AuditCoverageGap::PerPrincipalScoring]);
+        assert!(c.sign_in_report_available);
+        assert_eq!(c.completed_at.as_deref(), Some("2026-09-02T10:00:00+00:00"));
+    }
+
+    /// Each of the three flags alone is enough to disqualify a run from reading
+    /// as complete — the failure mode is one of them being dropped from the
+    /// conjunction, which a single-case test would miss.
+    #[test]
+    fn only_a_complete_undegraded_run_reads_as_complete() {
+        assert!(run().coverage().is_complete());
+        for mutate in [
+            (|c: &mut AuditExportCoverage| c.cancelled = true) as fn(&mut AuditExportCoverage),
+            |c: &mut AuditExportCoverage| c.truncated = true,
+            |c: &mut AuditExportCoverage| c.degraded = vec![AuditCoverageGap::EwsFullAccessGrants],
+        ] {
+            let mut c = run().coverage();
+            mutate(&mut c);
+            assert!(!c.is_complete(), "{c:?} must not read as a complete scan");
+        }
+    }
+
+    /// `completed_at` is additive: a run cached (or exported) by a build from
+    /// before the field existed must still deserialize, reporting an unknown
+    /// run time rather than failing the read.
+    #[test]
+    fn a_run_without_a_timestamp_still_deserializes() {
+        let json = r#"{"tenant_id":"t1","total_apps":0,"items":[],"cancelled":false}"#;
+        let back: AuditRunResult = serde_json::from_str(json).expect("pre-field run");
+        assert_eq!(back.completed_at, None);
     }
 }

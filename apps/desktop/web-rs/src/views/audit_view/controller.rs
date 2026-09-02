@@ -14,7 +14,7 @@ use std::sync::Arc;
 use azapptoolkit_core::audit::RemediationKind;
 use leptos::prelude::*;
 
-use crate::bindings::audit::{self, AuditProgress, AuditRunResult};
+use crate::bindings::audit::{self, AuditExportCoverage, AuditProgress, AuditRunResult};
 use crate::bindings::auth;
 use crate::bindings::events;
 use crate::hooks::use_progress_stream::use_progress_stream;
@@ -139,7 +139,7 @@ impl AuditController {
             });
         });
 
-        Self {
+        let ctrl = Self {
             session,
             result,
             scanning,
@@ -154,7 +154,26 @@ impl AuditController {
             report_available,
             on_remediated,
             on_bulk_done,
-        }
+        };
+
+        // Home's "Run a security audit" call to action used to only NAVIGATE
+        // here, leaving the operator to find and press "Run audit" a second
+        // time. It now trips the one-shot flag and this consumes it, so one
+        // click both navigates and scans. An Effect rather than a read at
+        // construction because this workbench is keep-alive: after its first
+        // visit it never mounts again, and a mount-time read would make the
+        // button work exactly once per session. Clearing the flag *before*
+        // running is what makes it one-shot — this effect also sees the signals
+        // `run()` touches, and every re-run then finds it false and does
+        // nothing.
+        Effect::new(move |_| {
+            if session.tenant_ui.pending_audit_run.get() {
+                session.tenant_ui.pending_audit_run.set(false);
+                ctrl.run();
+            }
+        });
+
+        ctrl
     }
 
     /// Starts a scan (no-op while one runs). Zero-arg so it drives both the
@@ -220,6 +239,11 @@ impl AuditController {
     /// Exports by reference: the backend serves its own cached run, so the
     /// item vector doesn't round-trip the IPC bridge. Only a CANCELLED run
     /// (never cached backend-side) ships its items along.
+    ///
+    /// The run's coverage always rides along, cached path included: the file
+    /// leaving the app has to carry the same caveats this workbench refuses to
+    /// omit on screen, and a cancelled run — the one that ships its items here
+    /// — is exactly the one with something to disclose.
     pub(crate) fn export(self, format: &'static str) {
         if self.exporting.get() {
             return;
@@ -227,16 +251,26 @@ impl AuditController {
         let Some(t) = self.session.active_tenant.get() else {
             return;
         };
-        let (empty, cancelled_items) = self.result.with(|r| match r.as_ref() {
-            Some(r) => (r.items.is_empty(), r.cancelled.then(|| r.items.clone())),
-            None => (true, None),
+        let (empty, cancelled_items, coverage) = self.result.with(|r| match r.as_ref() {
+            Some(r) => (
+                r.items.is_empty(),
+                r.cancelled.then(|| r.items.clone()),
+                r.coverage(),
+            ),
+            None => (true, None, AuditExportCoverage::default()),
         });
         if empty {
             return;
         }
         self.exporting.set(true);
         leptos::task::spawn_local(async move {
-            match audit::save_audit_to_file(&t.tenant_id, cancelled_items.as_deref(), format).await
+            match audit::save_audit_to_file(
+                &t.tenant_id,
+                cancelled_items.as_deref(),
+                coverage,
+                format,
+            )
+            .await
             {
                 // Success + failure both surface through the shared bottom-right
                 // toast system (matching the list-view exports), not a

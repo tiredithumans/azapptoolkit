@@ -2,6 +2,8 @@
 //! mailbox (the Entra ∪ Exchange-RBAC union) to answer "who can read this
 //! mailbox?".
 
+use std::sync::Arc;
+
 use azapptoolkit_core::audit::AuditPrincipalKind;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Input, ProgressBar};
@@ -11,13 +13,54 @@ use crate::bindings::permission_tester::{
     self, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
 };
 use crate::bindings::sharepoint;
+use crate::components::export_menu::ExportMenu;
 use crate::components::ui::{Callout, ShowMore};
 use crate::constants::*;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
+use crate::hooks::use_list_export::use_list_export;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::{Session, use_session};
 
 use super::{verdict_badge, verdict_tooltip};
+
+/// The panel's headline sentence for one probe result.
+///
+/// A free function rather than prose built inline, because the export ships it
+/// verbatim: an `unknown` verdict means an Exchange RBAC check could not be
+/// evaluated, and an Exchange outage leaves every verdict deriving from the
+/// Entra grants alone. Both caveats are stated on screen, and a file that
+/// dropped either would read as an audited all-clear.
+fn summary_line(r: &MailboxReachersResult) -> String {
+    let reachers = r
+        .rows
+        .iter()
+        .filter(|x| x.verdict == "org_wide" || x.verdict == "scoped")
+        .count();
+    let unknowns = r.rows.iter().filter(|x| x.verdict == "unknown").count();
+    let mut summary = format!(
+        "{} of {} candidate app{} can reach “{}”",
+        reachers,
+        r.total_candidates,
+        if r.total_candidates == 1 { "" } else { "s" },
+        r.mailbox,
+    );
+    if unknowns > 0 {
+        // An Unknown row means a path (usually the Exchange RBAC check)
+        // couldn't be evaluated — treat as possible access, not noise.
+        summary.push_str(&format!(
+            " · {unknowns} couldn’t be confirmed (need Exchange admin rights)"
+        ));
+    }
+    if !r.exchange_available {
+        summary.push_str(
+            " — Exchange was unavailable, so verdicts derive from the Entra grants alone (org-wide unless scoped; never under-reported)",
+        );
+    }
+    if r.cancelled {
+        summary.push_str(" — probe was cancelled early");
+    }
+    summary
+}
 
 /// Routes a reacher row's "Open" affordance to the right detail pane — the audit
 /// view's `principal_kind` routing (App Registration / enterprise / managed
@@ -67,6 +110,43 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
     });
 
     use_progress_stream(progress, events::mailbox_probe_progress);
+
+    let summary: Memo<Option<String>> =
+        Memo::new(move |_| result.with(|r| r.as_ref().map(summary_line)));
+
+    // What the panel is answering with: confirmed "No access" is noise for "who
+    // can reach this?" and is hidden by default. THIS, not the render window
+    // below, is what the export writes — the window is a DOM budget, not a
+    // filter. A `Signal` rather than a `Memo` because `MailboxReacherRow` is an
+    // IPC DTO with no `PartialEq` to memoize on.
+    let visible_rows: Signal<Vec<MailboxReacherRow>> = Signal::derive(move || {
+        let show_na = show_no_access.get();
+        result.with(|r| {
+            r.as_ref()
+                .map(|r| {
+                    r.rows
+                        .iter()
+                        .filter(|x| show_na || x.verdict != "no_access")
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+    });
+
+    // "Which apps can read this mailbox?" is the answer an operator is asked to
+    // put in writing after an incident; before this the only way out of the app
+    // was a screenshot. Reuses the inventory lists' export handle (snapshot +
+    // double-submit guard + toast) and ships `summary` with the rows so the
+    // probe's caveats travel with the data.
+    let (export_rows, exporting, do_export) = use_list_export(
+        move |rows: Arc<Vec<MailboxReacherRow>>, format| async move {
+            let coverage = summary.get_untracked().unwrap_or_default();
+            permission_tester::save_mailbox_reachers_to_file(&rows, &coverage, format).await
+        },
+        "candidate apps",
+    );
+    Effect::new(move |_| export_rows.set_value(Arc::new(visible_rows.get())));
 
     // A probe result is mailbox- and tenant-specific: clear it on tenant switch
     // so another tenant's verdicts can never linger (cross-tenant leakage).
@@ -150,6 +230,13 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                         .into_any()
                 }
             }}
+            <ExportMenu
+                disabled=Signal::derive(move || {
+                    exporting.get() || visible_rows.with(Vec::is_empty)
+                })
+                on_select=Callback::new(do_export)
+                options=vec![("csv", "Export as CSV…"), ("json", "Export as JSON…")]
+            />
         </div>
         {move || {
             progress
@@ -186,35 +273,10 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
             let Some(r) = result.get() else {
                 return ().into_any();
             };
-            let reachers = r
-                .rows
-                .iter()
-                .filter(|x| x.verdict == "org_wide" || x.verdict == "scoped")
-                .count();
-            let unknowns = r.rows.iter().filter(|x| x.verdict == "unknown").count();
             let no_access = r.rows.iter().filter(|x| x.verdict == "no_access").count();
-            let mut summary = format!(
-                "{} of {} candidate app{} can reach “{}”",
-                reachers,
-                r.total_candidates,
-                if r.total_candidates == 1 { "" } else { "s" },
-                r.mailbox,
-            );
-            if unknowns > 0 {
-                // An Unknown row means a path (usually the Exchange RBAC check)
-                // couldn't be evaluated — treat as possible access, not noise.
-                summary.push_str(&format!(
-                    " · {unknowns} couldn’t be confirmed (need Exchange admin rights)"
-                ));
-            }
-            if !r.exchange_available {
-                summary.push_str(
-                    " — Exchange was unavailable, so verdicts derive from the Entra grants alone (org-wide unless scoped; never under-reported)",
-                );
-            }
-            if r.cancelled {
-                summary.push_str(" — probe was cancelled early");
-            }
+            // From the same memo the export reads, so the sentence on screen and
+            // the one in the file are one string, not two that can drift apart.
+            let summary = summary.get().unwrap_or_default();
             view! {
                 <Body1 class="page__summary">{summary}</Body1>
                 {if r.rows.is_empty() {
@@ -228,15 +290,14 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                     let show_na = show_no_access.get();
                     // Hide confirmed "No access" by default — the answer to "who
                     // can reach this?" is the reachers plus the couldn't-confirms.
-                    let visible_total = if show_na { r.rows.len() } else { r.rows.len() - no_access };
+                    // ONE definition of "visible", shared with the export; the
+                    // render window below is a DOM budget layered on top of it,
+                    // not a second filter, so the file and the table agree.
+                    let visible = visible_rows.get();
+                    let visible_total = visible.len();
                     let limit = render_limit.get();
-                    let rows: Vec<MailboxReacherRow> = r
-                        .rows
-                        .iter()
-                        .filter(|x| show_na || x.verdict != "no_access")
-                        .take(limit)
-                        .cloned()
-                        .collect();
+                    let rows: Vec<MailboxReacherRow> =
+                        visible.into_iter().take(limit).collect();
                     view! {
                         {if rows.is_empty() {
                             // Everything was confirmed no-access (all hidden).

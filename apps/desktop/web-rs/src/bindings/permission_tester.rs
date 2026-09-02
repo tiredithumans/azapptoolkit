@@ -73,3 +73,35 @@ pub async fn test_site_access(
     )
     .await
 }
+
+// ---------------- Mailbox-reacher export ----------------
+
+/// The panel's own summary sentence rides along with the rows: an `unknown`
+/// verdict means an Exchange check couldn't be evaluated, and an Exchange
+/// outage leaves the verdicts deriving from Entra grants alone. Both caveats
+/// are on screen and both must reach the file.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveMailboxReachersArgs<'a> {
+    rows: &'a [MailboxReacherRow],
+    summary: &'a str,
+    format: &'a str,
+}
+
+/// Exports the (filtered) mailbox-reacher rows to a CSV/JSON file via the OS
+/// save dialog. Returns the chosen path, or `None` if the user cancelled.
+pub async fn save_mailbox_reachers_to_file(
+    rows: &[MailboxReacherRow],
+    summary: &str,
+    format: &str,
+) -> Result<Option<String>, UiError> {
+    invoke_result(
+        "save_mailbox_reachers_to_file",
+        SaveMailboxReachersArgs {
+            rows,
+            summary,
+            format,
+        },
+    )
+    .await
+}

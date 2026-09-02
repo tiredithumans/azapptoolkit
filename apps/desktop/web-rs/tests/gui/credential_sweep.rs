@@ -80,6 +80,15 @@ async fn a_completed_sweep_confirms_itself_outside_the_reloaded_subtree() {
     ts::wait_for(|| ts::body_contains("Remove 2 expired")).await;
     click_button("Remove 2 expired");
     ts::wait_for(|| ts::body_contains("Remove all expired secrets?")).await;
+    // The modal covers the tab it was opened from, and the workspace can have
+    // several app windows open behind it — so "this application" has to be a
+    // name, not a pronoun.
+    assert_eq!(
+        ts::query(".confirm-dialog__subject")
+            .and_then(|el| el.text_content())
+            .as_deref(),
+        Some("Contoso CRM"),
+    );
     click_button("Remove expired");
     ts::wait_for(|| ts::call_count("remove_expired_passwords") == 1).await;
 

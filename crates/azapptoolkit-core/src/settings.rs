@@ -11,6 +11,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::TenantDefaults;
+use crate::identity::TenantContext;
 
 pub const SETTINGS_FILE: &str = "settings.json";
 
@@ -33,6 +34,22 @@ pub struct UserSettings {
     /// Settings page via `get_tenant_defaults` / `set_tenant_defaults`.
     #[serde(default)]
     pub tenant_defaults: BTreeMap<String, TenantDefaults>,
+    /// The account the operator last signed in as, so a relaunch can revive the
+    /// session from the keyring refresh token instead of showing the sign-in
+    /// card (the `restore_session` command). Written on a successful sign-in,
+    /// cleared on sign-out.
+    ///
+    /// **Not a secret.** The refresh token stays in the OS keyring; this is only
+    /// the *pointer* to it — directory object ids plus the operator's own UPN and
+    /// display name, all of which the app already renders in its own chrome. The
+    /// whole [`TenantContext`] is stored rather than a narrower struct so a
+    /// restored session is indistinguishable from a fresh sign-in (same tenant
+    /// chip, same `login_hint` on a later re-auth) and so there is no parallel
+    /// shape to drift from the one the rest of the app passes around. The file is
+    /// written owner-only ([`crate::private_file::write_owner_only`]) like every
+    /// other artifact this app persists.
+    #[serde(default)]
+    pub last_account: Option<TenantContext>,
 }
 
 fn default_true() -> bool {
@@ -46,6 +63,7 @@ impl Default for UserSettings {
             client_id: None,
             tenant_id: None,
             tenant_defaults: BTreeMap::new(),
+            last_account: None,
         }
     }
 }
@@ -128,6 +146,23 @@ impl UserSettings {
             .get(tenant_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// The remembered account — but only when it belongs to `tenant_id`, the
+    /// tenant this process actually resolved at startup.
+    ///
+    /// The configured tenant is not fixed: an env var, the first-run config
+    /// screen, or a rebuilt `.env` can all repoint it between launches, while
+    /// `settings.json` still names the account from the previous one. Handing
+    /// that account back would send the restore hunting for a keyring entry
+    /// under `{new tenant}:{old oid}` — at best missing, and at worst a *second*
+    /// directory's session revived under this tenant's caches, which is the
+    /// cross-tenant leak this repo guards hardest against. Cheaper to refuse
+    /// here than to detect it downstream.
+    pub fn remembered_account_for(&self, tenant_id: &str) -> Option<&TenantContext> {
+        self.last_account
+            .as_ref()
+            .filter(|account| account.tenant_id == tenant_id)
     }
 
     /// Applies the operator-editable half of `incoming` for `tenant_id` —
@@ -241,6 +276,7 @@ mod tests {
             client_id: Some("11111111-1111-1111-1111-111111111111".into()),
             tenant_id: Some("contoso.onmicrosoft.com".into()),
             tenant_defaults: BTreeMap::new(),
+            last_account: None,
         };
         s.save(dir.path()).unwrap();
         // `stored` (not `load`) so an `AZAPPTOOLKIT_AUTO_UPDATE` in the test env
@@ -323,6 +359,35 @@ mod tests {
         let d = s.defaults_for("t-1");
         assert_eq!(d.default_vault.as_deref(), Some("kv-a"));
         assert!(d.app_vaults.contains_key("app-1"));
+    }
+
+    /// The launch restore reads this pointer, so it has to survive the file and
+    /// stay refused for a tenant it was not written under.
+    #[test]
+    fn remembered_account_round_trips_and_is_refused_across_tenants() {
+        let dir = tempdir();
+        // Written before this field existed: an old settings.json must still
+        // load (the operator simply signs in once more).
+        std::fs::write(dir.path().join(SETTINGS_FILE), br#"{"auto_update": true}"#).unwrap();
+        assert!(UserSettings::stored(dir.path()).last_account.is_none());
+
+        UserSettings::mutate(dir.path(), |s| {
+            s.last_account = Some(TenantContext {
+                tenant_id: "t-1".into(),
+                account_oid: "oid-1".into(),
+                username: Some("ada@contoso.com".into()),
+                display_name: Some("Ada".into()),
+            });
+        })
+        .unwrap();
+
+        let loaded = UserSettings::stored(dir.path());
+        let account = loaded.remembered_account_for("t-1").expect("remembered");
+        assert_eq!(account.account_oid, "oid-1");
+        assert_eq!(account.username.as_deref(), Some("ada@contoso.com"));
+        // Repointed at another directory since the account was remembered: the
+        // oid addresses a keyring entry that is not this tenant's.
+        assert!(loaded.remembered_account_for("t-2").is_none());
     }
 
     #[test]

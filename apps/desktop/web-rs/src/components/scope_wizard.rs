@@ -15,6 +15,12 @@
 //!   (`grant_selected_item_access`). Strips nothing: these scopes have no
 //!   org-wide predecessor — they are least-privilege from the start.
 //!
+//! Step 3 is the last point before a change that is not undone by clicking
+//! Back: it names the principal, the permission values and the resolved
+//! targets, and — for the scoped Exchange and site paths, which BOTH strip the
+//! app's matching org-wide Entra grants once the scoped access lands — says so
+//! before the apply rather than afterwards in the result toast.
+//!
 //! Step 1 is the full live permission catalog (the [`PermissionPicker`]) as a
 //! multi-select cart, so any permission — scopable or not — can be granted from
 //! here. Scoped targets are offered **only** when the whole cart is one scopable
@@ -455,6 +461,11 @@ pub fn ScopeWizard(
         group_state.set(None);
         site_urls.set(String::new());
         site_write.set(false);
+        // The item targets reset with the rest: they were the one pair left
+        // behind, so a previous run's library/folder URLs survived into the next
+        // open of the wizard, pre-filled against a different permission.
+        item_urls.set(String::new());
+        item_write.set(false);
         busy.set(false);
         error.set(None);
         needs_consent.set(false);
@@ -635,11 +646,18 @@ pub fn ScopeWizard(
         let Some(t) = session.active_tenant.get_untracked() else {
             return;
         };
-        let scope = match mechanism.get_untracked() {
+        // Which consent the FAILED apply needed — keyed on the mode that ran,
+        // not on the cart's mechanism. An org-wide grant goes through
+        // `grant_single_permission` / `grant_managed_identity_permission`, which
+        // ride the ordinary Graph write scopes; the old `_ => "exchange"`
+        // fall-through consented the Exchange scopes for it, which cannot fix
+        // the failure the operator just saw (and left the button looking broken).
+        let scope = match (scope_mode.get_untracked(), mechanism.get_untracked()) {
+            (ScopeMode::OrgWide, _) | (_, None) => "write",
             // Both SharePoint mechanisms ride the same Sites.FullControl.All
             // consent — the permission endpoints need it at every level.
-            Some(ScopeKind::SharePoint | ScopeKind::SharePointItem) => "sharepoint",
-            _ => "exchange",
+            (_, Some(ScopeKind::SharePoint | ScopeKind::SharePointItem)) => "sharepoint",
+            (_, Some(ScopeKind::Exchange)) => "exchange",
         };
         busy.set(true);
         error.set(None);
@@ -660,6 +678,58 @@ pub fn ScopeWizard(
     };
 
     let step0_ready = move || selected.with(|s| !s.is_empty());
+
+    // ---- Step 3's review facts ------------------------------------------------
+    // All three read the same signals `run_apply` reads, so the review can never
+    // describe a different grant from the one that executes.
+
+    // What the resolved targets ARE, for the definition-list label.
+    let targets_label = move || match scope_mode.get() {
+        ScopeMode::Managed | ScopeMode::Existing => "Mailbox group(s)",
+        ScopeMode::Sites => "Sites",
+        ScopeMode::Items => "Libraries, folders & files",
+        ScopeMode::OrgWide => "Reach",
+    };
+
+    // The exact target strings this run will send — the managed group's own
+    // address, or the lines the operator typed two steps back. Empty for
+    // org-wide (which has no targets) and for a scoped mode whose target isn't
+    // resolved yet (which `run_apply` refuses).
+    let review_targets = move || -> Vec<String> {
+        match scope_mode.get() {
+            ScopeMode::Managed => match group_state.get() {
+                Some(Ok(g)) if g.exists => vec![
+                    g.primary_smtp_address
+                        .clone()
+                        .unwrap_or(g.group_name.clone()),
+                ],
+                _ => Vec::new(),
+            },
+            ScopeMode::Existing => parse_lines(&existing_groups.get()),
+            ScopeMode::Sites => parse_lines(&site_urls.get()),
+            ScopeMode::Items => parse_lines(&item_urls.get()),
+            ScopeMode::OrgWide => Vec::new(),
+        }
+    };
+
+    // What the apply REMOVES, named before it runs rather than after. The
+    // scoped Exchange apply passes `remove_unscoped = true` and the site
+    // conversion `remove_orgwide = true`, so both delete the app's matching
+    // org-wide Entra grants once the scoped access is in place — the
+    // irreversible half of the operation, and until now it was reported only
+    // afterwards, in the result toast. The item path strips nothing: a
+    // `…Selected` scope has no org-wide predecessor to convert away from.
+    let strip_warning = move || -> Option<String> {
+        let after = match scope_mode.get() {
+            ScopeMode::Managed | ScopeMode::Existing => "the scoped role assignment",
+            ScopeMode::Sites => "per-site access",
+            ScopeMode::Items | ScopeMode::OrgWide => return None,
+        };
+        let perms = selected.with(|s| perm_values(s).join(", "));
+        Some(format!(
+            "Once {after} is in place, this REMOVES any org-wide {perms} grant this app already holds in Entra. Restoring org-wide access afterwards is a separate, manual grant."
+        ))
+    };
 
     let review_line = move || {
         let perms = selected.with(|s| perm_values(s).join(", "));
@@ -817,14 +887,82 @@ pub fn ScopeWizard(
 
                     // ---- Step 2: review & grant ----
                     <Show when=move || step.get() == 2 fallback=|| ()>
+                        // The facts of the operation, above the sentence that
+                        // characterises it. The sentence alone named neither the
+                        // principal nor the targets the operator typed two steps
+                        // back, so there was nothing here to check the grant
+                        // against — on the step whose whole job is that check.
+                        <dl class="read-field">
+                            <dt>"Application"</dt>
+                            <dd>
+                                {move || target.with(|t| t.display_name.clone())}
+                                " "
+                                <span class="mono">
+                                    {move || target.with(|t| t.app_id.clone())}
+                                </span>
+                            </dd>
+                            <dt>"Permissions"</dt>
+                            <dd class="mono">
+                                {move || selected.with(|s| perm_values(s).join(", "))}
+                            </dd>
+                            <dt>{targets_label}</dt>
+                            <dd>
+                                {move || {
+                                    let targets = review_targets();
+                                    match (scope_mode.get(), targets.is_empty()) {
+                                        (ScopeMode::OrgWide, _) => {
+                                            view! { "Every resource in the tenant" }.into_any()
+                                        }
+                                        (_, true) => {
+                                            view! {
+                                                <span class="hint">
+                                                    "Nothing chosen yet — go back and pick a target."
+                                                </span>
+                                            }
+                                                .into_any()
+                                        }
+                                        _ => {
+                                            view! {
+                                                <ul class="member-list">
+                                                    {targets
+                                                        .into_iter()
+                                                        .map(|t| view! { <li class="mono">{t}</li> })
+                                                        .collect_view()}
+                                                </ul>
+                                            }
+                                                .into_any()
+                                        }
+                                    }
+                                }}
+                            </dd>
+                        </dl>
                         <Body1>{review_line}</Body1>
+                        {move || {
+                            strip_warning()
+                                .map(|w| {
+                                    view! {
+                                        <Callout tone="warn">
+                                            <Body1>{w}</Body1>
+                                        </Callout>
+                                    }
+                                })
+                        }}
                         {move || {
                             needs_consent
                                 .get()
                                 .then(|| {
+                                    // An org-wide apply fails on the Graph WRITE
+                                    // scopes, not on a mechanism's admin scope —
+                                    // the same distinction `consent_and_retry`
+                                    // now keys on, said out loud.
+                                    let what = if scope_mode.get() == ScopeMode::OrgWide {
+                                        "Granting these permissions needs an admin consent."
+                                    } else {
+                                        "Scoping needs an admin consent for this mechanism."
+                                    };
                                     view! {
                                         <Callout tone="warn">
-                                            "Scoping needs an admin consent for this mechanism."
+                                            {what}
                                             <Button
                                                 appearance=Signal::derive(|| ButtonAppearance::Primary)
                                                 on_click=Box::new(consent_and_retry)

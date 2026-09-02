@@ -4,6 +4,11 @@
 //! `shown_items` MUST be cleared here or a stale item leaks the previous
 //! tenant's data into the next tenant's workspace. `tenant_switch_resets_every_tenant_scoped_field`
 //! pins it.
+//!
+//! The parked-workspace restore that follows the clear is the same footgun read
+//! backwards, which is why its `localStorage` key carries the tenant id — an
+//! unkeyed snapshot would hand the arriving tenant the departing one's items.
+//! `restore_open_items_never_crosses_tenants` pins that.
 
 use super::*;
 
@@ -15,12 +20,22 @@ impl Session {
         // Clear the cross-entity working set — a previous tenant's open items are
         // stale and would leak its data into the next tenant's workspace (the
         // repo's #1 footgun). `open_seq` stays monotonic, like `toast_seq`.
+        //
+        // Deliberately the raw `set`, not `Session::update_open_items`: that one
+        // also writes the parked snapshot, and by this line `active_tenant` is
+        // already the NEW tenant — so persisting the clear would wipe the very
+        // working set the restore below is about to read back.
         self.open_items.set(Vec::new());
         self.shown_items.set(Vec::new());
         // Every lifted search/facet/selection/dialog signal resets structurally
         // — membership and sentinels live on `TenantScopedUi` itself.
         self.tenant_ui.reset();
         self.view.set(ActiveView::Home);
+        // Only now — after the unconditional clear — read back what THIS tenant
+        // parked. The snapshot is keyed by tenant id, so a restore can only ever
+        // return the arriving tenant's own items; signed out (`None`), it
+        // returns nothing at all.
+        self.restore_open_items();
     }
 
     /// Toggle an application object id in the bulk-selection set.

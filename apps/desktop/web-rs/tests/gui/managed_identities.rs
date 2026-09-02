@@ -29,6 +29,24 @@ async fn loads_and_renders_rows() {
     );
 }
 
+/// A11Y-02: the third virtualized inventory list gets the same roving-tabindex
+/// row navigation as the other two (wired once, in the shared `VirtualList`).
+#[wasm_bindgen_test]
+async fn arrow_keys_move_focus_between_rows() {
+    ts::reset();
+    ts::mock_ok(
+        "list_managed_identities",
+        &fixtures::managed_identities(&["mi-first", "mi-second"]),
+    );
+
+    let _m = ts::mount_view(|| view! { <ManagedIdentitiesView /> });
+    ts::wait_for(|| ts::query_all(".app-list__row[tabindex='0']").len() == 1).await;
+
+    ts::focus(".app-list__row");
+    ts::press_key(".app-list__row", "ArrowDown");
+    assert!(ts::text(".app-list__row[tabindex='0']").contains("mi-second"));
+}
+
 #[wasm_bindgen_test]
 async fn error_state_renders_message() {
     ts::reset();

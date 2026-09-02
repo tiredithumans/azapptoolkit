@@ -147,7 +147,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                     // both sibling lists did.
                     <ListScaffold
                         search=raw_search
-                        search_placeholder="Filter Managed Identities…"
+                        search_placeholder="Filter Managed Identities by name or appId…"
                         saved_view_key="mi"
                         facet=mi_filter
                         filters_open=filters_open
@@ -227,8 +227,11 @@ fn LoadedManagedIdentities(
     let list = use_filtered_list(FilteredListSpec {
         items: list,
         search,
+        // Name OR appId, like the two sibling lists — a managed identity is
+        // just as likely to arrive from a log line as from a name.
         search_match: |mi: &ManagedIdentityDto, needle: &str| {
             contains_ignore_case(&mi.display_name, needle)
+                || contains_ignore_case(&mi.app_id, needle)
         },
         // No date range or other extra filter on this list — search only.
         extra_active: Signal::derive(|| false),
@@ -304,6 +307,7 @@ fn LoadedManagedIdentities(
                 overscan=OVERSCAN
                 scroller_class="app-list__scroller"
                 sizer_class="app-list__sizer"
+                row_selector=".app-list__row"
                 key=|mi: &ManagedIdentityDto| mi.id.clone()
                 render_row=move |idx, mi| { render_row(idx, mi).into_any() }
             />

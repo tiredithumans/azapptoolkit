@@ -12,6 +12,16 @@ scopes are consented **incrementally** on first write — a browse-only session 
 mutate-capable token. Error codes distinguish failure modes (`not_signed_in`, `keyring`,
 `token_exchange`, `network`, `authorization`, `consent_required`).
 
+**Launch restore.** The keyring entry is keyed `{tenant}:{oid}`, and the oid used to live only in
+memory — so nothing could read the refresh token back at startup, and every launch showed the
+sign-in card and a `prompt=select_account` browser bounce. `UserSettings.last_account` now persists
+that pointer (object ids + UPN — identifiers, never the token), and the `restore_session` command
+redeems it for the sign-in read scopes through the ordinary silent-refresh path. It is guarded on
+the *configured* tenant: an account remembered under a different directory is refused rather than
+used to address someone else's keyring entry. Every empty case — nothing stored, signed out, tenant
+repointed, token revoked, keyring locked — returns `Ok(None)`, not an error, and lands on the normal
+sign-in card; a failed attempt removes the context again so it can never leave a half-live session.
+
 **Keyring chunking (Windows footgun).** Refresh tokens are chunked across numbered keyring entries
 (`{tenant}:{oid}`, `{tenant}:{oid}#1`, …) in `token_cache.rs` because Windows Credential Manager
 caps a blob at 2560 UTF-16 bytes and Entra tokens exceed that — don't collapse them back to a
@@ -59,6 +69,15 @@ To actually acquire consent, call `EntraAuthService::consent_for_scopes` — an 
 that seeds the token cache so the next silent acquisition succeeds. The UI reaches it through the
 `request_scope_consent(tenant_id, feature)` command (feature → scopes via
 `AppState::consent_scopes_for`).
+
+**The front-end has one shared fallback.** `Session::report_consent_required` is the consent twin of
+`report_if_session_dead`: any command failing `consent_required` raises a toast offering the grant,
+so a missing consent is recoverable even where no bespoke button exists. `CommandState` carries the
+scope set to offer as `consent_feature`, defaulting to `"write"` — the Graph write scopes, which are
+consented lazily on first write and which, before this, had no grant path anywhere in the UI. A
+component whose mutations ride an on-demand feature scope overrides it
+(`use_command().with_consent_feature("exchange")`); offering the wrong set is a real bug this repo
+has shipped, when the scope wizard offered the Exchange scopes for a failed org-wide Graph grant.
 
 **Pre-acquire typed tokens so `consent_required` survives to the UI.** The `BearerProvider`
 boundary flattens errors to `String`, so a command that wants the UI to show a "Grant consent"

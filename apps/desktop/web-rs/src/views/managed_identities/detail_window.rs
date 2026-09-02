@@ -146,6 +146,31 @@ pub fn ManagedIdentityDetailWindow(
         }
     });
 
+    // The dialog names the permission the operator clicked. The panel's revoke
+    // icon hands back only (assignment id, SP id), so resolve the row out of the
+    // held list the table is already rendering — same source, same fallback to
+    // the raw appRole id, so the subject matches the cell exactly.
+    let pending_revoke_label = Signal::derive(move || {
+        pending_revoke
+            .with(|p| {
+                p.as_ref().map(|(aid, _)| {
+                    permissions
+                        .with(|held| {
+                            held.as_ref()
+                                .and_then(|r| r.as_ref().ok())
+                                .and_then(|list| list.iter().find(|row| &row.assignment_id == aid))
+                                .map(|row| {
+                                    row.app_role_value
+                                        .clone()
+                                        .unwrap_or_else(|| row.app_role_id.clone())
+                                })
+                        })
+                        .unwrap_or_else(|| aid.clone())
+                })
+            })
+            .unwrap_or_default()
+    });
+
     let do_revoke = move |assignment_id: String, sp_id: String| {
         cmd.run(
             move |()| {
@@ -187,6 +212,7 @@ pub fn ManagedIdentityDetailWindow(
             open=Signal::derive(move || pending_revoke.with(|p| p.is_some()))
             title="Revoke permission?"
             body="Remove this managed identity's held app-role assignment. The identity loses that permission until it's granted again; the live grant is re-checked before removal."
+            subject=pending_revoke_label
             confirm_label="Revoke"
             busy=cmd.busy
             error=cmd.error

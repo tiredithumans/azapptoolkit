@@ -281,8 +281,15 @@ group or filter, prefer a structured flag on `AuditItem` over matching an adviso
 The Findings pane renders `groups::group_findings` — the `GROUP_CATALOG`, keyed by the **same**
 finding keys `filter::matches_finding` understands. Classification delegates to
 `matches_finding`, so each marker predicate lives exactly once. Actionable groups are ranked by
-impact (Σ `risk_score`); healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a
-collapsed disclosure.
+their own **worst severity**, then affected-principal count, then catalog order (the sort is stable);
+healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed disclosure.
+
+> Ranking used to be Σ `risk_score` over the group's members — each member's *total* score from every
+> rule, not what this rule contributed. Because the ownership rule carries no points of its own and
+> matches a large fraction of any tenant, "Missing or single owner" led a findings-first workbench
+> while a twelve-app Critical org-wide-mailbox group sat below the fold. If a group ever needs a
+> scalar "how much risk sits here" again, compute it at the call site: a field named `impact` that
+> nothing ranks by is what produced the bug.
 
 - **`expired` matches only `CredentialStatus::Expired`** — expiring-soon lives in the
   Credential-expiry lens, not this finding.

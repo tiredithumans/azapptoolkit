@@ -38,6 +38,14 @@
   --ok: #0f803c;
   --ok-soft: rgba(15, 128, 60, 0.12);
 
+  /* Foreground for text/glyphs painted ON a filled --danger or --accent
+     surface. These are tokens rather than a literal #fff because both
+     backgrounds INVERT between themes: in dark mode --danger is #ff6b70 and
+     --accent is #4cc2ff, against which white 11px text lands at ~2.8:1 and
+     ~2.0:1. Redefined in the dark block below. */
+  --on-danger: #ffffff;
+  --on-accent: #ffffff;
+
   /* ---- Spacing (4px grid) ---- */
   --space-1: 4px;
   --space-2: 8px;
@@ -129,6 +137,10 @@
     --warning-soft: rgba(240, 171, 70, 0.18);
     --ok: #4cd17e;
     --ok-soft: rgba(76, 209, 126, 0.18);
+    /* The filled danger/accent surfaces lightened above, so their foreground
+     * has to darken to stay legible (near-black clears AA on both). */
+    --on-danger: #1a1a1a;
+    --on-accent: #1a1a1a;
     --shadow-2: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-4: 0 2px 4px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.3);
     --shadow-8: 0 4px 8px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.3);
@@ -163,7 +175,9 @@ body {
 }
 
 /* Keyboard-focus ring (Fluent-style stacked outline) for interactive rows and
- * nav items. */
+ * nav items. A list row is reachable because `VirtualList` gives the rendered
+ * window a roving tabindex (`hooks::use_grid_keynav`) — until that landed this
+ * rule matched nothing, since a plain <div> takes no focus. */
 .app-list__row:focus-visible,
 .nav__item:focus-visible {
   outline: none;
@@ -411,7 +425,7 @@ h3 {
 .badge--critical {
   background: var(--danger);
   border-color: var(--danger);
-  color: #fff;
+  color: var(--on-danger);
 }
 .badge--warning {
   background: var(--warning-soft);
@@ -508,7 +522,7 @@ h3 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--on-accent);
   font-size: var(--text-sm);
   font-weight: 700;
   flex-shrink: 0;
@@ -978,6 +992,18 @@ h3 {
   min-height: 0;
   min-width: 0;
 }
+/* The pane is `tabindex="-1"` and takes focus when the workspace opens, so the
+ * operator's next Tab starts inside it instead of at the top of the shell.
+ * `:focus-visible` is what distinguishes the two openings: a keyboard open
+ * draws the ring (that IS the answer to "where did focus go?"), a pointer open
+ * draws nothing. Same stacked ring as every other focusable surface. */
+.workspace__pane:focus {
+  outline: none;
+}
+.workspace__pane:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
 .workspace__pane-bar {
   display: flex;
   align-items: center;
@@ -1194,15 +1220,64 @@ h3 {
   display: flex;
   width: 100%;
 }
+/* `.app-list__row-title` is the only flexible child, so everything after it in
+   `.row-meta` is pushed to the row's right edge — the credential badge and its
+   expiry included. The pairing arrow is NOT in this list: it is a sibling of
+   the row button (nesting a button inside a button spliced its label into the
+   row's accessible name), and it flex-shrinks with the row instead. */
 .app-list__row .row-meta > .badge,
-.app-list__row .row-meta > .pair-arrow,
-.app-list__row .row-meta > .type-chip {
+.app-list__row .row-meta > .app-list__row-expiry,
+.app-list__row .row-meta > .type-chip,
+.app-list__row > .pair-arrow {
   flex-shrink: 0;
 }
 .app-list__row-appid {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: var(--text-xs);
   color: var(--text-muted);
+}
+/* Relative expiry ("12d left" / "3 days ago") beside the credential badge. */
+.app-list__row-expiry {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+/* Column sort above the virtualized rows. Deliberately a strip of text buttons
+   rather than a `<select>`: the three columns and the active direction stay
+   readable at a glance, which is the whole reason an operator opens this list
+   sorted in the first place. */
+.app-list__sortbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
+}
+.app-list__sortbar-label {
+  color: var(--text-muted);
+  margin-right: var(--space-1);
+}
+.app-list__sort {
+  background: none;
+  border: none;
+  padding: 2px var(--space-2);
+  font: inherit;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.app-list__sort:hover {
+  background: var(--bg-subtle);
+  color: var(--text);
+}
+.app-list__sort--active {
+  color: var(--accent);
+  font-weight: 600;
+}
+.app-list__sort:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 .app-list__error {
   color: var(--danger);
@@ -1528,7 +1603,7 @@ h3 {
   padding: 0 var(--space-1);
   border-radius: var(--radius-pill);
   background: var(--accent, var(--danger));
-  color: #fff;
+  color: var(--on-accent);
   font-size: var(--text-xs);
 }
 .filter-toggle__chevron {
@@ -2515,6 +2590,20 @@ h3 {
   font-size: var(--text-caption);
   color: var(--text-muted);
 }
+/* "Go to" rows: the leading glyph stands in for the record rows' TypeChip, and
+   the hint names the surface that contains the destination ("Security",
+   "Resource Access"). Prose, not the appid's monospace — it is a place, not an
+   identifier. */
+.global-search__row-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+}
+.global-search__row-hint {
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
 .global-search__empty {
   padding: var(--space-3) var(--space-4);
   color: var(--text-muted);
@@ -2524,6 +2613,14 @@ h3 {
 /* ---------- Permissions tab (humanized) ---------- */
 .permissions-tab .data-table td.permission-cell {
   vertical-align: top;
+}
+/* "Test access…", under a scope badge that can't state its own reach. Its own
+   line so it never competes with the badge for the cell's width; `link-btn`
+   keeps it subordinate to the row's real actions (Scope…, Downgrade…, Revoke),
+   because this one only navigates. */
+.scope-cell__test-access {
+  display: block;
+  margin-top: var(--space-1);
 }
 .permissions-cell__primary {
   font-weight: 500;
@@ -3658,6 +3755,21 @@ h3 {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+
+  /* ...except the indicators that ARE the progress report. The blanket reset
+   * above froze every spinner and the skeleton shimmer, so on a managed or VDI
+   * desktop with animation effects off — this tool's usual environment — a
+   * multi-second Graph fan-out rendered a motionless arc that reads as a hung
+   * UI. A steady rotation/sweep is non-vestibular, which is precisely what
+   * WCAG 2.3.3 sets out to preserve; the flourishes stay disabled. */
+  .ui-skel,
+  [class*="thaw-spinner"],
+  [class*="thaw-spinner"]::before,
+  [class*="thaw-spinner"]::after,
+  [class*="thaw-progress"] [class*="indeterminate"] {
+    animation-duration: 1.4s !important;
+    animation-iteration-count: infinite !important;
+  }
 }
 
 /* ---------------- Permission tester ---------------- */
@@ -3783,21 +3895,38 @@ h3 {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+/* Worst-severity dot on a group header. Critical and High both painted
+   `var(--danger)`, so the dot resolved four tiers into three — and the two it
+   merged are exactly the pair an operator triages between. They now split the
+   way the row badges do (`.badge--critical` filled, the rest a soft fill inside
+   a full-strength ring), so a header and the rows it expands speak one severity
+   vocabulary. The word itself rides an `aria-label`/`title` on the span:
+   colour alone was the only carrier. */
 .finding-group__tone {
   width: 10px;
   height: 10px;
   border-radius: 50%;
   flex: none;
+  /* There is no global `* { box-sizing: border-box }` in this sheet, so the
+     ring below would otherwise grow the dot to 12px and shift every title. */
+  box-sizing: border-box;
+  border: 1px solid transparent;
 }
-.finding-group__tone--critical,
-.finding-group__tone--danger {
+.finding-group__tone--critical {
   background: var(--danger);
+  border-color: var(--danger);
+}
+.finding-group__tone--danger {
+  background: var(--danger-soft);
+  border-color: var(--danger);
 }
 .finding-group__tone--warning {
-  background: var(--warning);
+  background: var(--warning-soft);
+  border-color: var(--warning);
 }
 .finding-group__tone--ok {
-  background: var(--ok);
+  background: var(--ok-soft);
+  border-color: var(--ok);
 }
 .finding-group__title {
   font-weight: var(--weight-semibold);
@@ -3820,6 +3949,12 @@ h3 {
 }
 .finding-group__appid {
   font-size: var(--text-xs);
+}
+/* What this finding says about the row (its own matched issue lines). Capped so
+   one verbose permission list can't push Risk/Score/Actions off a narrow
+   window; the full text stays one "Open" away. */
+.finding-group__detail {
+  max-width: 44ch;
 }
 .finding-group--healthy .finding-group__title {
   font-weight: var(--weight-regular);
@@ -3925,6 +4060,15 @@ h3 {
   margin-top: var(--space-2);
   color: var(--text-muted);
   font-size: var(--text-sm);
+}
+/* Retry inside the "couldn't check readiness" callout. Sits on its own line
+   under the message so it reads as the next step rather than as part of the
+   sentence. Only that branch has one: re-running a check that never returned a
+   verdict is a different act from "Refresh token", which is how you re-check
+   after activating a PIM role. */
+.readiness__retry {
+  display: block;
+  margin-top: var(--space-2);
 }
 
 /* Proactive "Requires: <role>" advisory label (RequiresRole component). */
@@ -4099,13 +4243,13 @@ h3 {
   gap: var(--space-3);
   padding: var(--space-2) var(--space-4);
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-size: var(--text-sm);
   text-align: center;
   z-index: 11;
 }
 .demo-banner__link {
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 600;
   text-decoration: underline;
   white-space: nowrap;

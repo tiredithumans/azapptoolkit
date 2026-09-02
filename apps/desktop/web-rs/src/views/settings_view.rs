@@ -10,6 +10,13 @@
 //! Loads via a tenant-keyed resource, then mounts an editor seeded from the
 //! loaded values — so a tenant switch refetches and remounts a fresh editor
 //! rather than leaking the prior tenant's directory objects.
+//!
+//! The one exception is the **Tenant connection** tab, which edits the *app*-level
+//! client / tenant IDs (`settings.json`, not the per-tenant defaults) — the
+//! same form the first-run [`crate::views::config_screen::ConfigScreen`] shows.
+//! It lives here because Settings is where an operator looks for "what tenant
+//! am I pointed at", and because the sign-in card's AADSTS hints send them here
+//! by name.
 
 use std::collections::HashSet;
 
@@ -17,6 +24,7 @@ use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
 
+use crate::bindings::config;
 use crate::bindings::defaults::{
     self, AppRegistrationDefaults, EnterpriseApplicationDefaults, StoredPrincipal, TenantDefaults,
 };
@@ -25,6 +33,7 @@ use crate::components::owner_picker::OwnerPicker;
 use crate::components::ui::{Callout, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
 use crate::util::parse_lines;
+use crate::views::config_screen::AuthConfigForm;
 
 fn to_stored(o: &DirectoryObject) -> StoredPrincipal {
     StoredPrincipal {
@@ -108,10 +117,43 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
 
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
-    // Which defaults group is showing. All editor signals live in this scope (not
-    // the tab subtree), so switching tabs never drops in-progress edits, and the
-    // single "Save defaults" button persists every tab's fields at once.
-    let active_tab = RwSignal::new("app-reg".to_string());
+    // Which group is showing. On the session (not a local signal) so
+    // `Session::open_settings(tab)` lands on the named tab — the callouts that
+    // say "set them in Settings" and the sign-in hints that name "Settings →
+    // Tenant connection" both deep-link through it. All editor signals live in
+    // this scope (not the tab subtree), so switching tabs never drops
+    // in-progress edits, and one "Save defaults" button persists every
+    // defaults tab's fields at once.
+    let active_tab = session.settings_tab;
+
+    // Tenant-connection tab: the app-level client / tenant IDs, held out here
+    // for the same reason as everything above — a tab switch must not discard a
+    // half-typed GUID. Read lazily on first open (below) rather than at mount,
+    // so the three defaults tabs cost no extra IPC.
+    let conn_client_id = RwSignal::new(String::new());
+    let conn_tenant_id = RwSignal::new(String::new());
+    let conn_loaded = RwSignal::new(false);
+    Effect::new(move |_| {
+        if active_tab.get() != "connection" || conn_loaded.get_untracked() {
+            return;
+        }
+        conn_loaded.set(true);
+        leptos::task::spawn_local(async move {
+            let current = config::get_auth_config().await;
+            // Seed only what is still untouched: the read is a fast in-memory
+            // IPC, but it must never overwrite an edit that beat it back.
+            conn_client_id.update(|v| {
+                if v.is_empty() {
+                    *v = current.client_id;
+                }
+            });
+            conn_tenant_id.update(|v| {
+                if v.is_empty() {
+                    *v = current.tenant_id;
+                }
+            });
+        });
+    });
 
     let app_exclude = Signal::derive(move || {
         app_owners
@@ -158,9 +200,12 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
         });
     });
 
-    let on_save = {
+    // A `Callback` (Copy), not a bare closure: the Save-defaults row is now
+    // rendered inside a reactive closure — which must be `Fn` — and a closure
+    // owning the tenant id string is only `FnOnce`.
+    let on_save = Callback::new({
         let tenant_id = tenant_id.clone();
-        move |_| {
+        move |()| {
             if busy.get() {
                 return;
             }
@@ -199,7 +244,7 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                 busy.set(false);
             });
         }
-    };
+    });
 
     view! {
         <div class="settings-editor">
@@ -208,6 +253,7 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                     TabBarItem { value: "app-reg", label: "App Registration Defaults" },
                     TabBarItem { value: "enterprise", label: "Enterprise Application Defaults" },
                     TabBarItem { value: "naming", label: "Naming Defaults" },
+                    TabBarItem { value: "connection", label: "Tenant connection" },
                 ]
                 selected=active_tab
             />
@@ -281,6 +327,26 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                         }
                             .into_any()
                     }
+                    "connection" => {
+                        view! {
+                            <section class="settings-section">
+                                <h3>"Tenant connection"</h3>
+                                <Body1 class="hint">
+                                    "The Entra app registration azapptoolkit signs in through. Stored in \
+                                     settings.json; an AZAPPTOOLKIT_CLIENT_ID / AZAPPTOOLKIT_TENANT_ID \
+                                     environment variable still overrides it. Saving restarts the app and \
+                                     signs you out — a sign-in that keeps failing on a well-formed ID is \
+                                     usually a wrong one here."
+                                </Body1>
+                                <AuthConfigForm
+                                    client_id=conn_client_id
+                                    tenant_id=conn_tenant_id
+                                    confirm_restart=true
+                                />
+                            </section>
+                        }
+                            .into_any()
+                    }
                     // "app-reg" (default): app-registration default owners.
                     _ => {
                         view! {
@@ -297,25 +363,40 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                 }}
             </div>
 
+            // Both belong to the defaults editor, so neither follows the
+            // operator onto the connection tab: that tab saves through its own
+            // button, and two "Save" controls on one page is a trap — the wrong
+            // one silently does nothing you asked for.
             {move || {
-                error.get().map(|e| view! { <Callout tone="danger">{e}</Callout> })
-            }}
-            <div class="actions-row">
-                <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Primary)
-                    on_click=Box::new(on_save)
-                    disabled=Signal::derive(move || busy.get())
-                >
-                    {move || {
-                        if busy.get() {
-                            view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
-                                .into_any()
-                        } else {
-                            view! { "Save defaults" }.into_any()
+                (active_tab.get() != "connection")
+                    .then(|| {
+                        view! {
+                            {move || {
+                                error
+                                    .get()
+                                    .map(|e| view! { <Callout tone="danger">{e}</Callout> })
+                            }}
+                            <div class="actions-row">
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                    on_click=Box::new(move |_| on_save.run(()))
+                                    disabled=Signal::derive(move || busy.get())
+                                >
+                                    {move || {
+                                        if busy.get() {
+                                            view! {
+                                                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                            }
+                                                .into_any()
+                                        } else {
+                                            view! { "Save defaults" }.into_any()
+                                        }
+                                    }}
+                                </Button>
+                            </div>
                         }
-                    }}
-                </Button>
-            </div>
+                    })
+            }}
         </div>
     }
 }

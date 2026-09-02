@@ -267,6 +267,12 @@ pub fn ApplicationDetailPane(
                                         open=Signal::derive(move || delete_open.get())
                                         title="Delete this app registration?"
                                         body="This removes the application. Permission grants on the service principal are revoked; any credentials become invalid immediately. Deletion can be undone from the Entra admin center within 30 days."
+                                        // Several app windows can be open at once and the
+                                        // modal covers all of them, so it names the app it
+                                        // will delete instead of relying on the header it
+                                        // is sitting on top of.
+                                        subject=Signal::derive(move || detail_signal
+                                            .with(|d| d.application.display_name.clone()))
                                         confirm_label="Delete"
                                         busy=Signal::derive(move || delete_cmd.busy.get())
                                         error=Signal::derive(move || delete_cmd.error.get())

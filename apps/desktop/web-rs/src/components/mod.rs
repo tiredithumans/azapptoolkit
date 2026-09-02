@@ -41,6 +41,7 @@ pub mod sharepoint_sites_section;
 pub mod shortcuts_help;
 pub mod site_selection_panel;
 pub mod sso_summary;
+pub mod tenant_defaults_hint;
 pub mod toast;
 pub mod type_chip;
 pub mod ui;

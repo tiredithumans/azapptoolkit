@@ -7,12 +7,18 @@
 //! makes the assertion true — focus the dialog on open, cycle Tab within it,
 //! and restore focus to the trigger on close. Pairs with [`super::use_escape`]
 //! (close-on-Escape) to complete the modal contract.
+//!
+//! The record-and-restore half lives in [`super::use_focus_return`], because
+//! the open-items workspace needs it without the trap; this hook is that hook
+//! plus Tab cycling.
 
 use leptos::ev;
 use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{Element, HtmlElement};
+
+use super::use_focus_return::use_focus_return;
 
 /// Tab-reachable elements, in DOM order. Excludes `tabindex="-1"` (programmatic
 /// focus only — e.g. the search-clear ×) and disabled controls.
@@ -46,48 +52,18 @@ fn is_active(el: &HtmlElement) -> bool {
 /// container ref is read reactively, so the focus-in still fires if the dialog
 /// mounts a tick after `active` flips (the `<Show>` case).
 pub fn use_focus_trap(container: NodeRef<html::Div>, active: Signal<bool>) {
-    // The element focused before the dialog opened, to restore on close. Not
-    // Send/Sync, so local storage.
-    let prev = StoredValue::new_local(None::<HtmlElement>);
-    // Latches the per-open focus-in so re-runs (e.g. the ref resolving) don't
-    // re-grab focus mid-interaction.
-    let grabbed = StoredValue::new(false);
-
-    Effect::new(move |_| {
-        let now = active.get();
-        let node = container.get();
-        if now {
-            if let Some(c) = node
-                && !grabbed.get_value()
-            {
-                prev.set_value(
-                    document()
-                        .active_element()
-                        .and_then(|e| e.dyn_into::<HtmlElement>().ok()),
-                );
-                if let Some(first) = focusable_in(&c).first() {
-                    let _ = first.focus();
-                }
-                grabbed.set_value(true);
-            }
-        } else if grabbed.get_value() {
-            if let Some(el) = prev.get_value() {
-                let _ = el.focus();
-            }
-            prev.set_value(None);
-            grabbed.set_value(false);
+    // Record-and-restore is the shared half (see the module doc). Reading the
+    // container ref inside the closure is what drives the retry when the dialog
+    // mounts a tick after `active` flips; a dialog with no focusable control at
+    // all still counts as placed, so closing it still restores the trigger.
+    use_focus_return(active, move || {
+        let Some(c) = container.get() else {
+            return false;
+        };
+        if let Some(first) = focusable_in(&c).first() {
+            let _ = first.focus();
         }
-    });
-
-    // Restore focus if the dialog is torn down while still open — covers the
-    // dialogs that are mounted only while visible (so `active` never flips to
-    // false). `try_*` since the StoredValues may already be disposing.
-    on_cleanup(move || {
-        if grabbed.try_get_value().unwrap_or(false)
-            && let Some(el) = prev.try_get_value().flatten()
-        {
-            let _ = el.focus();
-        }
+        true
     });
 
     let handle = window_event_listener(ev::keydown, move |ev| {

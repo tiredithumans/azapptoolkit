@@ -4,6 +4,8 @@
 //! the reverse). Mirrors the Sites panel; the plane is ARM, so consent uses the
 //! `arm` feature and rows come from role assignments rather than site grants.
 
+use std::sync::Arc;
+
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, ProgressBar};
 
@@ -13,11 +15,13 @@ use crate::bindings::keyvault_rbac::{
     self, KeyVaultAccessRow, KeyVaultSweepProgress, KeyVaultSweepResult,
 };
 use crate::bindings::sharepoint;
+use crate::components::export_menu::ExportMenu;
 use crate::components::ui::SearchInput;
 use crate::components::ui::{Badge, Callout, ShowMore};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
+use crate::hooks::use_list_export::use_list_export;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
 
@@ -141,6 +145,22 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
         })
     });
 
+    // "Who can read this vault?" is an answer an operator gets asked to produce
+    // in writing; before this the only way out of the app was a screenshot.
+    // Reuses the inventory lists' export handle, and ships the SUMMARY with the
+    // rows — a vault whose role read failed contributes none, so a file without
+    // "(N failed — coverage is partial)" would overstate what was checked.
+    let (export_rows, exporting, do_export) = use_list_export(
+        move |rows: Arc<Vec<KeyVaultAccessRow>>, format| async move {
+            let coverage = summary.get_untracked().unwrap_or_default();
+            keyvault_rbac::save_key_vault_access_to_file(&rows, &coverage, format).await
+        },
+        "role assignments",
+    );
+    // Keep the export snapshot in step with what's rendered — what you see is
+    // what you export, filter included.
+    Effect::new(move |_| export_rows.set_value(Arc::new(filtered_rows.get())));
+
     use_progress_stream(progress, events::keyvault_sweep_progress);
 
     // Hydrate from the backend cache on tenant change, guarding the async write
@@ -255,6 +275,13 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
             <div class="page__search">
                 <SearchInput value=search placeholder="Filter by vault, principal, or role…" />
             </div>
+            <ExportMenu
+                disabled=Signal::derive(move || {
+                    exporting.get() || filtered_rows.with(Vec::is_empty)
+                })
+                on_select=Callback::new(do_export)
+                options=vec![("csv", "Export as CSV…"), ("json", "Export as JSON…")]
+            />
         </div>
         {move || {
             progress

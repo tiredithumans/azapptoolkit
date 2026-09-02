@@ -13,7 +13,14 @@ pub fn run() {
 
     let app_state = state::AppState::new();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // macOS only: Windows and Linux get no menu bar at all (Tauri installs a
+    // default one only there), and adding one would grow chrome that has never
+    // been part of this app.
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(macos_menu);
+
+    builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .setup(|_app| {
@@ -36,6 +43,7 @@ pub fn run() {
             commands::updater::check_for_update,
             commands::updater::perform_update,
             commands::auth::sign_in,
+            commands::auth::restore_session,
             commands::auth::sign_out,
             commands::auth::refresh_session,
             commands::auth::reauthenticate,
@@ -201,20 +209,115 @@ pub fn run() {
             commands::sharepoint::cancel_resource_sweep,
             commands::sharepoint::get_cached_site_sweep,
             commands::sharepoint::get_app_site_access,
+            commands::sharepoint::save_site_access_to_file,
             commands::sharepoint::resolve_sharepoint_resource,
             commands::sharepoint::grant_selected_item_access,
             commands::sharepoint::list_selected_item_permissions,
             commands::sharepoint::remove_selected_item_permission,
             commands::keyvault_rbac::sweep_key_vault_access,
             commands::keyvault_rbac::get_cached_key_vault_access,
+            commands::keyvault_rbac::save_key_vault_access_to_file,
             commands::permission_tester::test_mailbox_access,
             commands::permission_tester::find_mailbox_reachers,
+            commands::permission_tester::save_mailbox_reachers_to_file,
             commands::usage::get_app_graph_usage,
             commands::permission_tester::test_site_access,
             commands::readiness::check_readiness,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// The macOS menu bar, built explicitly so that **Cmd-W is not a menu key
+/// equivalent**.
+///
+/// With no menu configured, Tauri installs `Menu::default`, whose File and
+/// Window submenus both carry Close Window on Cmd-W. AppKit routes a menu key
+/// equivalent through NSMenu before the key event ever reaches WKWebView, so
+/// the front end's Cmd-W binding — "close the focused open item", not the
+/// window — was unreachable on macOS, and one keystroke dropped the whole
+/// working set, the audit run and any in-flight dialog. This menu simply has no
+/// Close Window item, so the accelerator falls through to the webview and
+/// `hooks::use_shortcuts` handles it. (The red traffic light and Cmd-Q are
+/// untouched; closing the window was never a keyboard-only route.)
+///
+/// `enable_macos_default_menu(false)` alone would NOT do: WKWebView takes
+/// Cmd-C/V/X/A from the Edit menu's key equivalents, so dropping the menu
+/// entirely breaks the clipboard app-wide. The App and Edit submenus are
+/// therefore reproduced verbatim from `Menu::default`, and the Window/Help
+/// submenus keep Tauri's well-known ids so AppKit still fills in the window
+/// list and the Help search field.
+#[cfg(target_os = "macos")]
+fn macos_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{
+        AboutMetadata, HELP_SUBMENU_ID, Menu, PredefinedMenuItem, Submenu, WINDOW_SUBMENU_ID,
+    };
+
+    let pkg = app.package_info();
+    let config = app.config();
+    let about = AboutMetadata {
+        name: Some(pkg.name.clone()),
+        version: Some(pkg.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        ..Default::default()
+    };
+
+    Menu::with_items(
+        app,
+        &[
+            &Submenu::with_items(
+                app,
+                pkg.name.clone(),
+                true,
+                &[
+                    &PredefinedMenuItem::about(app, None, Some(about))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::services(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::hide(app, None)?,
+                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::quit(app, None)?,
+                ],
+            )?,
+            // Load-bearing, not decoration — see the doc above: without these
+            // key equivalents the webview has no clipboard.
+            &Submenu::with_items(
+                app,
+                "Edit",
+                true,
+                &[
+                    &PredefinedMenuItem::undo(app, None)?,
+                    &PredefinedMenuItem::redo(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::cut(app, None)?,
+                    &PredefinedMenuItem::copy(app, None)?,
+                    &PredefinedMenuItem::paste(app, None)?,
+                    &PredefinedMenuItem::select_all(app, None)?,
+                ],
+            )?,
+            &Submenu::with_items(
+                app,
+                "View",
+                true,
+                &[&PredefinedMenuItem::fullscreen(app, None)?],
+            )?,
+            // Tauri's default Window submenu minus Close Window; the File
+            // submenu held nothing else on macOS, so it is gone entirely.
+            &Submenu::with_id_and_items(
+                app,
+                WINDOW_SUBMENU_ID,
+                "Window",
+                true,
+                &[
+                    &PredefinedMenuItem::minimize(app, None)?,
+                    &PredefinedMenuItem::maximize(app, None)?,
+                ],
+            )?,
+            &Submenu::with_id_and_items(app, HELP_SUBMENU_ID, "Help", true, &[])?,
+        ],
+    )
 }
 
 /// RAII guards for the rolling file appender — returned so the caller can

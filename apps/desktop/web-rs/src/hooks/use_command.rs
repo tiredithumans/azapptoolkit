@@ -24,6 +24,9 @@ pub struct CommandState {
     pub busy: RwSignal<bool>,
     /// Message from the last failed command, if any.
     pub error: RwSignal<Option<String>>,
+    /// Which scope set to offer consent for when a command fails with
+    /// `consent_required` — see [`with_consent_feature`](Self::with_consent_feature).
+    pub consent_feature: &'static str,
     session: Session,
 }
 
@@ -73,6 +76,12 @@ impl CommandState {
 
     /// Run a mutating command, storing any error message in `error` (cleared at
     /// start). On `Ok` runs `on_ok(value)`. The common case.
+    ///
+    /// A missing admin consent additionally raises the shared sink's "Grant
+    /// consent" toast: it is the one failure the inline message can never
+    /// resolve — the scope exists only after an interactive round trip — so
+    /// leaving it as `error` text alone is a dead end, which is exactly what
+    /// every write-scope failure used to be.
     pub fn run<T, Fut>(
         &self,
         on_ok: impl FnOnce(T) + 'static,
@@ -82,8 +91,17 @@ impl CommandState {
         T: 'static,
     {
         let error = self.error;
+        let session = self.session;
+        let feature = self.consent_feature;
         error.set(None);
-        self.run_with(on_ok, move |e| error.set(Some(e.message)), op);
+        self.run_with(
+            on_ok,
+            move |e| {
+                session.report_consent_required(&e, feature);
+                error.set(Some(e.message));
+            },
+            op,
+        );
     }
 
     /// Like [`run`](Self::run) but reports failures via a `toast_error` instead
@@ -98,16 +116,34 @@ impl CommandState {
         T: 'static,
     {
         let session = self.session;
+        let feature = self.consent_feature;
         self.run_with(
             on_ok,
             move |e| {
-                // Routes through `report_command_error` so a dead session
+                // Routes through the central sink so a dead session
                 // (`refresh_missing` / `not_signed_in`) gets a "Re-authenticate"
-                // action instead of a dead-end error toast.
-                session.report_command_error(&e);
+                // action and a missing admin consent a "Grant consent" one,
+                // instead of a dead-end error toast.
+                session.report_command_error_for(&e, feature);
             },
             op,
         );
+    }
+
+    /// Point this handle's consent recovery at a feature other than the Graph
+    /// write scopes — `"exchange"`, `"sharepoint"`, `"arm"`, … (the keys the
+    /// backend's `AppState::consent_scopes_for` accepts).
+    ///
+    /// Nothing in a `consent_required` error says which scope set was missing,
+    /// so a component whose commands ride an on-demand scope must declare it;
+    /// otherwise the offered grant consents scopes that cannot fix the failure
+    /// the operator just saw. (That mis-mapping is a real bug this repo has
+    /// shipped once: the scope wizard consented Exchange for an org-wide Graph
+    /// grant.)
+    #[must_use]
+    pub fn with_consent_feature(mut self, feature: &'static str) -> Self {
+        self.consent_feature = feature;
+        self
     }
 }
 
@@ -118,6 +154,11 @@ pub fn use_command() -> CommandState {
     CommandState {
         busy: RwSignal::new(false),
         error: RwSignal::new(None),
+        // Graph write scopes: what every mutating command needs, consented
+        // lazily on the first write, and — unlike the on-demand feature scopes
+        // — never offered a grant path anywhere in the UI. Override per
+        // component with `with_consent_feature`.
+        consent_feature: "write",
         session: use_session(),
     }
 }
@@ -136,6 +177,23 @@ mod tests {
             let cmd = use_command();
             assert!(!cmd.busy.get_untracked());
             assert!(cmd.error.with_untracked(|e| e.is_none()));
+        });
+    }
+
+    #[test]
+    fn the_consent_recovery_defaults_to_the_graph_write_scopes() {
+        // The default is load-bearing: a mutation that fails on the lazily
+        // consented write scopes is the case no per-feature consent button
+        // covers, so it is the one the shared sink must get right unaided.
+        Owner::new().with(|| {
+            provide_session();
+            assert_eq!(use_command().consent_feature, "write");
+            assert_eq!(
+                use_command()
+                    .with_consent_feature("exchange")
+                    .consent_feature,
+                "exchange"
+            );
         });
     }
 }

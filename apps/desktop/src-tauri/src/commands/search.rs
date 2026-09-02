@@ -8,12 +8,19 @@
 //! cached app-registration and service-principal indexes — the same cached
 //! enumerations the App Registrations / Enterprise Apps lists populate, so a
 //! warm tenant filters instantly.
+//!
+//! Both caps this path is subject to are reported, never just applied: the
+//! per-kind display cap through the `*_total` counts and the corpus's inherited
+//! service-principal index cap through `corpus_truncated`. This is the fastest
+//! input in the app, and an operator treats its silence as an answer — so a
+//! result set that quietly omits rows is the one failure mode it cannot have.
 
 use std::sync::Arc;
 
 use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_core::models::{Application, ServicePrincipal};
 use azapptoolkit_graph::GraphClient;
+use azapptoolkit_graph::client::SP_INDEX_MAX;
 use tauri::State;
 
 use crate::commands::applications::search_corpus_key;
@@ -24,6 +31,10 @@ use crate::state::AppState;
 
 /// Per-kind cap on rows returned to the dropdown. Keeps the response small
 /// and the UI predictable.
+///
+/// The cap is fine; hiding it was not. Every bucket also reports its **pre-cap**
+/// match count (`*_total` on [`GlobalSearchResults`]) so the dropdown can say
+/// "10 of 47" instead of presenting a truncated set as the whole answer.
 const SEARCH_TOP: u32 = 10;
 
 /// Which result bucket a corpus row belongs to.
@@ -47,6 +58,21 @@ struct SearchRow {
     app_id_lc: String,
     id_lc: String,
     kind: SearchKind,
+}
+
+/// The tenant's search corpus: the pre-lowercased rows plus what the snapshot
+/// could NOT see.
+///
+/// `sp_index_truncated` is the same signal `IndexCapNotice` renders on the three
+/// inventory lists (`sps.len() >= SP_INDEX_MAX`), carried here rather than
+/// re-derived per query for two reasons: after the two halves are merged the
+/// rows are indistinguishable, so the count is unrecoverable; and re-asking the
+/// index would put a second tenant-wide read back on the debounced keystroke
+/// path this whole cache exists to keep clear. It is a property of the snapshot,
+/// so it is cached with the snapshot.
+struct SearchCorpus {
+    rows: Vec<SearchRow>,
+    sp_index_truncated: bool,
 }
 
 /// One half of the corpus, degrading a failed index read to no rows for that
@@ -83,11 +109,11 @@ async fn search_corpus(
     state: &AppState,
     client: &GraphClient,
     tenant_id: &str,
-) -> Arc<Vec<SearchRow>> {
+) -> Arc<SearchCorpus> {
     let corpus_key = search_corpus_key(tenant_id);
     if let Some(corpus) = state
         .cache
-        .get_typed::<Vec<SearchRow>>(CacheKind::Lists, &corpus_key)
+        .get_typed::<SearchCorpus>(CacheKind::Lists, &corpus_key)
     {
         return corpus;
     }
@@ -103,7 +129,7 @@ async fn search_corpus(
     // Re-check: the build we queued behind has already populated the cache.
     if let Some(corpus) = state
         .cache
-        .get_typed::<Vec<SearchRow>>(CacheKind::Lists, &corpus_key)
+        .get_typed::<SearchCorpus>(CacheKind::Lists, &corpus_key)
     {
         return corpus;
     }
@@ -162,7 +188,15 @@ async fn search_corpus(
             kind,
         });
     }
-    let corpus = Arc::new(rows);
+    // Recorded at build time, from the SP half's own length: the two indexes are
+    // bounded at `SP_INDEX_MAX`, and a tenant that hit it has enterprise apps and
+    // managed identities the corpus never saw. Without this the dropdown answers
+    // "No matches." for a principal that is genuinely present — the one lie this
+    // path must not tell, and the one the three inventory lists already refuse to.
+    let corpus = Arc::new(SearchCorpus {
+        rows,
+        sp_index_truncated: sps.len() >= SP_INDEX_MAX,
+    });
     // Pinned: rebuilding this corpus costs two full directory scans. Stored
     // only if this key was not invalidated since `watch` (see above) AND both
     // halves loaded — a partial corpus is served to this caller but never
@@ -244,6 +278,16 @@ pub async fn global_search(
         return Ok(GlobalSearchResults {
             query: trimmed,
             looked_up_as_guid: true,
+            // A GUID probe is four exact Graph lookups, not a corpus filter: it
+            // returns at most one hit per bucket, nothing is capped, and the
+            // index cap cannot hide the object from it (an exact read reaches a
+            // principal past the 10 000th just fine). So the totals are the
+            // bucket lengths and there is nothing to warn about.
+            app_registrations_total: app_registrations.len(),
+            enterprise_apps_total: enterprise_apps.len(),
+            managed_identities_total: managed_identities.len(),
+            corpus_truncated: false,
+            corpus_cap: SP_INDEX_MAX,
             app_registrations,
             enterprise_apps,
             managed_identities,
@@ -261,7 +305,7 @@ pub async fn global_search(
     let mut app_hits: Vec<(u8, &str, SearchHit)> = Vec::new();
     let mut ent_hits: Vec<(u8, &str, SearchHit)> = Vec::new();
     let mut mi_hits: Vec<(u8, &str, SearchHit)> = Vec::new();
-    for row in corpus.iter() {
+    for row in corpus.rows.iter() {
         let Some(r) = relevance(&needle, &row.name_lc, &row.app_id_lc, &row.id_lc) else {
             continue;
         };
@@ -278,12 +322,24 @@ pub async fn global_search(
         bucket.push((r, row.name_lc.as_str(), hit));
     }
 
+    // Counted BEFORE `finalize` truncates — that ordering is the whole point.
+    // Ten rows and a full stop is read as "there are ten"; ten rows under
+    // "10 of 47" is read as "narrow the query", which is the truth.
+    let app_total = app_hits.len();
+    let ent_total = ent_hits.len();
+    let mi_total = mi_hits.len();
+
     Ok(GlobalSearchResults {
         query: trimmed,
         looked_up_as_guid: false,
         app_registrations: finalize(&mut app_hits),
         enterprise_apps: finalize(&mut ent_hits),
         managed_identities: finalize(&mut mi_hits),
+        app_registrations_total: app_total,
+        enterprise_apps_total: ent_total,
+        managed_identities_total: mi_total,
+        corpus_truncated: corpus.sp_index_truncated,
+        corpus_cap: SP_INDEX_MAX,
     })
 }
 
@@ -354,7 +410,8 @@ fn relevance(needle: &str, name_lc: &str, app_id_lc: &str, id_lc: &str) -> Optio
 }
 
 /// Sorts ranked hits (rank, then lowercased display name) and keeps the best
-/// [`SEARCH_TOP`].
+/// [`SEARCH_TOP`]. The caller counts the bucket *before* calling this — the
+/// count is what the dropdown needs, and it is unrecoverable afterwards.
 fn finalize(hits: &mut [(u8, &str, SearchHit)]) -> Vec<SearchHit> {
     hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
     hits.iter()
@@ -443,6 +500,39 @@ mod tests {
         );
         assert_eq!(apps.len(), 1);
         assert_eq!(ents.len(), 1);
+    }
+
+    #[test]
+    fn finalize_caps_the_bucket_and_the_pre_cap_count_survives_it() {
+        // The honesty of the dropdown rests on this ordering: the total is taken
+        // from the bucket BEFORE `finalize` truncates it, because afterwards
+        // twenty-five matches and exactly ten are byte-identical. Ten rows and a
+        // full stop is how an operator concludes the eleventh app doesn't exist.
+        let names: Vec<String> = (0..25).map(|i| format!("svc-{i:02}")).collect();
+        let mut hits: Vec<(u8, &str, SearchHit)> = names
+            .iter()
+            .map(|n| {
+                (
+                    3u8,
+                    n.as_str(),
+                    SearchHit {
+                        id: n.clone(),
+                        app_id: None,
+                        display_name: n.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        let total = hits.len();
+        let shown = finalize(&mut hits);
+
+        assert_eq!(total, 25);
+        assert_eq!(shown.len(), SEARCH_TOP as usize);
+        assert!(total > shown.len(), "the group footer's condition");
+        // Same rank throughout, so the tie-break is the lowercased name.
+        assert_eq!(shown[0].display_name, "svc-00");
+        assert_eq!(shown[9].display_name, "svc-09");
     }
 
     #[test]

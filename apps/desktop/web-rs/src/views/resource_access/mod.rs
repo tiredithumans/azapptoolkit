@@ -10,7 +10,7 @@
 //!   Filtering by app answers "which sites can this app reach?" — the
 //!   `Sites.Selected` blind spot — and filtering by site answers "which apps
 //!   can touch this site?".
-//! - **Key Vault**: a tenant-wide sweep of every reachable vault's direct Azure
+//! - **Vault access**: a tenant-wide sweep of every reachable vault's direct Azure
 //!   RBAC role assignments (`sweep_key_vault_access`, progress-streamed,
 //!   backend-cached). Filtering by principal answers "which vaults can this app
 //!   / managed identity reach?" and filtering by vault answers "who can touch
@@ -23,6 +23,7 @@ use leptos::prelude::*;
 use thaw::Body1;
 
 use crate::components::ui::{SectionHeader, TabBar, TabBarItem};
+use crate::state::use_session;
 
 mod keyvault;
 mod mailboxes;
@@ -34,7 +35,11 @@ use sites::SitesPanel;
 
 #[component]
 pub fn ResourceAccessView() -> impl IntoView {
-    let tab = RwSignal::new(String::from("mailboxes"));
+    // Session-held rather than local: this view is keep-alive and its panels
+    // stay mounted across tab switches, so a local signal could never be
+    // addressed from outside — which is what Global Search's "Go to" group
+    // (and any future deep link) needs to land on a named plane.
+    let tab = use_session().resource_access_tab;
     view! {
         <div class="page">
             <SectionHeader title="Resource Access" />
@@ -45,7 +50,12 @@ pub fn ResourceAccessView() -> impl IntoView {
                 items=vec![
                     TabBarItem { value: "mailboxes", label: "Mailboxes" },
                     TabBarItem { value: "sites", label: "Sites" },
-                    TabBarItem { value: "keyvault", label: "Key Vault" },
+                    // "Vault access", not "Key Vault": the rail's Key Vault row
+                    // is the secret *browser*, a different destination
+                    // entirely, and two tabs sharing a name left the operator
+                    // no way to tell which one answers "who can reach this
+                    // vault?".
+                    TabBarItem { value: "keyvault", label: "Vault access" },
                 ]
                 selected=tab
             />

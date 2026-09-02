@@ -198,7 +198,8 @@ The Security tab is a findings-first workbench: one controller, one strip, four 
 - **Read-only posture strip** — it renders severity counts, never filter controls. Do not
   reintroduce a severity TabBar, finding-chip drawer, or clickable scorecard as filters, and no
   `SavedViews` on this view — filtering has exactly two homes (below).
-- **Sub-tabs** — `security_tab`: `"findings" | "apps" | "credentials" | "grants"`, keep-alive.
+- **Sub-tabs** — `security_tab`: `"findings" | "apps" | "credentials" | "sso-certificates" |
+  "grants" | "app-permissions"`, keep-alive.
   **Findings** (default) renders the grouped accordion; expansion state is
   `Session.tenant_ui.audit_expanded_group`. **All apps** is the ranked table with ONE severity
   control (`audit_severity`) + search (`filter_indices(items, severity, "all", query)`).

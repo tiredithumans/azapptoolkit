@@ -16,8 +16,11 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
     // Owned here (not by `DirectorySearch`) purely so the mutation handlers
     // can clear the box after a successful round trip.
     let raw_query = RwSignal::new(String::new());
-    let pending_remove: RwSignal<Option<String>> = RwSignal::new(None);
-    let pending_assign: RwSignal<Option<String>> = RwSignal::new(None);
+    // Both stage (id, name). The two dialogs are mounted once and cover the row
+    // or search hit they were opened from, so the name rides along purely to be
+    // the dialog's subject and is discarded there.
+    let pending_remove: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+    let pending_assign: RwSignal<Option<(String, String)>> = RwSignal::new(None);
     // Which directory object type the search targets ("users" or "groups").
     let principal_kind = RwSignal::new(String::from("users"));
 
@@ -147,6 +150,13 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                                             let role = resolve_role(&roles, &a.app_role_id);
                                             let aid_click = a.assignment_id.clone();
                                             let aid_busy = a.assignment_id.clone();
+                                            // The Principal cell, staged for the dialog's subject.
+                                            // A nameless assignment stages nothing rather than the
+                                            // "—" placeholder, which would name no one.
+                                            let principal_label = a
+                                                .principal_display_name
+                                                .clone()
+                                                .unwrap_or_default();
                                             view! {
                                                 <tr>
                                                     <td class="cell-mid">{principal}</td>
@@ -160,7 +170,10 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                                                                 busy.with(|b| b.as_deref() == Some(aid_busy.as_str()))
                                                             })
                                                             on_click=Box::new(move |_| {
-                                                                pending_remove.set(Some(aid_click.clone()))
+                                                                pending_remove
+                                                                    .set(
+                                                                        Some((aid_click.clone(), principal_label.clone())),
+                                                                    )
                                                             })
                                                         >
                                                             "Remove"
@@ -233,7 +246,16 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                         DirectoryScope::Users
                     }
                 })
-                on_pick=Callback::new(move |o: DirectoryObject| pending_assign.set(Some(o.id)))
+                on_pick=Callback::new(move |o: DirectoryObject| {
+                    // The results list is covered by the modal, so the picked
+                    // principal's name goes with the id to be its subject.
+                    let label = o
+                        .display_name
+                        .clone()
+                        .or_else(|| o.user_principal_name.clone())
+                        .unwrap_or_default();
+                    pending_assign.set(Some((o.id, label)));
+                })
                 query=raw_query
                 clear_on_pick=false
                 label="Search by name (2+ chars)"
@@ -249,10 +271,13 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                 open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
                 title="Remove this assignment?"
                 body="The principal loses access to this enterprise application. You can re-assign them later."
+                subject=Signal::derive(move || {
+                    pending_remove.with(|p| p.as_ref().map(|(_, name)| name.clone())).unwrap_or_default()
+                })
                 confirm_label="Remove"
                 busy=Signal::derive(move || busy.with(|b| b.is_some()))
                 on_confirm=Callback::new(move |()| {
-                    if let Some(id) = pending_remove.get() {
+                    if let Some((id, _)) = pending_remove.get() {
                         pending_remove.set(None);
                         remove(id);
                     }
@@ -263,10 +288,13 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                 open=Signal::derive(move || pending_assign.with(|p| p.is_some()))
                 title="Grant access?"
                 body="Assigns the selected principal to this enterprise application's chosen role. They gain access immediately."
+                subject=Signal::derive(move || {
+                    pending_assign.with(|p| p.as_ref().map(|(_, name)| name.clone())).unwrap_or_default()
+                })
                 confirm_label="Grant"
                 busy=Signal::derive(move || busy.with(|b| b.is_some()))
                 on_confirm=Callback::new(move |()| {
-                    if let Some(id) = pending_assign.get() {
+                    if let Some((id, _)) = pending_assign.get() {
                         pending_assign.set(None);
                         assign(id);
                     }
@@ -318,9 +346,10 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
     // a successful interactive grant so the user doesn't re-pick the group.
     let retry_op: RwSignal<Option<(bool, String)>> = RwSignal::new(None);
     let consenting = RwSignal::new(false);
-    // Group ids awaiting dialog confirmation.
-    let pending_add: RwSignal<Option<String>> = RwSignal::new(None);
-    let pending_remove: RwSignal<Option<String>> = RwSignal::new(None);
+    // Groups awaiting dialog confirmation, staged as (id, name): the id drives
+    // the mutation, the name is the dialog's subject and is discarded there.
+    let pending_add: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+    let pending_remove: RwSignal<Option<(String, String)>> = RwSignal::new(None);
 
     // Owned here (not by `DirectorySearch`) purely so the mutation handlers
     // can clear the box after a successful round trip.
@@ -436,6 +465,10 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                                         .iter()
                                         .any(|t| t == "DynamicMembership");
                                     let gid = g.id.clone();
+                                    // Two rows can differ only by group, and the
+                                    // modal covers them both — so the name goes
+                                    // with the id to be the dialog's subject.
+                                    let gname = g.display_name.clone();
                                     view! {
                                         <tr>
                                             // Two-line identity cell: stays top-aligned
@@ -456,7 +489,8 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                                 disabled=Signal::derive(move || busy.get())
                                                                 on_click=Box::new(move |_| {
-                                                                    pending_remove.set(Some(gid.clone()))
+                                                                    pending_remove
+                                                                        .set(Some((gid.clone(), gname.clone())))
                                                                 })
                                                             >
                                                                 "Remove"
@@ -488,7 +522,10 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
         // mutation, not by the pick.
         <DirectorySearch
             scope=Signal::derive(|| DirectoryScope::Groups)
-            on_pick=Callback::new(move |g: DirectoryObject| pending_add.set(Some(g.id)))
+            on_pick=Callback::new(move |g: DirectoryObject| {
+                let label = g.display_name.clone().unwrap_or_default();
+                pending_add.set(Some((g.id, label)));
+            })
             query=raw_query
             clear_on_pick=false
             label="Add to group (search by name, 2+ chars)"
@@ -531,10 +568,13 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
             open=Signal::derive(move || pending_add.with(|p| p.is_some()))
             title="Add to this group?"
             body="The service principal becomes a member immediately and gains whatever access the group is granted — including group-gated API settings (e.g. Power BI tenant settings scoped to the group)."
+            subject=Signal::derive(move || {
+                pending_add.with(|p| p.as_ref().map(|(_, name)| name.clone())).unwrap_or_default()
+            })
             confirm_label="Add"
             busy=Signal::derive(move || busy.get())
             on_confirm=Callback::new(move |()| {
-                if let Some(id) = pending_add.get() {
+                if let Some((id, _)) = pending_add.get() {
                     pending_add.set(None);
                     mutate(true, id);
                 }
@@ -545,10 +585,13 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
             open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
             title="Remove from this group?"
             body="The service principal loses any access granted via this group — for group-gated APIs (e.g. Power BI) that can break the integration immediately."
+            subject=Signal::derive(move || {
+                pending_remove.with(|p| p.as_ref().map(|(_, name)| name.clone())).unwrap_or_default()
+            })
             confirm_label="Remove"
             busy=Signal::derive(move || busy.get())
             on_confirm=Callback::new(move |()| {
-                if let Some(id) = pending_remove.get() {
+                if let Some((id, _)) = pending_remove.get() {
                     pending_remove.set(None);
                     mutate(false, id);
                 }

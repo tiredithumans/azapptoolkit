@@ -1,4 +1,5 @@
 use super::*;
+use crate::components::tenant_defaults_hint::OwnerDefaultsHint;
 use crate::components::ui::Callout;
 
 /// Owners tab — lists current owners and lets you add/remove them. Only **users**
@@ -20,7 +21,13 @@ pub(super) fn OwnersContent(
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let raw_query = RwSignal::new(String::new());
     let query = use_debounced(raw_query.into(), 300);
-    let pending_remove: RwSignal<Option<String>> = RwSignal::new(None);
+    // (owner id, name): one dialog covers a list of owners, so the row's name is
+    // staged with the id purely to be the dialog's subject, then discarded there.
+    let pending_remove: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+    // Distinct from `error`: this one is not a failure the operator can retry,
+    // it is a missing setting with a place to go, so it renders as a hint with
+    // the route in it rather than as dead red text (`OwnerDefaultsHint`).
+    let no_owner_defaults = RwSignal::new(false);
 
     let candidates = LocalResource::new(move || {
         let q = query.get();
@@ -91,6 +98,7 @@ pub(super) fn OwnersContent(
         }
         adding_defaults.set(true);
         error.set(None);
+        no_owner_defaults.set(false);
         let tenant_v = tenant.get();
         let sp = sp_id.get();
         let existing: std::collections::HashSet<String> =
@@ -103,9 +111,7 @@ pub(super) fn OwnersContent(
             let defaults = crate::bindings::defaults::get_tenant_defaults(&t.tenant_id).await;
             let owners = defaults.enterprise_application.default_owners;
             if owners.is_empty() {
-                error.set(Some(
-                    "No default owners configured — set them in Settings.".into(),
-                ));
+                no_owner_defaults.set(true);
                 adding_defaults.set(false);
                 return;
             }
@@ -169,6 +175,7 @@ pub(super) fn OwnersContent(
                                     .unwrap_or_else(|| o.id.clone());
                                 let id_click = o.id.clone();
                                 let id_busy = o.id.clone();
+                                let name_click = name.clone();
                                 view! {
                                     <li>
                                         <div>
@@ -182,7 +189,8 @@ pub(super) fn OwnersContent(
                                                 busy.with(|b| b.as_deref() == Some(id_busy.as_str()))
                                             })
                                             on_click=Box::new(move |_| {
-                                                pending_remove.set(Some(id_click.clone()))
+                                                pending_remove
+                                                    .set(Some((id_click.clone(), name_click.clone())))
                                             })
                                         >
                                             "Remove"
@@ -297,14 +305,20 @@ pub(super) fn OwnersContent(
                     .into_any()
             }}
             {move || error.get().map(|e| view! { <Body1 class="app-detail__error">{e}</Body1> })}
+            <Show when=move || no_owner_defaults.get() fallback=|| ()>
+                <OwnerDefaultsHint class="app-detail__error" tab="enterprise" />
+            </Show>
             <ConfirmDialog
                 open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
                 title="Remove this owner?"
                 body="The owner loses the ability to manage this enterprise application. You can re-add them later."
+                subject=Signal::derive(move || {
+                    pending_remove.with(|p| p.as_ref().map(|(_, name)| name.clone())).unwrap_or_default()
+                })
                 confirm_label="Remove"
                 busy=Signal::derive(move || busy.with(|b| b.is_some()))
                 on_confirm=Callback::new(move |()| {
-                    if let Some(id) = pending_remove.get() {
+                    if let Some((id, _)) = pending_remove.get() {
                         pending_remove.set(None);
                         mutate(false, id);
                     }

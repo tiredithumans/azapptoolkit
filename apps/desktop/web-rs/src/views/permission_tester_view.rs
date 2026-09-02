@@ -73,6 +73,36 @@ pub fn PermissionTesterView() -> impl IntoView {
         needs_consent.set(false);
     });
 
+    // A "Test access…" affordance beside a scope badge that can't state its own
+    // reach seeds `tester_app_id` and navigates here; this consumes it. The
+    // picker searches by *name* but tests by appId, so the seed fills both: the
+    // appId the checks actually use, and the field text, which would otherwise
+    // read empty over a live selection.
+    //
+    // An Effect rather than a read at mount because this view is keep-alive —
+    // after its first visit it never mounts again, and a mount-time read would
+    // make the affordance work exactly once per session (the same reason the
+    // audit controller consumes `pending_audit_run` this way). Clearing the
+    // signal *before* writing is what makes it one-shot: this effect also sees
+    // the signals it sets, and every re-run then finds `None` and does nothing,
+    // so returning here later can't clobber a manual edit.
+    //
+    // Declared after the tenant reset above so it wins on a first mount, where
+    // both run: a seed that arrived with the navigation must not be erased by
+    // the reset that same tick.
+    Effect::new(move |_| {
+        if let Some(seed) = session.tenant_ui.tester_app_id.get() {
+            session.tenant_ui.tester_app_id.set(None);
+            app_query.set(seed.clone());
+            app_id.set(seed);
+            // The seed is an exact appId, not a search: don't drop the operator
+            // into a typeahead dropdown they have to dismiss.
+            app_focused.set(false);
+            result.set(None);
+            error.set(None);
+        }
+    });
+
     // Server-side identity search (debounced) — reuses the global search so the
     // picker spans app registrations, enterprise apps, and managed identities
     // (all three are service principals testable by appId). Returns

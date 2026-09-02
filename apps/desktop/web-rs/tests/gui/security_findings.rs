@@ -1,10 +1,10 @@
-//! GUI tests for the findings-first Security workbench: impact ranking, the
-//! Fix-all eligibility rule, the group↔bulk-action pairing (the retired
-//! over-privileged→remove-redundant mismatch), the per-row fix↔section pairing
-//! (a section offers its own rule's Fix only, deep-links "Open" to its own
-//! tab, and applying one fix leaves the others standing), the add-owner /
-//! disable-sign-in bulk flows, and the Home-drill routing (severity → All apps
-//! pane, finding → expanded group).
+//! GUI tests for the findings-first Security workbench: the worst-severity
+//! ranking, the per-finding row Detail column, the Fix-all eligibility rule,
+//! the group↔bulk-action pairing (the retired over-privileged→remove-redundant
+//! mismatch), the per-row fix↔section pairing (a section offers its own rule's
+//! Fix only, deep-links "Open" to its own tab, and applying one fix leaves the
+//! others standing), the add-owner / disable-sign-in bulk flows, and the
+//! Home-drill routing (severity → All apps pane, finding → expanded group).
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
@@ -111,6 +111,7 @@ fn cached_run() -> AuditRunResult {
         sign_in_consent_required: false,
         truncated: false,
         degraded: Vec::new(),
+        completed_at: None,
     }
 }
 
@@ -174,8 +175,13 @@ fn click_panel_button(label: &str) {
     panic!("no armed-panel button labelled `{label}`");
 }
 
+/// Groups rank by their OWN worst severity, then by how many principals they
+/// affect, then by catalog order — never by Σ `risk_score` over their members,
+/// which is every rule's score, not this one's. Ownership contributes no points
+/// at all yet used to lead the workbench because unowned apps also hold risky
+/// permissions and the rule matches a large slice of any tenant.
 #[wasm_bindgen_test]
-async fn groups_rank_by_impact_with_counts() {
+async fn groups_rank_by_worst_severity_then_count() {
     let _m = mount_security().await;
     let titles: Vec<String> = ts::query_all(".finding-group__title")
         .iter()
@@ -187,15 +193,99 @@ async fn groups_rank_by_impact_with_counts() {
             .position(|x| x == t)
             .unwrap_or_else(|| panic!("group {t:?} not rendered: {titles:?}"))
     };
-    // Ownership (impact 35) outranks expired (8), which outranks unused (2).
+    // Ownership's worst is Critical, so it leads — as it did before, but now
+    // for the right reason.
     assert!(pos("Missing or single owner") < pos("Expired credentials"));
-    assert!(pos("Expired credentials") < pos("Unused applications"));
+    // The pin that flips: expired's worst is Medium against org-wide mailbox's
+    // Low, even though the mailbox group's two members outscore expired's.
+    assert!(
+        pos("Expired credentials") < pos("Org-wide mailbox access"),
+        "worst severity outranks the members' score sum: {titles:?}"
+    );
+    // Equal (Low) severity → the broader group first: 2 principals beats 1.
+    assert!(pos("Org-wide mailbox access") < pos("Unused applications"));
+    // Equal severity AND count → catalog order, which puts unused ahead of the
+    // advisory over-privileged group despite unused scoring lower.
+    assert!(
+        pos("Unused applications") < pos("High-risk application permissions"),
+        "catalog order is the final tie-break: {titles:?}"
+    );
     assert!(ts::body_contains("2 principals"), "ownership count renders");
+    // The severity tier is text, not colour alone — Critical and High resolve
+    // to the same red dot.
+    assert!(
+        ts::query("[aria-label='Worst: Critical']").is_some(),
+        "the worst-severity dot carries its tier as an accessible name"
+    );
     // The healthy section trails as a collapsed disclosure; expanding it
     // reveals the positive groups even at zero count.
     assert!(!ts::body_contains("Mailbox access scoped"));
     ts::click(".finding-group__header--section");
     ts::wait_for(|| ts::body_contains("Mailbox access scoped")).await;
+}
+
+/// A pane grouped BY finding has to say what the finding is: the row quotes the
+/// issue line(s) that put it in this group, and only those. Before this the
+/// grouped, remediation-focused pane showed strictly less finding detail than
+/// the ungrouped All-apps table beside it.
+#[wasm_bindgen_test]
+async fn group_rows_quote_their_own_findings_issue_line() {
+    let m = mount_security().await;
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("orgwide_mailbox".to_string()));
+    ts::wait_for(|| ts::query(".finding-group__detail").is_some()).await;
+    let details: Vec<String> = ts::query_all(".finding-group__detail")
+        .iter()
+        .map(|el| el.text_content().unwrap_or_default())
+        .collect();
+    assert!(
+        details.iter().any(|d| d.contains("Mail.Read")),
+        "the org-wide mailbox row names the permission that is org-wide: {details:?}"
+    );
+    assert!(
+        details.iter().any(|d| d.contains("Mail.ReadWrite")),
+        "…for the SP-only row too: {details:?}"
+    );
+
+    // A row listed under several groups quotes the line for the group it is
+    // being shown in: the Legacy Policy App is in this section AND in Expired
+    // credentials, and the cell must speak for this one.
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("legacy_mailbox_scope".to_string()));
+    ts::wait_for(|| {
+        ts::query(".finding-group__detail")
+            .and_then(|el| el.text_content())
+            .is_some_and(|t| t.contains("legacy Application Access Policy"))
+    })
+    .await;
+
+    // Last sign-in is the unused rule's evidence and dead weight everywhere
+    // else, so only that group spends a column on it. Scope the header query to
+    // this pane — the All-apps pane stays keep-alive-mounted (display:none) with
+    // its own "Last sign-in" column still in the DOM.
+    assert!(
+        !findings_headers().contains(&"Last sign-in".to_string()),
+        "the legacy-scoping group drops the sign-in column: {:?}",
+        findings_headers()
+    );
+    assert!(findings_headers().contains(&"Detail".to_string()));
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("unused".to_string()));
+    ts::wait_for(|| findings_headers().contains(&"Last sign-in".to_string())).await;
+}
+
+/// The column headers of the one expanded Findings group.
+fn findings_headers() -> Vec<String> {
+    ts::query_all(".findings-pane th")
+        .iter()
+        .map(|el| el.text_content().unwrap_or_default())
+        .collect()
 }
 
 #[wasm_bindgen_test]
@@ -518,6 +608,16 @@ async fn applying_one_fix_leaves_the_other_sections_fix_standing() {
     ts::wait_for(|| has_button("Remove 1 expired credential")).await;
     click_button("Remove 1 expired credential");
     ts::wait_for(|| ts::body_contains("Remove expired credentials?")).await;
+    // The modal covers the row it was opened from, so it has to name what it
+    // will remove — a static body describing the *kind* of change left the
+    // operator trusting that the button they clicked belonged to the row they
+    // meant.
+    assert_eq!(
+        ts::query(".confirm-dialog__subject")
+            .and_then(|el| el.text_content())
+            .as_deref(),
+        Some("old-secret (expired 2024-01-01)")
+    );
     click_button("Remove");
     ts::wait_for(|| ts::call_count("remediate_remove_expired_credentials") == 1).await;
     // The applied fix is gone for good.

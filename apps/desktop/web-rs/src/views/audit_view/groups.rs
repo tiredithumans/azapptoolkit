@@ -3,10 +3,10 @@
 //! One catalog entry per finding key (the same keys `filter::matches_finding`
 //! understands, so Home drills and the characterization tests share one
 //! vocabulary), classified into two sections: **Actionable** findings ranked by
-//! impact, and demoted **Healthy** positives (confirmed-scoped access). The
-//! classifier delegates to `matches_finding` per key — the load-bearing
-//! `.contains(SCOPED_VIA_RBAC)` vs `.starts_with` asymmetry lives in exactly
-//! one place.
+//! their own worst severity, and demoted **Healthy** positives
+//! (confirmed-scoped access). The classifier delegates to `matches_finding` per
+//! key — the load-bearing `.contains(SCOPED_VIA_RBAC)` vs `.starts_with`
+//! asymmetry lives in exactly one place.
 
 use azapptoolkit_core::audit::{AuditItem, RemediationKind, RiskLevel};
 
@@ -17,7 +17,7 @@ use super::filter::matches_finding;
 /// Which section of the Findings pane a group renders in.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum GroupSection {
-    /// Ranked by impact; hidden at zero affected principals.
+    /// Ranked worst-severity first; hidden at zero affected principals.
     Actionable,
     /// Positive signals (already-scoped access), demoted below the ranked list.
     Healthy,
@@ -138,8 +138,8 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
 ];
 
 /// One computed finding group: which items (as indices into the run's item
-/// slice, original risk-ranked order) match, the worst risk level among them,
-/// and the impact (Σ risk_score) that ranks the Actionable section.
+/// slice, original risk-ranked order) match, and the worst risk level among
+/// them — the key that ranks the Actionable section.
 /// `Clone + PartialEq` so the pane's `Memo<Option<Vec<FindingGroup>>>` can
 /// hand out and diff runs.
 #[derive(Clone, PartialEq)]
@@ -147,7 +147,6 @@ pub(super) struct FindingGroup {
     pub spec: &'static GroupSpec,
     pub item_indices: Vec<usize>,
     pub worst: RiskLevel,
-    pub impact: u32,
 }
 
 fn sev_rank(level: RiskLevel) -> u8 {
@@ -160,9 +159,10 @@ fn sev_rank(level: RiskLevel) -> u8 {
 }
 
 /// Classifies `items` into every catalog group and ranks the Actionable
-/// section by impact (descending; catalog order breaks ties). Healthy groups
-/// keep catalog order at the end. Empty groups are returned too — the pane
-/// hides empty Actionable groups but renders Healthy ones count-muted.
+/// section worst-severity first, breaking ties on affected-principal count.
+/// Healthy groups keep catalog order at the end. Empty groups are returned too
+/// — the pane hides empty Actionable groups but renders Healthy ones
+/// count-muted.
 pub(super) fn group_findings(items: &[AuditItem]) -> Vec<FindingGroup> {
     let mut groups: Vec<FindingGroup> = GROUP_CATALOG
         .iter()
@@ -178,27 +178,36 @@ pub(super) fn group_findings(items: &[AuditItem]) -> Vec<FindingGroup> {
                 .map(|&i| items[i].risk_level)
                 .max_by_key(|&l| sev_rank(l))
                 .unwrap_or(RiskLevel::Low);
-            let impact = item_indices.iter().map(|&i| items[i].risk_score).sum();
             FindingGroup {
                 spec,
                 item_indices,
                 worst,
-                impact,
             }
         })
         .collect();
-    // Stable sort: Actionable before Healthy, then impact descending. Stability
-    // keeps catalog order as the tie-break within equal (section, impact).
+    // Stable sort: Actionable before Healthy, then worst severity descending,
+    // then count descending. Stability keeps catalog order as the final
+    // tie-break within an equal (section, severity, count).
+    //
+    // Severity is the group's OWN worst, not Σ `risk_score` over its members:
+    // a member's total score is everything the app was scored for, most of it
+    // by other rules. Ownership contributes no points at all (there is no PTS
+    // constant for Rule 14) yet matched a large fraction of any tenant, so its
+    // members' unrelated permission risk summed to the top of a findings-first
+    // workbench — pushing a twelve-app Critical org-wide-mailbox group below
+    // the fold. Count only breaks ties, so breadth still ranks within a tier
+    // without ever outvoting severity.
     groups.sort_by_key(|g| {
         (
             matches!(g.spec.section, GroupSection::Healthy),
-            std::cmp::Reverse(g.impact),
+            std::cmp::Reverse(sev_rank(g.worst)),
+            std::cmp::Reverse(g.item_indices.len()),
         )
     });
     groups
 }
 
-/// The Findings pane's Actionable groups, in the SAME impact ranking, as
+/// The Findings pane's Actionable groups, in the SAME severity ranking, as
 /// `(key, title, tone)` — for surfaces outside the workbench (the Home posture
 /// card) that echo the order + severity tone without re-deriving them. Healthy
 /// groups are excluded; empty groups stay (the caller decides whether a
@@ -367,37 +376,78 @@ mod tests {
     }
 
     #[test]
-    fn actionable_groups_rank_by_impact_then_catalog_order() {
-        // ownership outscores expired here, so it must rank first despite its
-        // later catalog position; zero-impact groups keep catalog order (stable
-        // sort) after the scored ones.
+    fn actionable_groups_rank_by_worst_severity_then_count() {
+        // The regression this pins: ownership matches three Low principals
+        // whose members' TOTAL scores sum to 60 — none of it contributed by the
+        // ownership rule, which carries no points — against a single Critical
+        // org-wide-mailbox principal scoring 25. Ranked by Σ risk_score the
+        // zero-weight group led the workbench and the Critical one sat below it.
+        let mailbox = with_issue(
+            format!("{} Mail.ReadWrite", issue::ORG_WIDE_MAILBOX),
+            25,
+            RiskLevel::Critical,
+        );
+        let owner_a = with_issue(format!("{} x", issue::NO_OWNERS), 20, RiskLevel::Low);
+        let owner_b = with_issue(format!("{} x", issue::SINGLE_OWNER), 20, RiskLevel::Low);
+        let owner_c = with_issue(format!("{} y", issue::NO_OWNERS), 20, RiskLevel::Low);
+        let redundant_a = with_issue(
+            format!("{} a", issue::REDUNDANT_APP_PERMS),
+            0,
+            RiskLevel::Low,
+        );
+        let redundant_b = with_issue(
+            format!("{} b", issue::REDUNDANT_APP_PERMS),
+            0,
+            RiskLevel::Low,
+        );
         let expired = AuditItem {
             credential_status: CredentialStatus::Expired,
-            risk_score: 8,
-            risk_level: RiskLevel::Medium,
             ..blank()
         };
-        let owner_a = with_issue(format!("{} x", issue::NO_OWNERS), 30, RiskLevel::Critical);
-        let owner_b = with_issue(format!("{} x", issue::SINGLE_OWNER), 5, RiskLevel::Low);
-        let items = vec![expired, owner_a, owner_b];
+        let sharepoint = with_issue(
+            format!("{} Sites.ReadWrite.All", issue::ORG_WIDE_SHAREPOINT),
+            0,
+            RiskLevel::Low,
+        );
+        let items = vec![
+            mailbox,
+            owner_a,
+            owner_b,
+            owner_c,
+            redundant_a,
+            redundant_b,
+            expired,
+            sharepoint,
+        ];
         let groups = group_findings(&items);
 
         let order: Vec<&str> = groups.iter().map(|g| g.spec.key).collect();
         let pos = |k: &str| order.iter().position(|x| *x == k).unwrap();
         assert!(
-            pos("ownership") < pos("expired"),
-            "impact 35 ranks above impact 8: {order:?}"
+            pos("orgwide_mailbox") < pos("ownership"),
+            "one Critical principal outranks three Low ones scoring 60 between \
+             them: {order:?}"
         );
-        // Equal-impact (zero) actionable groups keep catalog order.
-        assert!(pos("orgwide_mailbox") < pos("orgwide_sharepoint"));
+        // Within one severity tier, breadth ranks: 3 affected before 2 before 1.
+        assert!(pos("ownership") < pos("redundant_perms"), "{order:?}");
+        assert!(pos("redundant_perms") < pos("expired"), "{order:?}");
+        // Equal severity AND equal count keeps catalog order (stable sort) —
+        // `expired` is catalogued before `orgwide_sharepoint`.
+        assert!(pos("expired") < pos("orgwide_sharepoint"), "{order:?}");
+        // Empty groups sort last within the tier (count 0), still in catalog
+        // order; the pane hides them.
+        assert!(
+            pos("orgwide_sharepoint") < pos("high_risk_perms"),
+            "{order:?}"
+        );
         // Healthy groups always trail every actionable group.
         assert!(pos("scoped_mailbox") > pos("no_local_app"));
         assert!(pos("scoped_sites") > pos("scoped_mailbox"));
 
         let ownership = group(&groups, "ownership");
-        assert_eq!(ownership.impact, 35);
-        assert_eq!(ownership.worst, RiskLevel::Critical);
-        assert_eq!(ownership.item_indices, vec![1, 2]);
+        assert_eq!(ownership.worst, RiskLevel::Low);
+        assert_eq!(ownership.item_indices, vec![1, 2, 3]);
+        assert_eq!(group(&groups, "orgwide_mailbox").worst, RiskLevel::Critical);
     }
 
     #[test]

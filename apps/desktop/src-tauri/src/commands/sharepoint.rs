@@ -22,6 +22,7 @@ use azapptoolkit_core::scoping::{
 
 use crate::commands::applications::{invalidate_app_detail_state, invalidate_app_lists};
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
+use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
 use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::graph_roles::graph_role_index;
 use crate::commands::permissions::declare_resource_access;
@@ -1046,11 +1047,121 @@ pub fn get_app_site_access(
     Some(AppSiteAccessDto::from_sweep(&sweep, &app_id))
 }
 
+/// Exports the (frontend-filtered) site-grant rows to CSV/JSON via the OS save
+/// dialog. Returns the path, or `None` if the user cancelled.
+///
+/// "Which apps can touch this site?" — and its inverse — is an answer an
+/// operator is routinely asked to produce in writing, and until this existed the
+/// only way out of the app was a screenshot. The rows come from the frontend
+/// because the filter that produced them does: one search box serves both
+/// directions, so what is on screen is the export the operator means.
+///
+/// `summary` is the panel's own coverage sentence, and it is load-bearing. A
+/// site whose permission read failed contributes no rows, and this index is the
+/// ONLY way `Sites.Selected` reach is knowable at all — so a file that dropped
+/// "(2 failed — coverage is partial)" would present a partial sweep as the
+/// complete answer, which is precisely the claim the sweep refuses to make on
+/// screen.
+#[tauri::command]
+pub async fn save_site_access_to_file(
+    app_handle: AppHandle,
+    rows: Vec<SiteAppGrantRow>,
+    summary: String,
+    format: String,
+) -> Result<Option<String>, UiError> {
+    crate::commands::export::save_export_via_dialog(
+        &app_handle,
+        "site-access",
+        &format,
+        || site_access_to_csv(&rows, &summary),
+        || coverage_json(&summary, &rows),
+    )
+    .await
+}
+
+/// Serializes site-grant rows as CSV under the shared coverage comment block.
+/// Site and app display names are directory data, so every field is routed
+/// through `csv_field` (formula-injection guard + delimiter quoting).
+fn site_access_to_csv(rows: &[SiteAppGrantRow], summary: &str) -> String {
+    let mut out = coverage_comment_block(
+        "azapptoolkit — SharePoint site access (per-site application permissions)",
+        summary,
+    );
+    out.push_str("Site,SiteUrl,SiteId,Application,AppId,Roles,PermissionId\n");
+    for r in rows {
+        let row = [
+            csv_field(r.site_display_name.as_deref().unwrap_or("")),
+            csv_field(r.site_url.as_deref().unwrap_or("")),
+            csv_field(&r.site_id),
+            csv_field(r.app_display_name.as_deref().unwrap_or("")),
+            csv_field(r.app_id.as_deref().unwrap_or("")),
+            // One cell, semicolon-joined: an app commonly holds `read` and
+            // `write` on the same site, and a comma would split the row.
+            csv_field(&r.roles.join("; ")),
+            csv_field(&r.permission_id),
+        ]
+        .join(",");
+        out.push_str(&row);
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // `is_sharepoint_orgwide` itself is unit-tested in azapptoolkit_core::scoping.
+    use crate::commands::export::csv_columns;
+
+    fn grant_row(site: &str, app: &str) -> SiteAppGrantRow {
+        SiteAppGrantRow {
+            site_id: format!("contoso.sharepoint.com,{site}"),
+            site_display_name: Some(site.into()),
+            site_url: Some(format!("https://contoso.sharepoint.com/sites/{site}")),
+            permission_id: "perm-1".into(),
+            roles: vec!["read".into(), "write".into()],
+            app_id: Some("11111111-1111-1111-1111-111111111111".into()),
+            app_display_name: Some(app.into()),
+        }
+    }
+
+    #[test]
+    fn site_csv_leads_with_the_coverage_line_then_a_header_and_one_row_each() {
+        let csv = site_access_to_csv(
+            &[
+                grant_row("Finance", "Contoso API"),
+                grant_row("HR", "Fabrikam Web"),
+            ],
+            "2 app grants across 2 sites — scanned 140 of 142 sites (2 failed — coverage is partial)",
+        );
+        let lines: Vec<&str> = csv.lines().collect();
+        // The sweep never overstates coverage on screen; the file must not either.
+        assert!(lines[1].contains("coverage is partial"));
+        let header = lines.iter().position(|l| l.starts_with("Site,")).unwrap();
+        assert_eq!(lines.len() - header, 3); // header + 2 rows
+        assert!(lines[header + 1].starts_with("Finance,"));
+    }
+
+    #[test]
+    fn site_csv_keeps_multiple_roles_in_one_cell() {
+        // Comma-joining roles would silently shift every column right of them —
+        // as would the site id's own commas (a Graph site id is literally
+        // `hostname,siteId,webId`), which is why the count is quote-aware.
+        let csv = site_access_to_csv(&[grant_row("Finance", "Contoso API")], "complete");
+        assert!(csv.contains("read; write"));
+        let header = csv.lines().position(|l| l.starts_with("Site,")).unwrap();
+        let columns = csv_columns(csv.lines().nth(header).unwrap());
+        assert_eq!(csv_columns(csv.lines().nth(header + 1).unwrap()), columns);
+    }
+
+    #[test]
+    fn site_csv_neutralizes_formula_injection_in_a_display_name() {
+        // CWE-1236: site and app names are directory data. The comma in the
+        // payload is the point: neutralization has to compose with quoting.
+        let csv = site_access_to_csv(&[grant_row("Finance", "=cmd|'/c calc',A1")], "complete");
+        assert!(csv.contains("\"'=cmd|'/c calc',A1\""));
+    }
 
     #[test]
     fn org_wide_removal_requires_a_landed_site_grant() {

@@ -44,6 +44,7 @@ use crate::commands::dispatch::{SessionDead, dispatch_capped};
 use azapptoolkit_exchange::verdict::{aap_verdict_for, is_org_wide_auth_row};
 
 use crate::commands::exchange::exchange_client;
+use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
 use crate::commands::graph_roles::{graph_role_index, mailbox_resource_roles, resolve_grant};
 use crate::commands::progress::emit_progress;
 use crate::dto::UiError;
@@ -1163,9 +1164,131 @@ fn required_scope_for(level: SelectedScopeLevel) -> &'static str {
     }
 }
 
+/// Exports the (frontend-filtered) mailbox-reacher rows to CSV/JSON via the OS
+/// save dialog. Returns the path, or `None` if the user cancelled.
+///
+/// "Which apps can read this mailbox?" is the answer an operator is asked to put
+/// in writing after an incident, and until this existed the only way out of the
+/// app was a screenshot. The rows come from the frontend because the view's
+/// filter does — confirmed "No access" rows are hidden by default, and the
+/// export follows what is on screen.
+///
+/// `summary` is that panel's own coverage sentence, and here it is the whole
+/// point: an `unknown` verdict means an Exchange RBAC check could not be
+/// evaluated, and when Exchange is unavailable altogether the verdicts derive
+/// from the Entra grants alone. Both caveats are stated on screen and both must
+/// travel with the file, or a partial probe reads as an audited all-clear.
+#[tauri::command]
+pub async fn save_mailbox_reachers_to_file(
+    app_handle: AppHandle,
+    rows: Vec<MailboxReacherRow>,
+    summary: String,
+    format: String,
+) -> Result<Option<String>, UiError> {
+    crate::commands::export::save_export_via_dialog(
+        &app_handle,
+        "mailbox-reachers",
+        &format,
+        || mailbox_reachers_to_csv(&rows, &summary),
+        || coverage_json(&summary, &rows),
+    )
+    .await
+}
+
+/// Serializes mailbox-reacher rows as CSV under the shared coverage comment
+/// block. Display names and Exchange-supplied detail are directory data, so
+/// every field is routed through `csv_field` (formula-injection guard +
+/// delimiter quoting).
+fn mailbox_reachers_to_csv(rows: &[MailboxReacherRow], summary: &str) -> String {
+    let mut out = coverage_comment_block(
+        "azapptoolkit — mailbox reachers (Entra grant ∪ Exchange RBAC)",
+        summary,
+    );
+    out.push_str(
+        "Application,AppId,Verdict,HeldPermissions,ExchangeRoles,Detail,PrincipalKind,ObjectId\n",
+    );
+    for r in rows {
+        let row = [
+            csv_field(r.display_name.as_deref().unwrap_or("")),
+            csv_field(&r.app_id),
+            csv_field(&r.verdict),
+            // Semicolon-joined into one cell each: a comma would split the row.
+            csv_field(&r.held_permissions.join("; ")),
+            csv_field(&r.roles.join("; ")),
+            csv_field(r.detail.as_deref().unwrap_or("")),
+            csv_field(r.principal_kind.as_str()),
+            csv_field(&r.object_id),
+        ]
+        .join(",");
+        out.push_str(&row);
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::export::csv_columns;
+
+    fn reacher(name: &str, verdict: &str) -> MailboxReacherRow {
+        MailboxReacherRow {
+            app_id: "11111111-1111-1111-1111-111111111111".into(),
+            principal_id: "22222222-2222-2222-2222-222222222222".into(),
+            display_name: Some(name.into()),
+            held_permissions: vec!["Mail.Read".into(), "Mail.Send".into()],
+            verdict: verdict.into(),
+            roles: vec!["Application Mail.Read".into()],
+            detail: Some("Org-wide Graph grant, unconstrained by any policy".into()),
+            principal_kind: AuditPrincipalKind::Application,
+            object_id: "33333333-3333-3333-3333-333333333333".into(),
+        }
+    }
+
+    #[test]
+    fn reacher_csv_leads_with_the_coverage_line_then_a_header_and_one_row_each() {
+        let csv = mailbox_reachers_to_csv(
+            &[
+                reacher("Contoso API", "org_wide"),
+                reacher("Fabrikam Web", "unknown"),
+            ],
+            "1 of 12 candidate apps can reach “shared@contoso.com” · 1 couldn’t be confirmed (need Exchange admin rights)",
+        );
+        let lines: Vec<&str> = csv.lines().collect();
+        // An unconfirmed verdict is possible access, not noise — the caveat has
+        // to reach whoever reads the file, not just whoever ran the probe.
+        assert!(lines[1].contains("couldn’t be confirmed"));
+        let header = lines
+            .iter()
+            .position(|l| l.starts_with("Application,"))
+            .unwrap();
+        assert_eq!(lines.len() - header, 3); // header + 2 rows
+        assert!(lines[header + 1].starts_with("Contoso API,"));
+    }
+
+    #[test]
+    fn reacher_csv_keeps_held_permissions_in_one_cell() {
+        // Comma-joining them would silently shift every column right of them —
+        // as would the Exchange-supplied `detail` prose, which routinely
+        // contains commas of its own, so the count is quote-aware.
+        let csv = mailbox_reachers_to_csv(&[reacher("Contoso API", "org_wide")], "complete");
+        assert!(csv.contains("Mail.Read; Mail.Send"));
+        let header = csv
+            .lines()
+            .position(|l| l.starts_with("Application,"))
+            .unwrap();
+        let columns = csv_columns(csv.lines().nth(header).unwrap());
+        assert_eq!(csv_columns(csv.lines().nth(header + 1).unwrap()), columns);
+    }
+
+    #[test]
+    fn reacher_csv_neutralizes_formula_injection_in_a_display_name() {
+        // CWE-1236: app display names are attacker-controllable directory data.
+        // The comma in the payload is the point: neutralization has to compose
+        // with quoting.
+        let csv = mailbox_reachers_to_csv(&[reacher("=cmd|'/c calc',A1", "org_wide")], "complete");
+        assert!(csv.contains("\"'=cmd|'/c calc',A1\""));
+    }
 
     // The Open affordance's routing: an SP-only reacher must never resolve to an
     // app-registration object id (opening one would `get_application` → 404), and

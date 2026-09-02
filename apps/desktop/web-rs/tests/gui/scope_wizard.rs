@@ -19,6 +19,8 @@
 //!   entirely and grants org-wide.
 //! - **Pre-seed:** opening with a permission pre-selected jumps to the
 //!   choose-access step.
+//! - **Review:** step 3 names the principal, the resolved targets and the
+//!   org-wide grants the apply will strip — before it runs.
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
@@ -528,4 +530,40 @@ async fn two_selected_levels_in_one_cart_fall_back_to_org_wide() {
         "a mixed-level cart must not offer a target panel it cannot apply"
     );
     assert_eq!(ts::call_count("grant_selected_item_access"), 0);
+}
+
+#[wasm_bindgen_test]
+async fn the_review_step_names_the_principal_the_targets_and_what_gets_removed() {
+    // Step 3 used to be one sentence about the permission values and the mode.
+    // It named neither the app, nor the site URLs typed two steps back, nor the
+    // fact that the apply passes `removeOrgwide = true` — the irreversible half
+    // of the operation, previously visible only in the result toast, i.e. after
+    // it had already happened.
+    let _m = mount_wizard(None);
+    ts::mock_ok("convert_site_access_to_selected", &site_scope_result());
+
+    ts::wait_for(|| ts::body_contains("Sites.Read.All")).await;
+    select_permission("Sites.Read.All");
+    ts::wait_for(next_enabled).await;
+    click_button("Next");
+
+    ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
+    ts::set_textarea_value(
+        ".modal textarea",
+        "https://contoso.sharepoint.com/sites/Marketing",
+    );
+    click_button("Next");
+
+    ts::wait_for(|| ts::body_contains("not have org-wide site access")).await;
+    // The principal, by appId — two apps can share a display name, and this is
+    // the point of no return.
+    assert!(ts::body_contains("app-0"), "the review names the appId");
+    assert!(ts::body_contains("Sites.Read.All"));
+    // The resolved targets: the same strings `run_apply` sends, read from the
+    // same signal. Step 2's panel is unmounted here, so this is the review's.
+    assert!(ts::body_contains(
+        "https://contoso.sharepoint.com/sites/Marketing"
+    ));
+    // The strip, stated before the grant rather than reported after it.
+    assert!(ts::body_contains("REMOVES any org-wide"));
 }

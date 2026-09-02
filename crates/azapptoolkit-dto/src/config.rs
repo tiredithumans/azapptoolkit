@@ -16,6 +16,9 @@ pub struct AuthConfigStatus {
     /// Current effective client ID, or empty when still the placeholder (so the
     /// config form renders blank rather than showing the all-zeros GUID).
     pub client_id: String,
-    /// Current effective tenant ID, or empty when still the placeholder.
+    /// Current effective tenant ID, or empty when still the placeholder. Also
+    /// what the sign-in card names ("Signing in to …"), so a wrong tenant is
+    /// caught before the browser round trip rather than after it comes back as
+    /// an opaque token-exchange failure.
     pub tenant_id: String,
 }

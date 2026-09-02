@@ -184,6 +184,52 @@ pub fn permission_scope_cell(
     }
 }
 
+/// Whether a permission row's scope badge leaves its actual reach **unstated**,
+/// and so should sit beside a "Test access…" jump into the Permission tester.
+///
+/// Takes the same arguments as [`permission_scope_cell`] and answers from the
+/// same [`scope_cell_for`] decision, so the affordance can never appear beside a
+/// badge that does state its reach (or fail to appear beside one that doesn't).
+///
+/// Three cells qualify, for one reason each:
+/// - **Org-wide** (mailbox or a broad `Sites.*`) — the reach is "everything",
+///   which is exactly the claim an operator is asked to verify against one
+///   specific resource before acting on it.
+/// - **Unknown** — the Exchange lookup failed outright; the badge is explicitly
+///   a non-answer, and the tester's live check is the way to get one.
+/// - **Scoped (selected items)** — sub-site Selected grants are the one scoping
+///   mechanism that is *not enumerable* from the app side at all. The badge's
+///   own tooltip already says "check a specific resource to see its grants";
+///   until now it said so and offered nowhere to do it.
+///
+/// The confidently-answered cells are deliberately excluded. `Sites.Selected`
+/// reach IS enumerable — the "Sites this app can reach" panel is on this very
+/// tab — and an RBAC-scoped mailbox verdict already names the groups that bound
+/// it, so a "Test access…" there would imply a doubt the app doesn't have.
+/// `Resolving…` is excluded too: a verdict is seconds away, and an escape hatch
+/// that blinks in and out mid-load is noise.
+pub fn permission_scope_reach_is_unstated(
+    value: Option<&str>,
+    resource_app_id: Option<&str>,
+    mail_scope: Option<MailPermissionScope>,
+    is_application: bool,
+    scope_loading: bool,
+) -> bool {
+    matches!(
+        scope_cell_for(
+            value,
+            resource_app_id,
+            mail_scope,
+            is_application,
+            scope_loading,
+        ),
+        ScopeCell::Mailbox(MailPermissionScope::OrgWide)
+            | ScopeCell::Mailbox(MailPermissionScope::Unknown)
+            | ScopeCell::SitesOrgWide
+            | ScopeCell::ItemsSelected
+    )
+}
+
 /// Renders the live Exchange mailbox-scope verdict as a badge.
 pub fn mailbox_scope_badge(scope: MailPermissionScope) -> AnyView {
     match scope {
@@ -336,6 +382,74 @@ mod tests {
             ),
             ScopeCell::NotApplicable,
         );
+    }
+
+    /// The "Test access…" gate. It must appear exactly where the badge cannot
+    /// state its own reach — offering it beside a verdict that already names its
+    /// groups implies a doubt the app doesn't have, and withholding it beside a
+    /// non-enumerable scope leaves the badge's own "check a specific resource"
+    /// advice with nowhere to go.
+    #[test]
+    fn test_access_is_offered_only_where_the_badge_states_no_reach() {
+        let offers = |value: &str, resource: &str, scope: Option<MailPermissionScope>| {
+            permission_scope_reach_is_unstated(Some(value), Some(resource), scope, true, false)
+        };
+        // Org-wide, both planes: the claim most worth verifying against one
+        // resource.
+        assert!(offers(
+            "Mail.Read",
+            GRAPH,
+            Some(MailPermissionScope::OrgWide)
+        ));
+        assert!(offers("Sites.Read.All", GRAPH, None));
+        // An unresolved Exchange verdict is explicitly a non-answer.
+        assert!(offers(
+            "Mail.Read",
+            GRAPH,
+            Some(MailPermissionScope::Unknown)
+        ));
+        // Sub-site Selected scopes are not enumerable from the app side at all.
+        assert!(offers("Lists.SelectedOperations.Selected", GRAPH, None,));
+    }
+
+    #[test]
+    fn test_access_is_withheld_where_the_badge_already_answers() {
+        let offers = |value: &str, resource: &str, scope: Option<MailPermissionScope>| {
+            permission_scope_reach_is_unstated(Some(value), Some(resource), scope, true, false)
+        };
+        // `Sites.Selected` reach IS enumerable — the "Sites this app can reach"
+        // panel is on the same tab.
+        assert!(!offers("Sites.Selected", GRAPH, None));
+        // An RBAC-scoped mailbox verdict already names the groups bounding it.
+        assert!(!offers(
+            "Mail.Read",
+            GRAPH,
+            Some(MailPermissionScope::Scoped {
+                scope_name: Some("Finance mailboxes".into()),
+                recipient_filter: None,
+                group_count: Some(1),
+                mechanism: ScopeMechanism::Rbac,
+            }),
+        ));
+        // Not scopable by any mechanism ⇒ nothing to test.
+        assert!(!offers("Directory.Read.All", GRAPH, None));
+        // Mid-load: a verdict is seconds away, so don't blink an escape hatch in.
+        assert!(!permission_scope_reach_is_unstated(
+            Some("Mail.Read"),
+            Some(GRAPH),
+            None,
+            true,
+            true,
+        ));
+        // A delegated row is never Exchange-scopable, so it never offers one
+        // either — even holding an application verdict for the same value.
+        assert!(!permission_scope_reach_is_unstated(
+            Some("Mail.Read"),
+            Some(GRAPH),
+            Some(MailPermissionScope::OrgWide),
+            false,
+            false,
+        ));
     }
 
     #[test]

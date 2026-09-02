@@ -12,6 +12,7 @@ use azapptoolkit_core::audit::RemediationAction;
 use azapptoolkit_core::models::DirectoryObject;
 
 use crate::bindings::applications;
+use crate::components::tenant_defaults_hint::OwnerDefaultsHint;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
@@ -34,6 +35,10 @@ pub fn AddOwnerButton(
     let busy = RwSignal::new(false);
     let adding_defaults = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
+    // Distinct from `error`: this one is not a failure the operator can retry,
+    // it is a missing setting with a place to go, so it renders as a hint with
+    // the route in it rather than as dead red text (`OwnerDefaultsHint`).
+    let no_owner_defaults = RwSignal::new(false);
     let raw_query = RwSignal::new(String::new());
     let query = use_debounced(raw_query.into(), 300);
 
@@ -100,14 +105,13 @@ pub fn AddOwnerButton(
         };
         adding_defaults.set(true);
         error.set(None);
+        no_owner_defaults.set(false);
         let object_id = object_id.clone();
         leptos::task::spawn_local(async move {
             let defaults = crate::bindings::defaults::get_tenant_defaults(&t.tenant_id).await;
             let owners = defaults.app_registration.default_owners;
             if owners.is_empty() {
-                error.set(Some(
-                    "No default owners configured — set them in Settings.".into(),
-                ));
+                no_owner_defaults.set(true);
                 adding_defaults.set(false);
                 return;
             }
@@ -258,6 +262,9 @@ pub fn AddOwnerButton(
                         {move || {
                             error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
                         }}
+                        <Show when=move || no_owner_defaults.get() fallback=|| ()>
+                            <OwnerDefaultsHint class="form-error" tab="app-reg" />
+                        </Show>
                         <div class="actions-row">
                             <Button
                                 appearance=Signal::derive(|| ButtonAppearance::Secondary)

@@ -9,7 +9,6 @@
 use std::sync::Arc;
 
 use chrono::NaiveDate;
-use leptos::ev;
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
@@ -154,7 +153,7 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
             <div class="apps-view__body">
                 <ListScaffold
                     search=raw_search
-                    search_placeholder="Filter Enterprise Apps…"
+                    search_placeholder="Filter Enterprise Apps by name or appId…"
                     saved_view_key="enterprise"
                     facet=ent_filter
                     filters_open=filters_open
@@ -231,8 +230,12 @@ fn LoadedEnterpriseApps(
     let list = use_filtered_list(FilteredListSpec {
         items,
         search,
+        // Name OR appId — the identifier a sign-in log, a ticket, or a
+        // Conditional Access policy names an app by, and the one printed on
+        // every row here.
         search_match: |sp: &EnterpriseApplicationDto, needle: &str| {
             contains_ignore_case(&sp.display_name, needle)
+                || contains_ignore_case(&sp.app_id, needle)
         },
         extra_active: Signal::derive(move || {
             created_after.get().is_some() || created_before.get().is_some()
@@ -351,6 +354,7 @@ fn VirtualRows(
                 overscan=OVERSCAN
                 scroller_class="app-list__scroller"
                 sizer_class="app-list__sizer"
+                row_selector=".app-list__row"
                 key=|sp: &EnterpriseApplicationDto| sp.id.clone()
                 render_row=move |idx, sp| view_row(idx, sp, session).into_any()
             />
@@ -391,7 +395,7 @@ fn view_row(
     // state they filter on — so a filtered view and an unfiltered one looked
     // identical row-for-row.
     let is_disabled = sp.account_enabled == Some(false);
-    let paired_app_id = sp.paired_app_registration_id.clone();
+    let paired_app_id = sp.paired_app_registration_id;
 
     // Descriptive per-row label so the row button announces which enterprise
     // application it opens.
@@ -434,29 +438,28 @@ fn view_row(
                                 />
                             }
                         })}
-                    {paired_app_id
-                        .map(|app_id| {
-                            let app_id_clone = app_id.clone();
-                            let s_ref = session;
-                            let on_pair = move |ev: ev::MouseEvent| {
-                                ev.stop_propagation();
-                                jump_to_paired_app(s_ref, app_id_clone.clone());
-                            };
-                            view! {
-                                <button
-                                    class="pair-arrow"
-                                    type="button"
-                                    title="Jump to paired App Registration"
-                                    aria-label="Jump to paired App Registration"
-                                    on:click=on_pair
-                                >
-                                    "↔"
-                                </button>
-                            }
-                        })}
                 </span>
                 <span class="app-list__row-appid">{app_id_string}</span>
             </button>
+            // A SIBLING of the row button, never nested inside it: nested
+            // interactive content is invalid HTML, and Leptos builds the DOM
+            // node-by-node so the parser never corrects it — the arrow's label
+            // ended up spliced into the middle of the row's accessible name,
+            // and Tab stopped on it between the name and the appId.
+            {paired_app_id
+                .map(|app_id| {
+                    view! {
+                        <button
+                            class="pair-arrow"
+                            type="button"
+                            title="Jump to paired App Registration"
+                            aria-label="Jump to paired App Registration"
+                            on:click=move |_| jump_to_paired_app(session, app_id.clone())
+                        >
+                            "↔"
+                        </button>
+                    }
+                })}
         </div>
     }
 }

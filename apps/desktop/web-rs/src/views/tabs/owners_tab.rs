@@ -8,6 +8,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 
 use crate::bindings::applications::{self, ApplicationDetail};
+use crate::components::tenant_defaults_hint::OwnerDefaultsHint;
 use crate::components::ui::DataTable;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
@@ -37,7 +38,9 @@ pub fn OwnersTab(
     let adding: RwSignal<Option<String>> = RwSignal::new(None);
     let removing: RwSignal<Option<String>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
-    let pending_remove: RwSignal<Option<String>> = RwSignal::new(None);
+    // (owner id, label): one dialog covers the whole owners table, so the row's
+    // own label rides along to be its subject and is discarded there.
+    let pending_remove: RwSignal<Option<(String, String)>> = RwSignal::new(None);
     // Replace-all-owners (ports `Set-AzAppOwner`): stage a target set, then
     // reconcile in one call.
     let replacing = RwSignal::new(false);
@@ -93,12 +96,17 @@ pub fn OwnersTab(
     // Adds the tenant's configured default owners in one click (additive — skips
     // any already present; never removes). Falls back to a hint if none are set.
     let adding_defaults = RwSignal::new(false);
+    // Distinct from `error`: this one is not a failure the operator can retry,
+    // it is a missing setting with a place to go, so it renders as a hint with
+    // the route in it rather than as dead red text (`OwnerDefaultsHint`).
+    let no_owner_defaults = RwSignal::new(false);
     let add_defaults = move |_| {
         if adding_defaults.get() {
             return;
         }
         adding_defaults.set(true);
         error.set(None);
+        no_owner_defaults.set(false);
         let tenant = session.active_tenant.get();
         let object_id = detail.with_untracked(|d| d.application.id.clone());
         let existing: std::collections::HashSet<String> =
@@ -112,9 +120,7 @@ pub fn OwnersTab(
             let defaults = crate::bindings::defaults::get_tenant_defaults(&t.tenant_id).await;
             let owners = defaults.app_registration.default_owners;
             if owners.is_empty() {
-                error.set(Some(
-                    "No default owners configured — set them in Settings.".into(),
-                ));
+                no_owner_defaults.set(true);
                 adding_defaults.set(false);
                 return;
             }
@@ -297,6 +303,14 @@ pub fn OwnersTab(
                                 let id_disabled = o.id.clone();
                                 let id_click = o.id.clone();
                                 let id_label = o.id.clone();
+                                // What the row shows, in the order it shows it: the
+                                // display name, else the UPN the second column falls
+                                // back to. Never the bare "—" placeholder.
+                                let remove_label = o
+                                    .display_name
+                                    .clone()
+                                    .or_else(|| o.user_principal_name.clone())
+                                    .unwrap_or_default();
                                 view! {
                                     <tr>
                                         <td>{display}</td>
@@ -310,7 +324,8 @@ pub fn OwnersTab(
                                                     removing.with(|r| r.as_deref() == Some(id_disabled.as_str()))
                                                 })
                                                 on_click=Box::new(move |_| {
-                                                    pending_remove.set(Some(id_click.clone()))
+                                                    pending_remove
+                                                        .set(Some((id_click.clone(), remove_label.clone())))
                                                 })
                                             >
                                                 {move || {
@@ -521,14 +536,20 @@ pub fn OwnersTab(
                 </Suspense>
             </section>
             {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            <Show when=move || no_owner_defaults.get() fallback=|| ()>
+                <OwnerDefaultsHint class="form-error" tab="app-reg" />
+            </Show>
             <ConfirmDialog
                 open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
                 title="Remove this owner?"
                 body="The owner loses the ability to manage this app registration. You can re-add them later."
+                subject=Signal::derive(move || {
+                    pending_remove.with(|p| p.as_ref().map(|(_, label)| label.clone())).unwrap_or_default()
+                })
                 confirm_label="Remove"
                 busy=Signal::derive(move || removing.with(|r| r.is_some()))
                 on_confirm=Callback::new(move |()| {
-                    if let Some(id) = pending_remove.get() {
+                    if let Some((id, _)) = pending_remove.get() {
                         pending_remove.set(None);
                         remove(id);
                     }

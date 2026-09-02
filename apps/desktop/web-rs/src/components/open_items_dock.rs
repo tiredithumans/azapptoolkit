@@ -15,7 +15,15 @@ pub fn OpenItemsDock() -> impl IntoView {
     let session = use_session();
     view! {
         <Show when=move || session.open_items.with(|l| !l.is_empty())>
-            <div class="open-dock" aria-label="Open items">
+            // `role="region"` + a label, for the reason the workspace overlay
+            // documents at its own root: a bare `aria-label` on a generic `div`
+            // has no role to attach to and is never announced. `region` rather
+            // than `toolbar` because the chips are each their own tab stop —
+            // `toolbar` would promise a roving tabindex and arrow keys that
+            // aren't here (the keyboard route is Cmd/Ctrl-`[`/`]`), and it
+            // wouldn't put the dock in the landmark list, which is the shortest
+            // way to reach a strip that sits after the whole content slot.
+            <div class="open-dock" role="region" aria-label="Open items">
                 // Chips scroll; the "Close all" control stays pinned beside them.
                 <div class="open-dock__chips">
                     <For each=move || session.open_items.get() key=|it| it.id let:item>
@@ -101,8 +109,12 @@ fn dock_chip(session: Session, item: OpenItem) -> impl IntoView {
             <button
                 type="button"
                 class="open-dock__close"
-                aria-label="Close"
-                title="Close"
+                // Six open chips announced six identical "Close"es, so a
+                // screen-reader user could not tell which one they were about
+                // to close. Same live-title closure as the label above, so it
+                // self-corrects with the chip.
+                aria-label=move || format!("Close {}", label())
+                title=move || format!("Close {}", label())
                 on:click=move |ev: leptos::ev::MouseEvent| {
                     ev.stop_propagation();
                     session.close_item(id);

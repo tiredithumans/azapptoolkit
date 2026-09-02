@@ -3,7 +3,9 @@
 //! - **Selected apps** — the shared [`BulkActionBar`] (Grant consent / Remove
 //!   expired credentials / Delete) over the apps checked in the App
 //!   Registrations list (`session.tenant_ui.selected_app_ids`). The bar is the single home
-//!   of the bulk command-calling logic; this page just hosts it.
+//!   of the bulk command-calling logic; this page just hosts it. It reviews the
+//!   selection by name too — that disclosure started here and moved into the
+//!   bar, where the other four hosts get it as well.
 //! - **Create apps** — a JSON form that ignores the selection.
 //!
 //! Promoted from a modal to a page: the modal used to cover the very App
@@ -12,11 +14,11 @@
 
 use crate::hooks::use_progress_stream::use_progress_stream;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize, Textarea};
+use thaw::{Body1, Button, ButtonAppearance, Textarea};
 
 use crate::bindings::bulk;
 use crate::bindings::events;
-use crate::components::bulk_action_bar::{BulkAction, BulkActionBar, BulkFailure};
+use crate::components::bulk_action_bar::{BulkAction, BulkActionBar, BulkFailure, BulkProgressRow};
 use crate::components::icon::IconName;
 use crate::components::ui::{Callout, EmptyState, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
@@ -28,7 +30,8 @@ pub fn BulkActionsView() -> impl IntoView {
 
     // After a successful selection-driven run, refetch the App Registrations
     // list (a delete / remove-expired sweep invalidates the backend cache). The
-    // bar clears the selection itself on delete, so the host only refreshes.
+    // bar drops the ids a delete actually removed from the selection itself, so
+    // the host only refreshes.
     let on_done = Callback::new(move |_| session.bump_apps_reload());
 
     // ---- Create-apps flow state (the only non-selection action) -------------
@@ -40,22 +43,6 @@ pub fn BulkActionsView() -> impl IntoView {
     // Live per-app progress emitted by the backend bulk loop ("bulk-progress").
     let progress: RwSignal<Option<bulk::BulkProgress>> = RwSignal::new(None);
     use_progress_stream(progress, events::bulk_progress);
-
-    let cancelling = RwSignal::new(false);
-    Effect::new(move |_| {
-        if !busy.get() {
-            cancelling.set(false);
-        }
-    });
-    let do_cancel = move |_| {
-        if cancelling.get() {
-            return;
-        }
-        cancelling.set(true);
-        leptos::task::spawn_local(async move {
-            bulk::cancel_bulk().await;
-        });
-    };
 
     let create_json = RwSignal::new(String::new());
 
@@ -103,6 +90,10 @@ pub fn BulkActionsView() -> impl IntoView {
                         .map(|o| BulkFailure {
                             label: o.display_name.clone(),
                             reason: o.message.clone().unwrap_or_else(|| o.status.clone()),
+                            // The apps this flow reports on were never created,
+                            // so there is no object id to re-select — the only
+                            // shape in the app where that is true.
+                            object_id: None,
                             // `None` for a validation rejection (`invalid`),
                             // which never reached the backend and so says
                             // nothing about the session.
@@ -173,28 +164,11 @@ pub fn BulkActionsView() -> impl IntoView {
                                 {move || {
                                     busy.get()
                                         .then(|| {
-                                            view! {
-                                                <div class="actions-row">
-                                                    <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
-                                                    <Body1>
-                                                        {move || match progress.get() {
-                                                            Some(p) if p.total > 0 => {
-                                                                format!("Working… ({}/{})", p.done, p.total)
-                                                            }
-                                                            _ => "Working…".to_string(),
-                                                        }}
-                                                    </Body1>
-                                                    <Button
-                                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                        on_click=Box::new(do_cancel)
-                                                        disabled=Signal::derive(move || cancelling.get())
-                                                    >
-                                                        {move || {
-                                                            if cancelling.get() { "Cancelling…" } else { "Cancel" }
-                                                        }}
-                                                    </Button>
-                                                </div>
-                                            }
+                                            // The bar's row, verbatim: these apps
+                                            // don't exist yet, so `current_app`
+                                            // is already a display name and there
+                                            // is no id map to resolve it against.
+                                            view! { <BulkProgressRow progress=progress names=None /> }
                                         })
                                 }}
                                 {move || {
@@ -246,38 +220,9 @@ pub fn BulkActionsView() -> impl IntoView {
                         // a result on screen); the hint shows whenever nothing is
                         // checked, including right after a run clears the selection.
                         view! {
-                            // Show WHAT is selected. Arriving from the list, this
-                            // page previously showed only a bare count, so an
-                            // operator typed DELETE against a set they could not
-                            // review. Sorted by name so the same selection always
-                            // reads the same way.
-                            {move || {
-                                let ids = session.tenant_ui.selected_app_ids.get();
-                                (!ids.is_empty())
-                                    .then(|| {
-                                        let names = session.tenant_ui.app_names.get();
-                                        let mut labels: Vec<String> = ids
-                                            .iter()
-                                            .map(|id| {
-                                                names.get(id).cloned().unwrap_or_else(|| id.clone())
-                                            })
-                                            .collect();
-                                        labels.sort_unstable();
-                                        view! {
-                                            <details class="bulk-selection" open=true>
-                                                <summary>
-                                                    {format!("{} app(s) selected", labels.len())}
-                                                </summary>
-                                                <ul class="bulk-selection__list">
-                                                    {labels
-                                                        .into_iter()
-                                                        .map(|l| view! { <li>{l}</li> })
-                                                        .collect_view()}
-                                                </ul>
-                                            </details>
-                                        }
-                                    })
-                            }}
+                            // WHAT is selected is reviewed in the bar's armed
+                            // panel now — one implementation, and it reads the
+                            // same on the four hosts that never had it.
                             <BulkActionBar
                                 names=Signal::derive(move || session.tenant_ui.app_names.get())
                                 selection=session.tenant_ui.selected_app_ids
