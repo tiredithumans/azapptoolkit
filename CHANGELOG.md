@@ -13,6 +13,18 @@
   those files sits under `use super::*`, which reaches `state/mod.rs`'s own prelude glob. Nothing
   resolved through the local copies; without removing them `just web-clippy` (`-D warnings`) fails
   on the new toolchain.
+- **Semver-compatible dependency refresh across both lockfiles.** `cargo update` on the root
+  workspace and the separate `apps/desktop/web-rs` tree — notably `tauri-plugin-updater`
+  2.10.1 → 2.11.0, `tauri-plugin-dialog` 2.7.2 → 2.7.3, `aws-lc-rs` 1.18.0 → 1.18.1 (with
+  `aws-lc-sys` 0.44 → 0.45), `rustls-webpki` 0.103.14 → 0.103.15, `hyper` 1.11.0 → 1.11.1,
+  `h2` 0.4.17 → 0.4.19, `flate2` 1.1.9 → 1.1.10, and `uuid` 1.24.1 → 1.26.0 in both trees.
+  `secret-service` 5.1.0 → 5.2.0 moves the Linux keyring's session crypto onto the RustCrypto
+  0.11 generation (`sha2` 0.11, `hmac` 0.13, `hkdf` 0.13, `aes` 0.9, `cbc` 0.2), so those majors
+  now sit beside the 0.10-line copies — upstream's move on a Linux/FreeBSD-only path, not one of
+  our pins, and `deny.toml` already treats duplicate versions as a warning. The deliberate holds
+  are unchanged (`base64` 0.22, `p12-keystore` 0.2.x, `rand` 0.8; `generic-array` is pinned to
+  exactly 0.14.7 by `crypto-common` 0.1.7, upstream's constraint rather than ours). `cargo audit`
+  and `cargo deny` pass on both trees.
 - **Developer workflow.** `just check` (type-check both trees) and `just test-crate <crate>` join
   the recipes as the sanctioned inner loop; `just --list` now describes every recipe in one line;
   the `setup` bodies moved to `scripts/setup.{sh,ps1}`. `AGENTS.md` is a true one-line-per-rule
