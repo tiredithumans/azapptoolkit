@@ -53,7 +53,11 @@ bindings_dir="$project/apps/desktop/web-rs/src/bindings"
 # Recursive (-r) — command handlers live in nested modules too
 # (commands/applications/, commands/sso/); a flat glob missed those and
 # produced ~20 false stale-handler warnings per edit.
-declared=$(grep -rh -A4 --include='*.rs' '#\[tauri::command' "$commands_dir" 2>/dev/null \
+# Anchored to line start: a doc comment that *mentions* `#[tauri::command]`
+# (permissions.rs has one, four lines above a plain helper) is not a
+# declaration, and matching it produced a permanent bogus "not registered"
+# warning on every edit to the command chain.
+declared=$(grep -rhE -A4 --include='*.rs' '^[[:space:]]*#\[tauri::command' "$commands_dir" 2>/dev/null \
   | grep -oE 'fn [a-z_0-9]+' | sed 's/^fn //' | sort -u)
 
 # 2. Registered: `commands::module::name` entries inside generate_handler![].

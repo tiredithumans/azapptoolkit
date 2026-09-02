@@ -214,7 +214,7 @@ jobs:
           # Whole history: a secret is just as leaked if it was removed in a
           # later commit, and `gitleaks detect` reads the log, not the worktree.
           fetch-depth: 0
-      # The eight `.claude/hooks/` scripts gate commit format, command parity,
+      # The `.claude/hooks/` scripts gate commit format, command parity,
       # AGENTS.md staleness and secrets — locally, and only for a contributor
       # running Claude Code with hooks installed. Nothing referenced them from
       # CI, so `--no-verify`, a different editor, or the GitHub web UI bypassed
