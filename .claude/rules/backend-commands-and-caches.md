@@ -1,0 +1,31 @@
+---
+paths:
+  - "apps/desktop/src-tauri/**"
+  - "crates/azapptoolkit-graph/**"
+  - "crates/azapptoolkit-dto/**"
+  - "crates/azapptoolkit-core/src/cache.rs"
+  - "crates/azapptoolkit-core/src/http_*.rs"
+  - "crates/azapptoolkit-core/src/{defaults,settings}.rs"
+---
+
+# Backend, commands & caches — the detail behind the AGENTS.md one-liners
+
+Deep-dive: `docs/architecture/caching-and-search.md`. Pinned by `apps/desktop/src-tauri/tests/repo_invariants/`.
+
+- **Tauri commands:** `#[tauri::command] async fn` → `State<'_, AppState>` → `Result<T, UiError>`. Must be in `generate_handler![]` AND have a typed stub in `web-rs/src/bindings/` calling `invoke_result()` (never bare `invoke`, which panics on a rejected promise). Frontend args use `#[serde(rename_all = "camelCase")]`; Rust params stay snake_case. Common arg shapes (`TenantArg`, `ObjectIdArgs`, `AppIdArgs`, …) live in `bindings/common.rs`. `commands/` has domain subdirectories (`applications/`, `exchange/`, `sso/`), each re-exporting flat so `commands::<domain>::name` paths never change.
+- **Tenant-scoped caches — cross-tenant leakage is the #1 footgun.** Keys are `{tenant_id}|{kind}`, never unscoped; sign-out sweeps **every** kind. The two tenant-wide indexes are typed + pinned — read them through their accessors, never `cache.get`. A cache-**only** command must prove the session; never pin a per-object key.
+- **Invalidate caches only on `Ok`.** SP/app-reg mutation → `invalidate_app_lists(...)`; **credential-only** → `invalidate_app_credentials(...)` (keeps the indexes); `appRoles`/`oauth2PermissionScopes` → `invalidate_app_details` only. A pinned index takes `generation_for(kind, key)` **before** the fetch (an owned `IndexWatch`, per KEY, released on drop) and stores via `*_if_current`.
+- **`CacheKind::ServicePrincipal` self-invalidates in the graph client, not the command aggregators.** Keyed by `appId` but SP mutators take an SP *object* id, so they sweep the tenant prefix on `Ok`; `invalidate_app_lists` does **not** touch this kind.
+- **Long-running writes stop on Cancel AND on a dead session.** `claim()` a `CancelToken` once, before the first suspension point (a later claim discards a cancel issued during it); latch `dispatch::SessionDead`, break on both, flag the result incomplete. Fan-outs never return a partial result. Pinned per **call site** in `repo_invariants/{cancel,fanout}.rs`; `KNOWN_GAPS` stays empty.
+- **Batched Graph fan-out + adaptive throttle.** Heavy fan-outs use Graph JSON batching + the shared `ConcurrencyThrottle` via `ThrottleGuard::attach`, degrading to per-object reads on a whole-batch failure. Never hand-roll a tracker or a per-item loop. `$expand` + advanced query fails *silently*.
+- **Every paged read sends `$top`.** Paging is serial, so Graph's default of 100 is a 10× round-trip multiplier — paged reads (and `$batch` sub-URLs) send `client::MAX_PAGE_SIZE`, `/applications` sends `DEFAULT_APP_PAGE_SIZE`.
+- **Full-collection PATCH for `appRoles` / `oauth2PermissionScopes`.** Graph **full-replaces** these not-nullable arrays — re-read live state, mutate, write the whole array back (never merge a cached payload). Deleting an enabled entry needs two PATCHes: disable, then remove. Exposed **app roles** edit the **paired application** when one exists (else the SP) and round-trip as **raw JSON** so the `value: null` SAML default survives byte-for-byte.
+- **camelCase vs snake_case.** Graph domain models (`Application`, `ServicePrincipal`) are camel (no serde rename); DTOs/bindings are snake_case. `Application` + `AuditItem` cross IPC **as-is** — renaming a field is a wire-format change.
+- **One definition per policy.** The Graph/ARM/Key Vault error taxonomy comes from `core::http_error_enum!`; retry budget + backoff from `core::http_retry` (`RetryBudget`, `with_retries`) — including `$batch`. A client supplies only what is genuinely its own (`ui_hint`, extra variants). Re-auth-fatal codes have ONE definition: `core::reauth::REAUTH_FATAL_CODES` — `UiError`/`TokenError::is_reauth_fatal()` both read it (agreement tested in `azapptoolkit-dto`); adding a code = editing that slice, and every long-running loop stops on it.
+- **The `BearerProvider` boundary carries the auth classification.** `core::token::TokenError { code, message }` — not a bare `String` — so a dead session survives into `GraphError/ExchangeError/KeyVaultError/ArmError::Token` and `ui_code()` passes `refresh_missing`/`not_signed_in` through. Flattening it to `token_error` made `is_reauth_fatal` unfirable for every client call. Sole mapping: `token_adapter::token_error`.
+- **Per-tenant operator defaults live in `settings.json` too.** `UserSettings.tenant_defaults` (types in `azapptoolkit-core::defaults`, ungated — also the IPC payload). **Two writers** (`commands::config` + `commands::defaults`), both read-modify-write via `UserSettings::stored`. `apply_tenant_defaults` writes only operator-editable fields and **preserves `default_vault`/`app_vaults`** (owned by the rotation flow); it destructures `TenantDefaults` exhaustively, so a new field won't compile until it's decided there.
+- **Build-time config baking.** `build.rs` reads `.env` → `AZAPPTOOLKIT_BUILD_*`; env vars override. Only public-client identifiers — never a credential.
+- **CSP governs the *webview*, not backend egress.** `connect-src` in `tauri.conf.json` restricts only WASM frontend fetches; backend reqwest calls to new hosts need no CSP change.
+- **Permissions catalog** is bundled at compile time from `azapptoolkit-permissions/data/`; unknown resources fall back to `resolve_resource_sp()`.
+- **Audit signals — structured, not text.** Facets/cards/finding groups key off `AuditItem` fields, not free-text. A `cancelled`/`truncated`/`degraded` run is **never cached** nor shown as an all-clear; a backup records what it missed in `TenantBackup::skipped`.
+- **Bulk remediations reuse the single-app cores, sequentially** via `run_bulk_seq` — **not** `dispatch_capped` (those cores take `State`, not `Send`). They `claim()` a `CancelToken`, degrade to a per-app structured `BulkError`, and stop on a re-auth-fatal code. SP-only audit rows (`AuditItem.principal_kind`) call the SP-only cores, **never** `remediate_scope_*` (which `get_application` first → 404).
