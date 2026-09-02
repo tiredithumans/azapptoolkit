@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # PostToolUse hook for `Bash`. After a `git commit`, nudges when the new HEAD
-# touches code paths but carries no CHANGELOG.md change — AGENTS.md requires an
-# [Unreleased] entry per change, and amending now is cheaper than a review
-# round trip later. Release commits are exempt (the release flow rewrites the
-# changelog itself).
+# touches app code but carries no CHANGELOG.md change — AGENTS.md asks for an
+# [Unreleased] entry for every USER-VISIBLE change, and amending now is cheaper
+# than a review round trip later. Only `crates/` and `apps/` count: tooling
+# (justfile, .claude/, CI) is not user-visible and never needs an entry. Release
+# commits are exempt (the release flow rewrites the changelog itself).
 #
 # Exits 0 always — this hook never blocks. The agent makes the judgment call.
 
@@ -43,7 +44,7 @@ esac
 files=$(git show --name-only --format= HEAD 2>/dev/null)
 [ -z "$files" ] && exit 0
 printf '%s\n' "$files" | grep -q '^CHANGELOG\.md$' && exit 0
-printf '%s\n' "$files" | grep -qE '^(crates/|apps/desktop/|justfile$|\.claude/)' || exit 0
+printf '%s\n' "$files" | grep -qE '^(crates/|apps/desktop/)' || exit 0
 
-printf '[changelog-check] HEAD (%s) touches code but not CHANGELOG.md — add a [Unreleased] entry (e.g. via `git commit --amend`).\n' "$subject" >&2
+printf '[changelog-check] HEAD (%s) touches app code but not CHANGELOG.md — if the change is user-visible, add a [Unreleased] entry (e.g. via `git commit --amend`).\n' "$subject" >&2
 exit 0

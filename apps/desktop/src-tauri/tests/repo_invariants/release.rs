@@ -105,12 +105,14 @@ fn changelog_headers_match_what_both_parsers_require() {
 }
 
 /// AGENTS.md is the index every agent loads on session start, and it documents
-/// its own 28 000-byte budget. It had grown past it, which is precisely when the
-/// file stops being an index and starts being the manual it tells you not to
-/// write — so the budget is enforced rather than advertised.
+/// its own 20 000-byte budget. It had grown past an earlier 28 000-byte one,
+/// which is precisely when the file stops being an index and starts being the
+/// manual it tells you not to write — so the budget is enforced rather than
+/// advertised, and it was lowered once the per-subsystem elaborations moved to
+/// `docs/architecture/` and the path-scoped `.claude/rules/`.
 #[test]
 fn agents_md_stays_within_its_own_budget() {
-    const BUDGET: usize = 28_000;
+    const BUDGET: usize = 20_000;
     // Measured with `\r` stripped: git checks this file out CRLF on Windows, so
     // a raw byte count would charge the file one extra byte per line and make
     // the budget platform-dependent (it failed on windows-latest alone).
@@ -195,6 +197,55 @@ fn every_manifest_states_the_same_version() {
         "Cargo.toml says {root} but the newest CHANGELOG.md release header is {changelog} — \
          web-rs/build.rs bakes that section into the in-app \"What's new\", so a mismatch \
          ships an empty panel"
+    );
+}
+
+/// The Conventional Commits scope allowlist has two copies that cannot be
+/// merged: AGENTS.md documents it (the cross-agent contract every tool reads)
+/// and `.claude/hooks/conventional-commit-validator.sh` enforces it (a hook
+/// cannot parse prose reliably). CONTRIBUTING.md and the skills point at
+/// AGENTS.md rather than carrying a third. This is what keeps the two honest.
+#[test]
+fn commit_scope_allowlist_agrees_between_agents_md_and_the_hook() {
+    fn backticked(line: &str) -> Vec<String> {
+        line.split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+    let agents = include_str!("../../../../../AGENTS.md");
+    let line = agents
+        .lines()
+        .find(|l| l.trim_start().starts_with("- Scopes"))
+        .expect("AGENTS.md has a `- Scopes …` line under Git & version control");
+    // Only the list after the explanatory parenthetical counts: the prose before
+    // it may itself name a file in backticks (this test, for one).
+    let list = line.rsplit_once("):").map_or(line, |(_, rest)| rest);
+    let mut documented = backticked(list);
+    documented.sort_unstable();
+
+    let hook = include_str!("../../../../../.claude/hooks/conventional-commit-validator.sh");
+    let start = hook
+        .find("scopes = {")
+        .expect("the commit validator defines `scopes = {…}`");
+    let block = &hook[start..];
+    let block = &block[..block.find('}').expect("scopes set closes")];
+    let mut enforced: Vec<String> = block
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect();
+    enforced.sort_unstable();
+
+    assert!(
+        documented.len() >= 5,
+        "parsed only {documented:?} from AGENTS.md — the line format changed and this test is          checking nothing"
+    );
+    assert_eq!(
+        documented, enforced,
+        "commit scope allowlist drift: AGENTS.md documents {documented:?} but conventional-commit-validator.sh enforces {enforced:?}. Change both."
     );
 }
 

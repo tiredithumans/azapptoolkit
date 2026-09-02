@@ -11,7 +11,7 @@ Create a complete feature scaffolding: branch → backend command + handler → 
 ## 0. Determine scope & naming
 
 - From the argument (or ask): what is the feature?
-  - New domain command → the right module under `src-tauri/src/commands/` + a binding in `web-rs/src/bindings/<domain>.rs`. Note `commands/` has domain **subdirectories** (`applications/`, `sso/`) as well as single files — extend the existing module for the domain rather than adding a parallel file.
+  - New domain command → the right module under `src-tauri/src/commands/` + a binding in `web-rs/src/bindings/<domain>.rs`. Note `commands/` has domain **subdirectories** (`applications/`, `exchange/`, `sso/`) as well as single files — extend the existing module for the domain rather than adding a parallel file.
   - New WASM component → new file in `web-rs/src/components/` or `web-rs/src/views/`.
   - New crate → new dir in `crates/` + update workspace Cargo.toml.
 - Conventional-commit scope: use the canonical list in AGENTS.md (Git & version control — exactly 9 scopes, enforced by the commit-validator hook). Don't invent scopes.

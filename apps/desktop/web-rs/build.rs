@@ -23,8 +23,19 @@ include!("build_support.rs");
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let changelog = repo_root(&manifest).join("CHANGELOG.md");
-    println!("cargo:rerun-if-changed={}", changelog.display());
+    // Deliberately NOT `rerun-if-changed=CHANGELOG.md`. The changelog is the
+    // highest-churn file in the repo (an `[Unreleased]` entry per user-visible
+    // change), and re-running this script recompiles the whole 50k-line crate
+    // for web-clippy, web-test AND web-build on the next verify — while the
+    // baked section (this version's, not `[Unreleased]`) is unchanged. The
+    // section can only change meaningfully with a version bump, and a bump
+    // re-runs the script on its own: the package id (name + version) is part of
+    // the build-script output directory hash. A post-release edit to the
+    // current version's section is picked up by the next clean build (every
+    // release build is one); locally, bump or `cargo clean` to see it.
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build_support.rs");
+    println!("cargo:rerun-if-changed=Cargo.toml");
 
     let version = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
     let notes = std::fs::read_to_string(&changelog)

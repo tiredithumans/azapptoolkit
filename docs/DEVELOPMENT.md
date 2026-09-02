@@ -8,25 +8,10 @@ For end-user installation and tenant configuration, see the
 
 ## Repository layout
 
-```
-azapptoolkit/
-├── Cargo.toml                    # workspace root
-├── crates/
-│   ├── azapptoolkit-core/           # domain types, cache, audit/risk scoring
-│   ├── azapptoolkit-auth/           # Entra ID OAuth2 PKCE + keyring
-│   ├── azapptoolkit-graph/          # typed Microsoft Graph client
-│   ├── azapptoolkit-exchange/       # Exchange Online Admin API client (RBAC for Applications)
-│   ├── azapptoolkit-keyvault/       # Key Vault secrets client
-│   ├── azapptoolkit-arm/            # Azure Resource Manager client (managed-identity Azure RBAC)
-│   ├── azapptoolkit-permissions/    # bundled permissions catalog
-│   └── azapptoolkit-dto/            # shared IPC DTO types
-├── apps/
-│   └── desktop/
-│       ├── src-tauri/            # Tauri 2 commands, state, adapters
-│       └── web-rs/               # Leptos 0.8 + Thaw frontend (WASM)
-├── justfile                      # task runner — all build/dev/verify commands
-└── .github/workflows/            # CI + release
-```
+The annotated tree lives in [AGENTS.md → Repo map](../AGENTS.md#repo-map) (one source, kept
+current by the staleness hook). In one line: `crates/` holds the eight shared libraries,
+`apps/desktop/src-tauri/` the Tauri backend, `apps/desktop/web-rs/` the Leptos/WASM frontend
+(excluded from the root workspace), and the `justfile` every build/dev/verify command.
 
 ## Prerequisites
 
@@ -97,19 +82,21 @@ git-ignored; check in only `.env.example`.
 
 ## Testing
 
-Run every CI gate in order with one command:
+Run every CI gate, in CI order, with one command:
 
 ```bash
-just verify        # fmt-check → clippy → test → web-fmt-check → web-test → web-build
+just verify        # the core gates + the browser GUI tests when Chrome + chromedriver are present
+just verify-ui     # same, browser tests mandatory
+just verify-full   # full CI parity: adds the dependency audit/deny gates (needs network)
 ```
 
-Or run an individual gate:
+`just --list` names every individual gate (`fmt-check`, `clippy`, `test`, `web-fmt-check`,
+`web-clippy`, `web-test`, `web-build`, `web-itest`, …) — the justfile is the single source for
+what each one runs. For the inner loop while iterating:
 
 ```bash
-just test          # cargo test --locked --workspace
-just clippy        # cargo clippy --locked --workspace --all-targets -- -D warnings
-just fmt-check     # cargo fmt --all -- --check
-just web-build     # trunk build --locked of the Leptos/WASM frontend
+just check                        # type-check both trees, no build, no tests
+just test-crate azapptoolkit-core # one crate's tests (append `-- <filter>` to narrow)
 ```
 
 Every new scoring rule added to `azapptoolkit-core::audit` must come with
@@ -334,25 +321,19 @@ Authenticode timestamps make the history auditable — keep it that way.
 `.github/workflows/ci.yml` runs on every push and pull request. Each job installs `just` and calls the
 same recipes you run locally, so CI and local builds can't drift:
 
-- Rust (`just fmt-check`, `just clippy`, `just test`) on Linux, Windows, and macOS
-- Frontend (`just web-fmt-check`, `just web-test`, `just web-build`) of `apps/desktop/web-rs` (Leptos/WASM)
+- Rust workspace (`just fmt-check`, `just clippy`, `just test`) on Linux, Windows, and macOS
+- Frontend (`just web-fmt-check`, `just web-clippy`, `just web-test`, `just web-build`, then the
+  browser GUI tests `just web-itest` + the shard ceiling `just web-itest-size`) on Linux
+- actionlint over the workflow files; shellcheck over `.claude/hooks/` plus a whole-history secrets
+  scan (never gated on the change detector)
 - Dependency policy: `just audit` + `just web-audit` (RustSec advisories — root workspace **and**
   the frontend's own lockfile) and `just deny` + `just web-deny` (license/source/bans for both trees)
 
-`.github/workflows/release.yml` runs on `v*` tags and
-`workflow_dispatch`:
-
-- Builds both the MSI and the NSIS installer (NSIS with updater artifacts),
-  with `--locked` enforcing the committed lockfiles end to end
-- Optionally Authenticode-signs both installers
-- Regenerates the NSIS updater signature over the final binary and
-  generates the `latest.json` manifest (target `windows-x86_64` → NSIS)
-- Publishes `SHA256SUMS` over every asset, so the (possibly unsigned) MSI
-  can be integrity-pinned by enterprise deployment tooling
-- Uploads the MSI, NSIS `-setup.exe`, its `.sig`, `latest.json`, and
-  `SHA256SUMS` to a **draft** release — publishing is the deliberate
-  human step (review notes, paste the CHANGELOG entry); the floating
-  `releases/latest` endpoint never sees a half-assembled release
+`.github/workflows/release.yml` runs on `v*` tags: a `guard` job (tag ⇔ manifests, updater pubkey,
+RustSec) → a 3-OS build matrix (Windows NSIS + MSI, macOS Apple Silicon `.dmg` + `.app.tar.gz`,
+Linux AppImage + `.deb`, each with signed updater artifacts) → one **draft** release with a single
+aggregated `latest.json` and `SHA256SUMS`. Publishing is the deliberate human step. Details:
+[docs/architecture/release-updater-demo.md](architecture/release-updater-demo.md).
 
 ## Token & secret security model
 
@@ -376,7 +357,7 @@ Invariants every change must preserve (the audit/review baseline for auth-adjace
 
 1. Run `just setup` once on a fresh clone (install `just` first — see Prerequisites).
 2. `just fmt` before submitting.
-3. `just verify` must pass — it runs the clippy, test, and frontend-build gates CI enforces.
+3. `just verify` must pass — it runs the CI gates, in CI order.
 
 Changes that port behavior from the legacy PowerShell module should
 reference the source file and line range in the commit message or PR

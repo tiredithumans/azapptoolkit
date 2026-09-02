@@ -8,7 +8,7 @@
 # Run recipe lines under PowerShell on Windows. `just` shells out to `sh -c` by
 # default on every platform; Windows has no `sh` unless Git Bash is on PATH, so
 # plain (non-shebang) recipes would fail with "could not find the shell 'sh'".
-# Shebang recipes (e.g. `setup`) are unaffected — they run as their own script.
+# Shebang recipes (e.g. `web-itest-auto`) are unaffected — they run as their own script.
 set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 
 # wasm-bindgen-test's headless runner gives a browser this many seconds to load
@@ -45,6 +45,8 @@ web-serve:
 # Frontend release build — invoked by tauri.conf.json `beforeBuildCommand`.
 # --locked: fail if web-rs/Cargo.lock is stale/tampered rather than silently
 # re-resolving (same supply-chain pin enforcement as the workspace recipes).
+
+# Frontend release build (Trunk, --locked) — tauri.conf.json beforeBuildCommand.
 [working-directory('apps/desktop/web-rs')]
 web-build-release:
     trunk build --release --locked
@@ -60,6 +62,8 @@ web-build:
 # (`https://<user>.github.io/<repo>/`). The desktop build keeps the default `/`;
 # the `demo` feature is never enabled there. Default `BASE` matches the repo name;
 # the Pages workflow passes it explicitly.
+
+# GitHub Pages demo build: release + `demo` feature (mock IPC) under a subpath base-href.
 [working-directory('apps/desktop/web-rs')]
 web-build-pages BASE="/azapptoolkit/":
     trunk build --release --locked --features demo --public-url {{BASE}}
@@ -71,9 +75,12 @@ web-build-pages BASE="/azapptoolkit/":
 # which GitHub keeps version-matched to the installed Chrome, so wasm-pack does
 # not download a copy that mismatches it. With no ARGS, wasm-pack uses a
 # `chromedriver` on `$PATH` or downloads one (swap `--chrome`/`--chromedriver`
-# for `--firefox`/`--geckodriver` to use Firefox instead). Deliberately NOT in
-# `verify`: that gate must run on any dev box, and this one needs a browser. The
-# `test-support` feature compiles the harness (off in the shipped Trunk build).
+# for `--firefox`/`--geckodriver` to use Firefox instead). Not a hard part of
+# `verify` (that gate must run on any dev box); `verify` runs it via
+# `web-itest-auto` when a browser is present. The `test-support` feature compiles
+# the harness (off in the shipped Trunk build).
+
+# Browser GUI tests: real Leptos views in headless Chrome, Tauri IPC mocked (needs chromedriver).
 [working-directory('apps/desktop/web-rs')]
 web-itest *ARGS:
     wasm-pack test --headless --chrome {{ARGS}} -- --features test-support
@@ -89,6 +96,8 @@ web-itest *ARGS:
 # Auto-detecting rather than mandatory, because the reason `web-itest` was kept
 # out of `verify` still holds — that gate must run on a box with no browser. The
 # skip is deliberately noisy so it can never be mistaken for a pass.
+
+# web-itest when this box has wasm-pack + chromedriver; a LOUD skip otherwise.
 [unix]
 web-itest-auto:
     #!/usr/bin/env bash
@@ -131,6 +140,8 @@ web-itest-auto:
 #
 # Unix/CI only (bash shebang, like `setup`): this is a size gate on the Linux CI
 # runner, not something a Windows dev box needs to reproduce.
+
+# Enforce the per-shard wasm ceiling headless Chrome can instantiate (CI/Unix).
 [working-directory('apps/desktop/web-rs')]
 web-itest-size:
     #!/usr/bin/env bash
@@ -182,6 +193,8 @@ web-itest-size:
 # without a chdir, keeping the recipe one plain `cargo` call per tree (works
 # under both sh and PowerShell). The next build recompiles from scratch. The
 # committed dist/ stub is left alone (verify recreates it via _stub-frontend-dist).
+
+# cargo clean BOTH build trees (root workspace + the excluded web-rs).
 clean:
     cargo clean
     cargo clean --manifest-path apps/desktop/web-rs/Cargo.toml
@@ -203,6 +216,8 @@ fmt-check:
 # the macro panics. Drop a minimal placeholder so the existence check passes;
 # never clobber a real build's index.html (the web-build recipes overwrite dist
 # with the real bundle). Hidden recipe (leading `_`).
+
+# Placeholder web-rs/dist so generate_context! compiles without a frontend build.
 [unix]
 _stub-frontend-dist:
     mkdir -p apps/desktop/web-rs/dist
@@ -216,12 +231,31 @@ _stub-frontend-dist:
 # Lint with warnings as errors (CI gate).
 # --locked: fail if Cargo.lock is stale/tampered rather than silently re-resolving
 # dependencies (supply-chain pin enforcement).
+
+# Lint the workspace, warnings as errors, --locked (CI gate).
 clippy: _stub-frontend-dist
     cargo clippy --locked --workspace --all-targets -- -D warnings
 
 # Run the workspace test suite (CI gate). --locked enforces the committed Cargo.lock.
 test: _stub-frontend-dist
     cargo test --locked --workspace
+
+# The inner loop while iterating: type-check BOTH trees (the root workspace incl.
+# every test target, and the wasm frontend) with no codegen and no tests. Not a
+# CI gate — `verify` is — but it catches the compile error `verify` would take
+# minutes to reach, and it keeps skills off hand-typed `cargo`.
+
+# Type-check both trees (no codegen, no tests) — the fast inner loop.
+check: _stub-frontend-dist
+    cargo check --locked --workspace --all-targets
+    cargo check --locked --manifest-path apps/desktop/web-rs/Cargo.toml --target wasm32-unknown-unknown
+
+# One crate's tests, e.g. `just test-crate azapptoolkit-core` or
+# `just test-crate desktop -- repo_invariants` (args after `--` go to cargo test).
+
+# Run one crate's tests: `just test-crate <crate> [-- <filter>]`.
+test-crate CRATE *ARGS: _stub-frontend-dist
+    cargo test --locked -p {{CRATE}} {{ARGS}}
 
 # Check frontend formatting (CI gate; web-rs is excluded from the root workspace).
 [working-directory('apps/desktop/web-rs')]
@@ -233,6 +267,8 @@ web-fmt-check:
 # the largest, IPC-privileged tier. Lints the actual wasm build + the browser
 # test harness; --features test-support so the integration-test targets (which
 # use it) compile under --all-targets. --locked enforces the web-rs Cargo.lock.
+
+# Lint the frontend for the wasm target, warnings as errors (CI gate).
 [working-directory('apps/desktop/web-rs')]
 web-clippy:
     cargo clippy --locked --target wasm32-unknown-unknown --all-targets --features test-support -- -D warnings
@@ -242,6 +278,8 @@ web-clippy:
 # no runtime WASM dependency, so they compile and run natively. --locked enforces
 # the committed web-rs Cargo.lock (this gate runs before web-build, so it pins the
 # frontend lockfile that Trunk's build then reuses).
+
+# Run the frontend unit tests on the host target (CI gate).
 [working-directory('apps/desktop/web-rs')]
 web-test:
     cargo test --locked
@@ -250,6 +288,8 @@ web-test:
 # `verify-full` so the browser suite is named exactly once per entry point and
 # can never run twice in one invocation. Frontend tests run before the (slower)
 # web build, matching the CI web job and failing fast on a logic regression.
+
+# The machine-independent gates shared by every verify entry point.
 _verify-core: fmt-check clippy test web-fmt-check web-clippy web-test web-build
 
 # Run the core CI gates locally, in order. Run this before declaring a change
@@ -257,6 +297,8 @@ _verify-core: fmt-check clippy test web-fmt-check web-clippy web-test web-build
 # and announce loudly when they cannot. Still not the whole of CI: the
 # dependency audit/deny gates are covered by `verify-full`; actionlint stays
 # CI-side unless installed locally.
+
+# The CI gates in CI order + the browser tests when this box can run them. Run before "done".
 verify: _verify-core web-itest-auto
     @echo ""
     @echo "verify OK — NOT run (needs network): audit, web-audit, deny, web-deny."
@@ -269,6 +311,8 @@ verify: _verify-core web-itest-auto
 # verify with the browser GUI tests MANDATORY rather than best-effort — use it
 # when you have Chrome + a matching chromedriver and want the frontend actually
 # proven, not skipped.
+
+# verify with the browser GUI tests MANDATORY (fails without Chrome + chromedriver).
 verify-ui: _verify-core web-itest
 
 # Full CI parity: the core gates + both RustSec scans + both deny policies + the
@@ -280,6 +324,8 @@ verify-ui: _verify-core web-itest
 # parity. It was missing, so a shard that had grown past the ceiling passed
 # `just verify-full` locally and failed in CI — the exact failure mode the
 # recipe exists to prevent.
+
+# Full CI parity: core gates + audit/deny for both trees + browser tests + shard ceiling.
 verify-full: _verify-core audit web-audit deny web-deny web-itest web-itest-size
 
 # --- Dependency policy (CI audit/deny jobs) ---------------------------------
@@ -292,6 +338,8 @@ audit:
 # workspace and has its own Cargo.lock (incl. the git-pinned tauri-sys), so the
 # root `audit` never sees it — and that WASM code runs inside the webview with
 # IPC access, so it must be gated too.
+
+# RustSec advisory scan of the frontend lockfile (web-rs is outside the workspace).
 web-audit:
     cargo audit -f apps/desktop/web-rs/Cargo.lock
 
@@ -301,6 +349,8 @@ web-audit:
 # omitting the check meant that block was config nobody executed — `yanked` was
 # never enforced by anything, and the ignores read as if they were load-bearing
 # here when only `.cargo/audit.toml` was actually consulted.
+
+# cargo-deny policy (advisories/bans/licenses/sources) for the root workspace.
 deny:
     cargo deny check advisories bans licenses sources
 
@@ -309,6 +359,8 @@ deny:
 # drift to different policies. `--config` sits on the ROOT command: the
 # cargo-deny 0.20 CLI refactor moved it off `check` (needs cargo-deny >= 0.20;
 # CI pins the matching version in ci.yml).
+
+# cargo-deny policy for the frontend tree, reusing the root deny.toml.
 [working-directory('apps/desktop/web-rs')]
 web-deny:
     cargo deny --config ../../../deny.toml check advisories bans licenses sources
@@ -319,6 +371,8 @@ web-deny:
 # Args after `--` go to the underlying cargo build: --locked enforces the
 # committed Cargo.lock on the one pipeline that produces shipped bytes (every
 # verify gate pins it; the release build must not silently re-resolve).
+
+# Windows MSI + NSIS installers, release, --locked (no updater signing key needed).
 [working-directory('apps/desktop/src-tauri')]
 build-windows:
     cargo tauri build --target x86_64-pc-windows-msvc -- --locked
@@ -332,6 +386,8 @@ build-windows:
 # when handing args to cargo.exe, so inline JSON parses as invalid ("key must be
 # a string"). A file path has no quoting to mangle. It is NOT a `tauri.*.conf.json`
 # name, so Tauri never auto-loads it — only this explicit `--config` does.
+
+# Windows installers WITH signed updater artifacts (needs TAURI_SIGNING_PRIVATE_KEY).
 [working-directory('apps/desktop/src-tauri')]
 build-windows-updater:
     cargo tauri build --target x86_64-pc-windows-msvc --config updater-build.json -- --locked
@@ -341,6 +397,8 @@ build-windows-updater:
 # NOT built (it's the historically-flaky bundling step on this stack; an Intel
 # leg can be added later). `--bundles app,dmg` keeps deb/rpm/etc. off the macOS
 # leg. Same updater-key contract as `build-windows-updater`.
+
+# macOS .dmg + .app.tar.gz with signed updater artifacts (Apple Silicon).
 [working-directory('apps/desktop/src-tauri')]
 build-macos-updater:
     cargo tauri build --target aarch64-apple-darwin --config updater-build.json --bundles app,dmg -- --locked
@@ -349,6 +407,8 @@ build-macos-updater:
 # with signed updater artifacts. Needs the GTK/WebKit/AppIndicator dev libs +
 # patchelf on the build host (CI installs them). `--bundles appimage,deb` — rpm
 # is omitted for now. Same updater-key contract as `build-windows-updater`.
+
+# Linux AppImage + .deb with signed updater artifacts.
 [working-directory('apps/desktop/src-tauri')]
 build-linux-updater:
     cargo tauri build --target x86_64-unknown-linux-gnu --config updater-build.json --bundles appimage,deb -- --locked
@@ -359,289 +419,19 @@ icon:
     cargo tauri icon icons/icon.svg
 
 # --- One-time developer setup (idempotent — safe to rerun) ------------------
-# Ported from the former scripts/setup.sh and scripts/setup.ps1. Verifies the
-# Rust toolchain, adds the wasm target + rustfmt/clippy, installs the Tauri CLI
-# and trunk if missing, checks OS-specific build deps, then runs a compile +
-# frontend-build smoke test. Run `cargo install just` (or your package manager)
-# first, then `just setup`.
+# The bodies live in scripts/setup.sh and scripts/setup.ps1 (they were inlined
+# here once, which doubled this file and made `just --list` unreadable; `just
+# setup` stays the single entry point). Each verifies the Rust toolchain, adds
+# the wasm target + rustfmt/clippy, installs the Tauri CLI, trunk and wasm-pack
+# if missing, checks OS-specific build deps + the browser-test prerequisites,
+# then runs a compile + frontend-build smoke test. Run `cargo install just` (or
+# your package manager) first, then `just setup`.
 
+# One-time, idempotent developer bootstrap (toolchain, targets, CLIs, browser test deps).
 [unix]
 setup:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-    info() { printf "${BLUE}==>${NC} %s\n" "$*"; }
-    ok()   { printf "${GREEN}[ OK ]${NC} %s\n" "$*"; }
-    warn() { printf "${YELLOW}[WARN]${NC} %s\n" "$*"; }
-    fail() { printf "${RED}[FAIL]${NC} %s\n" "$*" >&2; exit 1; }
-    need_cmd() { command -v "$1" >/dev/null 2>&1; }
-
-    info "Checking Rust toolchain"
-    if ! need_cmd rustc; then
-      fail "Rust not found. Install via https://rustup.rs, then rerun 'just setup'."
-    fi
-    ok "$(rustc --version)"
-
-    if need_cmd rustup; then
-      info "Ensuring rustfmt + clippy components are present"
-      rustup component add rustfmt clippy >/dev/null 2>&1 || warn "Could not add rustfmt/clippy components automatically"
-      ok "rustfmt + clippy ready"
-      info "Ensuring the wasm32-unknown-unknown target"
-      rustup target add wasm32-unknown-unknown >/dev/null 2>&1 || warn "Could not add wasm32-unknown-unknown automatically"
-      ok "wasm32-unknown-unknown ready"
-    else
-      warn "rustup not found — ensure rustfmt, clippy, and the wasm32-unknown-unknown target are installed some other way"
-    fi
-
-    if [[ "$(uname -s)" == "Linux" ]]; then
-      info "Checking Linux system packages required by Tauri"
-      LINUX_PKGS=(libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev)
-      MISSING=()
-      if need_cmd dpkg; then
-        for p in "${LINUX_PKGS[@]}"; do
-          if ! dpkg -s "$p" >/dev/null 2>&1; then MISSING+=("$p"); fi
-        done
-        if [[ ${#MISSING[@]} -gt 0 ]]; then
-          warn "Missing apt packages: ${MISSING[*]}"
-          warn "Install with: sudo apt-get update && sudo apt-get install -y ${MISSING[*]}"
-        else
-          ok "All required apt packages present"
-        fi
-      else
-        warn "Non-Debian Linux detected — install equivalents of: ${LINUX_PKGS[*]}"
-      fi
-    fi
-
-    info "Checking Tauri CLI"
-    if need_cmd cargo-tauri; then
-      ok "$(cargo tauri --version 2>/dev/null || echo 'tauri-cli present')"
-    else
-      warn "tauri-cli not installed — installing now (may take several minutes)"
-      # Pin the CLI to the exact `tauri` runtime version (Cargo.lock) for
-      # reproducible tooling. Bump both together. --locked pins the CLI's own deps.
-      cargo install tauri-cli --locked --version "=2.11.2"
-      ok "tauri-cli installed"
-    fi
-
-    info "Checking trunk (WASM bundler)"
-    if need_cmd trunk; then
-      ok "$(trunk --version)"
-    else
-      warn "trunk not installed — installing now (may take several minutes)"
-      cargo install trunk --locked
-      ok "trunk installed"
-    fi
-
-    info "Checking wasm-pack (frontend GUI test runner for 'just web-itest')"
-    if need_cmd wasm-pack; then
-      ok "$(wasm-pack --version)"
-    else
-      warn "wasm-pack not installed — installing now (may take several minutes)"
-      cargo install wasm-pack --locked
-      ok "wasm-pack installed"
-    fi
-    # `just web-itest` runs the Leptos views in a real headless browser, so it
-    # needs BOTH a browser and a matching WebDriver. This is the only behavioural
-    # gate for ~46k lines of frontend, and it is the gate most likely to be
-    # missing locally — so install the driver rather than only naming it, and
-    # report the browser side precisely instead of assuming Chrome.
-    info "Checking the browser GUI test prerequisites ('just web-itest')"
-    BROWSER=""
-    for candidate in \
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-      "/Applications/Chromium.app/Contents/MacOS/Chromium" \
-      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
-      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"; do
-      if [[ -x "$candidate" ]]; then BROWSER="$candidate"; break; fi
-    done
-    if [[ -z "$BROWSER" ]]; then
-      for candidate in google-chrome google-chrome-stable chromium chromium-browser brave-browser microsoft-edge; do
-        if need_cmd "$candidate"; then BROWSER="$(command -v "$candidate")"; break; fi
-      done
-    fi
-
-    if ! need_cmd chromedriver && ! need_cmd geckodriver; then
-      # Small, safe, and useless to defer — unlike a browser, which is a large
-      # unattended install this script will not perform on someone's behalf.
-      if need_cmd brew; then
-        warn "No WebDriver found — installing chromedriver via Homebrew"
-        brew install chromedriver >/dev/null 2>&1 || warn "chromedriver install failed; install it manually"
-      elif need_cmd apt-get; then
-        warn "No WebDriver found — install with: sudo apt-get install -y chromium-driver"
-      fi
-    fi
-
-    if need_cmd chromedriver || need_cmd geckodriver; then
-      if [[ -n "$BROWSER" ]]; then
-        ok "Browser GUI tests can run ($(basename "$BROWSER") + WebDriver)"
-        case "$BROWSER" in
-          *Chrome*|*chrome*) ;;
-          *)
-            # wasm-pack asks for Chrome by name; a Chromium-family sibling needs
-            # its binary path handed to the driver. Without this the run fails
-            # with an opaque 404 from a driver that started fine.
-            warn "Only a non-Chrome Chromium browser was found. If 'just web-itest' fails to start one,"
-            warn "  create apps/desktop/web-rs/webdriver.json with:"
-            warn "  {\"goog:chromeOptions\": {\"binary\": \"$BROWSER\"}}"
-            ;;
-        esac
-      else
-        warn "A WebDriver is present but no browser was found — 'just web-itest' cannot run."
-        warn "  macOS: brew install --cask google-chrome    Linux: apt-get install -y chromium"
-      fi
-    else
-      warn "No WebDriver — 'just web-itest' will LOUD-SKIP, leaving the frontend unproven locally."
-    fi
-
-    info "cargo check --workspace"
-    cargo check --workspace
-    ok "Rust workspace compiles"
-
-    info "Frontend build (apps/desktop/web-rs)"
-    ( cd apps/desktop/web-rs && trunk build )
-    ok "Frontend builds"
-
-    cat <<'EOF'
-
-    ==================================================================
-    Setup complete.
-
-    Before signing in to a real tenant, point the app at an Entra ID
-    public-client app registration by exporting its client and tenant ids
-    (both are required):
-
-      export AZAPPTOOLKIT_CLIENT_ID=<your-public-client-guid>
-      export AZAPPTOOLKIT_TENANT_ID=<your-tenant-guid>
-
-    The app registration must be a single-tenant public client with a
-    redirect URI of `http://127.0.0.1` and the following delegated
-    permissions:
-
-      - Directory.Read.All                        (required at sign-in)
-      - Application.ReadWrite.All                 (on first write)
-      - AppRoleAssignment.ReadWrite.All           (on first write)
-      - DelegatedPermissionGrant.ReadWrite.All    (on first write)
-
-    Optional features (Key Vault, Exchange scoping, audit logs, ...) need
-    more scopes, consented on first use — see the permission table in
-    README.md > First-run configuration for the full list.
-
-    Run the app in dev mode:
-
-      just dev
-
-    For release builds, updater signing keys, and packaging, see
-    docs/DEVELOPMENT.md.
-    ==================================================================
-    EOF
+    bash scripts/setup.sh
 
 [windows]
 setup:
-    #!powershell.exe
-    $ErrorActionPreference = 'Stop'
-    function Write-Info   ($m) { Write-Host "==> $m"     -ForegroundColor Cyan }
-    function Write-Ok     ($m) { Write-Host "[ OK ] $m"  -ForegroundColor Green }
-    function Write-WarnMsg($m) { Write-Host "[WARN] $m"  -ForegroundColor Yellow }
-    function Write-Fail   ($m) { Write-Host "[FAIL] $m"  -ForegroundColor Red; exit 1 }
-
-    Write-Info "Checking Rust toolchain"
-    if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) {
-        Write-Fail "Rust not found. Install via https://rustup.rs, then rerun 'just setup'."
-    }
-    Write-Ok (rustc --version)
-
-    if (Get-Command rustup -ErrorAction SilentlyContinue) {
-        Write-Info "Ensuring rustfmt + clippy components are present"
-        rustup component add rustfmt clippy *> $null
-        Write-Ok "rustfmt + clippy ready"
-        Write-Info "Ensuring the wasm32-unknown-unknown target"
-        rustup target add wasm32-unknown-unknown *> $null
-        Write-Ok "wasm32-unknown-unknown ready"
-    } else {
-        Write-WarnMsg "rustup not found — ensure rustfmt, clippy, and the wasm32-unknown-unknown target are installed some other way"
-    }
-
-    Write-Info "Checking Tauri CLI"
-    if (Get-Command cargo-tauri -ErrorAction SilentlyContinue) {
-        Write-Ok (cargo tauri --version 2>$null)
-    } else {
-        Write-WarnMsg "tauri-cli not installed — installing now (may take several minutes)"
-        # Pin the CLI to the exact `tauri` runtime version (Cargo.lock) for
-        # reproducible tooling. Bump both together. --locked pins the CLI's own deps.
-        cargo install tauri-cli --locked --version "=2.11.2"
-        Write-Ok "tauri-cli installed"
-    }
-
-    Write-Info "Checking WiX Toolset (required only for MSI packaging)"
-    if (Get-Command candle -ErrorAction SilentlyContinue) {
-        Write-Ok "WiX found"
-    } else {
-        Write-WarnMsg "WiX not found. Install WiX 3.11+ if you plan to build .msi installers."
-        Write-WarnMsg "  https://wixtoolset.org/releases/"
-    }
-
-    Write-Info "Checking trunk (WASM bundler)"
-    if (Get-Command trunk -ErrorAction SilentlyContinue) {
-        Write-Ok (trunk --version)
-    } else {
-        Write-WarnMsg "trunk not installed — installing now (may take several minutes)"
-        cargo install trunk --locked
-        Write-Ok "trunk installed"
-    }
-
-    Write-Info "Checking wasm-pack (frontend GUI test runner for 'just web-itest')"
-    if (Get-Command wasm-pack -ErrorAction SilentlyContinue) {
-        Write-Ok (wasm-pack --version)
-    } else {
-        Write-WarnMsg "wasm-pack not installed — installing now (may take several minutes)"
-        cargo install wasm-pack --locked
-        Write-Ok "wasm-pack installed"
-    }
-    # 'just web-itest' runs the Leptos views in a real headless browser, so it
-    # needs a browser + a matching WebDriver on PATH (CI uses Chrome). Not part
-    # of 'just verify', so this is a soft prerequisite — warn, don't fail.
-    if (Get-Command chromedriver -ErrorAction SilentlyContinue) {
-        Write-Ok "chromedriver present (for 'just web-itest' browser GUI tests)"
-    } else {
-        Write-WarnMsg "No chromedriver found — 'just web-itest' (browser GUI tests) needs Chrome + a matching chromedriver on PATH."
-    }
-
-    Write-Info "cargo check --workspace"
-    cargo check --workspace
-    Write-Ok "Rust workspace compiles"
-
-    Write-Info "Frontend build (apps/desktop/web-rs)"
-    Push-Location apps/desktop/web-rs
-    try { trunk build } finally { Pop-Location }
-    Write-Ok "Frontend builds"
-
-    Write-Host ""
-    Write-Host "==================================================================" -ForegroundColor Cyan
-    Write-Host "Setup complete." -ForegroundColor Green
-    Write-Host ""
-    Write-Host "Before signing in to a real tenant, point the app at an Entra ID"
-    Write-Host "public-client app registration by setting its client and tenant ids"
-    Write-Host "(both are required):"
-    Write-Host ""
-    Write-Host "  [Environment]::SetEnvironmentVariable('AZAPPTOOLKIT_CLIENT_ID','<client-guid>','User')"
-    Write-Host "  [Environment]::SetEnvironmentVariable('AZAPPTOOLKIT_TENANT_ID','<tenant-guid>','User')"
-    Write-Host ""
-    Write-Host "The app registration must be a single-tenant public client with a"
-    Write-Host "redirect URI of http://127.0.0.1 and the following delegated scopes:"
-    Write-Host ""
-    Write-Host "  - Directory.Read.All                        (required at sign-in)"
-    Write-Host "  - Application.ReadWrite.All                 (on first write)"
-    Write-Host "  - AppRoleAssignment.ReadWrite.All           (on first write)"
-    Write-Host "  - DelegatedPermissionGrant.ReadWrite.All    (on first write)"
-    Write-Host ""
-    Write-Host "Optional features (Key Vault, Exchange scoping, audit logs, ...) need"
-    Write-Host "more scopes, consented on first use — see the permission table in"
-    Write-Host "README.md > First-run configuration for the full list."
-    Write-Host ""
-    Write-Host "Run the app in dev mode:"
-    Write-Host ""
-    Write-Host "  just dev"
-    Write-Host ""
-    Write-Host "For release builds (MSI + NSIS installers), updater signing"
-    Write-Host "keys, and packaging, see docs/DEVELOPMENT.md."
-    Write-Host "==================================================================" -ForegroundColor Cyan
+    powershell.exe -NoLogo -ExecutionPolicy Bypass -File scripts/setup.ps1

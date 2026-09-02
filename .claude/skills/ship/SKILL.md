@@ -16,8 +16,7 @@ ambiguous, or if a gate fails.
 - `git status --short` and `git log origin/main..HEAD --oneline`. Nothing to commit **and**
   nothing unpushed → report "nothing to ship" and stop.
 - **Gate check:** if any Rust/WASM source changed (`crates/`, `apps/desktop/src-tauri/`,
-  `apps/desktop/web-rs/`), run `just verify` (fmt-check → clippy → test → web-fmt-check →
-  web-clippy → web-test → web-build) and stop on failure. For full CI parity, `just verify-full`
+  `apps/desktop/web-rs/`), run `just verify` (every CI gate, in CI order) and stop on failure. For full CI parity, `just verify-full`
   adds audit/web-audit/deny/web-deny/web-itest (web-itest needs a browser). Changes limited to
   docs, `.claude/`, or `.github/` skip verify — say so in the PR test plan. Remote CI still runs
   the required checks on the PR; the merge waits on them (step 4).

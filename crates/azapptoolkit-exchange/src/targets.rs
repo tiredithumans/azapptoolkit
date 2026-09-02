@@ -1010,7 +1010,7 @@ mod tests {
     /// the first multi-byte character landed it mid-sequence and the slice
     /// panicked on the char boundary. Everything here is a filter an operator
     /// could plausibly have written or pasted, and all three call sites
-    /// (`commands/exchange.rs` twice, `client/rbac.rs`) feed this function
+    /// (`commands/exchange/` twice, `client/rbac.rs`) feed this function
     /// filters this crate did not generate.
     #[test]
     fn a_non_ascii_filter_is_counted_rather_than_panicking() {
