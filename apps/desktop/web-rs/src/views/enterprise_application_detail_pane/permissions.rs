@@ -116,6 +116,30 @@ pub(super) fn PermissionsContent(
         revoke_cmd.error.set(None);
         pending_revoke.set(Some(assignment_id));
     });
+    // The revoke icon hands back only an assignment id, so the dialog resolves
+    // the row's own permission out of the held list the table is already
+    // rendering — same source, same fallback to the raw appRole id, so the
+    // subject is character-for-character the cell the operator clicked.
+    let pending_revoke_label = Signal::derive(move || {
+        pending_revoke
+            .with(|p| {
+                p.as_ref().map(|aid| {
+                    granted
+                        .with(|g| {
+                            g.as_ref()
+                                .and_then(|r| r.as_ref().ok())
+                                .and_then(|list| list.iter().find(|row| &row.assignment_id == aid))
+                                .map(|row| {
+                                    row.app_role_value
+                                        .clone()
+                                        .unwrap_or_else(|| row.app_role_id.clone())
+                                })
+                        })
+                        .unwrap_or_else(|| aid.clone())
+                })
+            })
+            .unwrap_or_default()
+    });
 
     let display_name =
         Signal::derive(move || signal.with(|d| d.service_principal.display_name.clone()));
@@ -292,6 +316,7 @@ pub(super) fn PermissionsContent(
                 open=Signal::derive(move || pending_revoke.with(|p| p.is_some()))
                 title="Revoke permission?"
                 body="Remove this app's held app-role assignment. The app loses that permission until it's granted again; the live grant is re-checked before removal."
+                subject=pending_revoke_label
                 confirm_label="Revoke"
                 busy=revoke_cmd.busy
                 error=revoke_cmd.error

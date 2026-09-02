@@ -669,6 +669,10 @@ pub fn audit_run_result() -> AuditRunResult {
         // real-failure surface, and showing it here would misrepresent the
         // findings below it as incomplete.
         degraded: Vec::new(),
+        // Relative to "now" rather than a fixed date, so the demo renders a
+        // plausible "Scanned 12 min ago" forever instead of aging into
+        // "Scanned 400 days ago" the year after it was written.
+        completed_at: Some((Utc::now() - chrono::Duration::minutes(12)).to_rfc3339()),
     }
 }
 
@@ -904,6 +908,11 @@ pub fn mailbox_probe_progress(done: usize, total: usize) -> MailboxProbeProgress
 
 /// A `global_search` result carrying only `app_registrations` hits (synthetic
 /// ids/appIds), with no enterprise/MI hits — for the top-bar search dropdown.
+///
+/// Every match fits on screen here: the per-kind total equals the row count and
+/// the corpus is whole, so the dropdown renders no "N of M" footer and no
+/// index-cap notice. Both of those need a *capped* result to show up, which is
+/// what `global_search_capped` below builds.
 pub fn global_search_apps(display_names: &[&str]) -> azapptoolkit_dto::search::GlobalSearchResults {
     azapptoolkit_dto::search::GlobalSearchResults {
         query: String::new(),
@@ -919,6 +928,30 @@ pub fn global_search_apps(display_names: &[&str]) -> azapptoolkit_dto::search::G
             .collect(),
         enterprise_apps: Vec::new(),
         managed_identities: Vec::new(),
+        app_registrations_total: display_names.len(),
+        enterprise_apps_total: 0,
+        managed_identities_total: 0,
+        corpus_truncated: false,
+        corpus_cap: 10_000,
+    }
+}
+
+/// [`global_search_apps`] on a tenant the search could not fully see: the
+/// app-registration bucket matched `total` rows but only these are returned,
+/// and the service-principal index behind the corpus truncated.
+///
+/// The two states a dropdown can only render dishonestly without them — a capped
+/// group presented as the whole answer, and a result set filtered from a partial
+/// directory — so they get a fixture rather than being reachable only against a
+/// >10 000-principal tenant.
+pub fn global_search_capped(
+    display_names: &[&str],
+    total: usize,
+) -> azapptoolkit_dto::search::GlobalSearchResults {
+    azapptoolkit_dto::search::GlobalSearchResults {
+        app_registrations_total: total,
+        corpus_truncated: true,
+        ..global_search_apps(display_names)
     }
 }
 

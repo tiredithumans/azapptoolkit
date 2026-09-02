@@ -1163,6 +1163,10 @@ pub fn CredentialsTab(
                 open=Signal::derive(move || pending_expired.get())
                 title="Remove all expired secrets?"
                 body="Sweeps every expired client secret from this application. Active secrets are not touched."
+                // Not a per-row dialog, but "this application" is ambiguous with
+                // several detail windows open behind the modal — so it names the
+                // one it will sweep.
+                subject=Signal::derive(move || detail.with(|d| d.application.display_name.clone()))
                 confirm_label="Remove expired"
                 busy=Signal::derive(move || cmd_expire.busy.get())
                 on_confirm=Callback::new(move |()| {

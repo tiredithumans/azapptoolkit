@@ -363,20 +363,32 @@ pub fn ScopeSharePointButton(
                             <Show
                                 when=move || needs_consent.get()
                                 fallback=move || {
+                                    // Read is the Primary (and, by this row's
+                                    // convention, last) button: this is a
+                                    // least-privilege remediation, so the
+                                    // emphasized default must not be the
+                                    // broader role. An operator working down a
+                                    // findings list at speed clicks the primary
+                                    // — which used to hand out write. The two
+                                    // equivalent paths already default to read
+                                    // (the wizard's `SiteSelectionPanel` starts
+                                    // `write=false`; the bulk bar's checkbox is
+                                    // labelled "default: read"), so this also
+                                    // stops the three surfaces disagreeing.
                                     view! {
                                         <Button
                                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                            on_click=Box::new(move |_| do_scope.run(false))
-                                            disabled=Signal::derive(move || busy.get())
-                                        >
-                                            "Grant read access"
-                                        </Button>
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Primary)
                                             on_click=Box::new(move |_| do_scope.run(true))
                                             disabled=Signal::derive(move || busy.get())
                                         >
                                             "Grant write access"
+                                        </Button>
+                                        <Button
+                                            appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                            on_click=Box::new(move |_| do_scope.run(false))
+                                            disabled=Signal::derive(move || busy.get())
+                                        >
+                                            "Grant read access"
                                         </Button>
                                     }
                                 }

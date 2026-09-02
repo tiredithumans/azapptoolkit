@@ -9,6 +9,11 @@
 //! (no remount), and the window is rendered through a keyed `<For>` — a
 //! one-row scroll step reuses the DOM of every still-visible row and only
 //! creates/drops the edge rows.
+//!
+//! Keyboard row navigation lives here rather than in the three list views
+//! because the element a Home/End has to move before an off-window row can
+//! exist — the scroller — is this component's, and so is the signal that says
+//! the window has caught up.
 
 use std::hash::Hash;
 use std::sync::Arc;
@@ -18,7 +23,9 @@ use leptos::html::Div;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
-use web_sys::{HtmlElement, ResizeObserver};
+use web_sys::{Element, HtmlElement, ResizeObserver};
+
+use crate::hooks::use_grid_keynav::{RowSource, use_row_keynav};
 
 #[component]
 pub fn VirtualList<T, K, KF, R>(
@@ -37,6 +44,12 @@ pub fn VirtualList<T, K, KF, R>(
     /// Class for the full-height inner sizer the rows are positioned in.
     #[prop(into)]
     sizer_class: String,
+    /// Selector matching the row roots `render_row` produces (e.g.
+    /// `".app-list__row"`), which gives them the roving-tabindex Arrow/Home/End
+    /// navigation every `DataTable` already has. Required rather than optional:
+    /// a windowed list is exactly the case where crossing it by Tab alone is
+    /// unusable, so opting out would only ever be an oversight.
+    row_selector: &'static str,
     /// Stable per-row key (e.g. the object id). Combined with the row's
     /// absolute index — a scroll step keeps every (index, id) pair so DOM is
     /// reused; a filter change that moves a row to a new offset rebuilds it
@@ -153,8 +166,23 @@ where
         (start.min(end), end)
     });
 
+    // Keyboard row navigation over the *rendered* window. `visible_range` is the
+    // rerender trigger the hook waits on: a Home/End scrolls first and can only
+    // take focus once the window has been rebuilt around the target row, and
+    // this is the signal that says it has. `items` is tracked too — a re-sort
+    // leaves the range untouched while replacing every row in it.
+    let on_keydown = use_row_keynav(
+        move || scroll_ref.get().map(Element::from),
+        row_selector,
+        RowSource::Windowed,
+        move || {
+            items.track();
+            visible_range.track();
+        },
+    );
+
     view! {
-        <div class=scroller_class node_ref=scroll_ref on:scroll=on_scroll>
+        <div class=scroller_class node_ref=scroll_ref on:scroll=on_scroll on:keydown=on_keydown>
             <div
                 class=sizer_class
                 style:height=move || {

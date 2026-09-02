@@ -86,7 +86,13 @@ pub fn ExchangeScopingSection(
 
     let groups_text = RwSignal::new(String::new());
     // Drives the shared-core grant flow (`run_grant`).
-    let grant_cmd = use_command();
+    // The consent fallback offers this component's OWN scope set, not the Graph
+    // write scopes `use_command` defaults to: these mutations ride an on-demand
+    // feature scope, so a `consent_required` here is closed by `exchange` — the
+    // same key this file's existing "Grant consent" button already passes.
+    // Offering the wrong set is the exact mis-mapping FR-02 found in the scope
+    // wizard, where an org-wide Graph grant offered the Exchange scopes.
+    let grant_cmd = use_command().with_consent_feature("exchange");
 
     // Resolved managed scope group (`app_scope_group_<appId>`) state — owned
     // here, populated by the embedded `ManagedScopeGroupPanel`, and read by
@@ -97,11 +103,11 @@ pub fn ExchangeScopingSection(
     > = RwSignal::new(None);
 
     // Drives the legacy Application Access Policy migration (`do_migrate`).
-    let mig_cmd = use_command();
+    let mig_cmd = use_command().with_consent_feature("exchange");
     // Tearing a scope back down. Without this the app could CREATE Exchange RBAC
     // scoping but not remove it — the operator had to drop to PowerShell to undo
     // something this tool did, which is the exact workflow it exists to replace.
-    let remove_cmd = use_command();
+    let remove_cmd = use_command().with_consent_feature("exchange");
     let confirm_remove = RwSignal::new(false);
     let mig_result: RwSignal<Option<AapMigrationReport>> = RwSignal::new(None);
     // A grant outcome that carries warnings, kept inline until it's been read.
@@ -117,7 +123,7 @@ pub fn ExchangeScopingSection(
     // mailboxes it covers today into the managed group, then repoint it). Runs
     // as a plan first — it rewrites what every role assignment on that scope
     // reaches, so the operator sees the mailbox list before committing.
-    let move_cmd = use_command();
+    let move_cmd = use_command().with_consent_feature("exchange");
     let move_result: RwSignal<Option<exchange::ExchangeScopeConsolidationResult>> =
         RwSignal::new(None);
     // Optional override for the management-scope name. Blank => backend default.
@@ -606,6 +612,10 @@ pub fn ExchangeScopingSection(
                                 open=Signal::derive(move || confirm_remove.get())
                                 title="Remove Exchange mailbox scoping?"
                                 body="This removes every Exchange role assignment for this principal, so its mail permissions revert to the org-wide access the Entra grant allows — this widens access, it does not revoke it. The management scope and the mail-enabled group are left in place so the scoping can be re-applied."
+                                // "This principal" is whichever detail window the
+                                // section is mounted in, and the modal covers them
+                                // all — so it names the principal it will widen.
+                                subject=Signal::derive(move || target.with(|t| t.display_name.clone()))
                                 confirm_label="Remove assignments"
                                 busy=Signal::derive(move || remove_cmd.busy.get())
                                 on_confirm=Callback::new(move |_| {

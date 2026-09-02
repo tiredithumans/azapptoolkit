@@ -36,12 +36,21 @@ pub fn SharePointSitesSection(
 
     let site_url = RwSignal::new(String::new());
     // Drives the consent / grant / remove mutations, which share one busy+error.
-    let cmd = use_command();
+    // The consent fallback offers this component's OWN scope set, not the Graph
+    // write scopes `use_command` defaults to: these mutations ride an on-demand
+    // feature scope, so a `consent_required` here is closed by `sharepoint` — the
+    // same key this file's existing "Grant consent" button already passes.
+    // Offering the wrong set is the exact mis-mapping FR-02 found in the scope
+    // wizard, where an org-wide Graph grant offered the Exchange scopes.
+    let cmd = use_command().with_consent_feature("sharepoint");
     let result: RwSignal<Option<GrantSiteAccessResult>> = RwSignal::new(None);
     // The site whose permissions are currently listed; set after grant/list.
     let listed_url = RwSignal::new(String::new());
     let reload = RwSignal::new(0_u32);
-    let pending_remove: RwSignal<Option<String>> = RwSignal::new(None);
+    // (permission id, label): the listing is one row per app on ONE site, so the
+    // label names the app AND the site — the modal covers the table, and the site
+    // it belongs to is only visible in the box above it.
+    let pending_remove: RwSignal<Option<(String, String)>> = RwSignal::new(None);
     // The site-permission endpoints require the admin-consent-only
     // `Sites.FullControl.All` scope, acquired on demand. A `consent_required`
     // from any SharePoint call flips this on to offer a "Grant consent" button.
@@ -273,6 +282,11 @@ pub fn SharePointSitesSection(
                                                             .app_display_name
                                                             .or(p.app_id)
                                                             .unwrap_or_else(|| "—".into());
+                                                        let label = format!(
+                                                            "{app} ({}) on {}",
+                                                            p.roles.join(", "),
+                                                            listed_url.get_untracked(),
+                                                        );
                                                         view! {
                                                             <tr>
                                                                 <td>{app}</td>
@@ -281,7 +295,10 @@ pub fn SharePointSitesSection(
                                                                     <Button
                                                                         class="button--danger"
                                                                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                        on_click=Box::new(move |_| pending_remove.set(Some(id.clone())))
+                                                                        on_click=Box::new(move |_| {
+                                                                            pending_remove
+                                                                                .set(Some((id.clone(), label.clone())))
+                                                                        })
                                                                         disabled=Signal::derive(move || cmd.busy.get())
                                                                     >
                                                                         "Remove"
@@ -309,10 +326,13 @@ pub fn SharePointSitesSection(
                                 open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
                                 title="Revoke this site permission?"
                                 body="This app immediately loses access to the SharePoint site. The grant can be re-added from this section."
+                                subject=Signal::derive(move || {
+                                    pending_remove.with(|p| p.as_ref().map(|(_, label)| label.clone())).unwrap_or_default()
+                                })
                                 confirm_label="Revoke"
                                 busy=cmd.busy
                                 on_confirm=Callback::new(move |()| {
-                                    if let Some(id) = pending_remove.get() {
+                                    if let Some((id, _)) = pending_remove.get() {
                                         pending_remove.set(None);
                                         do_remove(id);
                                     }

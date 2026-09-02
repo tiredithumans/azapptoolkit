@@ -22,3 +22,34 @@ pub async fn get_cached_key_vault_access(
 ) -> Result<Option<KeyVaultSweepResult>, UiError> {
     invoke_result("get_cached_key_vault_access", TenantArg { tenant_id }).await
 }
+
+// ---------------- Vault-access export ----------------
+
+/// The panel's own coverage sentence rides along with the rows: a vault whose
+/// role read failed contributes none, so an export that dropped
+/// "(N failed — coverage is partial)" would read as a complete answer.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveKeyVaultAccessArgs<'a> {
+    rows: &'a [KeyVaultAccessRow],
+    summary: &'a str,
+    format: &'a str,
+}
+
+/// Exports the (filtered) vault-access rows to a CSV/JSON file via the OS save
+/// dialog. Returns the chosen path, or `None` if the user cancelled.
+pub async fn save_key_vault_access_to_file(
+    rows: &[KeyVaultAccessRow],
+    summary: &str,
+    format: &str,
+) -> Result<Option<String>, UiError> {
+    invoke_result(
+        "save_key_vault_access_to_file",
+        SaveKeyVaultAccessArgs {
+            rows,
+            summary,
+            format,
+        },
+    )
+    .await
+}

@@ -49,72 +49,67 @@ pub(super) fn matches_severity(i: &AuditItem, severity: &str) -> bool {
     }
 }
 
-/// Finding-type dimension: `"all"` plus the structured/marker-driven findings.
-pub(super) fn matches_finding(i: &AuditItem, finding: &str) -> bool {
-    match finding {
-        "all" => true,
-        // Already-expired credentials only — proactive "expiring soon" rotation
-        // lead-time lives in the Credential-expiry lens (≤7d / ≤30d facets).
-        "expired" => {
-            use azapptoolkit_core::audit::CredentialStatus;
-            matches!(i.credential_status, CredentialStatus::Expired)
-        }
-        "high_risk_perms" => i
-            .issues
-            .iter()
-            .any(|x| x.starts_with(issue::HIGH_RISK_APP_PERMS)),
-        "high_risk_delegated" => i
-            .issues
-            .iter()
-            .any(|x| x.starts_with(issue::HIGH_RISK_DELEGATED_PERMS)),
+/// The per-issue predicate behind a marker-driven finding: does THIS issue line
+/// belong to `finding`? `None` for `"all"`, for an unknown key, and for the
+/// findings that key off a structured `AuditItem` field instead of issue text.
+///
+/// The key→marker table living here exactly once is the point:
+/// [`matches_finding`] asks "does any issue match?" and [`issue_lines_for`] asks
+/// "which ones?", so a group's membership and the line a row quotes for it can
+/// never diverge — including the load-bearing `.contains` arm below.
+fn issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
+    let marks: fn(&str) -> bool = match finding {
+        "high_risk_perms" => |x| x.starts_with(issue::HIGH_RISK_APP_PERMS),
+        "high_risk_delegated" => |x| x.starts_with(issue::HIGH_RISK_DELEGATED_PERMS),
         // Reach beyond this directory. Both markers live in one group: the
         // publisher finding only ever fires alongside the audience one, so
         // splitting them would produce a group that is always a subset of
         // another.
-        "external_exposure" => i.issues.iter().any(|x| {
+        "external_exposure" => |x| {
             x.starts_with(issue::MULTITENANT_AUDIENCE) || x.starts_with(issue::UNVERIFIED_PUBLISHER)
-        }),
+        },
         // Effective mailbox scoping findings. Scoping is resolved on every run, but
         // degrades to org-wide when the signed-in user lacks Exchange-admin rights.
-        "orgwide_mailbox" => i
-            .issues
-            .iter()
-            .any(|x| x.starts_with(issue::ORG_WIDE_MAILBOX)),
+        "orgwide_mailbox" => |x| x.starts_with(issue::ORG_WIDE_MAILBOX),
         // Load-bearing asymmetry: `SCOPED_VIA_RBAC` is embedded MID-issue
         // ("Mail.Read scoped via Exchange RBAC…"), not a prefix like its siblings,
         // so this must stay `.contains` — a "normalize to starts_with" sweep would
         // silently empty the Scoped-mailbox finding (pinned by the tests below).
-        "scoped_mailbox" => i.issues.iter().any(|x| x.contains(issue::SCOPED_VIA_RBAC)),
+        "scoped_mailbox" => |x| x.contains(issue::SCOPED_VIA_RBAC),
         // Confined, but by the deprecated per-app Application Access Policy
         // rather than RBAC for Applications. Its own finding, not a variant of
         // `orgwide_mailbox` (the access IS confined) and not of `scoped_mailbox`
         // (that group is the healthy end state this one migrates toward) — the
         // scorer keeps `SCOPED_VIA_RBAC` off these advisories so the two can't
         // both match.
-        "legacy_mailbox_scope" => i
-            .issues
-            .iter()
-            .any(|x| x.starts_with(issue::LEGACY_MAILBOX_POLICY)),
-        "orgwide_sharepoint" => i
-            .issues
-            .iter()
-            .any(|x| x.starts_with(issue::ORG_WIDE_SHAREPOINT)),
+        "legacy_mailbox_scope" => |x| x.starts_with(issue::LEGACY_MAILBOX_POLICY),
+        "orgwide_sharepoint" => |x| x.starts_with(issue::ORG_WIDE_SHAREPOINT),
         // Rule 18 — held narrower permissions a broader held one already covers.
         // Its own finding key (not folded into `high_risk_perms`) so the
         // RemoveRedundant group/bulk action pairs with the rule it actually
         // fixes.
-        "redundant_perms" => i
-            .issues
-            .iter()
-            .any(|x| x.starts_with(issue::REDUNDANT_APP_PERMS)),
-        "scoped_sites" => i
-            .issues
-            .iter()
-            .any(|x| x.starts_with(issue::SCOPED_SHAREPOINT)),
-        "ownership" => i
-            .issues
-            .iter()
-            .any(|x| x.starts_with(issue::NO_OWNERS) || x.starts_with(issue::SINGLE_OWNER)),
+        "redundant_perms" => |x| x.starts_with(issue::REDUNDANT_APP_PERMS),
+        "scoped_sites" => |x| x.starts_with(issue::SCOPED_SHAREPOINT),
+        "ownership" => |x| x.starts_with(issue::NO_OWNERS) || x.starts_with(issue::SINGLE_OWNER),
+        _ => return None,
+    };
+    Some(marks)
+}
+
+/// Finding-type dimension: `"all"` plus the structured/marker-driven findings.
+/// The marker-driven half delegates to [`issue_marker`]; what stays here is the
+/// half that reads a structured field, which carries no issue line at all.
+pub(super) fn matches_finding(i: &AuditItem, finding: &str) -> bool {
+    if let Some(marks) = issue_marker(finding) {
+        return i.issues.iter().any(|x| marks(x.as_str()));
+    }
+    match finding {
+        // Already-expired credentials only — proactive "expiring soon" rotation
+        // lead-time lives in the Credential-expiry lens (≤7d / ≤30d facets).
+        "expired" => {
+            use azapptoolkit_core::audit::CredentialStatus;
+            matches!(i.credential_status, CredentialStatus::Expired)
+        }
         // Structured flag set by the audit runner from the sign-in activity
         // report — no longer parsed from the issue text.
         "unused" => i.unused,
@@ -125,8 +120,35 @@ pub(super) fn matches_finding(i: &AuditItem, finding: &str) -> bool {
             i.principal_kind,
             AuditPrincipalKind::ServicePrincipal | AuditPrincipalKind::ManagedIdentity
         ),
+        // `"all"` — and, deliberately, an unknown key: no constraint.
         _ => true,
     }
+}
+
+/// The issue line(s) on `item` that put it in the `key` finding — the "what,
+/// exactly?" a Findings-pane row shows. A pane grouped BY finding otherwise
+/// says nothing about the finding: under "Org-wide mailbox access" the operator
+/// could not see WHICH mail permission was org-wide, or on which resource,
+/// without opening every row. The scorer already writes that into `issues`
+/// ("Organization-wide mailbox access: Mail.ReadWrite (Microsoft Graph),
+/// Mail.Send"); quoting it through the same predicate that classified the row
+/// keeps the quoted line and the group membership from ever disagreeing.
+///
+/// Empty for `"all"` and for the structured findings — `expired`, `unused` and
+/// `no_local_app` key off a field, so there is no line to quote and the row's
+/// own columns carry the evidence (the Fix preview names the expired
+/// credentials, Last sign-in carries `unused`, the principal kind IS
+/// `no_local_app`). Empty for an unknown key too: the Detail cell must degrade
+/// to nothing, never to a dump of every issue the app tripped.
+pub(super) fn issue_lines_for<'a>(item: &'a AuditItem, key: &str) -> Vec<&'a str> {
+    let Some(marks) = issue_marker(key) else {
+        return Vec::new();
+    };
+    item.issues
+        .iter()
+        .filter(|x| marks(x.as_str()))
+        .map(String::as_str)
+        .collect()
 }
 
 #[cfg(test)]
@@ -410,6 +432,74 @@ mod tests {
         let item = with_issue(format!("Mail.Read {} (Sales Team)", issue::SCOPED_VIA_RBAC));
         assert!(matches_finding(&item, "scoped_mailbox"));
         assert!(!matches_finding(&item, "orgwide_mailbox"));
+    }
+
+    /// The Findings pane quotes these lines beside each row, so the set must be
+    /// exactly the issues that put the item in the group: every one of its own
+    /// (or the cell under-reports the finding) and none of a sibling's (or the
+    /// cell contradicts the group header it sits under).
+    #[test]
+    fn issue_lines_for_quotes_only_this_findings_own_lines() {
+        let item = AuditItem {
+            issues: vec![
+                format!(
+                    "{}: Mail.ReadWrite (Microsoft Graph), Mail.Send",
+                    issue::ORG_WIDE_MAILBOX
+                ),
+                format!("{}: Sites.ReadWrite.All", issue::ORG_WIDE_SHAREPOINT),
+                "Long-lived secrets (>1 year): old-secret".to_string(),
+            ],
+            ..blank()
+        };
+        assert_eq!(
+            issue_lines_for(&item, "orgwide_mailbox"),
+            vec![item.issues[0].as_str()]
+        );
+        assert_eq!(
+            issue_lines_for(&item, "orgwide_sharepoint"),
+            vec![item.issues[1].as_str()]
+        );
+        // A finding this item doesn't trip quotes nothing — never the unmatched
+        // rest of the issue list.
+        assert!(issue_lines_for(&item, "ownership").is_empty());
+    }
+
+    #[test]
+    fn issue_lines_for_covers_multi_marker_and_mid_string_findings() {
+        // Two markers, one group: both lines belong in the cell.
+        let external = AuditItem {
+            issues: vec![
+                format!("{} — reaches any Entra tenant", issue::MULTITENANT_AUDIENCE),
+                format!("{} — cannot be attributed", issue::UNVERIFIED_PUBLISHER),
+            ],
+            ..blank()
+        };
+        assert_eq!(issue_lines_for(&external, "external_exposure").len(), 2);
+
+        // The `.contains` asymmetry reaches the quoted line too: matched with
+        // `.starts_with`, every healthy scoped row would render an empty cell.
+        let scoped = with_issue(format!(
+            "High-risk mailbox permissions {} (reduced risk): Mail.Read",
+            issue::SCOPED_VIA_RBAC
+        ));
+        assert_eq!(issue_lines_for(&scoped, "scoped_mailbox").len(), 1);
+    }
+
+    #[test]
+    fn issue_lines_for_is_empty_for_structured_and_unknown_findings() {
+        // These three classify off a field, so there is no line to quote — the
+        // row's other columns carry their evidence. An unknown key (and "all")
+        // must degrade to nothing rather than dumping the whole issue list.
+        let item = AuditItem {
+            credential_status: CredentialStatus::Expired,
+            unused: true,
+            principal_kind: AuditPrincipalKind::ServicePrincipal,
+            issues: vec!["All credentials expired: old-secret".to_string()],
+            ..blank()
+        };
+        for key in ["expired", "unused", "no_local_app", "all", "not-a-finding"] {
+            assert!(issue_lines_for(&item, key).is_empty(), "finding {key}");
+        }
     }
 
     #[test]

@@ -42,16 +42,25 @@ pub mod test_support;
 #[cfg(feature = "demo")]
 pub mod demo;
 
+use bindings::config::AuthConfigStatus;
 use state::{ActiveView, provide_session, use_session};
 use util::keep_alive;
 use views::{
-    applications_view::ApplicationsView, bulk_actions_view::BulkActionsView,
-    config_screen::ConfigScreen, dr::DisasterRecoveryView,
-    enterprise_applications_view::EnterpriseApplicationsView, home_dashboard::HomeDashboard,
-    key_vault_view::KeyVaultView, managed_identities::ManagedIdentitiesView,
-    permission_tester_view::PermissionTesterView, readiness_view::ReadinessView,
-    resource_access::ResourceAccessView, security_view::SecurityView, settings_view::SettingsView,
-    shell::AppShell, sign_in::SignInScreen,
+    applications_view::ApplicationsView,
+    bulk_actions_view::BulkActionsView,
+    config_screen::ConfigScreen,
+    dr::DisasterRecoveryView,
+    enterprise_applications_view::EnterpriseApplicationsView,
+    home_dashboard::HomeDashboard,
+    key_vault_view::KeyVaultView,
+    managed_identities::ManagedIdentitiesView,
+    permission_tester_view::PermissionTesterView,
+    readiness_view::ReadinessView,
+    resource_access::ResourceAccessView,
+    security_view::SecurityView,
+    settings_view::SettingsView,
+    shell::AppShell,
+    sign_in::{RestoringSession, SignInScreen},
 };
 
 /// Boot the app: install the panic hook and mount the Leptos+Thaw root onto the
@@ -125,28 +134,94 @@ fn Root() -> impl IntoView {
     // detail pane looped). `None` = the fast local-IPC check is still in flight.
     // Demo build short-circuits to "configured" (no first-run config screen); the
     // live build probes the backend.
-    let configured = RwSignal::new(if cfg!(feature = "demo") {
-        Some(true)
+    //
+    // The whole status is kept, not just the boolean it gates on: both screens
+    // behind this gate need the ids. The config form prefills from them (an
+    // operator fixing a wrong tenant is editing, not retyping), and the sign-in
+    // card names the tenant it is about to redirect to, so a typo is caught
+    // before the browser round trip instead of after an opaque `token_exchange`
+    // failure.
+    let config = RwSignal::new(if cfg!(feature = "demo") {
+        Some(AuthConfigStatus {
+            configured: true,
+            client_id: String::new(),
+            tenant_id: String::new(),
+        })
     } else {
-        None::<bool>
+        None::<AuthConfigStatus>
     });
+    // Whether the one launch attempt at reviving the previous session is still
+    // outstanding. Tracked separately from `configured` so the sign-in card is
+    // never painted in front of an operator who is about to be signed in
+    // already — the friction this whole path exists to remove. The demo build
+    // starts signed in and never asks.
+    let restoring = RwSignal::new(!cfg!(feature = "demo"));
+    // Chained into the config probe rather than spawned beside it: the restore
+    // is only meaningful once the app HAS a client/tenant to redeem a refresh
+    // token against, and one task is also what makes "exactly once" structural.
     #[cfg(not(feature = "demo"))]
     leptos::task::spawn_local(async move {
-        configured.set(Some(bindings::config::get_auth_config().await.configured));
+        let status = bindings::config::get_auth_config().await;
+        let configured = status.configured;
+        config.set(Some(status));
+        // Every failure — nothing stored, a revoked token, an unreachable
+        // keyring — comes back as `Ok(None)` or an `Err` we ignore, and lands on
+        // the untouched sign-in card. Deliberately no error surface here: the
+        // card is the recovery, and it already says what to do.
+        if configured && let Ok(Some(restored)) = bindings::auth::restore_session().await {
+            session.set_active_tenant(Some(restored));
+        }
+        restoring.set(false);
     });
 
     view! {
         <div style="height: 100%; display: flex; flex-direction: column;">
-            {move || match configured.get() {
+            {move || match config.get() {
                 None => ().into_any(),
-                // Freshly-downloaded release with no usable client/tenant IDs:
-                // configure them (saved to settings.json) before any sign-in.
-                Some(false) => view! { <ConfigScreen /> }.into_any(),
-                Some(true) => {
+                // Freshly-downloaded release with no usable client/tenant IDs —
+                // or an operator who chose "Change" on the sign-in card because
+                // the ids we have point at the wrong tenant: configure them
+                // (saved to settings.json) before any sign-in.
+                Some(status) if !status.configured => {
+                    view! {
+                        <ConfigScreen client_id=status.client_id tenant_id=status.tenant_id />
+                    }
+                        .into_any()
+                }
+                Some(status) => {
+                    let tenant_id = status.tenant_id;
                     view! {
                         {move || match tenant.get() {
-                            None => view! { <SignInScreen /> }.into_any(),
                             Some(_) => view! { <AuthedShell /> }.into_any(),
+                            // Hold the sign-in card back until the launch
+                            // restore has had its one chance, so a session that
+                            // is about to come back never shows a sign-in button
+                            // the operator can reach for and lose mid-click.
+                            None if restoring.get() => view! { <RestoringSession /> }.into_any(),
+                            None => {
+                                view! {
+                                    <SignInScreen
+                                        tenant=tenant_id.clone()
+                                        // Drops back to the (prefilled) config
+                                        // form. Sign-in is the only surface an
+                                        // install pointed at the wrong tenant
+                                        // can reach — Settings → Tenant
+                                        // connection sits behind the sign-in it
+                                        // can never complete — so without this
+                                        // the fix is editing settings.json by
+                                        // hand.
+                                        on_reconfigure=Callback::new(move |()| {
+                                            config
+                                                .update(|c| {
+                                                    if let Some(c) = c {
+                                                        c.configured = false;
+                                                    }
+                                                });
+                                        })
+                                    />
+                                }
+                                    .into_any()
+                            }
                         }}
                     }
                         .into_any()

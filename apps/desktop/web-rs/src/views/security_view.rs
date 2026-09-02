@@ -24,7 +24,7 @@ use thaw::{Body1, Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 use crate::components::export_menu::ExportMenu;
 use crate::components::ui::{Callout, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
-use crate::util::keep_alive;
+use crate::util::{TimeAgo, keep_alive, time_ago};
 use crate::views::app_permission_grants_view::AppPermissionGrantsView;
 use crate::views::audit_view::posture::PostureCounts;
 use crate::views::audit_view::{AuditAppsPane, AuditController, FindingsPane};
@@ -158,6 +158,22 @@ fn PostureStrip() -> impl IntoView {
                                 {metric_box(c.medium, "Medium", "warning")}
                                 {metric_box(c.low, "Low", "muted")}
                             </div>
+                        }
+                    })
+            }}
+            // How old the counts above are. The run cache is in-process with a
+            // 60-minute TTL, so a scan an operator is about to act on can be an
+            // hour stale with nothing on screen saying so; the exact stamp
+            // hangs off the title for a change ticket that has to cite it.
+            {move || {
+                ctrl.result
+                    .with(|r| r.as_ref().and_then(|r| r.completed_at.clone()))
+                    .and_then(|ts| time_ago(&ts))
+                    .map(|TimeAgo { relative, exact }| {
+                        view! {
+                            <p class="muted posture-strip__age" title=exact>
+                                {format!("Scanned {relative}")}
+                            </p>
                         }
                     })
             }}

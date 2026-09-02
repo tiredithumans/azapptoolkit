@@ -12,6 +12,7 @@ use crate::bindings::{applications, audit, credentials, enterprise_application, 
 use crate::components::icon::{Icon, IconName};
 use crate::components::ui::{DetailLoadError, SectionHeader, Skeleton};
 use crate::state::{ActiveView, Session, use_session};
+use crate::util::{TimeAgo, time_ago};
 use crate::views::audit_view::posture::{PostureCounts, posture_counts};
 use crate::views::audit_view::ranked_actionable_findings;
 
@@ -451,6 +452,26 @@ pub fn HomeDashboard() -> impl IntoView {
                                                 move || session.open_posture_with_facet("medium"),
                                             )}
                                         </div>
+                                        // Directly under the counts, because it
+                                        // qualifies them: the run cache is
+                                        // in-process with a 60-minute TTL, so
+                                        // this card presented an hour-old scan
+                                        // exactly like one that just finished
+                                        // while every number on it is something
+                                        // an operator acts on. The exact stamp
+                                        // hangs off the title for a change
+                                        // ticket that has to cite it.
+                                        {r
+                                            .completed_at
+                                            .as_deref()
+                                            .and_then(time_ago)
+                                            .map(|TimeAgo { relative, exact }| {
+                                                view! {
+                                                    <p class="muted" title=exact>
+                                                        {format!("Scanned {relative}")}
+                                                    </p>
+                                                }
+                                            })}
                                         // Ranked "Top findings" list below.
                                         {clean
                                             .then(|| {
@@ -478,14 +499,28 @@ pub fn HomeDashboard() -> impl IntoView {
                                 }
                                 None => {
                                     view! {
-                                        <Body1>"No audit has been run yet."</Body1>
+                                        // NOT "no audit has been run yet": the
+                                        // run cache is in-process with a 60-minute
+                                        // TTL, so this is what an operator sees
+                                        // after every relaunch and after any
+                                        // hour-long gap — a tenant audited daily
+                                        // for a year lands here every morning.
+                                        <Body1>"No audit run in this session."</Body1>
                                         <div class="dash-card__actions">
                                             <Button
                                                 appearance=Signal::derive(|| {
                                                     ButtonAppearance::Primary
                                                 })
                                                 on_click=Box::new(move |_| {
-                                                    session.open_security("findings")
+                                                    // One click, not two: trip the
+                                                    // one-shot flag the audit
+                                                    // controller consumes on
+                                                    // arrival so the scan starts
+                                                    // itself. Navigating alone
+                                                    // left the operator to find
+                                                    // and press "Run audit" again.
+                                                    session.tenant_ui.pending_audit_run.set(true);
+                                                    session.open_security("findings");
                                                 })
                                             >
                                                 "Run a security audit"

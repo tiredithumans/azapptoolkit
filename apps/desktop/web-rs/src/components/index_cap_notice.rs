@@ -12,12 +12,34 @@
 //! every Microsoft first-party and consented SaaS app has one) silently shows a
 //! partial list: filtering for an app that exists returns "No matching
 //! enterprise applications" and the operator concludes it isn't in the tenant.
+//!
+//! The wording lives in [`index_cap_message`] rather than in the component, so
+//! the top-bar search dropdown — which filters a corpus built from the *same*
+//! capped index, and so can answer "No matches." for a principal that is
+//! genuinely present — says the same thing rather than a second, subtly
+//! different thing about the same cap.
 
 use leptos::prelude::*;
 
 use crate::bindings::applications;
 use crate::components::ui::Callout;
 use crate::state::use_session;
+
+/// The one wording for "this tenant's service-principal index truncated", shared
+/// by every surface that has to admit it.
+///
+/// `noun` is the singular for whatever the surface is showing ("enterprise
+/// application", "managed identity", "record") — the only part that varies.
+/// Centralized because two surfaces telling an operator two different stories
+/// about the same cap is exactly how "it must not be in the tenant" gets
+/// believed.
+pub fn index_cap_message(cap: usize, noun: &str) -> String {
+    format!(
+        "This tenant has more than {cap} service principals. Only the first {cap} are loaded, \
+         so this list — and its search and filters — cover that subset. A {noun} outside it \
+         will not appear."
+    )
+}
 
 /// Renders nothing unless the shared SP index truncated for the active tenant.
 /// The read is fallible and its failure is swallowed on purpose — losing the
@@ -55,12 +77,7 @@ pub fn IndexCapNotice(
                     .map(|s| {
                         view! {
                             <Callout tone="warn">
-                                {format!(
-                                    "This tenant has more than {} service principals. Only the first {} are loaded, so this list — and its search and filters — cover that subset. A {} outside it will not appear.",
-                                    s.sp_index_cap,
-                                    s.sp_index_cap,
-                                    noun.get_value(),
-                                )}
+                                {index_cap_message(s.sp_index_cap, &noun.get_value())}
                             </Callout>
                         }
                     })

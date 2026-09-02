@@ -1,6 +1,114 @@
 ## [Unreleased]
 
+### Added
+
+- **The app restores your signed-in session at launch instead of asking you to sign in again.** The
+  refresh token has always lived in the OS keyring, but the account object id it is keyed by
+  (`{tenant}:{oid}`) lived only in memory — so every launch landed on the sign-in card, and clicking
+  it opened the system browser with `prompt=select_account`: a forced account picker for someone who
+  signed in ten minutes earlier. A successful sign-in now records the account (object ids and your
+  own UPN — identifiers, never the token) in `settings.json`, and startup redeems the stored refresh
+  token for the read scopes behind a brief "Restoring your session" card. Nothing to restore — you
+  signed out, the tenant was reconfigured, the token expired or was revoked — is not an error: it
+  lands on the ordinary sign-in card. An account remembered under a different tenant than the one
+  this build is configured for is refused rather than used.
+- **Settings gained a "Tenant connection" tab, so the client and tenant IDs are editable after first
+  run.** They could previously be entered exactly once: a well-formed but wrong tenant GUID was an
+  in-app dead end, fixable only by hand-editing `settings.json`, and a consultant working several
+  tenants had to re-point the app from outside the UI. The tab mounts the same form the first-run
+  screen does, pre-filled from the current values, and saving relaunches behind a confirmation that
+  names the tenant. The sign-in card now also states which tenant it is about to redirect to, so a
+  typo is caught before the browser round trip rather than after an opaque failure.
+- **The Cmd/Ctrl-K palette can reach destinations by name.** Twenty-five named destinations — the
+  Security sub-tabs, the Resource Access tabs, Credential expiry, SSO certificates, Delegated
+  grants, Access Readiness, the Settings tabs — existed only as strips revealed after you already
+  guessed the right nav row. They are now a "Go to" group above the record results, routed through
+  the existing navigation helpers. The two things called "Key Vault" (the secret browser and the
+  vault-access lookup) are now distinguishable, and the Resource Access tab reads "Vault access".
+- **The security audit says how old it is, and Home's "Run a security audit" button runs one.** The
+  posture card showed severity counts with nothing saying when the scan behind them happened, on a
+  cache with a 60-minute TTL. A run is stamped when it completes and the stamp is stored with its
+  items, so a cache hit reports the original run time rather than the moment it was read back; both
+  surfaces render "Scanned 12 min ago", with the exact UTC time on hover. The empty state no longer
+  claims "No audit has been run yet" — what you see after every relaunch — and the button now
+  navigates *and* starts the scan instead of leaving you to press "Run audit" a second time.
+- **App Registration rows carry credential state, and the list sorts.** `credential_status`,
+  `soonest_credential_expiry` and `created_date_time` already crossed IPC on every row and reached
+  nothing: on a 5,000-app tenant you could filter to "Expiring" and still not see which credential
+  expired when, in an order Graph happened to return. Rows now show the credential badge and a
+  relative expiry, and the list sorts by name, soonest expiry, or created date.
+- **The inventory lists search by appId, not just display name.** An appId is what a sign-in log, a
+  change ticket and a Conditional Access policy name an app by — and the lists printed it on every
+  row while matching only the name, so pasting one returned "No matching apps" over rows that
+  contained it. Every other search box in the app already matched both.
+- **The Findings pane shows each finding's own detail.** It is the surface organised *by* finding,
+  yet its rows showed Application / Risk / Score / Last sign-in and nothing about the finding: under
+  "Org-wide mailbox access" you could not see *which* mail permission was org-wide without opening
+  every row, even though the ungrouped All-apps pane rendered exactly that. "Last sign-in" now
+  appears only in the group where it is the evidence, and its space pays for the detail.
+- **The resource reverse-lookups export, and the scope badges link to the permission tester.** "Which
+  apps can reach this mailbox", "which apps can touch this site" and "who can read this vault" are
+  answers an operator is asked to produce in writing, and none of them could leave the app. Each
+  panel now exports its filtered rows together with its coverage summary, so the partial-coverage
+  caveat travels with the data. And the "Scoped (selected items)" badge — whose own tooltip says
+  reach is not enumerable and to check a specific resource — now offers the way to do it.
+- **The open-items dock survives a restart, keyboard-steps, and stops silently dropping items.** It
+  is where you park a reference app while triaging, and past eight items it discarded the oldest
+  with no cue and no way back — the one you opened first, usually the reference. Overflow now names
+  what it dropped and offers to reopen it, eviction is least-recently-*focused* rather than
+  oldest-opened, and the working set is parked per tenant across restarts. Cmd/Ctrl-`]` and `[` step
+  along the dock, which is also the keyboard route back after Escape collapses the workspace.
+- **Arrow keys move between rows in the three inventory lists.** Every table in the app already had
+  roving-tabindex navigation; the lists an operator actually lives in did not, so crossing twenty
+  rows cost about fifty Tab presses. The focus ring for those rows had shipped in the stylesheet all
+  along and could never match, because nothing gave the row a tabindex.
+
 ### Changed
+
+- **Finding groups are ranked by their own worst severity, not by their members' total risk scores.**
+  Group order summed each member's whole `risk_score` — every rule's contribution, not this rule's —
+  so "Missing or single owner", a rule that contributes no points and matches a large fraction of
+  any tenant, outranked everything, while a twelve-app Critical org-wide-mailbox group sat below the
+  fold of a findings-first workbench. Ranking is now worst severity, then affected-principal count,
+  then catalog order.
+- **Opening an item no longer throws away the surface you were working.** Every "Open" deep link
+  switched the top-level view before opening the pane, so remediating a row from a finding group and
+  pressing Escape dropped you on the App Registrations list instead of the group you were halfway
+  through — a nav click and a re-orient per row. The workspace overlay is mounted over the shared
+  content slot and the dock is global, so the pane opens the same way without the switch.
+- **Access Readiness leads with what is unmet.** The checklist rendered in flat catalog order, which
+  buried the two capabilities you were short among a dozen green ticks — the answer was on the page
+  and still had to be hunted for. A count line states the gap, planes holding one come first, and
+  within a plane Missing precedes Unknown precedes satisfied. A check that fails outright now offers
+  a Retry, which "Refresh token" (the re-check after activating a PIM role) was never the answer to.
+- **The Grant-access wizard's review step names what it is about to do.** It was one sentence: the
+  permission values and a mode blurb. It never named the principal, never listed the targets you
+  typed two steps earlier, and never said that the scoped apply *removes* the matching org-wide
+  grants — the irreversible half, previously disclosed only afterwards in a toast. Step 3 now states
+  the principal, the permissions, the resolved targets read from the same signals the apply sends,
+  and warns about the removal before you commit to it.
+- **A bulk action shows which apps it will touch, and which one it is touching.** The armed panel
+  said only "the 40 selected app(s)" — the standalone Bulk Actions page had solved this and the four
+  other hosts of the same bar had not, which mattered most where the selection was not built by hand
+  ("Fix all N" seeds it in one click). Progress dropped the current app entirely, so the person
+  deciding whether to cancel a 40-app scope-and-strip was the one person who could not see what was
+  being mutated — while the read-only audit scan showed exactly that.
+- **An exported audit report carries the run's coverage caveats.** The workbench never presents a
+  partial scan as an all-clear, but the export dropped all of it — and a cancelled run is
+  *specifically* the one that ships its rows to the exporter, so the file with the most to disclose
+  said only "N application(s)". Every format now opens with the scored/total fraction, the run time,
+  the cancelled/truncated sentences shown on screen and the degraded reads, plus a severity summary.
+- **Global search admits what it left out.** The dropdown capped each kind at ten rows and stopped,
+  so on a tenant where two hundred apps matched "svc" you saw ten and reasonably concluded the
+  eleventh did not exist — on the fastest input path in the app, whose silence reads as an answer.
+  Each group now carries a "10 of 47 — keep typing to narrow" footer, outside the keyboard
+  selection. Searching over a corpus truncated by the directory index cap shows the same warning the
+  lists already show, above the results — including above the "No matches." it would otherwise state
+  as fact.
+- **"Grant read access" is the emphasized button in the SharePoint scoping remediation.** In a
+  least-privilege remediation the primary button granted the broader role, and an operator working
+  down a findings list at speed clicks the primary. The two equivalent paths already defaulted to
+  read.
 
 - **Rust toolchain and MSRV move 1.97.1 → 1.98.0.** `rust-toolchain.toml` pins the exact patch
   (1.98.0) so a silent stable bump can't break builds, and the workspace `rust-version` floor (root
@@ -32,6 +140,72 @@
   the 62 KB scoping/audit deep-dive is split into four; `commands/exchange.rs` is a module
   directory and the largest inline test modules are sibling files. Releases up to 0.26.3 moved to
   `docs/CHANGELOG-archive.md`, and editing this file no longer recompiles the frontend.
+
+
+### Fixed
+
+- **Revoking a permission from an app registration now asks first.** The trash icon on the
+  Permissions tab stripped a live app-role assignment or delegated grant on one click — no
+  confirmation, no indication of which row, and no confirmation afterwards; the only signal was a
+  row vanishing on the next refetch. The identical call was already confirm-gated on both the
+  Enterprise Application and Managed Identity panes, making the busiest surface in the app the only
+  unguarded one. Each of the three cases now gets its own dialog naming the permission, with bodies
+  that distinguish revoking a live grant (calls start failing immediately) from removing a
+  declaration (nothing the app can do today changes).
+- **A stopped bulk run no longer hides the apps it never reached.** Cancelling at item 12 of 40
+  reported "Scoped mailbox access on 11 app(s); 1 failed" and never mentioned the 28 untouched apps,
+  because the summary counted the outcomes produced rather than the apps attempted. A cancelled
+  delete also cleared the entire selection — including everything it had not deleted — destroying
+  the work queue. Summaries now name the unattempted remainder, cancellation keeps it selected, and
+  the failures list can narrow the selection to just what failed so it can be re-run.
+- **A missing admin consent is no longer a dead end.** Graph write scopes are consented on first
+  write, so in a tenant without pre-granted admin consent the first mutation returned
+  `consent_required` and reached the UI as red text with nothing to click — the app's seventeen
+  "Grant consent" buttons all covered on-demand feature scopes, and none of them this. It is now
+  handled where a dead session already is, offering the grant for the scope set that actually
+  failed. The Grant-access wizard's own button offered the *Exchange* scopes for a failed org-wide
+  Graph grant, which could never have fixed it.
+- **Cmd-W closes the open item instead of the window.** The shortcut sheet documented it as closing
+  the open item, but no application menu was installed, so macOS supplied its own Close Window and
+  routed the key there first. The handler also only claimed the key while an item was open — so
+  immediately after Escape collapsed the workspace, Cmd-W fell through to the OS and dropped the
+  whole working set, the audit run and any in-flight dialog. In a two-pane compare it also closed
+  the left pane regardless of which one you were reading.
+- **Keyboard focus follows the workspace open and collapse.** Opening an item from the keyboard left
+  focus on the document body — about thirteen Tab presses from the pane it had just opened, past the
+  whole nav rail — because the overlay correctly marks the content behind it inert, which blurs the
+  row button you activated. Escape had the mirror problem, returning you to the top of the page
+  instead of the row, losing your place in a four-thousand-row list.
+- **Critical badges are legible in dark mode.** Five foregrounds were hardcoded white on backgrounds
+  that invert between themes, so the Critical risk badge — the loudest signal in the audit table —
+  rendered white on light red at about 2.8:1, and the filter count badge at about 2.0:1, both at
+  11–12px.
+- **Spinners keep spinning with reduced motion enabled.** The blanket reduced-motion reset froze
+  every spinner and the skeleton shimmer, so on a managed or VDI desktop with animation effects off
+  — this tool's usual environment — a multi-second Graph fan-out showed a motionless arc that reads
+  as a hung UI. A steady rotation is what that preference is meant to preserve.
+- **A paired list row announces its own name.** The "jump to the paired application" button was
+  nested inside the row button, which is invalid HTML and spliced its label into the middle of every
+  paired row's accessible name; it also sat in the tab order between the name and the appId.
+- **Finding-group severity is readable without color.** A collapsed group's worst severity was a
+  10px dot with no text and no label, and Critical and High resolved to the same fill — so the dot
+  could not separate the top two tiers, and severity was absent entirely from the header's
+  accessible name. Sortable audit columns now expose their sort state, the open-items dock's label
+  is attached to a role that announces it, and each dock chip's close button names the item it
+  closes rather than all announcing "Close".
+- **Confirmation dialogs name what they are about to act on.** The `subject` field existed precisely
+  because six identical dialogs for six secrets made the operator trust that the button they clicked
+  belonged to the row they meant — and it was passed at two of roughly twenty sites. Thirteen more
+  now name the permission, principal, URI, site or owner, including the audit's one-click fixes,
+  whose detail line the dialog was covering.
+- **A failed sign-in explains the AADSTS code it is showing you.** Entra's numeric code was already
+  on screen and already preserved through the redaction that strips tenant and correlation ids
+  around it, but the recovery hint could only speak in generalities — `token_exchange` covers wrong
+  tenant, unknown client id, an unregistered redirect URI and a Conditional Access block alike. The
+  common codes now name the cause and the step that clears it, and an unmapped code still falls back
+  rather than guessing.
+- **"Set them in Settings" is a link.** Four callouts named a page reachable only through the account
+  menu — the one destination with no nav row and no shortcut — and left the operator to go find it.
 
 ## [0.29.0] - 2026-08-31
 

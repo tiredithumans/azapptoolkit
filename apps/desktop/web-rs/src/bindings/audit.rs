@@ -7,7 +7,7 @@ use serde::Serialize;
 use tauri_sys::core::{invoke, invoke_result};
 
 use crate::bindings::TenantArg;
-pub use azapptoolkit_dto::audit::{AuditProgress, AuditRunResult};
+pub use azapptoolkit_dto::audit::{AuditExportCoverage, AuditProgress, AuditRunResult};
 
 /// Runs a full security audit. Exchange mailbox-scoping is resolved as part of
 /// every run (best-effort — it degrades to unscoped scoring when the signed-in
@@ -34,6 +34,7 @@ struct ExportArgs<'a> {
 struct SaveArgs<'a> {
     tenant_id: &'a str,
     items: Option<&'a [AuditItem]>,
+    coverage: AuditExportCoverage,
     format: &'a str,
 }
 
@@ -42,9 +43,15 @@ struct SaveArgs<'a> {
 /// Exports by reference: pass `items: None` and the backend serves its own
 /// cached run (no multi-MB IPC round trip); pass `Some` only for a cancelled
 /// run, which is never cached.
+///
+/// `coverage` is the run's caveats ([`AuditRunResult::coverage`]) — small
+/// enough to always send, and what makes the exported file say what the scan
+/// did not cover. The backend reads it only alongside explicit `items`; a
+/// cached run describes itself.
 pub async fn save_audit_to_file(
     tenant_id: &str,
     items: Option<&[AuditItem]>,
+    coverage: AuditExportCoverage,
     format: &str,
 ) -> Result<Option<String>, UiError> {
     invoke_result(
@@ -52,6 +59,7 @@ pub async fn save_audit_to_file(
         SaveArgs {
             tenant_id,
             items,
+            coverage,
             format,
         },
     )

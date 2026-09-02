@@ -152,6 +152,18 @@ pub fn AuditAppsPane() -> impl IntoView {
             };
         });
     };
+    // `aria-sort` for a header cell. The glyph below is the sighted half of the
+    // same fact and this is the announced half — a screen-reader user otherwise
+    // has no way to tell which column the table is ordered by, because the
+    // direction lives only in an appended "↑"/"↓" character. Both read the same
+    // signal so they cannot disagree. WAI-ARIA puts this on the `th`, not on the
+    // button inside it, and only the sorted column carries a value.
+    let sort_aria = move |col: SortCol| -> Option<&'static str> {
+        match sort.get() {
+            Some((c, desc)) if c == col => Some(if desc { "descending" } else { "ascending" }),
+            _ => None,
+        }
+    };
     // Sort-direction glyph for a header (empty when that column isn't the sort).
     let sort_glyph = move |col: SortCol| -> &'static str {
         match sort.get() {
@@ -270,7 +282,7 @@ pub fn AuditAppsPane() -> impl IntoView {
                             <thead>
                                 <tr>
                                     <th class="data-table__check" aria-label="Select"></th>
-                                    <th>
+                                    <th aria-sort=move || sort_aria(SortCol::Name)>
                                         <button
                                             class="th-sort"
                                             type="button"
@@ -281,7 +293,7 @@ pub fn AuditAppsPane() -> impl IntoView {
                                         </button>
                                     </th>
                                     <th>"AppId"</th>
-                                    <th>
+                                    <th aria-sort=move || sort_aria(SortCol::Score)>
                                         // Risk tier and Score are the same
                                         // ordering, so this header drives
                                         // `SortCol::Score` — and must therefore
@@ -298,7 +310,7 @@ pub fn AuditAppsPane() -> impl IntoView {
                                             {move || sort_glyph(SortCol::Score)}
                                         </button>
                                     </th>
-                                    <th>
+                                    <th aria-sort=move || sort_aria(SortCol::Score)>
                                         <button
                                             class="th-sort"
                                             type="button"
@@ -309,7 +321,7 @@ pub fn AuditAppsPane() -> impl IntoView {
                                         </button>
                                     </th>
                                     <th>"Status"</th>
-                                    <th>
+                                    <th aria-sort=move || sort_aria(SortCol::LastSignIn)>
                                         <button
                                             class="th-sort"
                                             type="button"

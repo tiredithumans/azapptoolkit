@@ -8,11 +8,12 @@
 //! rebuilding the subtree. The chrome (header, search, filter drawer) is the
 //! shared [`ListScaffold`].
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::NaiveDate;
-use leptos::ev;
+use azapptoolkit_core::audit::ListCredentialStatus;
+use chrono::{DateTime, NaiveDate, Utc};
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
@@ -27,7 +28,7 @@ use crate::components::list_scaffold::ListScaffold;
 use crate::components::select_all_bar::SelectAllBar;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Callout, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
+    Badge, Callout, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
 };
 use crate::components::virtual_list::VirtualList;
 use crate::constants::*;
@@ -35,8 +36,132 @@ use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
 use crate::hooks::use_list_export::use_list_export;
 use crate::state::{ActiveView, OpenItemKind, use_session};
-use crate::util::{contains_ignore_case, created_in_range};
+use crate::util::{contains_ignore_case, created_in_range, relative_time};
 use crate::views::pairing::jump_to_paired_enterprise;
+
+/// A sortable App Registrations column.
+///
+/// The order Graph returned is the unsorted default — the list command sends no
+/// `$orderby` precisely because ordering happens here — and clicking a column
+/// cycles default-direction → reverse → back to unsorted, so that original
+/// order is always recoverable. Modelled on the audit table's `SortCol`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppSortCol {
+    Name,
+    Expiry,
+    Created,
+}
+
+impl AppSortCol {
+    /// First-click direction: names A→Z, soonest expiry first (the triage
+    /// need), newest apps first.
+    fn default_desc(self) -> bool {
+        matches!(self, AppSortCol::Created)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            AppSortCol::Name => "Name",
+            AppSortCol::Expiry => "Soonest expiry",
+            AppSortCol::Created => "Created",
+        }
+    }
+}
+
+/// Orders two optional column values, keeping the rows that *have* no value at
+/// the bottom in **both** directions. Reversing them along with everything else
+/// would head the descending view with "no credentials" / "creation date
+/// unknown" — the one thing the column cannot rank.
+fn cmp_missing_last<T: Ord>(a: Option<&T>, b: Option<&T>, desc: bool) -> Ordering {
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(x), Some(y)) => {
+            let ord = x.cmp(y);
+            if desc { ord.reverse() } else { ord }
+        }
+    }
+}
+
+/// Orders the filtered rows by `col`. Pure so the column semantics — above all
+/// where a missing value lands — are pinned by tests rather than by eyeballing
+/// a 5 000-app tenant.
+fn sort_rows(rows: &mut [ApplicationListRowDto], col: AppSortCol, desc: bool) {
+    match col {
+        AppSortCol::Name => {
+            // Lowercase ONCE per row (`sort_by_cached_key`) instead of twice per
+            // comparison: the comparator runs O(n log n) times, and at the
+            // 10 000-row list ceiling allocating inside it dominates the sort.
+            // `reverse()` afterwards rather than a reversing comparator keeps
+            // that single allocation; the only difference is the relative order
+            // of rows sharing one name exactly.
+            rows.sort_by_cached_key(|r| r.display_name.to_lowercase());
+            if desc {
+                rows.reverse();
+            }
+        }
+        AppSortCol::Expiry => rows.sort_by(|a, b| {
+            cmp_missing_last(
+                a.soonest_credential_expiry.as_ref(),
+                b.soonest_credential_expiry.as_ref(),
+                desc,
+            )
+        }),
+        AppSortCol::Created => rows.sort_by(|a, b| {
+            cmp_missing_last(
+                a.created_date_time.as_ref(),
+                b.created_date_time.as_ref(),
+                desc,
+            )
+        }),
+    }
+}
+
+/// One row's credential cell: the state badge plus the relative expiry beside
+/// it.
+///
+/// Tones are the Credential-expiry dashboard's `status_badge` vocabulary
+/// (`danger` / `warning` / `ok` / `unknown`), because a row and that dashboard
+/// describe the same credential — two colour languages for one fact is how an
+/// operator learns to trust neither.
+struct CredentialMeta {
+    label: &'static str,
+    tone: &'static str,
+    /// `"12d left"` / `"3 days ago"`. `None` when nothing on the app carries an
+    /// end date, where the badge already says all there is to say.
+    expiry: Option<String>,
+    /// The expiry date itself, hovered on the relative phrase — a relative
+    /// phrase alone is unciteable in a change ticket.
+    exact: Option<String>,
+}
+
+fn credential_meta(
+    status: ListCredentialStatus,
+    soonest: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> CredentialMeta {
+    let (label, tone) = match status {
+        ListCredentialStatus::Active => ("Active", "ok"),
+        ListCredentialStatus::Expiring => ("Expiring", "warning"),
+        ListCredentialStatus::Expired => ("Expired", "danger"),
+        ListCredentialStatus::None => ("No creds", "unknown"),
+    };
+    CredentialMeta {
+        label,
+        tone,
+        expiry: soonest.map(|end| {
+            if end <= now {
+                // Already gone: `relative_time` is the app's one past-tense phrase.
+                relative_time(now, end)
+            } else {
+                // Still to come, in the Credential-expiry dashboard's own words.
+                format!("{}d left", (end - now).num_days())
+            }
+        }),
+        exact: soonest.map(|end| end.date_naive().to_string()),
+    }
+}
 
 #[component]
 pub fn ApplicationList() -> impl IntoView {
@@ -59,6 +184,12 @@ pub fn ApplicationList() -> impl IntoView {
     let cred_filter = RwSignal::new("any".to_string());
     let created_after: RwSignal<Option<NaiveDate>> = RwSignal::new(None);
     let created_before: RwSignal<Option<NaiveDate>> = RwSignal::new(None);
+
+    // Row order. `None` keeps the order Graph returned. Local rather than
+    // lifted to `TenantScopedUi` for the same reason as `cred_filter`: nothing
+    // outside this view seeds it, and it lives above `LoadedApps` so a Refresh
+    // doesn't silently drop the operator back into Graph order.
+    let sort: RwSignal<Option<(AppSortCol, bool)>> = RwSignal::new(None);
 
     // Collapsible advanced-filter drawer (saved views + created-on range + the
     // facet chips). Search stays outside it (always visible). Default collapsed
@@ -170,7 +301,7 @@ pub fn ApplicationList() -> impl IntoView {
             <div class="apps-view__body">
                 <ListScaffold
                     search=raw_search
-                    search_placeholder="Filter App Registrations…"
+                    search_placeholder="Filter App Registrations by name or appId…"
                     saved_view_key="apps"
                     facet=cred_filter
                     filters_open=filters_open
@@ -198,6 +329,7 @@ pub fn ApplicationList() -> impl IntoView {
                                                 created_after=created_after
                                                 created_before=created_before
                                                 filters_open=filters_open
+                                                sort=sort
                                                 export_rows=export_rows
                                             />
                                         }
@@ -243,6 +375,8 @@ fn LoadedApps(
     /// Shared with the list view's filter toggle — the facet chips collapse with
     /// the rest of the drawer.
     filters_open: RwSignal<bool>,
+    /// Active `(column, descending)`, or `None` for the order Graph returned.
+    sort: RwSignal<Option<(AppSortCol, bool)>>,
     export_rows: StoredValue<Arc<Vec<ApplicationListRowDto>>>,
 ) -> impl IntoView {
     let session = use_session();
@@ -267,8 +401,12 @@ fn LoadedApps(
     let list = use_filtered_list(FilteredListSpec {
         items,
         search,
+        // Name OR appId — an appId is what a sign-in log, a ticket, and a
+        // Conditional Access policy name an app by, and it is printed on every
+        // row here. Same two fields the audit and credential searches match.
         search_match: |row: &ApplicationListRowDto, needle: &str| {
             contains_ignore_case(&row.display_name, needle)
+                || contains_ignore_case(&row.app_id, needle)
         },
         extra_active: Signal::derive(move || {
             created_after.get().is_some() || created_before.get().is_some()
@@ -299,7 +437,9 @@ fn LoadedApps(
                 row.credential_status.as_facet() == "none"
             }),
         ],
-        export_rows: Some(export_rows),
+        // The export snapshot is taken from `sorted` below instead, so what you
+        // export matches what you see down to the row order.
+        export_rows: None,
     });
 
     // The backend paginates to completion (bounded by APPS_HARD_CAP). `total`
@@ -312,6 +452,28 @@ fn LoadedApps(
     let expiring = list.count_of("expiring");
     let expired = list.count_of("expired");
     let none = list.count_of("none");
+
+    // The sort sits BETWEEN the filtered set and the `VirtualList`: the scroller
+    // is handed an already-ordered `Arc<Vec<_>>` exactly as it is handed the
+    // filtered one, so virtualization never learns that sorting exists.
+    let sorted: Memo<Arc<Vec<ApplicationListRowDto>>> = Memo::new(move |_| {
+        let Some((col, desc)) = sort.get() else {
+            // Unsorted: a pointer copy of the filtered set, not a row-by-row
+            // clone of it (the same short-circuit `use_filtered_list` makes).
+            return shown.get();
+        };
+        // One clone of the *filtered* set to own an order. `base` already clones
+        // its matches whenever a search is active, so this adds a second pass
+        // over a set that is usually much smaller than the tenant — and only
+        // while a sort is actually held.
+        let mut rows = shown.with(|s| s.as_ref().clone());
+        sort_rows(&mut rows, col, desc);
+        Arc::new(rows)
+    });
+
+    // "What you see is what you export", order included. `use_filtered_list` was
+    // given no `export_rows`, so this is the snapshot's single writer.
+    Effect::new(move |_| export_rows.set_value(sorted.get()));
 
     // Derived ONCE, outside the render closures: each is memoized, so a
     // keystroke updates the count text and the selection bar in place instead of
@@ -329,6 +491,55 @@ fn LoadedApps(
             format!("{shown_n} of {total} app registrations")
         }
     });
+
+    // Click a column: cycle default-direction → reverse → unsorted, so the
+    // order Graph returned is always one more click away (the audit table's
+    // contract).
+    let toggle_sort = move |col: AppSortCol| {
+        sort.update(|s| {
+            *s = match *s {
+                Some((c, desc)) if c == col => {
+                    if desc == col.default_desc() {
+                        Some((col, !desc))
+                    } else {
+                        None
+                    }
+                }
+                _ => Some((col, col.default_desc())),
+            };
+        });
+    };
+    let sort_buttons = [AppSortCol::Name, AppSortCol::Expiry, AppSortCol::Created]
+        .into_iter()
+        .map(|col| {
+            let active = move || sort.get().is_some_and(|(c, _)| c == col);
+            view! {
+                <button
+                    type="button"
+                    class=move || {
+                        if active() {
+                            "app-list__sort app-list__sort--active"
+                        } else {
+                            "app-list__sort"
+                        }
+                    }
+                    // A *string*, never a bare `bool`: Leptos renders a bool as
+                    // a boolean attribute, and neither `aria-pressed=""` nor an
+                    // absent one is a valid ARIA value.
+                    aria-pressed=move || active().to_string()
+                    on:click=move |_| toggle_sort(col)
+                >
+                    {col.label()}
+                    {move || match sort.get() {
+                        Some((c, desc)) if c == col => {
+                            if desc { " ↓" } else { " ↑" }
+                        }
+                        _ => "",
+                    }}
+                </button>
+            }
+        })
+        .collect_view();
 
     view! {
         <Show when=move || filters_open.get()>
@@ -367,7 +578,26 @@ fn LoadedApps(
                     </Callout>
                 }
             })}
-        <VirtualRows items=shown total=total />
+        // Sits directly above the rows it reorders, outside the collapsed
+        // filter drawer: a sort an operator cannot see is a sort they will not
+        // use, and it is not a filter — it never changes the result count.
+        // Suppressed only for a tenant with no apps at all, where the onboarding
+        // empty state is the whole message; a filtered-empty list keeps it so
+        // the chrome doesn't jump as the operator widens the search back out.
+        {(total > 0)
+            .then(|| {
+                view! {
+                    <div
+                        class="app-list__sortbar"
+                        role="group"
+                        aria-label="Sort app registrations"
+                    >
+                        <span class="app-list__sortbar-label">"Sort"</span>
+                        {sort_buttons}
+                    </div>
+                }
+            })}
+        <VirtualRows items=sorted total=total />
     }
 }
 
@@ -381,6 +611,11 @@ fn VirtualRows(
     total: usize,
 ) -> impl IntoView {
     let session = use_session();
+    // One clock for the whole window rather than one per row: the backend
+    // classified `credential_status` at fetch time, so a row's relative expiry
+    // is already a snapshot of that moment — re-reading the clock per row would
+    // only let neighbouring rows disagree about "today".
+    let now = Utc::now();
     view! {
         <Show
             when=move || items.with(|v| !v.is_empty())
@@ -421,8 +656,9 @@ fn VirtualRows(
                 overscan=OVERSCAN
                 scroller_class="app-list__scroller"
                 sizer_class="app-list__sizer"
+                row_selector=".app-list__row"
                 key=|row: &ApplicationListRowDto| row.id.clone()
-                render_row=move |idx, row| view_row(idx, row, session).into_any()
+                render_row=move |idx, row| view_row(idx, row, session, now).into_any()
             />
         </Show>
     }
@@ -432,6 +668,7 @@ fn view_row(
     idx: usize,
     row: ApplicationListRowDto,
     session: crate::state::Session,
+    now: DateTime<Utc>,
 ) -> impl IntoView {
     let paired_sp_id = row.paired_service_principal_id;
     // One shared allocation for the row id; the per-handler captures below are
@@ -464,6 +701,23 @@ fn view_row(
     // display name plus its appId, so screen-reader users can tell rows apart
     // instead of hearing "Select for bulk actions" repeated.
     let check_label = format!("Select {display_name} ({app_id_string}) for bulk actions");
+
+    // The credential state the list already filters on but never showed — so
+    // "Expiring" narrowed the set without saying which credential expires when.
+    let CredentialMeta {
+        label: cred_label,
+        tone: cred_tone,
+        expiry: cred_expiry,
+        exact: cred_exact,
+    } = credential_meta(row.credential_status, row.soonest_credential_expiry, now);
+    // Spelled out rather than left to the browser's name computation: the row
+    // button's accessible name would otherwise be the concatenation of a type
+    // chip, a truncated title, a badge and a monospace GUID.
+    let row_label = match &cred_expiry {
+        Some(expiry) => format!("{display_name} ({app_id_string}) — {cred_label}, {expiry}"),
+        None => format!("{display_name} ({app_id_string}) — {cred_label}"),
+    };
+
     view! {
         <div
             class=row_class
@@ -480,6 +734,7 @@ fn view_row(
             <button
                 class="app-list__row-btn"
                 type="button"
+                aria-label=row_label
                 on:click=move |_| {
                     session.open_item(OpenItemKind::AppReg, id_click.to_string(), name_click.clone());
                 }
@@ -487,27 +742,138 @@ fn view_row(
                 <span class="row-meta">
                     <TypeChip kind=AppKind::AppRegistration compact=true />
                     <span class="app-list__row-title" title=title_name>{display_name}</span>
-                    {paired_sp_id
-                        .map(|sp_id| {
-                            let on_pair = move |ev: ev::MouseEvent| {
-                                ev.stop_propagation();
-                                jump_to_paired_enterprise(session, sp_id.clone());
-                            };
+                    <Badge label=cred_label tone=cred_tone />
+                    {cred_expiry
+                        .map(|expiry| {
                             view! {
-                                <button
-                                    class="pair-arrow"
-                                    type="button"
-                                    title="Jump to paired Enterprise Application"
-                                    aria-label="Jump to paired Enterprise Application"
-                                    on:click=on_pair
-                                >
-                                    "↔"
-                                </button>
+                                <span class="app-list__row-expiry" title=cred_exact>
+                                    {expiry}
+                                </span>
                             }
                         })}
                 </span>
                 <span class="app-list__row-appid">{app_id_string}</span>
             </button>
+            // A SIBLING of the row button, never nested inside it: nested
+            // interactive content is invalid HTML, and Leptos builds the DOM
+            // node-by-node so the parser never corrects it — the arrow's label
+            // ended up spliced into the middle of the row's accessible name,
+            // and Tab stopped on it between the name and the appId.
+            {paired_sp_id
+                .map(|sp_id| {
+                    view! {
+                        <button
+                            class="pair-arrow"
+                            type="button"
+                            title="Jump to paired Enterprise Application"
+                            aria-label="Jump to paired Enterprise Application"
+                            on:click=move |_| jump_to_paired_enterprise(session, sp_id.clone())
+                        >
+                            "↔"
+                        </button>
+                    }
+                })}
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, TimeZone};
+
+    fn at(days: i64) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap() + Duration::days(days)
+    }
+
+    fn row(name: &str, expiry: Option<i64>, created: Option<i64>) -> ApplicationListRowDto {
+        ApplicationListRowDto {
+            id: name.to_string(),
+            app_id: format!("{name}-appid"),
+            display_name: name.to_string(),
+            sign_in_audience: None,
+            publisher_domain: None,
+            created_date_time: created.map(at),
+            password_credential_count: 0,
+            key_credential_count: 0,
+            soonest_credential_expiry: expiry.map(at),
+            credential_status: ListCredentialStatus::None,
+            paired_service_principal_id: None,
+        }
+    }
+
+    fn names(rows: &[ApplicationListRowDto]) -> Vec<&str> {
+        rows.iter().map(|r| r.display_name.as_str()).collect()
+    }
+
+    #[test]
+    fn name_sort_is_case_insensitive_in_both_directions() {
+        let mut rows = vec![row("beta", None, None), row("Alpha", None, None)];
+        sort_rows(&mut rows, AppSortCol::Name, false);
+        assert_eq!(names(&rows), ["Alpha", "beta"]);
+        sort_rows(&mut rows, AppSortCol::Name, true);
+        assert_eq!(names(&rows), ["beta", "Alpha"]);
+    }
+
+    #[test]
+    fn expiry_sort_puts_the_soonest_first_by_default() {
+        let mut rows = vec![
+            row("far", Some(90), None),
+            row("soon", Some(3), None),
+            row("gone", Some(-10), None),
+        ];
+        let desc = AppSortCol::Expiry.default_desc();
+        sort_rows(&mut rows, AppSortCol::Expiry, desc);
+        assert_eq!(names(&rows), ["gone", "soon", "far"]);
+    }
+
+    #[test]
+    fn created_sort_puts_the_newest_first_by_default() {
+        let mut rows = vec![row("old", None, Some(-400)), row("new", None, Some(-2))];
+        let desc = AppSortCol::Created.default_desc();
+        sort_rows(&mut rows, AppSortCol::Created, desc);
+        assert_eq!(names(&rows), ["new", "old"]);
+    }
+
+    /// A row the column cannot rank belongs at the bottom whichever way the
+    /// column points — heading the descending view with "no credentials" would
+    /// bury the very rows the sort was reached for.
+    #[test]
+    fn a_missing_value_sorts_last_in_both_directions() {
+        let mut rows = vec![
+            row("none", None, None),
+            row("far", Some(90), None),
+            row("soon", Some(3), None),
+        ];
+        sort_rows(&mut rows, AppSortCol::Expiry, false);
+        assert_eq!(names(&rows), ["soon", "far", "none"]);
+        sort_rows(&mut rows, AppSortCol::Expiry, true);
+        assert_eq!(names(&rows), ["far", "soon", "none"]);
+    }
+
+    #[test]
+    fn credential_meta_reuses_the_dashboard_badge_vocabulary() {
+        let tone = |s| credential_meta(s, None, at(0)).tone;
+        assert_eq!(tone(ListCredentialStatus::Active), "ok");
+        assert_eq!(tone(ListCredentialStatus::Expiring), "warning");
+        assert_eq!(tone(ListCredentialStatus::Expired), "danger");
+        assert_eq!(tone(ListCredentialStatus::None), "unknown");
+    }
+
+    #[test]
+    fn credential_meta_reads_forward_to_an_expiry_and_back_from_a_lapse() {
+        let now = at(0);
+        let soon = credential_meta(ListCredentialStatus::Expiring, Some(at(12)), now);
+        assert_eq!(soon.expiry.as_deref(), Some("12d left"));
+        // The relative phrase is unciteable on its own, so the exact date rides
+        // along as the hover title.
+        assert_eq!(soon.exact.as_deref(), Some("2026-09-14"));
+
+        let lapsed = credential_meta(ListCredentialStatus::Expired, Some(at(-3)), now);
+        assert_eq!(lapsed.expiry.as_deref(), Some("3 days ago"));
+
+        // Nothing with an end date: the badge alone carries the state.
+        let bare = credential_meta(ListCredentialStatus::None, None, now);
+        assert!(bare.expiry.is_none() && bare.exact.is_none());
     }
 }

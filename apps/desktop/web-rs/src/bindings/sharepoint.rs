@@ -282,3 +282,35 @@ pub async fn grant_selected_item_access(
     )
     .await
 }
+
+// ---------------- Site-access export ----------------
+
+/// The panel's own coverage sentence rides along with the rows: a site whose
+/// permission read failed contributes none, and this index is the only way
+/// `Sites.Selected` reach is knowable, so an export that dropped the caveat
+/// would present a partial sweep as the complete answer.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveSiteAccessArgs<'a> {
+    rows: &'a [SiteAppGrantRow],
+    summary: &'a str,
+    format: &'a str,
+}
+
+/// Exports the (filtered) site-access rows to a CSV/JSON file via the OS save
+/// dialog. Returns the chosen path, or `None` if the user cancelled.
+pub async fn save_site_access_to_file(
+    rows: &[SiteAppGrantRow],
+    summary: &str,
+    format: &str,
+) -> Result<Option<String>, UiError> {
+    invoke_result(
+        "save_site_access_to_file",
+        SaveSiteAccessArgs {
+            rows,
+            summary,
+            format,
+        },
+    )
+    .await
+}

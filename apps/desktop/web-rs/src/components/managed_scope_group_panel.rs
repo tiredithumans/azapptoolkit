@@ -39,7 +39,13 @@ pub fn ManagedScopeGroupPanel(
     let session = use_session();
     let add_text = RwSignal::new(String::new());
     // Drives the membership mutations (`do_add` / `do_remove`) + initial load.
-    let group_cmd = use_command();
+    // The consent fallback offers this component's OWN scope set, not the Graph
+    // write scopes `use_command` defaults to: these mutations ride an on-demand
+    // feature scope, so a `consent_required` here is closed by `exchange` — the
+    // same key this file's existing "Grant consent" button already passes.
+    // Offering the wrong set is the exact mis-mapping FR-02 found in the scope
+    // wizard, where an org-wide Graph grant offered the Exchange scopes.
+    let group_cmd = use_command().with_consent_feature("exchange");
     // Confirmation gate for removing a mailbox — a server mutation that stops the
     // app reaching it via the scoped grant.
     let pending_remove_mailbox: RwSignal<Option<String>> = RwSignal::new(None);
@@ -157,6 +163,10 @@ pub fn ManagedScopeGroupPanel(
                 open=Signal::derive(move || pending_remove_mailbox.with(|p| p.is_some()))
                 title="Remove mailbox from scope group?"
                 body="Removes the mailbox from the toolkit-managed scope group, so the app can no longer reach it via the scoped Exchange grant. Exchange can take up to ~2 hours to apply RBAC changes."
+                // The pending value already IS the SMTP address the member list
+                // shows, so it is its own subject — without it a group of twenty
+                // mailboxes showed twenty identical dialogs.
+                subject=Signal::derive(move || pending_remove_mailbox.get().unwrap_or_default())
                 confirm_label="Remove"
                 busy=group_cmd.busy
                 error=group_cmd.error

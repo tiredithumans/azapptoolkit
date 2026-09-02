@@ -7,12 +7,50 @@ use crate::state::AppState;
 
 #[tauri::command]
 pub async fn sign_in(state: State<'_, AppState>) -> Result<SignInOutcome, UiError> {
-    state.auth.sign_in().await.map_err(Into::into)
+    let outcome = state.auth.sign_in().await.map_err(UiError::from)?;
+    // Remember WHO signed in (not the token — that is already in the keyring) so
+    // the next launch can restore this session silently instead of putting the
+    // operator back through the account picker. Best-effort: see
+    // `AppState::remember_account`.
+    state.remember_account(&outcome.tenant);
+    Ok(outcome)
+}
+
+/// Revives the last signed-in session from the OS keyring, without a browser
+/// round trip — what turns "sign in again every launch" back into "the app is
+/// already open on your tenant". Called once by the front-end at startup, before
+/// the sign-in card is painted.
+///
+/// `Ok(None)` — never an error — is the answer for *every* way this can come up
+/// empty: nobody has signed in on this machine, the operator signed out, the
+/// tenant was repointed, the refresh token expired or was revoked, or the
+/// keyring is locked. All of them mean the same thing to the operator (sign in),
+/// and the existing sign-in card already says it; an error toast at launch would
+/// add noise to a screen that is about to ask for the credential anyway. The
+/// code is logged so a persistent failure is still diagnosable — the code only,
+/// since an AAD message routinely embeds tenant and user GUIDs.
+#[tauri::command]
+pub async fn restore_session(state: State<'_, AppState>) -> Result<Option<TenantContext>, UiError> {
+    let Some(tenant) = state.remembered_account() else {
+        return Ok(None);
+    };
+    match state.auth.restore_session(&tenant).await {
+        Ok(outcome) => Ok(Some(outcome.tenant)),
+        Err(err) => {
+            let code = UiError::from(err).code;
+            tracing::info!(target: "auth", %code, "no session to restore; showing sign-in");
+            Ok(None)
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn sign_out(state: State<'_, AppState>, tenant: TenantContext) -> Result<(), UiError> {
     state.auth.sign_out(&tenant).await.map_err(UiError::from)?;
+    // Signing out is the one place that must also drop the restore pointer:
+    // leaving it behind would have the next launch try to revive a session whose
+    // keyring token `sign_out` just deleted.
+    state.forget_account();
     state.graph_clients.lock().remove(&tenant.tenant_id);
     state.exchange_clients.lock().remove(&tenant.tenant_id);
     // Drop EVERY tenant-scoped cache entry — lists, the cached audit run +

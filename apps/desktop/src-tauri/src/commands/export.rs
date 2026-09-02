@@ -154,9 +154,133 @@ pub(crate) async fn save_csv_via_dialog(
     write_via_dialog(app_handle, "CSV", "csv", default_name, to_csv()).await
 }
 
+/// The leading `#` comment block that carries an export's coverage into the CSV
+/// itself: a title line, the panel's own summary sentence, and the export
+/// timestamp.
+///
+/// `#` is the convention every CSV reader worth using can skip
+/// (`pandas.read_csv(comment='#')`, `read.csv(comment.char='#')`), so the caveat
+/// travels with the rows without touching the column layout downstream tooling
+/// parses — the same choice `export_audit_csv` made, and the same reason.
+///
+/// `summary` is written **verbatim**, never re-derived. It is the sentence the
+/// operator read on screen ("scanned 140 of 142 sites (2 failed — coverage is
+/// partial)"), and the reverse lookups' whole discipline is that they never
+/// overstate coverage; a file that re-phrased it would eventually drift into a
+/// milder claim than the panel made. Written raw rather than through
+/// [`csv_field`] because none of it is directory data: the title is a
+/// `&'static str` from this binary, the summary is composed from the sweep's own
+/// counts, and the stamp is our own RFC3339.
+pub(crate) fn coverage_comment_block(title: &str, summary: &str) -> String {
+    let mut out = format!("# {title}\n");
+    // A blank summary is a caller that lost its coverage line, not a clean bill
+    // of health — say so rather than shipping a file that reads as complete.
+    if summary.trim().is_empty() {
+        out.push_str("# Coverage: not stated by the exporting view — treat as incomplete\n");
+    } else {
+        out.push_str(&format!("# {}\n", summary.trim()));
+    }
+    out.push_str(&format!(
+        "# Exported: {}\n",
+        chrono::Utc::now().to_rfc3339()
+    ));
+    out
+}
+
+/// [`coverage_comment_block`]'s JSON counterpart: the rows under `rows`, with
+/// the coverage sentence and an export stamp as top-level fields.
+///
+/// Same shape as the audit's JSON export — coverage first, rows verbatim
+/// underneath — so a consumer that already reads one reads the other, and
+/// neither can be mistaken for a bare row array whose completeness is unstated.
+/// A serialize failure surfaces as an object saying so rather than as `[]`,
+/// which would read as "nothing to report".
+pub(crate) fn coverage_json<T: serde::Serialize>(summary: &str, rows: &[T]) -> String {
+    #[derive(serde::Serialize)]
+    struct Export<'a, T> {
+        generated_at: String,
+        coverage: &'a str,
+        rows: &'a [T],
+    }
+    let export = Export {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        coverage: summary,
+        rows,
+    };
+    serde_json::to_string_pretty(&export).unwrap_or_else(|e| {
+        serde_json::json!({ "error": format!("export serialization failed: {e}") }).to_string()
+    })
+}
+
+/// Column count of one CSV line — commas **outside** quotes only.
+///
+/// A test helper, shared so the per-domain export tests all prove alignment the
+/// same way. Counting raw commas is the obvious mistake and a silently wrong
+/// one: several real fields carry commas of their own (a Graph site id is
+/// literally `hostname,siteId,webId`), and those are quoted, not escaped away.
+#[cfg(test)]
+pub(crate) fn csv_columns(line: &str) -> usize {
+    let mut in_quotes = false;
+    let mut columns = 1;
+    for c in line.chars() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => columns += 1,
+            _ => {}
+        }
+    }
+    columns
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_columns_ignores_commas_inside_a_quoted_field() {
+        assert_eq!(csv_columns("a,b,c"), 3);
+        assert_eq!(csv_columns("a,\"b,still b\",c"), 3);
+        assert_eq!(csv_columns(""), 1);
+    }
+
+    #[test]
+    fn coverage_json_states_its_coverage_alongside_the_rows() {
+        let json = coverage_json(
+            "scanned 9 of 11 vaults (2 failed — coverage is partial)",
+            &[1, 2],
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            v["coverage"]
+                .as_str()
+                .unwrap()
+                .contains("coverage is partial")
+        );
+        assert_eq!(v["rows"].as_array().unwrap().len(), 2);
+        assert!(v["generated_at"].is_string());
+    }
+
+    #[test]
+    fn coverage_block_carries_the_panels_own_sentence_verbatim() {
+        let block = coverage_comment_block(
+            "azapptoolkit — sites this app can reach",
+            "12 app grants across 4 sites — scanned 140 of 142 sites (2 failed — coverage is partial)",
+        );
+        let lines: Vec<&str> = block.lines().collect();
+        assert!(lines.iter().all(|l| l.starts_with('#')));
+        assert_eq!(
+            lines[1],
+            "# 12 app grants across 4 sites — scanned 140 of 142 sites (2 failed — coverage is partial)",
+        );
+    }
+
+    #[test]
+    fn a_missing_coverage_line_reads_as_incomplete_not_as_clean() {
+        // The honest failure direction: an export whose view forgot its summary
+        // must not be indistinguishable from one with full coverage.
+        let block = coverage_comment_block("azapptoolkit — mailbox reachers", "  ");
+        assert!(block.contains("treat as incomplete"));
+    }
 
     #[test]
     fn csv_field_quotes_delimiters_and_doubles_quotes() {

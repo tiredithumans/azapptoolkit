@@ -14,6 +14,17 @@ pub async fn sign_in() -> Result<SignInOutcome, UiError> {
     invoke_result("sign_in", ()).await
 }
 
+/// Revives the last signed-in session from the OS keyring — no browser, no
+/// account picker. Called once at launch, before the sign-in card renders.
+///
+/// `Ok(None)` is the ordinary "nothing to restore" answer (nobody signed in
+/// here, the operator signed out, or the stored refresh token expired or was
+/// revoked); the backend deliberately reports every such case this way, so a
+/// caller shows the normal sign-in card rather than an error.
+pub async fn restore_session() -> Result<Option<TenantContext>, UiError> {
+    invoke_result("restore_session", ()).await
+}
+
 #[derive(Serialize)]
 struct SignOutArgs<'a> {
     tenant: &'a TenantContext,
@@ -55,9 +66,15 @@ struct ConsentArgs<'a> {
     feature: &'a str,
 }
 
-/// Runs interactive incremental consent for an optional feature's scopes
-/// (e.g. `"arm"`, `"audit_log"`, `"write"`). Call this to recover from a command
-/// that failed with the `consent_required` code, then retry the command.
+/// Runs interactive incremental consent for a feature's scopes (e.g. `"arm"`,
+/// `"audit_log"`, `"write"`) — the round trip a *silent* refresh-token grant
+/// cannot make. Call this to recover from a command that failed with the
+/// `consent_required` code, then retry the command.
+///
+/// `"write"` is the Graph read-write bundle every mutating command redeems on
+/// first use; it is the default the shared error sink offers
+/// (`Session::report_consent_required`), because the per-feature consent
+/// buttons scattered across the views only ever covered the on-demand scopes.
 pub async fn request_scope_consent(tenant_id: &str, feature: &str) -> Result<(), UiError> {
     invoke_result("request_scope_consent", ConsentArgs { tenant_id, feature }).await
 }

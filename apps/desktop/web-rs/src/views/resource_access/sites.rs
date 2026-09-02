@@ -1,16 +1,20 @@
 //! Sites panel — a tenant-wide sweep of every enumerable site's application
 //! permissions, filterable by app or site.
 
+use std::sync::Arc;
+
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, ProgressBar};
 
 use crate::bindings::auth;
 use crate::bindings::events;
 use crate::bindings::sharepoint::{self, SiteAppGrantRow, SiteSweepProgress, SiteSweepResult};
+use crate::components::export_menu::ExportMenu;
 use crate::components::ui::{Callout, SearchInput, ShowMore};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
+use crate::hooks::use_list_export::use_list_export;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
 
@@ -131,6 +135,25 @@ pub(super) fn SitesPanel() -> impl IntoView {
         })
     });
 
+    // "Which apps can touch this site?" is an answer an operator gets asked to
+    // produce in writing; before this the only way out of the app was a
+    // screenshot. Reuses the inventory lists' export handle (snapshot +
+    // double-submit guard + toast), and ships the SUMMARY alongside the rows:
+    // a site whose permission read failed contributes none, and this index is
+    // the only way `Sites.Selected` reach is knowable at all, so a file without
+    // "(N failed — coverage is partial)" would read as the complete answer to a
+    // question the sweep couldn't fully answer.
+    let (export_rows, exporting, do_export) = use_list_export(
+        move |rows: Arc<Vec<SiteAppGrantRow>>, format| async move {
+            let coverage = summary.get_untracked().unwrap_or_default();
+            sharepoint::save_site_access_to_file(&rows, &coverage, format).await
+        },
+        "site grants",
+    );
+    // Keep the export snapshot in step with what's rendered — what you see is
+    // what you export, filter included.
+    Effect::new(move |_| export_rows.set_value(Arc::new(filtered_rows.get())));
+
     // Subscribe to sweep progress for this view's lifetime; abort on unmount so
     // the stream task doesn't leak or race a remount's task (audit pattern).
     use_progress_stream(progress, events::site_sweep_progress);
@@ -248,6 +271,13 @@ pub(super) fn SitesPanel() -> impl IntoView {
             <div class="page__search">
                 <SearchInput value=search placeholder="Filter by site, app name, or app id…" />
             </div>
+            <ExportMenu
+                disabled=Signal::derive(move || {
+                    exporting.get() || filtered_rows.with(Vec::is_empty)
+                })
+                on_select=Callback::new(do_export)
+                options=vec![("csv", "Export as CSV…"), ("json", "Export as JSON…")]
+            />
         </div>
         {move || {
             progress

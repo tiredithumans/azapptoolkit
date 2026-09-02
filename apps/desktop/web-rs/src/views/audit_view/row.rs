@@ -102,9 +102,10 @@ fn pick(
 /// Per-row actions for an audit finding. Always renders an "Open" deep-link into
 /// the app's detail pane (turning the audit from a dead-end table into a
 /// launchpad), followed by the one-click remediations the scorer attached that
-/// this surface owns: remove-expired-credentials (a static confirm dialog) and
-/// the scoping fixes (guided group/site modals). On success each fires
-/// `on_done` with its OWN kind, so the parent drops just that remediation — the
+/// this surface owns: remove-expired-credentials (a confirm dialog naming the
+/// credentials) and the scoping fixes (guided group/site modals). On success
+/// each fires `on_done` with its OWN kind, so the parent drops just that
+/// remediation — the
 /// button disappears for good (surviving facet/search changes) while the row's
 /// other Fixes, which nothing has fixed yet, stay put. The audit cache is
 /// busted server-side, so a re-run reflects the new scores.
@@ -164,6 +165,9 @@ pub(super) fn AuditRowActions(
     // audit row's object id so `on_done` clears the right row.
     let app_id_migrate = item.app_id.clone();
     let oid_migrate = object_id.clone();
+    // Disabling sign-in changes the app itself, so its confirm dialog names the
+    // app rather than a credential or permission list (see `DisableSignInAction`).
+    let app_name_disable = item.application_name.clone();
     let target_m = scope_target.clone();
     let target_s = scope_target;
     view! {
@@ -250,6 +254,7 @@ pub(super) fn AuditRowActions(
                     view! {
                         <DisableSignInAction
                             object_id=oid_disable.clone()
+                            app_name=app_name_disable.clone()
                             action=action
                             on_done=done(RemediationKind::DisableSignIn)
                         />
@@ -259,13 +264,19 @@ pub(super) fn AuditRowActions(
     }
 }
 
-/// The disable-sign-in fix for an unused app: a button gated by a static
-/// confirm dialog. Sets `accountEnabled: false` on the app's service principal
-/// — reversible any time from the enterprise app's Overview toggle, which is
-/// why a plain confirm (no typed keyword) suffices.
+/// The disable-sign-in fix for an unused app: a button gated by a confirm
+/// dialog naming the app. Sets `accountEnabled: false` on the app's service
+/// principal — reversible any time from the enterprise app's Overview toggle,
+/// which is why a plain confirm (no typed keyword) suffices.
 #[component]
 fn DisableSignInAction(
     object_id: String,
+    /// The dialog's subject. Its siblings pass `action.detail`, which names the
+    /// credentials or permissions they remove; this action changes the *app*, so
+    /// the app is what the dialog has to name. `detail` here is a rationale
+    /// ("No recent sign-in activity…") the body already covers, and
+    /// `ConfirmDialog::subject` is documented as the object being affected.
+    app_name: String,
     action: RemediationAction,
     #[prop(into)] on_done: Callback<String>,
 ) -> impl IntoView {
@@ -319,6 +330,9 @@ fn DisableSignInAction(
                 open=Signal::derive(move || open.get())
                 title="Disable sign-in?"
                 body="Blocks token issuance for this unused app by disabling its service principal. This is reversible — re-enable it anytime from the enterprise app's Overview tab. Nothing is deleted. Re-run the audit afterward to refresh scores."
+                // The modal covers the row it was opened from, and every unused
+                // app's dialog is otherwise identical.
+                subject=app_name
                 confirm_label="Disable sign-in"
                 busy=Signal::derive(move || busy.get())
                 error=Signal::derive(move || error.get())
@@ -330,10 +344,10 @@ fn DisableSignInAction(
         .into_any()
 }
 
-/// The remove-redundant-permissions fix: a button gated by a static confirm
-/// dialog (the narrower permissions are previewed in-row and the covering
-/// broader ones listed under Issues). The backend re-plans against the live
-/// manifest + grants, so the toast reports what was actually removed/skipped.
+/// The remove-redundant-permissions fix: a button gated by a confirm dialog
+/// that names the narrower permissions (the same string previewed in-row). The
+/// backend re-plans against the live manifest + grants, so the toast reports
+/// what was actually removed/skipped.
 #[component]
 fn RedundantPermsAction(
     object_id: String,
@@ -388,6 +402,9 @@ fn RedundantPermsAction(
 
     let label = action.label.clone();
     let detail = action.detail.clone();
+    // The modal covers the row it was opened from, so it names the permissions
+    // itself rather than pointing at a column it is sitting on top of.
+    let subject = action.detail.clone();
 
     view! {
         <div class="audit-actions">
@@ -402,7 +419,8 @@ fn RedundantPermsAction(
             <ConfirmDialog
                 open=Signal::derive(move || open.get())
                 title="Remove redundant permissions?"
-                body="Removes the narrower permissions listed under Issues — a broader permission this app also holds already grants the same access, so its calls keep working. Each removal is re-checked against the live grants first; a permission whose covering grant has since been revoked or scoped is skipped. Re-run the audit afterward to refresh scores."
+                body="Removes these narrower permissions — a broader permission this app also holds already grants the same access, so its calls keep working. Each removal is re-checked against the live grants first; a permission whose covering grant has since been revoked or scoped is skipped. Re-run the audit afterward to refresh scores."
+                subject=subject
                 confirm_label="Remove"
                 busy=Signal::derive(move || busy.get())
                 error=Signal::derive(move || error.get())
@@ -414,8 +432,8 @@ fn RedundantPermsAction(
         .into_any()
 }
 
-/// The remove-expired-credentials fix: a button gated by a static confirm dialog
-/// (the specific credentials are previewed in-row and listed under Issues).
+/// The remove-expired-credentials fix: a button gated by a confirm dialog that
+/// names the specific credentials (the same string previewed in-row).
 #[component]
 fn ExpiredCredsAction(
     object_id: String,
@@ -466,6 +484,10 @@ fn ExpiredCredsAction(
 
     let label = action.label.clone();
     let detail = action.detail.clone();
+    // The modal covers the in-row preview naming these credentials, so it
+    // restates them: without it an app with six expired secrets showed six
+    // identical dialogs.
+    let subject = action.detail.clone();
 
     view! {
         <div class="audit-actions">
@@ -480,7 +502,8 @@ fn ExpiredCredsAction(
             <ConfirmDialog
                 open=Signal::derive(move || open.get())
                 title="Remove expired credentials?"
-                body="Permanently removes this app's expired secrets and certificates (listed under Issues). Expired credentials can't authenticate, so removing them won't disrupt a working sign-in — you can add a new credential anytime. Re-run the audit afterward to refresh scores."
+                body="Permanently removes this app's expired secrets and certificates. Expired credentials can't authenticate, so removing them won't disrupt a working sign-in — you can add a new credential anytime. Re-run the audit afterward to refresh scores."
+                subject=subject
                 confirm_label="Remove"
                 busy=Signal::derive(move || busy.get())
                 error=Signal::derive(move || error.get())

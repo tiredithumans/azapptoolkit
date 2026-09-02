@@ -364,11 +364,17 @@ fn EnterpriseAppPanel(
                 // "DELETE" confirmation — matching the bulk-delete guard. An
                 // ordinary in-tenant SP keeps the one-click confirm.
                 let require_keyword = if foreign { "DELETE" } else { "" };
+                // Several detail windows can be open at once and the modal covers
+                // all of them, so it names the service principal it will delete
+                // rather than leaving "this enterprise application" to the header
+                // underneath it.
+                let subject = ro_signal.with(|d| d.service_principal.display_name.clone());
                 view! {
                     <ConfirmDialog
                         open=Signal::derive(move || delete_open.get())
                         title="Delete this enterprise application?"
                         body=body
+                        subject=subject
                         confirm_label="Delete"
                         require_keyword=require_keyword
                         busy=Signal::derive(move || deleting.get())

@@ -10,7 +10,8 @@ use wasm_bindgen_test::*;
 
 use azapptoolkit_web_rs::components::open_items_dock::OpenItemsDock;
 use azapptoolkit_web_rs::components::open_items_workspace::OpenItemsWorkspace;
-use azapptoolkit_web_rs::state::OpenItemKind;
+use azapptoolkit_web_rs::hooks::use_shortcuts::use_shortcuts;
+use azapptoolkit_web_rs::state::{OpenItemKind, use_session};
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 
 /// Count elements matching `selector` that are actually visible (hidden ones are
@@ -31,9 +32,19 @@ fn visible_panes() -> usize {
     visible_count(".workspace__pane")
 }
 
-/// Mount the dock + workspace with the App Reg / Enterprise detail commands
-/// mocked, so opened windows load and report their names back to the dock.
-fn mount() -> ts::Mounted {
+/// True when the focused element matches `selector`. Focus placement is the
+/// whole property here and no DOM query expresses it.
+fn focused_matches(selector: &str) -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.active_element())
+        .and_then(|el| el.matches(selector).ok())
+        .unwrap_or(false)
+}
+
+/// The App Reg / Enterprise detail commands, so opened windows load and report
+/// their names back to the dock.
+fn mock_details() {
     ts::reset();
     ts::mock_ok(
         "get_application_detail",
@@ -47,8 +58,31 @@ fn mount() -> ts::Mounted {
         "get_enterprise_application_detail",
         &fixtures::enterprise_application_detail("sp-1", "Fabrikam Web"),
     );
+}
+
+/// Mount the dock + workspace on their own.
+fn mount() -> ts::Mounted {
+    mock_details();
     ts::mount_view(|| {
         view! {
+            <OpenItemsWorkspace />
+            <OpenItemsDock />
+        }
+    })
+}
+
+/// The same pair plus the global keyboard layer the shell installs beside them,
+/// and a stand-in for the list row that opened the item — the focus contract is
+/// precisely about handing focus back to that row.
+///
+/// Deliberately no `provide_session()`: `mount_view` already provided one, and
+/// re-providing would hand the test a different session than the view reads.
+fn mount_with_shortcuts() -> ts::Mounted {
+    mock_details();
+    ts::mount_view(|| {
+        use_shortcuts(use_session(), RwSignal::new(false));
+        view! {
+            <button class="probe-row" type="button">"Open Contoso API"</button>
             <OpenItemsWorkspace />
             <OpenItemsDock />
         }
@@ -187,4 +221,99 @@ async fn chip_title_self_corrects_to_loaded_name() {
     );
     // Once the detail loads, the pane reports its real name to the dock chip.
     ts::wait_for(|| ts::text(".open-dock__chip-label") == "Contoso API").await;
+}
+
+#[wasm_bindgen_test]
+async fn dock_labels_name_the_chip_they_close() {
+    let m = mount();
+    m.session.open_item(
+        OpenItemKind::AppReg,
+        "app-1".to_string(),
+        "Contoso API".to_string(),
+    );
+    ts::wait_for(|| ts::query_all(".open-dock__chip").len() == 1).await;
+
+    // A bare `aria-label` on a plain `<div>` has no role to attach to and is
+    // never announced — the same fix the workspace made for itself.
+    let dock = ts::query(".open-dock").expect("the dock");
+    assert_eq!(
+        dock.get_attribute("role").as_deref(),
+        Some("region"),
+        "the dock's label needs a role to hang on"
+    );
+    // With six items open, six identical "Close"es tell a screen-reader user
+    // nothing about which one is about to go.
+    let close = ts::query(".open-dock__close").expect("a chip close button");
+    assert_eq!(
+        close.get_attribute("aria-label").as_deref(),
+        Some("Close Contoso API")
+    );
+}
+
+#[wasm_bindgen_test]
+async fn focus_moves_into_the_pane_and_returns_on_collapse() {
+    let m = mount_with_shortcuts();
+    // Stand where the operator stands: on the list row that opens the item.
+    ts::focus(".probe-row");
+    m.session.open_item(
+        OpenItemKind::AppReg,
+        "app-1".to_string(),
+        "Contoso API".to_string(),
+    );
+    // Without this the overlay opens with focus still on <body>, ~13 Tab
+    // presses (the whole nav rail) away from the pane it just opened.
+    ts::wait_for(|| focused_matches(".workspace__pane")).await;
+
+    // Escape collapses the workspace; focus goes back to the row, so the
+    // operator keeps their place in the list rather than restarting at <body>.
+    ts::press_key("body", "Escape");
+    ts::wait_for(|| focused_matches(".probe-row")).await;
+}
+
+#[wasm_bindgen_test]
+async fn accelerators_step_the_dock_and_close_the_focused_item() {
+    let m = mount_with_shortcuts();
+    let a = m.session.open_item(
+        OpenItemKind::AppReg,
+        "app-1".to_string(),
+        "Contoso API".to_string(),
+    );
+    let b = m.session.open_item(
+        OpenItemKind::Enterprise,
+        "sp-1".to_string(),
+        "Fabrikam Web".to_string(),
+    );
+    ts::wait_for(|| visible_panes() == 1).await;
+
+    // Escape is documented as "collapse the workspace" and used to be a one-way
+    // door: the only route back was tabbing past the entire content slot to the
+    // dock. Cmd/Ctrl-] is that route.
+    ts::press_key("body", "Escape");
+    ts::wait_for(|| visible_panes() == 0).await;
+    ts::press_key_with_accel("body", "]");
+    ts::wait_for(|| visible_panes() == 1).await;
+    assert_eq!(
+        m.session.shown_items.get_untracked(),
+        vec![a],
+        "collapsed, `]` re-opens at the first chip"
+    );
+
+    // Then it steps along the dock, and `[` steps back. Focus follows the
+    // switch: the pane it was in is now `display:none`, so leaving it there
+    // would drop the operator back on `<body>` with every step.
+    ts::press_key_with_accel("body", "]");
+    ts::wait_for(|| m.session.shown_items.get_untracked() == vec![b]).await;
+    ts::wait_for(|| focused_matches(".workspace__pane")).await;
+    ts::press_key_with_accel("body", "[");
+    ts::wait_for(|| m.session.shown_items.get_untracked() == vec![a]).await;
+
+    // Cmd/Ctrl-W closes the focused open item — the OS window is not this
+    // binding's business, and on macOS the app menu has no Close Window item so
+    // the accelerator reaches the webview at all.
+    ts::press_key_with_accel("body", "w");
+    ts::wait_for(|| ts::query_all(".open-dock__chip").len() == 1).await;
+    assert!(
+        m.session.is_open(OpenItemKind::AppReg, "app-1").is_none(),
+        "the focused item is the one that closed"
+    );
 }

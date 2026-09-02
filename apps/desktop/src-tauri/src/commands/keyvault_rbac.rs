@@ -21,6 +21,7 @@ use azapptoolkit_arm::{KeyVaultResource, RoleAssignment};
 use azapptoolkit_core::cache::CacheKind;
 
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
+use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
 use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::progress::emit_progress;
 use crate::dto::UiError;
@@ -367,9 +368,112 @@ pub fn get_cached_key_vault_access(
         .get(CacheKind::Audit, &kv_sweep_cache_key(&tenant_id))
 }
 
+/// Exports the (frontend-filtered) vault-access rows to CSV/JSON via the OS save
+/// dialog. Returns the path, or `None` if the user cancelled.
+///
+/// "Who can read this vault?" is an answer an operator is routinely asked to
+/// produce in writing, and until this existed the only way out of the app was a
+/// screenshot. The rows come from the frontend because the filter that produced
+/// them does: the panel's one search box serves both lookup directions, so what
+/// is on screen — one vault's principals, or one principal's vaults — is the
+/// export the operator means.
+///
+/// `summary` is that panel's own coverage sentence, and it is not decoration:
+/// a vault whose role read failed contributes no rows, so a file that dropped
+/// "(2 failed — coverage is partial)" would read as a complete answer to a
+/// question the sweep could not fully answer.
+#[tauri::command]
+pub async fn save_key_vault_access_to_file(
+    app_handle: AppHandle,
+    rows: Vec<KeyVaultAccessRow>,
+    summary: String,
+    format: String,
+) -> Result<Option<String>, UiError> {
+    crate::commands::export::save_export_via_dialog(
+        &app_handle,
+        "vault-access",
+        &format,
+        || key_vault_access_to_csv(&rows, &summary),
+        || coverage_json(&summary, &rows),
+    )
+    .await
+}
+
+/// Serializes vault-access rows as CSV under the shared coverage comment block.
+/// Principal display names come from the directory, so every field is routed
+/// through `csv_field` (formula-injection guard + delimiter quoting).
+fn key_vault_access_to_csv(rows: &[KeyVaultAccessRow], summary: &str) -> String {
+    let mut out = coverage_comment_block(
+        "azapptoolkit — Key Vault access (direct Azure RBAC role assignments)",
+        summary,
+    );
+    out.push_str(
+        "Vault,VaultResourceId,Scope,Role,HighPrivilege,Principal,PrincipalId,PrincipalType\n",
+    );
+    for r in rows {
+        let row = [
+            csv_field(r.vault_name.as_deref().unwrap_or("")),
+            csv_field(&r.vault_id),
+            csv_field(&r.scope),
+            csv_field(&r.role_name),
+            r.high_privilege.to_string(),
+            csv_field(r.principal_display_name.as_deref().unwrap_or("")),
+            csv_field(&r.principal_id),
+            csv_field(r.principal_type.as_deref().unwrap_or("")),
+        ]
+        .join(",");
+        out.push_str(&row);
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn access_row(vault: &str, principal: &str) -> KeyVaultAccessRow {
+        KeyVaultAccessRow {
+            vault_id: format!(
+                "/subscriptions/s/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/{vault}"
+            ),
+            vault_name: Some(vault.into()),
+            scope: format!(
+                "/subscriptions/s/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/{vault}"
+            ),
+            role_name: "Key Vault Secrets User".into(),
+            principal_id: "11111111-1111-1111-1111-111111111111".into(),
+            principal_type: Some("ServicePrincipal".into()),
+            principal_display_name: Some(principal.into()),
+            high_privilege: false,
+        }
+    }
+
+    #[test]
+    fn csv_leads_with_the_coverage_line_then_a_header_and_one_row_each() {
+        let csv = key_vault_access_to_csv(
+            &[
+                access_row("kv-prod", "Contoso API"),
+                access_row("kv-dev", "Fabrikam Web"),
+            ],
+            "2 role assignments across 2 vaults — scanned 9 of 11 vaults (2 failed — coverage is partial)",
+        );
+        let lines: Vec<&str> = csv.lines().collect();
+        // The partial-coverage caveat must reach the file, ahead of the data.
+        assert!(lines[1].contains("coverage is partial"));
+        let header = lines.iter().position(|l| l.starts_with("Vault,")).unwrap();
+        assert_eq!(lines.len() - header, 3); // header + 2 rows
+        assert!(lines[header + 1].starts_with("kv-prod,"));
+    }
+
+    #[test]
+    fn csv_neutralizes_formula_injection_in_a_principal_name() {
+        // CWE-1236: display names are directory data. A leading '=' must be
+        // defused so a spreadsheet treats the cell as text, not a formula — and
+        // the comma in the payload is the point: it has to compose with quoting.
+        let csv = key_vault_access_to_csv(&[access_row("kv", "=cmd|'/c calc',A1")], "complete");
+        assert!(csv.contains("\"'=cmd|'/c calc',A1\""));
+    }
 
     #[test]
     fn cache_key_is_tenant_scoped() {

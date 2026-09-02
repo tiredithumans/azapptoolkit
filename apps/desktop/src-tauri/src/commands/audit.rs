@@ -21,7 +21,7 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_core::audit::{
-    AppPermissions, AuditItem, MailPermissionScope, ResourcePermission, SpAuditInput,
+    AppPermissions, AuditItem, MailPermissionScope, ResourcePermission, RiskLevel, SpAuditInput,
     score_application, score_service_principal, unused_app_advisory,
 };
 use azapptoolkit_core::cache::{Cache, CacheKind};
@@ -42,7 +42,7 @@ use crate::commands::graph_roles::graph_role_index;
 use crate::commands::progress::emit_progress;
 use crate::commands::throttle::FanOutMeter;
 use crate::dto::UiError;
-use crate::dto::audit::{AuditCoverageGap, AuditProgress, AuditRunResult};
+use crate::dto::audit::{AuditCoverageGap, AuditExportCoverage, AuditProgress, AuditRunResult};
 use crate::state::AppState;
 use azapptoolkit_exchange::verdict::{aap_verdict_for, apply_legacy_policy_verdict};
 
@@ -85,6 +85,22 @@ const MAX_APPS_PER_RUN: usize = crate::commands::applications::APPS_MAX;
 /// original `run:{tenant}` suffix shape was invisible to the prefix idiom.)
 pub(crate) fn audit_cache_key(tenant_id: &str) -> String {
     format!("{tenant_id}|audit_run")
+}
+
+/// What the [`CacheKind::Audit`] run entry holds: the scored items **plus the
+/// moment the run finished**.
+///
+/// The timestamp rides in the same entry rather than a second key so it can
+/// never outlive, be evicted apart from, or disagree with the items it
+/// describes. It is the only record of when a scan happened — the cache is
+/// in-process with a 60-minute TTL, so "read time" and "run time" differ by up
+/// to an hour, and a cache hit stamped on read would tell an operator a
+/// 59-minute-old posture was current.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedAuditRun {
+    /// RFC3339 UTC.
+    completed_at: String,
+    items: Vec<AuditItem>,
 }
 
 /// Whether a finished run may be written to the audit cache.
@@ -418,11 +434,23 @@ pub async fn run_audit(
     let cancelled = cancelled_before_all_dispatched || cancel.is_cancelled();
     items.sort_by_key(|i| std::cmp::Reverse(i.risk_score));
 
+    // Built BEFORE the cache write and destructured back out for the result, so
+    // the cached run and the one returned to the caller carry byte-identical
+    // items and the same completion stamp — and so the multi-MB item vector is
+    // moved through, never cloned.
+    let run = CachedAuditRun {
+        completed_at: Utc::now().to_rfc3339(),
+        items,
+    };
     if run_is_cacheable(cancelled, truncated, &degraded) {
         state
             .cache
-            .put(CacheKind::Audit, audit_cache_key(&tenant_id), &items);
+            .put(CacheKind::Audit, audit_cache_key(&tenant_id), &run);
     }
+    let CachedAuditRun {
+        completed_at,
+        items,
+    } = run;
 
     Ok(AuditRunResult {
         tenant_id,
@@ -438,6 +466,7 @@ pub async fn run_audit(
         sign_in_consent_required,
         truncated,
         degraded,
+        completed_at: Some(completed_at),
     })
 }
 
@@ -472,7 +501,8 @@ pub(crate) fn invalidate_audit_cache(cache: &azapptoolkit_core::cache::Cache, te
 pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option<AuditRunResult> {
     state.auth.tenant_context(&tenant_id)?;
     let key = audit_cache_key(&tenant_id);
-    let items: Vec<AuditItem> = state.cache.get(CacheKind::Audit, &key)?;
+    let run: CachedAuditRun = state.cache.get(CacheKind::Audit, &key)?;
+    let items = run.items;
     // Report availability is reconstructed from the cached items (every item
     // carries the run's `sign_in_report_available`); a cached run never re-prompts
     // for consent, so `sign_in_consent_required` is false on a cache hit.
@@ -489,6 +519,10 @@ pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option
         truncated: false,
         // Nor is a degraded one, for the same reason.
         degraded: Vec::new(),
+        // The stamp the RUN wrote, not this read: a cache hit is what the
+        // dashboard shows after a relaunch-free hour, and "scanned just now"
+        // about an hour-old scan is the false claim this field exists to stop.
+        completed_at: Some(run.completed_at),
     })
 }
 
@@ -498,34 +532,46 @@ pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option
 /// `items: None` the backend serves its own cached run, so the multi-MB item
 /// vector never round-trips the IPC bridge; a *cancelled* run — which is
 /// never cached — passes its items explicitly.
+///
+/// `coverage` describes the run those explicit items came from, and every
+/// writer opens with it: the exported file is the artifact that leaves the app,
+/// so it has to carry the same caveats the workbench refuses to omit. It is
+/// read **only** on the explicit-items path — a run served from the cache is
+/// complete by construction (`run_is_cacheable`), and the backend describes it
+/// from the entry itself rather than from what the webview claims about it.
 #[tauri::command]
 pub async fn save_audit_to_file(
     app_handle: AppHandle,
     state: State<'_, AppState>,
     tenant_id: String,
     items: Option<Vec<AuditItem>>,
+    coverage: AuditExportCoverage,
     format: String,
 ) -> Result<Option<String>, UiError> {
     // This can answer entirely from the tenant cache and then WRITE the result to
     // a user-chosen path, so an unproven `tenant_id` would make a cross-tenant
     // leak persistent on disk. Prove the session before either branch.
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
-    let items: Vec<AuditItem> = match items {
-        Some(items) => items,
-        None => state
-            .cache
-            .get(CacheKind::Audit, &audit_cache_key(&tenant_id))
-            .ok_or_else(|| {
-                UiError::validation(
-                    "no_cached_audit",
-                    "no cached audit to export — run the audit again",
-                )
-            })?,
+    let (items, coverage): (Vec<AuditItem>, AuditExportCoverage) = match items {
+        Some(items) => (items, coverage),
+        None => {
+            let run: CachedAuditRun = state
+                .cache
+                .get(CacheKind::Audit, &audit_cache_key(&tenant_id))
+                .ok_or_else(|| {
+                    UiError::validation(
+                        "no_cached_audit",
+                        "no cached audit to export — run the audit again",
+                    )
+                })?;
+            let coverage = cached_run_coverage(&run);
+            (run.items, coverage)
+        }
     };
     let (content, ext, filter_name) = match format.as_str() {
-        "csv" => (export_audit_csv(items), "csv", "CSV"),
-        "json" => (audit_to_json(&items)?, "json", "JSON"),
-        "html" => (audit_to_html(&items), "html", "HTML"),
+        "csv" => (export_audit_csv(items, &coverage), "csv", "CSV"),
+        "json" => (audit_to_json(&items, &coverage)?, "json", "JSON"),
+        "html" => (audit_to_html(&items, &coverage), "html", "HTML"),
         other => {
             return Err(UiError::validation(
                 "unsupported_format",
@@ -537,15 +583,123 @@ pub async fn save_audit_to_file(
     write_via_dialog(app_handle, filter_name, ext, default_name, content).await
 }
 
-/// Serializes audit items as pretty-printed JSON. Propagates a serialize error
-/// instead of writing an empty `"[]"` file — a silent empty export reads as
-/// "nothing to report" rather than "the export failed".
-fn audit_to_json(items: &[AuditItem]) -> Result<String, UiError> {
-    serde_json::to_string_pretty(items).map_err(|e| UiError::serde(e.to_string()))
+/// How a cached run describes itself to the exporter.
+///
+/// Never taken from the webview: `run_is_cacheable` admits only a complete,
+/// undegraded scan, so those three flags are known here — and the entry's own
+/// stamp is the authority for when the items it holds were produced. Report
+/// availability is reconstructed from the items exactly as `get_cached_audit`
+/// does it.
+fn cached_run_coverage(run: &CachedAuditRun) -> AuditExportCoverage {
+    AuditExportCoverage {
+        total_apps: run.items.len(),
+        cancelled: false,
+        truncated: false,
+        degraded: Vec::new(),
+        sign_in_report_available: run.items.iter().any(|i| i.sign_in_report_available),
+        completed_at: Some(run.completed_at.clone()),
+    }
 }
 
-/// Renders a standalone HTML report — a styled table of the key audit columns.
-fn audit_to_html(items: &[AuditItem]) -> String {
+/// The run's coverage as plain sentences — one per caveat, none when the scan
+/// was complete.
+///
+/// Deliberately the **same wording** the Security workbench uses (the posture
+/// strip's cancelled callout, the Findings pane's truncated callout and
+/// degraded lede): an operator who read the caveat on screen must recognize it
+/// in the file, and a second set of words would eventually drift into a milder
+/// claim. `scored` is the exported item count, so the fraction is always about
+/// the rows actually in this file.
+fn coverage_sentences(scored: usize, coverage: &AuditExportCoverage) -> Vec<String> {
+    let mut out = Vec::new();
+    if coverage.cancelled {
+        out.push(format!(
+            "This scan was cancelled early — {scored} of {total} principals were scored. \
+             Everything below covers only those; re-run for full coverage.",
+            total = coverage.total_apps,
+        ));
+    }
+    if coverage.truncated {
+        out.push(
+            "The tenant holds more app registrations than one run scores, so this scan \
+             covered an arbitrary prefix of them. This is not an all-clear, and re-running \
+             will not extend it."
+                .to_string(),
+        );
+    }
+    if !coverage.degraded.is_empty() {
+        out.push(
+            "Part of this scan could not run — treat the results as incomplete and re-run."
+                .to_string(),
+        );
+    }
+    if !coverage.sign_in_report_available {
+        out.push(
+            "Unused-app detection was off for this run — it needs the sign-in activity report \
+             (AuditLog.Read.All and Entra ID P1/P2), so no application here could be flagged \
+             unused."
+                .to_string(),
+        );
+    }
+    out
+}
+
+/// Per-level counts over the exported rows, highest severity first — the
+/// summary an auditor reads before the table.
+fn severity_summary(items: &[AuditItem]) -> [(&'static str, usize); 4] {
+    let count = |level: RiskLevel| items.iter().filter(|i| i.risk_level == level).count();
+    [
+        ("Critical", count(RiskLevel::Critical)),
+        ("High", count(RiskLevel::High)),
+        ("Medium", count(RiskLevel::Medium)),
+        ("Low", count(RiskLevel::Low)),
+    ]
+}
+
+/// Serializes the audit as pretty-printed JSON: the run's coverage as
+/// top-level fields, its rows under `items`. Propagates a serialize error
+/// instead of writing an empty `"[]"` file — a silent empty export reads as
+/// "nothing to report" rather than "the export failed".
+///
+/// The rows keep the shape they always had (`AuditItem`, verbatim), so a
+/// consumer only has to reach one level deeper for them — and now cannot read
+/// a partial scan as a full one.
+fn audit_to_json(items: &[AuditItem], coverage: &AuditExportCoverage) -> Result<String, UiError> {
+    #[derive(serde::Serialize)]
+    struct Export<'a> {
+        generated_at: String,
+        completed_at: Option<&'a str>,
+        scored: usize,
+        total_apps: usize,
+        complete: bool,
+        cancelled: bool,
+        truncated: bool,
+        degraded: &'a [AuditCoverageGap],
+        sign_in_report_available: bool,
+        /// The caveat sentences, so a consumer that renders the file doesn't
+        /// have to re-derive the prose from the flags above.
+        coverage_notes: Vec<String>,
+        items: &'a [AuditItem],
+    }
+    let export = Export {
+        generated_at: Utc::now().to_rfc3339(),
+        completed_at: coverage.completed_at.as_deref(),
+        scored: items.len(),
+        total_apps: coverage.total_apps,
+        complete: coverage.is_complete(),
+        cancelled: coverage.cancelled,
+        truncated: coverage.truncated,
+        degraded: &coverage.degraded,
+        sign_in_report_available: coverage.sign_in_report_available,
+        coverage_notes: coverage_sentences(items.len(), coverage),
+        items,
+    };
+    serde_json::to_string_pretty(&export).map_err(|e| UiError::serde(e.to_string()))
+}
+
+/// Renders a standalone HTML report — a coverage header, a severity summary,
+/// then a styled table of the key audit columns.
+fn audit_to_html(items: &[AuditItem], coverage: &AuditExportCoverage) -> String {
     let mut rows = String::new();
     for item in items {
         rows.push_str(&format!(
@@ -558,19 +712,57 @@ fn audit_to_html(items: &[AuditItem]) -> String {
             html_escape(&item.issues.join("; ")),
         ));
     }
+
+    // Coverage first, above everything it qualifies. The old header said
+    // "N application(s) — generated <timestamp>" and nothing else, so a
+    // cancelled run's export — the one export that ships items the cache
+    // refuses to hold — read exactly like a clean full scan.
+    let mut header = format!(
+        "<p class=\"coverage\">{scored} of {total} principal(s) scored — scanned {scanned}, \
+         exported {generated}</p>",
+        scored = items.len(),
+        // `max` only so the fraction can never read "14 of 0": the denominator
+        // is what the run set out to score, which is >= what it scored.
+        total = coverage.total_apps.max(items.len()),
+        scanned = html_escape(coverage.completed_at.as_deref().unwrap_or("unknown")),
+        generated = html_escape(&Utc::now().to_rfc3339()),
+    );
+    for sentence in coverage_sentences(items.len(), coverage) {
+        header.push_str(&format!(
+            "<p class=\"caveat\">{}</p>",
+            html_escape(&sentence)
+        ));
+    }
+    if !coverage.degraded.is_empty() {
+        header.push_str("<ul class=\"caveat\">");
+        for gap in &coverage.degraded {
+            header.push_str(&format!("<li>{}</li>", html_escape(gap.description())));
+        }
+        header.push_str("</ul>");
+    }
+    let summary: String = severity_summary(items)
+        .iter()
+        .map(|(label, n)| format!("<li><b>{n}</b> {label}</li>"))
+        .collect();
+
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <title>azapptoolkit Security Audit</title>\
 <style>body{{font-family:system-ui,sans-serif;margin:2rem}}\
 table{{border-collapse:collapse;width:100%}}\
 th,td{{border:1px solid #ccc;padding:6px 8px;text-align:left;font-size:14px;vertical-align:top}}\
-th{{background:#f3f3f3}}</style></head>\
-<body><h1>Security Audit</h1><p>{count} application(s) — generated {generated}</p>\
+th{{background:#f3f3f3}}\
+p.coverage{{color:#444;font-size:14px}}\
+.caveat{{background:#fff4e5;border-left:4px solid #d97706;padding:8px 12px;font-size:14px}}\
+ul.severities{{list-style:none;display:flex;gap:1.5rem;padding:0;margin:1rem 0;font-size:14px}}\
+</style></head>\
+<body><h1>Security Audit</h1>{header}\
+<ul class=\"severities\">{summary}</ul>\
 <table><thead><tr><th>Application</th><th>App ID</th><th>Risk score</th>\
 <th>Level</th><th>Credentials</th><th>Issues</th></tr></thead>\
 <tbody>{rows}</tbody></table></body></html>",
-        count = items.len(),
-        generated = chrono::Utc::now().to_rfc3339(),
+        header = header,
+        summary = summary,
         rows = rows,
     )
 }
@@ -593,8 +785,37 @@ fn html_escape(s: &str) -> String {
 /// a command "so callers that want the text don't need a save dialog", but no
 /// such caller was ever written — leaving an unreachable entry point on the IPC
 /// boundary.
-pub(crate) fn export_audit_csv(items: Vec<AuditItem>) -> String {
+pub(crate) fn export_audit_csv(items: Vec<AuditItem>, coverage: &AuditExportCoverage) -> String {
     let mut out = String::new();
+    // A leading `#` comment block — the convention every CSV reader worth using
+    // can skip (`pandas.read_csv(comment='#')`, `read.csv(comment.char='#')`) —
+    // so the coverage travels with the rows without touching the column layout
+    // downstream tooling parses. Written raw rather than through `csv_field`
+    // because nothing here is directory data: the counts are integers, the
+    // timestamp is our own RFC3339 stamp, and the sentences and gap
+    // descriptions are `&'static str`s from this binary.
+    out.push_str(&format!(
+        "# azapptoolkit security audit — {scored} of {total} principal(s) scored\n",
+        scored = items.len(),
+        total = coverage.total_apps.max(items.len()),
+    ));
+    out.push_str(&format!(
+        "# Scan completed: {}\n",
+        coverage.completed_at.as_deref().unwrap_or("unknown")
+    ));
+    out.push_str(&format!("# Exported: {}\n", Utc::now().to_rfc3339()));
+    for (label, n) in severity_summary(&items) {
+        out.push_str(&format!("# {label}: {n}\n"));
+    }
+    if coverage.is_complete() {
+        out.push_str("# Coverage: complete\n");
+    }
+    for sentence in coverage_sentences(items.len(), coverage) {
+        out.push_str(&format!("# {sentence}\n"));
+    }
+    for gap in &coverage.degraded {
+        out.push_str(&format!("# - {}\n", gap.description()));
+    }
     out.push_str("ApplicationName,AppId,ObjectId,CreatedDate,Publisher,SignInAudience,RiskScore,RiskLevel,CredentialStatus,PermissionCount,DaysSinceCreated,ServicePrincipalEnabled,Issues,Recommendations,PrincipalKind\n");
     for item in items {
         let row = [
@@ -1394,7 +1615,7 @@ async fn score_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use azapptoolkit_core::audit::{AuditPrincipalKind, CredentialStatus, RiskLevel};
+    use azapptoolkit_core::audit::{AuditPrincipalKind, CredentialStatus};
 
     #[test]
     fn a_dead_session_stops_the_audit_but_one_bad_app_does_not() {
@@ -1611,20 +1832,47 @@ mod tests {
         assert_eq!(got, vec!["sp-ews".to_string()]);
     }
 
+    /// A run that covered everything — the shape every export took before the
+    /// coverage travelled with the items.
+    fn complete(total: usize) -> AuditExportCoverage {
+        AuditExportCoverage {
+            total_apps: total,
+            cancelled: false,
+            truncated: false,
+            degraded: Vec::new(),
+            sign_in_report_available: true,
+            completed_at: Some("2026-09-02T09:00:00+00:00".to_string()),
+        }
+    }
+
+    /// The one run that ships its items to the exporter instead of being served
+    /// from the cache — and so the one whose caveat can only travel this way.
+    fn cancelled(total: usize) -> AuditExportCoverage {
+        AuditExportCoverage {
+            cancelled: true,
+            ..complete(total)
+        }
+    }
+
+    /// Lines of a CSV export that are not part of the `#` coverage preamble.
+    fn csv_data_lines(csv: &str) -> Vec<&str> {
+        csv.lines().filter(|l| !l.starts_with('#')).collect()
+    }
+
     #[test]
     fn export_audit_csv_ends_rows_with_principal_kind() {
         let mut item = sample("SP App");
         item.principal_kind = AuditPrincipalKind::ServicePrincipal;
-        let csv = export_audit_csv(vec![item]);
-        let lines: Vec<&str> = csv.lines().collect();
+        let csv = export_audit_csv(vec![item], &complete(1));
+        let lines = csv_data_lines(&csv);
         assert!(lines[0].ends_with(",PrincipalKind"));
         assert!(lines[1].ends_with(",ServicePrincipal"));
     }
 
     #[test]
     fn export_audit_csv_has_header_and_one_row_per_item() {
-        let csv = export_audit_csv(vec![sample("App A"), sample("App B")]);
-        let lines: Vec<&str> = csv.lines().collect();
+        let csv = export_audit_csv(vec![sample("App A"), sample("App B")], &complete(2));
+        let lines = csv_data_lines(&csv);
         assert!(lines[0].starts_with("ApplicationName,AppId,ObjectId"));
         assert_eq!(lines.len(), 3); // header + 2 rows
         assert!(lines[1].starts_with("App A,"));
@@ -1637,10 +1885,96 @@ mod tests {
     fn export_audit_csv_neutralizes_malicious_display_name() {
         // Comma in the name forces CSV quoting AND the leading '=' is defused,
         // so the cell can never be parsed as a formula by a spreadsheet.
-        let csv = export_audit_csv(vec![sample("=cmd|'/c calc',A1")]);
+        let csv = export_audit_csv(vec![sample("=cmd|'/c calc',A1")], &complete(1));
         assert!(csv.contains("\"'=cmd|'/c calc',A1\""));
         // No data row begins with a bare formula character.
         assert!(!csv.lines().skip(1).any(|l| l.starts_with('=')));
+    }
+
+    /// The caveat has to reach the file itself — the export is the artifact
+    /// that leaves the app, and a cancelled run is exactly the one whose items
+    /// are handed to the writer rather than read back from a (never-written)
+    /// cache entry.
+    #[test]
+    fn a_cancelled_run_says_so_in_every_format() {
+        let items = vec![sample("App A")];
+        let coverage = cancelled(40);
+
+        let csv = export_audit_csv(items.clone(), &coverage);
+        assert!(
+            csv.starts_with("# azapptoolkit security audit — 1 of 40 principal(s) scored"),
+            "csv preamble missing the coverage fraction:\n{csv}"
+        );
+        assert!(csv.contains("# This scan was cancelled early — 1 of 40 principals were scored."));
+        // …without disturbing the columns a spreadsheet reads.
+        assert!(csv_data_lines(&csv)[0].starts_with("ApplicationName,AppId,ObjectId"));
+
+        let html = audit_to_html(&items, &coverage);
+        assert!(html.contains("1 of 40 principal(s) scored"));
+        assert!(html.contains("This scan was cancelled early"));
+
+        let json = audit_to_json(&items, &coverage).expect("serialize");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["cancelled"], serde_json::json!(true));
+        assert_eq!(v["complete"], serde_json::json!(false));
+        assert_eq!(v["scored"], serde_json::json!(1));
+        assert_eq!(v["total_apps"], serde_json::json!(40));
+    }
+
+    /// A run whose tenant-wide reads partly failed scores every app it saw and
+    /// so reads as a clean scan everywhere the gap isn't stated — the same
+    /// reason the Findings pane shows its lede unconditionally.
+    #[test]
+    fn degraded_gaps_are_listed_by_description_not_by_flag() {
+        let items = vec![sample("App A")];
+        let coverage = AuditExportCoverage {
+            degraded: vec![AuditCoverageGap::PermissionResolution],
+            ..complete(1)
+        };
+        let expected = AuditCoverageGap::PermissionResolution.description();
+
+        let html = audit_to_html(&items, &coverage);
+        assert!(html.contains("Part of this scan could not run"));
+        assert!(html.contains(&html_escape(expected)));
+
+        let csv = export_audit_csv(items.clone(), &coverage);
+        assert!(csv.contains(expected));
+
+        let json = audit_to_json(&items, &coverage).expect("serialize");
+        assert!(json.contains("permissionResolution"));
+    }
+
+    /// The positive case must stay boring: a complete run's export carries the
+    /// counts and the run time, and none of the caveat prose.
+    #[test]
+    fn a_complete_run_exports_without_caveats() {
+        let items = vec![sample("App A"), sample("App B")];
+        let csv = export_audit_csv(items.clone(), &complete(2));
+        assert!(csv.contains("# Coverage: complete"));
+        assert!(csv.contains("# Scan completed: 2026-09-02T09:00:00+00:00"));
+        assert!(!csv.contains("cancelled"));
+        assert!(!csv.contains("not an all-clear"));
+
+        let html = audit_to_html(&items, &complete(2));
+        assert!(html.contains("2 of 2 principal(s) scored"));
+        assert!(!html.contains("class=\"caveat\""));
+    }
+
+    /// The severity summary is a count of the rows in THIS file, so an auditor
+    /// reading the header can't be told about principals the export omits.
+    #[test]
+    fn the_severity_summary_counts_the_exported_rows() {
+        let mut critical = sample("Critical App");
+        critical.risk_level = RiskLevel::Critical;
+        let items = vec![critical, sample("App B")]; // sample() is Medium
+
+        assert_eq!(
+            severity_summary(&items),
+            [("Critical", 1), ("High", 0), ("Medium", 1), ("Low", 0)]
+        );
+        let html = audit_to_html(&items, &complete(2));
+        assert!(html.contains("<li><b>1</b> Critical</li>"));
+        assert!(html.contains("<li><b>0</b> High</li>"));
     }
 
     #[test]
@@ -1653,7 +1987,7 @@ mod tests {
 
     #[test]
     fn audit_to_html_escapes_a_script_payload_in_the_name() {
-        let html = audit_to_html(&[sample("<script>alert(1)</script>")]);
+        let html = audit_to_html(&[sample("<script>alert(1)</script>")], &complete(1));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(!html.contains("<script>alert(1)</script>"));
     }
@@ -1661,9 +1995,17 @@ mod tests {
     #[test]
     fn audit_to_json_round_trips() {
         let items = vec![sample("App A")];
-        let json = audit_to_json(&items).expect("audit items serialize");
-        let back: Vec<AuditItem> = serde_json::from_str(&json).unwrap();
+        let json = audit_to_json(&items, &complete(1)).expect("audit items serialize");
+        // The rows keep the shape they always had — a consumer reaches one
+        // level deeper for them, and nothing about a row changed.
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let back: Vec<AuditItem> = serde_json::from_value(v["items"].clone()).unwrap();
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].application_name, "App A");
+        assert_eq!(v["complete"], serde_json::json!(true));
+        assert_eq!(
+            v["completed_at"],
+            serde_json::json!("2026-09-02T09:00:00+00:00")
+        );
     }
 }

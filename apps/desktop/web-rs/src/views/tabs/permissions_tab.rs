@@ -22,6 +22,7 @@ use crate::components::permission_picker::PickerSelection;
 use crate::components::requires_role::RequiresRole;
 use crate::components::scope_badge::{
     is_exchange_scopable_on, is_sharepoint_orgwide, permission_scope_cell,
+    permission_scope_reach_is_unstated,
 };
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
@@ -32,6 +33,7 @@ use crate::components::ui::Callout;
 use crate::components::ui::IconButton;
 use crate::hooks::use_command::use_command;
 use crate::state::{Session, use_session};
+use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::tabs::usage_panel::UsagePanel;
 use azapptoolkit_core::audit::{MailPermissionScope, downgrade_alternatives};
 use azapptoolkit_core::scoping::{
@@ -269,6 +271,17 @@ pub fn PermissionsTab(
         )
     };
 
+    // A row's "Test access…" seeds the Permission tester with THIS principal and
+    // jumps to it. Offered only beside a badge that can't state its own reach
+    // (org-wide, unknown, or a non-enumerable Selected-items scope) — see
+    // `permission_scope_reach_is_unstated`. Keyed on appId because that is what
+    // both live checks resolve the service principal by, so the seed works for
+    // an app registration exactly as it would for its enterprise-app twin.
+    let open_tester = move || {
+        let app_id = detail.with_untracked(|d| d.application.app_id.clone());
+        session.open_permission_tester_for(app_id);
+    };
+
     // A row's "Scope…" opens the wizard pre-selected to that permission, jumping
     // to the choose-access step. The wizard infers the mechanism from it.
     let open_scope = move |sel: PickerSelection| {
@@ -342,7 +355,42 @@ pub fn PermissionsTab(
         );
     };
 
-    let do_revoke_application = move |assignment_id: String| {
+    // What a row's Trash icon is about to do, held while its confirm dialog is
+    // open. The icon used to call the mutation directly: one click on a 32px
+    // glyph in a dense table stripped a live production grant, with no dialog,
+    // no subject and no success toast — the only signal being a row vanishing on
+    // refetch. The identical `revoke_app_role_assignment` call is confirm-gated
+    // on both the Enterprise Application and Managed Identity panes, so this was
+    // the busiest surface in the app and the only unguarded one.
+    //
+    // Each variant carries the row's own display value so the dialog can name
+    // it: `ConfirmDialog::body` is `&'static str` and describes the *kind* of
+    // thing, which is exactly how six identical dialogs happened before.
+    #[derive(Clone)]
+    enum PendingRevoke {
+        /// A live app-role assignment (an Application permission).
+        Application {
+            assignment_id: String,
+            subject: String,
+        },
+        /// A consented delegated scope. Its value is its own subject.
+        Delegated { grant_id: String, value: String },
+        /// Declared-but-never-granted: removes the manifest entry, not a grant.
+        Declared {
+            resource_app_id: String,
+            permission_id: String,
+            kind: PermissionKind,
+            subject: String,
+        },
+    }
+
+    let pending_revoke: RwSignal<Option<PendingRevoke>> = RwSignal::new(None);
+    let close_revoke = move || {
+        pending_revoke.set(None);
+        cmd.error.set(None);
+    };
+
+    let do_revoke_application = move |assignment_id: String, subject: String| {
         let Some(sp_id) = detail.with(|d| d.service_principal.as_ref().map(|sp| sp.id.clone()))
         else {
             cmd.error.set(Some(
@@ -351,7 +399,11 @@ pub fn PermissionsTab(
             return;
         };
         cmd.run(
-            move |()| on_changed.run(()),
+            move |()| {
+                session.toast_success(format!("Revoked {subject}."));
+                pending_revoke.set(None);
+                on_changed.run(());
+            },
             move |tenant_id| async move {
                 permissions::revoke_app_role_assignment(&tenant_id, &sp_id, &assignment_id).await
             },
@@ -359,8 +411,13 @@ pub fn PermissionsTab(
     };
 
     let do_revoke_delegated = move |grant_id: String, scope_value: String| {
+        let subject = scope_value.clone();
         cmd.run(
-            move |_| on_changed.run(()),
+            move |_| {
+                session.toast_success(format!("Revoked {subject}."));
+                pending_revoke.set(None);
+                on_changed.run(());
+            },
             move |tenant_id| async move {
                 permissions::revoke_oauth2_scope(&tenant_id, &grant_id, &scope_value).await
             },
@@ -370,23 +427,51 @@ pub fn PermissionsTab(
     // Remove a not-granted (declared-only) permission from the manifest. The
     // Trash icon on a granted row revokes the runtime grant; on a not-granted
     // row it removes the declaration instead, so every row has a way out.
-    let do_remove_declared =
-        move |resource_app_id: String, permission_id: String, kind: PermissionKind| {
-            let object_id = detail.with(|d| d.application.id.clone());
-            cmd.run(
-                move |()| on_changed.run(()),
-                move |tenant_id| async move {
-                    permissions::remove_declared_permission(
-                        &tenant_id,
-                        &object_id,
-                        &resource_app_id,
-                        &permission_id,
-                        kind,
-                    )
-                    .await
-                },
-            );
-        };
+    let do_remove_declared = move |resource_app_id: String,
+                                   permission_id: String,
+                                   kind: PermissionKind,
+                                   subject: String| {
+        let object_id = detail.with(|d| d.application.id.clone());
+        cmd.run(
+            move |()| {
+                session.toast_success(format!("Removed the {subject} declaration."));
+                pending_revoke.set(None);
+                on_changed.run(());
+            },
+            move |tenant_id| async move {
+                permissions::remove_declared_permission(
+                    &tenant_id,
+                    &object_id,
+                    &resource_app_id,
+                    &permission_id,
+                    kind,
+                )
+                .await
+            },
+        );
+    };
+
+    // The row hands the dialog what it is about to act on; the dialog runs it.
+    let arm_revoke_application = move |assignment_id: String, subject: String| {
+        pending_revoke.set(Some(PendingRevoke::Application {
+            assignment_id,
+            subject,
+        }));
+    };
+    let arm_revoke_delegated = move |grant_id: String, value: String| {
+        pending_revoke.set(Some(PendingRevoke::Delegated { grant_id, value }));
+    };
+    let arm_remove_declared = move |resource_app_id: String,
+                                    permission_id: String,
+                                    kind: PermissionKind,
+                                    subject: String| {
+        pending_revoke.set(Some(PendingRevoke::Declared {
+            resource_app_id,
+            permission_id,
+            kind,
+            subject,
+        }));
+    };
 
     view! {
         <div class="permissions-tab">
@@ -540,11 +625,12 @@ pub fn PermissionsTab(
                                         p,
                                         mail_scopes,
                                         scopes_loading,
-                                        do_revoke_application,
-                                        do_revoke_delegated,
-                                        do_remove_declared,
+                                        arm_revoke_application,
+                                        arm_revoke_delegated,
+                                        arm_remove_declared,
                                         open_scope,
                                         open_downgrade,
+                                        open_tester,
                                     )
                                 }
                             />
@@ -594,6 +680,82 @@ pub fn PermissionsTab(
                         }
                     })
             }}
+            // Three always-mounted dialogs rather than one, and three bodies:
+            // revoking a runtime grant breaks the app's calls the moment it
+            // lands, while removing a declaration only edits the manifest an
+            // admin would consent to next. Collapsing them into one "Are you
+            // sure?" is what let the two read as the same act. Mounted (rather
+            // than rendered on demand) so `use_focus_trap` sees a real
+            // false->true edge and returns focus to the Trash icon on close —
+            // the same shape the Enterprise Application pane uses.
+            <ConfirmDialog
+                open=Signal::derive(move || {
+                    matches!(pending_revoke.get(), Some(PendingRevoke::Application { .. }))
+                })
+                title="Revoke this permission?"
+                body="The app loses this app-role assignment as soon as this lands, and any call relying on it starts failing. The live grant is re-checked before removal, and it can be granted again."
+                subject=Signal::derive(move || match pending_revoke.get() {
+                    Some(PendingRevoke::Application { subject, .. }) => subject,
+                    _ => String::new(),
+                })
+                confirm_label="Revoke"
+                busy=cmd.busy
+                error=cmd.error
+                on_confirm=Callback::new(move |()| {
+                    if let Some(PendingRevoke::Application { assignment_id, subject }) = pending_revoke
+                        .get()
+                    {
+                        do_revoke_application(assignment_id, subject);
+                    }
+                })
+                on_close=Callback::new(move |()| close_revoke())
+            />
+            <ConfirmDialog
+                open=Signal::derive(move || {
+                    matches!(pending_revoke.get(), Some(PendingRevoke::Delegated { .. }))
+                })
+                title="Revoke this delegated scope?"
+                body="The app loses this consented scope for the users it was granted for. They are prompted to consent again the next time it is requested."
+                subject=Signal::derive(move || match pending_revoke.get() {
+                    Some(PendingRevoke::Delegated { value, .. }) => value,
+                    _ => String::new(),
+                })
+                confirm_label="Revoke"
+                busy=cmd.busy
+                error=cmd.error
+                on_confirm=Callback::new(move |()| {
+                    if let Some(PendingRevoke::Delegated { grant_id, value }) = pending_revoke.get() {
+                        do_revoke_delegated(grant_id, value);
+                    }
+                })
+                on_close=Callback::new(move |()| close_revoke())
+            />
+            <ConfirmDialog
+                open=Signal::derive(move || {
+                    matches!(pending_revoke.get(), Some(PendingRevoke::Declared { .. }))
+                })
+                title="Remove this declared permission?"
+                body="This permission was never granted, so nothing the app can do today changes. It is removed from the app's manifest, so it is no longer part of what an admin would consent to."
+                subject=Signal::derive(move || match pending_revoke.get() {
+                    Some(PendingRevoke::Declared { subject, .. }) => subject,
+                    _ => String::new(),
+                })
+                confirm_label="Remove"
+                busy=cmd.busy
+                error=cmd.error
+                on_confirm=Callback::new(move |()| {
+                    if let Some(PendingRevoke::Declared {
+                        resource_app_id,
+                        permission_id,
+                        kind,
+                        subject,
+                    }) = pending_revoke.get()
+                    {
+                        do_remove_declared(resource_app_id, permission_id, kind, subject);
+                    }
+                })
+                on_close=Callback::new(move |()| close_revoke())
+            />
             {move || {
                 scope_note.get().map(|m| view! { <Callout tone="ok" role="status">{m}</Callout> })
             }}
@@ -687,10 +849,11 @@ fn chip_kind_for_permission(kind: PermissionKind) -> AppKind {
 }
 
 // Row renderer wiring one resolved permission to the five mutation callbacks the
-// table exposes (revoke app/delegated, remove declaration, scope, downgrade); the
-// props are genuinely independent, so a parameter struct would only add ceremony.
+// table exposes (revoke app/delegated, remove declaration, scope, downgrade) plus
+// the read-only jump into the Permission tester; the props are genuinely
+// independent, so a parameter struct would only add ceremony.
 #[allow(clippy::too_many_arguments)]
-fn view_resolved_row<RevApp, RevDel, Remove, Scope, Downgrade>(
+fn view_resolved_row<RevApp, RevDel, Remove, Scope, Downgrade, TestAccess>(
     p: ResolvedPermission,
     // Read reactively in the Scope cell (below) so that under a keyed `<For>` a
     // row's scope still updates when the async mail-scopes resolve — without
@@ -702,12 +865,14 @@ fn view_resolved_row<RevApp, RevDel, Remove, Scope, Downgrade>(
     remove_declared: Remove,
     scope: Scope,
     downgrade: Downgrade,
+    test_access: TestAccess,
 ) -> impl IntoView
 where
-    RevApp: Fn(String) + Send + Sync + Copy + 'static,
+    RevApp: Fn(String, String) + Send + Sync + Copy + 'static,
     RevDel: Fn(String, String) + Send + Sync + Copy + 'static,
-    Remove: Fn(String, String, PermissionKind) + Send + Sync + Copy + 'static,
+    Remove: Fn(String, String, PermissionKind, String) + Send + Sync + Copy + 'static,
     Scope: Fn(PickerSelection) + Send + Sync + Copy + 'static,
+    TestAccess: Fn() + Send + Sync + Copy + 'static,
     Downgrade: Fn(String, String) + Send + Sync + Copy + 'static,
 {
     let resource_display = p
@@ -729,6 +894,10 @@ where
     let perm_guid_body = p.permission_id.clone();
     let chip_kind = chip_kind_for_permission(p.permission_kind);
 
+    // The row's own human label, handed to the confirm dialog as its subject so
+    // the modal names the permission the operator clicked rather than "this
+    // permission" over a row it is covering.
+    let revoke_subject = perm_primary.clone();
     let runtime_assignment_id = p.runtime_assignment_id.clone();
     let runtime_grant_id = p.runtime_grant_id.clone();
     let permission_value = p.permission_value.clone();
@@ -746,7 +915,8 @@ where
 
     let trash_button = match (permission_kind, runtime_assignment_id, runtime_grant_id) {
         (PermissionKind::Application, Some(assignment_id), _) => {
-            let on_click = move |_| revoke_application(assignment_id.clone());
+            let subject = revoke_subject.clone();
+            let on_click = move |_| revoke_application(assignment_id.clone(), subject.clone());
             view! {
                 <IconButton
                     icon=IconName::Trash
@@ -779,11 +949,13 @@ where
         _ => {
             let resource_app_id = remove_resource_app_id.clone();
             let permission_id = remove_permission_id.clone();
+            let subject = revoke_subject.clone();
             let on_click = move |_| {
                 remove_declared(
                     resource_app_id.clone(),
                     permission_id.clone(),
                     permission_kind,
+                    subject.clone(),
                 )
             };
             view! {
@@ -871,13 +1043,40 @@ where
                         let mail_scope = scope_value
                             .as_deref()
                             .and_then(|v| mail_scopes.with(|m| m.get(v).cloned()));
-                        permission_scope_cell(
+                        let loading = scopes_loading.get();
+                        // Both the badge and the affordance beside it answer from
+                        // the ONE `scope_cell_for` decision, so "Test access…"
+                        // can never appear next to a badge that does state its
+                        // reach — or go missing next to one that doesn't.
+                        let unstated = permission_scope_reach_is_unstated(
                             scope_value.as_deref(),
                             Some(&scope_resource_app_id),
-                            mail_scope,
+                            mail_scope.clone(),
                             is_app,
-                            scopes_loading.get(),
-                        )
+                            loading,
+                        );
+                        view! {
+                            {permission_scope_cell(
+                                scope_value.as_deref(),
+                                Some(&scope_resource_app_id),
+                                mail_scope,
+                                is_app,
+                                loading,
+                            )}
+                            {unstated
+                                .then(|| {
+                                    view! {
+                                        <button
+                                            type="button"
+                                            class="link-btn scope-cell__test-access"
+                                            title="Check this app against one specific mailbox or SharePoint resource in the Permission Tester"
+                                            on:click=move |_| test_access()
+                                        >
+                                            "Test access…"
+                                        </button>
+                                    }
+                                })}
+                        }
                     }
                 }
             </td>

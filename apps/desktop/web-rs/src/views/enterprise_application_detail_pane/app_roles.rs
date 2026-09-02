@@ -194,9 +194,12 @@ pub(super) fn AppRolesContent(
 
     // ---- Delete (backend disables an enabled role first) ----
     let delete_cmd = use_command();
-    let pending_delete: RwSignal<Option<String>> = RwSignal::new(None);
+    // (role id, label): the dialog is mounted once for a table of roles, so the
+    // row's own label is staged alongside the id to be its subject and dropped
+    // there — an app with six roles otherwise showed six identical dialogs.
+    let pending_delete: RwSignal<Option<(String, String)>> = RwSignal::new(None);
     let do_delete = move || {
-        let Some(id) = pending_delete.get() else {
+        let Some((id, _)) = pending_delete.get() else {
             return;
         };
         let (sp, app) = (sp_id.get(), app_id.get());
@@ -293,6 +296,14 @@ pub(super) fn AppRolesContent(
                                                 let edit_role = r.clone();
                                                 let toggle_role = r.clone();
                                                 let delete_id = r.id.clone();
+                                                // Display name first (the row's own first
+                                                // column), with the value the tokens carry —
+                                                // the body talks about that value.
+                                                let delete_label = if r.display_name.trim().is_empty() {
+                                                    r.value.clone()
+                                                } else {
+                                                    format!("{} ({})", r.display_name, r.value)
+                                                };
                                                 let actions = if builtin {
                                                     view! { <span class="muted">"Built-in"</span> }
                                                         .into_any()
@@ -322,7 +333,10 @@ pub(super) fn AppRolesContent(
                                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                                 disabled=busy_any
                                                                 on_click=Box::new(move |_| {
-                                                                    pending_delete.set(Some(delete_id.clone()))
+                                                                    pending_delete
+                                                                        .set(
+                                                                            Some((delete_id.clone(), delete_label.clone())),
+                                                                        )
                                                                 })
                                                             >
                                                                 "Delete"
@@ -440,6 +454,9 @@ pub(super) fn AppRolesContent(
                 open=Signal::derive(move || pending_delete.with(|p| p.is_some()))
                 title="Delete this app role?"
                 body="Any users, groups, or apps currently assigned this role lose it, and tokens stop carrying its value. An enabled role is disabled first, then removed."
+                subject=Signal::derive(move || {
+                    pending_delete.with(|p| p.as_ref().map(|(_, label)| label.clone())).unwrap_or_default()
+                })
                 confirm_label="Delete"
                 busy=Signal::derive(move || delete_cmd.busy.get())
                 on_confirm=Callback::new(move |()| do_delete())

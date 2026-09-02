@@ -168,7 +168,9 @@ fn ExposeApiLoaded(
     let scope_enabled = RwSignal::new(true);
     let scope_cmd = use_command();
     let scope_delete_cmd = use_command();
-    let pending_delete_scope: RwSignal<Option<String>> = RwSignal::new(None);
+    // (scope id, value): the delete dialog is mounted once for the whole scopes
+    // table, so the row's value rides along to be its subject and is dropped there.
+    let pending_delete_scope: RwSignal<Option<(String, String)>> = RwSignal::new(None);
 
     let open_add_scope = move || {
         scope_editing_id.set(None);
@@ -450,6 +452,7 @@ fn ExposeApiLoaded(
                                             };
                                             let edit_scope = s.clone();
                                             let delete_id = s.id.clone();
+                                            let delete_value = s.value.clone();
                                             view! {
                                                 <tr>
                                                     <td class="mono">{s.value.clone()}</td>
@@ -479,7 +482,10 @@ fn ExposeApiLoaded(
                                                                 class="button--danger"
                                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                                 on_click=Box::new(move |_| {
-                                                                    pending_delete_scope.set(Some(delete_id.clone()))
+                                                                    pending_delete_scope
+                                                                        .set(
+                                                                            Some((delete_id.clone(), delete_value.clone())),
+                                                                        )
                                                                 })
                                                             >
                                                                 "Delete"
@@ -810,6 +816,9 @@ fn ExposeApiLoaded(
                 open=Signal::derive(move || pending_remove_uri.with(|p| p.is_some()))
                 title="Remove this Application ID URI?"
                 body="Clients requesting tokens with this URI as the audience will start failing immediately."
+                // An app with several URIs otherwise showed identical dialogs;
+                // the pending value already IS the URI, so it is its own subject.
+                subject=Signal::derive(move || pending_remove_uri.get().unwrap_or_default())
                 confirm_label="Remove"
                 busy=Signal::derive(move || uri_remove_cmd.busy.get())
                 error=Signal::derive(move || uri_remove_cmd.error.get())
@@ -824,10 +833,13 @@ fn ExposeApiLoaded(
                 open=Signal::derive(move || pending_delete_scope.with(|p| p.is_some()))
                 title="Delete this scope?"
                 body="Any client or consent grant using this scope breaks immediately. The scope is disabled first, then removed, and it is stripped from authorized client applications. This cannot be undone."
+                subject=Signal::derive(move || {
+                    pending_delete_scope.with(|p| p.as_ref().map(|(_, value)| value.clone())).unwrap_or_default()
+                })
                 confirm_label="Delete"
                 busy=Signal::derive(move || scope_delete_cmd.busy.get())
                 on_confirm=Callback::new(move |()| {
-                    if let Some(id) = pending_delete_scope.get() {
+                    if let Some((id, _)) = pending_delete_scope.get() {
                         delete_scope(id);
                     }
                 })
@@ -837,6 +849,10 @@ fn ExposeApiLoaded(
                 open=Signal::derive(move || pending_remove_pre.with(|p| p.is_some()))
                 title="Remove this authorized client application?"
                 body="The client can still request these scopes, but users will be prompted to consent again."
+                // No display name is resolvable for a pre-authorized client — the
+                // client id IS the row's identity here (and its only column), so
+                // it is the one string the operator can match to the row.
+                subject=Signal::derive(move || pending_remove_pre.get().unwrap_or_default())
                 confirm_label="Remove"
                 busy=Signal::derive(move || pre_remove_cmd.busy.get())
                 on_confirm=Callback::new(move |()| {

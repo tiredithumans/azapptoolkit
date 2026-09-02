@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use leptos::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::bindings::TenantContext;
 use crate::components::toast::{Toast, ToastAction, ToastKind};
@@ -61,7 +62,12 @@ pub enum ActiveView {
 
 /// Which entity surface an [`OpenItem`] points at — the three list views whose
 /// rows can be opened into the shared workspace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` because the working set is parked in
+/// `localStorage` between launches; the variant names are therefore a stored
+/// format — renaming one drops (not corrupts) an operator's parked dock, since
+/// a snapshot that fails to decode is discarded whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OpenItemKind {
     AppReg,
     Enterprise,
@@ -70,8 +76,9 @@ pub enum OpenItemKind {
 
 /// One entry in the cross-entity "working set" — an item the admin has opened
 /// into the workspace dock. Modeled on the toast stack: a `Vec` of these on
-/// `Session` with a monotonic `open_seq` id source, capped + drain-oldest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Session` with a monotonic `open_seq` id source, capped + evict-least-
+/// recently-focused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenItem {
     /// Monotonic id from `open_seq` — the stable `<For>` key for this item's
     /// window, so closing/reordering siblings never remounts (and discards the
@@ -84,6 +91,12 @@ pub struct OpenItem {
     /// window calls [`Session::set_open_item_title`] once its detail resolves so
     /// deep-link / global-search opens that lacked a name self-correct.
     pub title: String,
+    /// Logical clock tick (from the same monotonic `open_seq` that mints `id`,
+    /// **not** a wall clock) of the last time this item was focused. The cap
+    /// evicts the smallest, i.e. the least recently *read* item — drain-oldest
+    /// threw away the first thing you opened, which is usually the reference
+    /// app you keep coming back to while triaging.
+    pub focused_at: u64,
 }
 
 /// Every lifted search / facet / selection / dialog signal that would leak one
@@ -136,6 +149,17 @@ pub struct TenantScopedUi {
     // chips unconditionally and the audit/credentials surfaces show tabs, so
     // neither needs this).
     pub pending_open_filters: RwSignal<bool>,
+    // One-shot "start a scan on arrival" flag. Home's Security Posture card is
+    // the only writer: its call to action used to *navigate* to the Security
+    // tab and leave the operator to find and press "Run audit" a second time.
+    // The audit controller consumes this once on mount so one click both
+    // navigates and runs.
+    pub pending_audit_run: RwSignal<bool>,
+    // Seed for the Permission Tester's principal field. Set by the "Test
+    // access…" affordance beside an org-wide/unknown scope badge — the badge
+    // states the reach is not enumerable and this is how the operator gets an
+    // answer — and consumed once by the tester on mount.
+    pub tester_app_id: RwSignal<Option<String>>,
     // Multi-select set of application object ids — distinct from the
     // workspace's open-items working set; this set is what the bulk-actions
     // dialog operates on.
@@ -200,6 +224,8 @@ impl TenantScopedUi {
             audit_expanded_group: RwSignal::new(None),
             credentials_facet: RwSignal::new(String::from("all")),
             pending_open_filters: RwSignal::new(false),
+            pending_audit_run: RwSignal::new(false),
+            tester_app_id: RwSignal::new(None),
             selected_app_ids: RwSignal::new(HashSet::new()),
             selected_audit_ids: RwSignal::new(HashSet::new()),
             selected_sso_cert_ids: RwSignal::new(HashSet::new()),
@@ -230,6 +256,8 @@ impl TenantScopedUi {
         self.audit_expanded_group.set(None);
         self.credentials_facet.set(String::from("all"));
         self.pending_open_filters.set(false);
+        self.pending_audit_run.set(false);
+        self.tester_app_id.set(None);
         self.selected_app_ids.update(HashSet::clear);
         self.selected_audit_ids.update(HashSet::clear);
         self.selected_sso_cert_ids.update(HashSet::clear);
@@ -250,13 +278,15 @@ pub struct Session {
     // The shared, cross-entity "working set": every item the admin has opened
     // into the workspace dock, across all three list views. Modeled on the
     // toast stack below (`Vec` + a monotonic `open_seq` id source, capped +
-    // drain-oldest). `shown_items` names the 1–2 currently displayed by id
-    // (left, right). Plain `RwSignal` (not `LocalStorage`) — `OpenItem` is
-    // `Send`, unlike `Toast`'s `Rc<dyn Fn()>` retry action. CROSS-TENANT
-    // FOOTGUN: both `open_items` and `shown_items` MUST reset in
-    // `set_active_tenant` (an open item from another tenant is stale + leaks).
-    // They live on `Session` (not `TenantScopedUi`) because the working-set
-    // helpers + monotonic `open_seq` form one model.
+    // evict-least-recently-focused). `shown_items` names the 1–2 currently
+    // displayed by id (left, right). Plain `RwSignal` (not `LocalStorage`) —
+    // `OpenItem` is `Send`, unlike `Toast`'s `Rc<dyn Fn()>` retry action.
+    // CROSS-TENANT FOOTGUN: both `open_items` and `shown_items` MUST reset in
+    // `set_active_tenant` (an open item from another tenant is stale + leaks),
+    // and the `localStorage` snapshot that survives a restart is keyed by
+    // tenant id for exactly the same reason. They live on `Session` (not
+    // `TenantScopedUi`) because the working-set helpers + monotonic `open_seq`
+    // form one model.
     pub open_items: RwSignal<Vec<OpenItem>>,
     pub open_seq: RwSignal<u64>,
     pub shown_items: RwSignal<Vec<u64>>,
@@ -285,11 +315,24 @@ pub struct Session {
     pub last_app_tab: RwSignal<String>,
     pub last_enterprise_tab: RwSignal<String>,
     pub last_mi_tab: RwSignal<String>,
+    // Active tab of the Settings view ("app-reg" | "enterprise" | "naming" |
+    // "connection"). Lifted to the session for the same reason `security_tab`
+    // is: the callouts that tell an operator to configure a tenant default
+    // ("No default owners configured — set them in Settings.") deep-link
+    // straight to the tab that holds it, rather than dropping them on Settings'
+    // first tab to hunt for it.
+    pub settings_tab: RwSignal<String>,
     // Active sub-tab of the Security workbench ("findings" | "apps" |
     // "credentials" | "grants"). Lifted to the session so the Home cards and
     // command palette can deep-link straight to a sub-tab, and so the choice
     // survives navigating away and back.
     pub security_tab: RwSignal<String>,
+    // Active tab of the Resource Access reverse lookups ("mailboxes" | "sites"
+    // | "keyvault"). Lifted to the session for the same reason `security_tab`
+    // is — Global Search's "Go to" group addresses the three planes by name —
+    // and because the panels stay mounted across tab switches, so a local
+    // signal was unreachable from outside the view.
+    pub resource_access_tab: RwSignal<String>,
     // In-app toast stack + a monotonic id source. Rendered once by
     // `ToastHost` near the shell root; pushed via the helpers below.
     // `LocalStorage`-backed because `Toast` carries a non-`Send` `Rc<dyn Fn()>`
@@ -312,7 +355,9 @@ pub fn provide_session() {
         last_app_tab: RwSignal::new(String::from("overview")),
         last_enterprise_tab: RwSignal::new(String::from("overview")),
         last_mi_tab: RwSignal::new(String::from("overview")),
+        settings_tab: RwSignal::new(String::from("app-reg")),
         security_tab: RwSignal::new(String::from("findings")),
+        resource_access_tab: RwSignal::new(String::from("mailboxes")),
         enterprise_apps_reload: RwSignal::new(0),
         audit_reload: RwSignal::new(0),
         readiness_reload: RwSignal::new(0),
@@ -396,6 +441,9 @@ mod tests {
             ui.audit_expanded_group.set(Some("ownership".into()));
             ui.credentials_facet.set("expired".into());
             ui.pending_open_filters.set(true);
+            ui.pending_audit_run.set(true);
+            ui.tester_app_id
+                .set(Some("11111111-2222-3333-4444-555555555555".into()));
             ui.selected_app_ids.update(|s| {
                 s.insert("app-1".into());
             });
@@ -428,6 +476,8 @@ mod tests {
             assert_eq!(ui.audit_expanded_group.get_untracked(), None);
             assert_eq!(ui.credentials_facet.get_untracked(), "all");
             assert!(!ui.pending_open_filters.get_untracked());
+            assert!(!ui.pending_audit_run.get_untracked());
+            assert_eq!(ui.tester_app_id.get_untracked(), None);
             ui.selected_app_ids
                 .with_untracked(|s| assert!(s.is_empty()));
             ui.selected_audit_ids
@@ -471,18 +521,102 @@ mod tests {
     }
 
     #[test]
-    fn open_item_caps_and_drops_oldest() {
+    fn open_item_cap_evicts_the_least_recently_focused() {
         with_session(|session| {
-            for i in 0..10 {
+            // Fill the dock, then go back to the FIRST item — the reference app
+            // an operator parks while working down a finding group. Under the
+            // old drain-oldest rule that is exactly the one the next open threw
+            // away.
+            for i in 0..8 {
                 session.open_item(OpenItemKind::AppReg, format!("app-{i}"), format!("App {i}"));
             }
+            let reference = session.is_open(OpenItemKind::AppReg, "app-0").unwrap();
+            session.focus_item(reference, false);
+
+            session.open_item(OpenItemKind::AppReg, "app-8", "App 8");
             session.open_items.with_untracked(|list| {
                 assert_eq!(list.len(), 8, "capped at MAX_OPEN_ITEMS");
-                // The two oldest were drained.
-                assert!(list.iter().all(|it| it.entity_id != "app-0"));
-                assert!(list.iter().all(|it| it.entity_id != "app-1"));
-                assert_eq!(list.first().unwrap().entity_id, "app-2");
+                assert!(
+                    list.iter().any(|it| it.entity_id == "app-0"),
+                    "the re-read reference item survives"
+                );
+                assert!(
+                    list.iter().all(|it| it.entity_id != "app-1"),
+                    "the least recently focused item is the one evicted"
+                );
             });
+
+            // And the eviction is announced with a way back, not silent.
+            let action = session.toasts.with_untracked(|list| {
+                let t = list.last().expect("an overflow toast");
+                assert!(matches!(t.kind, ToastKind::Info));
+                assert!(
+                    t.message.contains("App 1"),
+                    "the toast names what was dropped: {}",
+                    t.message
+                );
+                assert!(t.message.contains('8'), "and the cap that dropped it");
+                assert_eq!(t.action_label.as_deref(), Some("Reopen"));
+                t.action.clone().expect("a Reopen action")
+            });
+            action();
+            assert!(
+                session.is_open(OpenItemKind::AppReg, "app-1").is_some(),
+                "Reopen puts the evicted item back"
+            );
+        });
+    }
+
+    #[test]
+    fn restore_open_items_never_crosses_tenants() {
+        // The read-side half of the tenant footgun: the parked working set is
+        // keyed by tenant id, so a switch can only ever restore the ARRIVING
+        // tenant's own items. An unkeyed snapshot would hand the new tenant the
+        // previous one's dock — precisely the leak the clear above it prevents.
+        // (The host-target snapshot store is per-thread, so this test owns the
+        // two tenant ids below.)
+        with_session(|session| {
+            let tenant = |id: &str| TenantContext {
+                tenant_id: id.to_string(),
+                account_oid: "00000000-0000-0000-0000-000000000001".to_string(),
+                username: None,
+                display_name: None,
+            };
+
+            session.set_active_tenant(Some(tenant("restore-test-contoso")));
+            session.open_item(OpenItemKind::AppReg, "app-c", "Contoso App");
+
+            // Fabrikam has parked nothing, so it arrives with an empty dock.
+            session.set_active_tenant(Some(tenant("restore-test-fabrikam")));
+            session
+                .open_items
+                .with_untracked(|list| assert!(list.is_empty(), "no item crosses tenants"));
+            session.open_item(OpenItemKind::Enterprise, "sp-f", "Fabrikam SP");
+
+            // Back to Contoso: its own item, and only its own.
+            session.set_active_tenant(Some(tenant("restore-test-contoso")));
+            session.open_items.with_untracked(|list| {
+                assert_eq!(list.len(), 1, "exactly the items this tenant parked");
+                assert_eq!(list[0].entity_id, "app-c");
+                assert_eq!(list[0].kind, OpenItemKind::AppReg);
+            });
+            // The dock comes back; the overlay does not.
+            session
+                .shown_items
+                .with_untracked(|s| assert!(s.is_empty(), "restore never re-opens a pane"));
+            // A fresh open can't collide with a restored id — the clock was
+            // advanced past the snapshot.
+            let fresh = session.open_item(OpenItemKind::AppReg, "app-new", "New");
+            assert_ne!(
+                fresh,
+                session.is_open(OpenItemKind::AppReg, "app-c").unwrap()
+            );
+
+            // Signing out restores nothing at all.
+            session.set_active_tenant(None);
+            session
+                .open_items
+                .with_untracked(|list| assert!(list.is_empty()));
         });
     }
 
