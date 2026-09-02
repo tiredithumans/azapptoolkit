@@ -1,7 +1,5 @@
 //! Transient notifications.
 
-use leptos::prelude::*;
-
 use super::*;
 
 impl Session {

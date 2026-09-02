@@ -5,8 +5,6 @@
 //! tenant's data into the next tenant's workspace. `tenant_switch_resets_every_tenant_scoped_field`
 //! pins it.
 
-use leptos::prelude::*;
-
 use super::*;
 
 impl Session {

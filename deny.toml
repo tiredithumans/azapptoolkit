@@ -18,17 +18,21 @@ yanked = "deny"
 # noise. Vulnerabilities (`RUSTSEC` informational=false) are unaffected — those
 # still fail on any crate, transitive or not.
 unmaintained = "workspace"
+# Keep square brackets out of the comments inside the array below:
+# `dependency_policy.rs` scans it with a hand-rolled parser that stops at the
+# first closing bracket, so one in a rationale hides every entry after it.
 ignore = [
     # glib unsound VariantStrIter — transitive GTK3 (Linux-only) dep with no
     # upgrade path until Tauri moves off GTK3; unreachable in the shipped
     # Windows/macOS builds. Kept in sync with .cargo/audit.toml (see there for
     # the full rationale + drop condition).
+    #
+    # cargo-deny prints `advisory-not-detected` for this id, and that is
+    # EXPECTED rather than a signal to delete it: the advisory is
+    # `informational = "unsound"`, which the advisories v2 config does not
+    # surface at all. cargo-audit DOES report it, and the two lists have to
+    # match — read the note in `.cargo/audit.toml` before touching this entry.
     "RUSTSEC-2024-0429",
-    # quick-xml 0.39 DoS-class parser issues, transitive via plist -> tauri;
-    # plist parses only the app's own bundle metadata, never untrusted XML.
-    # Kept in sync with .cargo/audit.toml (full rationale + drop condition).
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
 ]
 
 [licenses]

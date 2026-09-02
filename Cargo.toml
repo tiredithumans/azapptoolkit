@@ -15,7 +15,7 @@ exclude = ["apps/desktop/web-rs"]
 [workspace.package]
 version = "0.29.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.98"
 license = "MIT OR Apache-2.0"
 authors = ["azapptoolkit contributors"]
 repository = "https://github.com/tiredithumans/azapptoolkit"

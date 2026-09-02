@@ -3,8 +3,6 @@
 //! A dead session is re-authenticated in place, never signed out: signing out
 //! would drop every data cache along with the session.
 
-use leptos::prelude::*;
-
 use super::*;
 
 impl Session {
