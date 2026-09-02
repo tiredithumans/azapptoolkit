@@ -129,17 +129,22 @@ The direct `rand = "0.8"` pin in `src-tauri/Cargo.toml` (random bytes for the v4
 resolve. Note `sha2` is **not** a direct dependency: both certificate thumbprints digest on
 `aws-lc-rs`, the same backend rcgen signs with (`src-tauri/Cargo.toml` says so at the
 `aws-lc-rs` block). The only direct consumer of the 0.10 line is `p12-keystore`, pinned below
-precisely to keep it there. As of a full `cargo update` on **2026-07-13**, `rand` is the only
-direct dep in the entire codebase behind a major (web-rs is fully current). The re-eval trigger
+precisely to keep it there. As of a full `cargo update` on **2026-09-02**, the only direct deps
+behind a major anywhere in the repo are the three held on purpose — `rand`, `base64` and
+`p12-keystore` (web-rs is current apart from its mirrored `base64` hold). The re-eval trigger
 below has **not** fired:
 
 - **`rand` (0.8.7 → 0.10.2):** `oauth2` 5.0.0 — the latest oauth2 — still resolves `rand 0.8.7` /
   `rand_core 0.6.4`. Bumping our direct dep to 0.10 leaves oauth2's `rand 0.8` in the tree
   regardless (no dedup), and pulls `getrandom 0.3` alongside the in-tree 0.2.
 - **`sha2` (0.10.9 → 0.11.0):** `sha2 0.10.9` is shared by oauth2 5, Tauri 2.11
-  (`tauri-codegen` / `wry`) and `secret-service`, all unified on `digest 0.10`. We'd be the *only*
-  crate on 0.11, so the bump **adds** a second `sha2` **and** a second `digest` major — net *more*
-  duplication, not less.
+  (`tauri-codegen` / `wry`) and the `p12-keystore` chain (`pkcs5`, `scrypt`), all unified on
+  `digest 0.10`. `secret-service` **left** that group in 5.2.0, which moved the Linux keyring's
+  session crypto onto the RustCrypto 0.11 line — so `sha2 0.11` and `digest 0.11` do now sit in
+  the lock file, reachable only through `zbus-secret-service-keyring-store` and therefore only on
+  Linux/FreeBSD. They are absent from the shipped Windows and macOS graphs, and nothing this repo
+  declares is on 0.11. Moving a dep we *do* declare onto 0.11 would still add the second major to
+  those two platforms — net *more* duplication where the artifacts actually ship.
 - **Cost with no benefit:** `rand` needs a code edit (`commands/guid.rs`: `rand::thread_rng()` →
   `rng()`, renamed in 0.9+) and `cert.rs` uses `rand::rngs::OsRng` for the `.pfx` password — while
   `cargo audit` is clean on both held versions, so nothing forces the move.
@@ -158,8 +163,10 @@ taken over the current **0.3.1** deliberately, and the pin is enforced in `depen
 of a tool that handles tenant credentials. `deny.toml` sets `yanked = "deny"` as a required
 check, and RustCrypto routinely retires superseded release candidates, so that combination lets
 an upstream yank break CI with no change on our side. 0.3.x also rides the RustCrypto 0.11 hash
-line, which would add a second `sha2` **and** `digest` major — exactly what the `rand`/`sha2`
-reasoning above exists to avoid.
+line, which would add a second `sha2` **and** `digest` major to the Windows and macOS graphs —
+exactly what the `rand`/`sha2` reasoning above exists to avoid. (Those majors reached the *Linux*
+graph anyway when `secret-service` 5.2.0 moved; that does not extend to the two platforms this
+pin is protecting.)
 
 0.2.1 is all-stable and lands entirely on majors the lock file already carries — `sha2 0.10`,
 `hmac 0.12`, `cbc 0.1`, `rand 0.10`, `x509-parser 0.18`, `base64 0.22`, `thiserror 2` — so

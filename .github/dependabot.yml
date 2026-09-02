@@ -59,24 +59,31 @@ updates:
       # Drop this ignore once `cms 0.3.0` ships final.
       - dependency-name: p12-keystore
         versions: [">=0.3"]
-      # base64 0.23 cannot be adopted yet, and taking it would make things worse
-      # rather than better. Our direct `base64 = "0.22"` currently UNIFIES with the
-      # copy the HTTP stack pulls (hyper-util / reqwest 0.12 + 0.13 all require
-      # ^0.22), so the graph carries two base64 majors. Moving our pin to 0.23
-      # un-unifies it and makes three — none of those crates would move with us:
+      # base64 stays on 0.22 for ONE reason, and it is not the shape of the graph.
+      # 0.23's default feature set is `["std", "simd-unsafe"]`, so adopting it as
+      # declared would put `unsafe` SIMD into the JWT-claim, certificate-thumbprint
+      # and client-secret decode paths of a tool whose workspace lints declare
+      # `unsafe_code = "deny"`. Nothing pushes the other way: there is no advisory
+      # against 0.22.x.
       #
-      #   oauth2 5.0.0    base64 >=0.21, <0.23   <- hard exclusion, and 5.0.0 is
-      #                                             the latest release (Jan 2025)
-      #   hyper-util      base64 ^0.22           (latest, 0.1.20)
-      #   reqwest 0.12/13 base64 ^0.22           (both latest)
+      # The duplicate-major argument this entry used to lead with is DEAD — do not
+      # restate it. The root tree already carries three base64 majors, and moving
+      # our pin would not change that count, only which one we sit on:
       #
-      # Same reasoning as the rand/sha2 pins above: bumping a direct pin that only
-      # duplicates a major is a cost with no benefit. There is also no security
-      # pressure — no advisory against 0.22.x — and 0.22 predates the `simd-unsafe`
-      # feature 0.23 turns on by default, so staying put keeps base64 free of
-      # `unsafe` in the JWT-claim / certificate / client-secret decode paths.
-      # Drop this ignore once oauth2 relaxes its `<0.23` bound AND the
-      # reqwest/hyper-util stack requires ^0.23.
+      #   0.21.7   swift-rs -> tauri-utils
+      #   0.22.1   ours, and oauth2 5.0.0 (`>=0.21, <0.23`, a hard exclusion, and
+      #            5.0.0 is still the latest release) + hyper-util 0.1.20 (`^0.22`,
+      #            behind its optional `client-proxy` feature)
+      #   0.23.1   pem 4.0.0 -> rcgen 0.14.10, i.e. certificate generation is on
+      #            0.23 already
+      #
+      # (reqwest 0.12 left the graph when oauth2 was taken with
+      # `default-features = false`; only reqwest 0.13 remains, still on ^0.22.)
+      #
+      # Drop this ignore when 0.23 can be taken WITHOUT its defaults —
+      # `{ version = "0.23", default-features = false, features = ["std"] }` — or
+      # once upstream stops defaulting `simd-unsafe` on. oauth2's `<0.23` bound
+      # constrains oauth2's own copy, not ours, so it is not the blocker.
       - dependency-name: base64
         versions: [">=0.23"]
     groups:
@@ -99,7 +106,9 @@ updates:
     open-pull-requests-limit: 10
     ignore:
       # Mirrors the root entry's base64 hold — this tree has its own lockfile, so
-      # Dependabot proposes the bump here separately. See the rationale above.
+      # Dependabot proposes the bump here separately. See the rationale above; the
+      # frontend tree carries a single base64 major, so the hold here is purely the
+      # `unsafe`-free decode posture, with no graph argument either way.
       - dependency-name: base64
         versions: [">=0.23"]
     groups:
