@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # PostToolUse hook for `Write` / `Edit`. When an Edit removes a string literal
 # (CSS class, aria-label, on-screen text) from web-rs source, checks whether
-# the browser GUI tests still reference it. `just web-itest` runs ONLY in CI —
-# not in `just verify` — so a rename passes local verify and then fails CI;
-# this hook surfaces the test dependency at edit time instead.
+# the browser GUI tests still reference it. `just verify` runs `web-itest` only
+# when Chrome + chromedriver are on this box (it loud-skips otherwise), so on a
+# box without them a rename passes local verify and then fails CI; this hook
+# surfaces the test dependency at edit time instead.
 #
 # Only Edit payloads carry old_string/new_string; Write payloads (whole-file
 # replace) have no cheap before/after diff, so they exit silently.
@@ -73,5 +74,5 @@ EOF
 
 [ -z "$out" ] && exit 0
 printf '%b' "$out" | head -10 >&2
-printf '[web-test-strings] web-itest runs ONLY in CI (not `just verify`) — update the tests with the rename or CI fails.\n' >&2
+printf '[web-test-strings] web-itest always runs in CI (locally only with Chrome + chromedriver) — update the tests with the rename or CI fails.\n' >&2
 exit 0

@@ -34,7 +34,7 @@ load-bearing gotchas.
 Run the same gates CI runs, and make sure they pass:
 
 ```bash
-just verify            # fmt-check → clippy → test → web-fmt-check → web-test → web-build
+just verify            # every CI gate, in CI order (`just --list` shows them)
 ```
 
 - **Keep changes focused.** Solve one logical thing per PR; smaller diffs review
@@ -51,8 +51,8 @@ just verify            # fmt-check → clippy → test → web-fmt-check → web
 `<type>[(scope)][!]: <description>`.
 
 - **types:** `feat fix docs chore refactor test build ci perf style revert deps`
-- **scopes seen in this repo:** `desktop`, `core`, `auth`, `graph`, `exchange`,
-  `keyvault`, `permissions`, `ci`, `docs`
+- **scopes:** the canonical list in [AGENTS.md](./AGENTS.md#git--version-control) —
+  the commit hook enforces it, and a test pins the two copies to each other
 
 Changes that port behavior from the legacy PowerShell module should reference the
 source `file:line` range in the commit body.

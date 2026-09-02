@@ -49,7 +49,7 @@ const WRITE_CALLS: &[&str] = &[
 /// `migrate_application_access_policies` — added in the very PR that introduced
 /// the pin — shipped a whole-tenant Exchange + Entra write loop with no cancel
 /// token and no dead-session latch, and passed CI: the rule simply never looked
-/// at `commands/exchange.rs`.
+/// at `commands/exchange.rs` (now the `commands/exchange/` directory).
 ///
 /// The rule now derives its own subject. "Tenant-wide writer" is expressed as
 /// what the code *does* — reads a tenant-wide collection, then writes inside a

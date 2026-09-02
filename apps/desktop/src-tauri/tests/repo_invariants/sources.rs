@@ -51,6 +51,13 @@ pub(crate) fn command_modules() -> Vec<(String, String)> {
             if path.extension().is_none_or(|e| e != "rs") {
                 continue;
             }
+            // A sibling `tests.rs` is the body of a `#[cfg(test)] mod tests;` —
+            // test code with no marker of its own for `strip_tests` to cut at,
+            // so it is skipped by name (the fixtures inside call the fan-out
+            // drivers and mutation helpers without being commands).
+            if path.file_name().is_some_and(|f| f == "tests.rs") {
+                continue;
+            }
             let Ok(src) = std::fs::read_to_string(&path) else {
                 continue;
             };

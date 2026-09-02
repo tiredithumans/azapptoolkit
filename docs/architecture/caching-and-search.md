@@ -225,7 +225,7 @@ Two shapes of this bug are worth naming, because both hid behind a guard that lo
 The general rule for multi-step mutations: **a partial success is a real write — invalidate,
 gated on "something actually changed."** Audit remediations, `remove_exchange_mailbox_access`,
 `downgrade_application_permission`, the `bulk_*` commands, and the SSO create flows all follow it
-(see [scoping-and-audit.md](./scoping-and-audit.md) for the remediation case).
+(see [audit-findings-and-remediation.md](./audit-findings-and-remediation.md#audit-remediations-one-click-fix) for the remediation case).
 
 ## `CacheKind::ServicePrincipal` self-invalidates in the graph client
 

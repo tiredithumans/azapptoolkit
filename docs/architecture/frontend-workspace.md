@@ -190,7 +190,7 @@ deliberate, not an oversight — pinned by the `filter.rs` tests.
 
 The Security tab is a findings-first workbench: one controller, one strip, four panes. (Finding
 *semantics* — the group catalog, key matching, and bulk-action pairing — live in
-[scoping-and-audit.md](./scoping-and-audit.md); this section is the view structure.)
+[audit-findings-and-remediation.md](./audit-findings-and-remediation.md#finding-groups-filters--bulk-action-pairing); this section is the view structure.)
 
 - **One controller** — `SecurityView` constructs a single `audit_view::AuditController`
   (run/cancel/export/progress/consent + the cached-run hydration with its tenant-race guard) and

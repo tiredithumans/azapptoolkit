@@ -18,11 +18,9 @@ Review work in progress before it lands on `main`. Use the repo's exact verifica
 
 ## 1. Inspect the diffs
 
-- **rust backend (crates/ + src-tauri):** Check that new commands follow the 3-step pattern:
-  1. `#[tauri::command] async fn` in `src-tauri/src/commands/<domain>.rs`.
-  2. Added to `tauri::generate_handler![]` in `src-tauri/src/lib.rs`.
-  3. Typed stub in `web-rs/src/bindings/<domain>.rs` calling `invoke_result`.
-- **Frontend (web-rs):** Check that added bindings actually match backend handlers. Look for stale `#[tauri::command]` handlers without corresponding bindings (the `command-parity-check.sh` hook catches this; mention which one).
+- **New Tauri commands** follow the three-step pattern in AGENTS.md → Common patterns (handler,
+  `generate_handler![]`, typed binding). The `command-parity-check.sh` hook names a missing leg;
+  mention which one.
 - **Tenant cache footgun:** New cache reads/writes must include `{tenant_id}|` prefix. Flag any that look unscoped.
 - **cache invalidation:** After mutation, is the relevant list cache busted? On failure is it left alone? (See [caching-and-search.md](docs/architecture/caching-and-search.md)).
 - **WASM gates:** Any server-only dep used in web-rs? Should be `#[cfg(not(target_arch = "wasm32"))]`.
@@ -32,13 +30,14 @@ Review work in progress before it lands on `main`. Use the repo's exact verifica
 
 - **Backend:** `just verify` on the current branch (or `origin/main` if reviewing a PR). If Rust/WASM source changed, this is required.
 - **Quick variant (for large PRs):** `just clippy` + `just test` if the frontend is known stable.
-- **Dependency audit** (if new deps): `just deny` + `cargo audit`.
+- **Dependency audit** (if new deps): `just audit` + `just deny` (and the `web-` twins if web-rs changed).
 
 ## 3. Check conventions
 
-- Commits follow Conventional Commits (`<type>[(scope)][!]: <description>`).
-- Scopes match: `desktop`, `core`, `auth`, `graph`, `exchange`, `keyvault`, `permissions`, `ci`, `docs`.
-- CHANGELOG.md `[Unreleased]` has entries for user-facing changes.
+- Commits follow Conventional Commits with a scope from the canonical list in AGENTS.md → Git &
+  version control (the commit hook enforces both).
+- CHANGELOG.md `[Unreleased]` has entries for user-visible changes (internal, docs, and tooling
+  changes need none).
 
 ## 4. Produce output
 
