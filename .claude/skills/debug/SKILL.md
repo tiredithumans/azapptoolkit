@@ -6,89 +6,76 @@ argument-hint: "[symptom] — e.g., 'token refresh failing', 'list not loading'"
 
 # Debug — diagnose Tauri + Leptos WASM issues
 
-Walk through the app's architecture layers to pinpoint the root cause. Start with a hypothesis from the symptom, then check each layer systematically.
+Start from the symptom, form one hypothesis, then check the layers in order. Read the matching
+`docs/architecture/` deep-dive (linked from AGENTS.md) before touching a subsystem.
 
-## 0. Clarify the symptom
+## 0. Pin the symptom
 
-Ask for / confirm:
-- Which component is affected? (auth token, app list, audit scoring, Search, etc.)
-- Is it happening in `just dev` (native) or only after a WASM rebuild?
-- Is there an error message or console output?
+- Which surface: sign-in/token, a list, a detail tab, the audit, Search, a bulk action, the updater?
+- Native (`just dev`) only, WASM build only, or the GitHub Pages demo?
+- Exact error text / `ui_code` (the toast and `DetailLoadError` show it) and the log line
+  (`README.md → Logs` says where the file is).
 
-## 1. Check the Rust backend (`crates/` + `src-tauri/`)
+## 1. Fast checks (never hand-typed `cargo`)
 
-If Rust source changed:
-- `just clippy` — often the fastest check for compile-time issues.
-- `cargo test --lib -p <crate>` — targeted crate tests.
+| Need | Recipe |
+|---|---|
+| Does it compile at all (both trees)? | `just check` |
+| One crate's tests, optionally filtered | `just test-crate <crate> [-- <filter>]` |
+| Frontend unit tests / WASM build | `just web-test` / `just web-build` |
+| Frontend behaviour in a real browser (IPC mocked) | `just web-itest` |
+| Everything CI runs | `just verify` |
 
-If backend code is responsible:
-- Check `src-tauri/src/state.rs` — AppState singleton, auth state, cache status.
-- Check `src-tauri/src/commands/<domain>.rs` — the handler that's failing.
-- Check for cache invalidation issues (tenant-scoped? invalidated only on Ok?).
-- Look at `src-tauri/src/token_adapter.rs` — ScopedTokenAdapter for extra-scope tokens.
+## 2. Backend (`crates/` + `apps/desktop/src-tauri/`)
 
-## 2. Check the WASM frontend (`web-rs/`)
+- `src-tauri/src/state.rs` — `AppState`: auth singleton, per-tenant clients, cache, cancel flags.
+- `src-tauri/src/commands/<domain>.rs` (or the `applications/`, `sso/`, `exchange/` subdirs) —
+  the failing handler. Is it in `generate_handler![]` (`lib.rs`)? The `command-parity-check.sh`
+  hook names a missing leg.
+- Cache: key carries `{tenant_id}|`? Invalidated only on `Ok`? A pinned index read through its
+  accessor? → [caching-and-search.md](../../../docs/architecture/caching-and-search.md).
+- `src-tauri/src/token_adapter.rs` — `ScopedTokenAdapter` mints extra-scope tokens; a missing
+  admin consent must degrade to `consent_required`, never a hard error.
 
-- `just web-build` — quick rebuild to see if the issue is in WASM.
-- Check `web-rs/src/bindings/` — do the stubs match backend handlers?
-- Check `web-rs/src/state.rs` — RwSignal state for the affected feature.
-- Look at `web-rs/src/hooks/` — debounced signals, ReusableEffect patterns.
-- Check `web-rs/src/views/` — the view/component that renders the feature.
+## 3. Auth (`crates/azapptoolkit-auth/`)
 
-## 3. Check auth layers (common source of bugs)
+- Token refresh: `src/token_cache.rs` (~60 s early, behind a shared mutex). A dead refresh token
+  surfaces as `refresh_missing` / `not_signed_in` and must trigger **re-auth in place**, not
+  sign-out → [auth-and-consent.md](../../../docs/architecture/auth-and-consent.md).
+- Keyring: refresh tokens are chunked (Windows caps an entry at 2560 UTF-16 bytes) — a partial
+  chunk set reads as "no token".
+- Consent: AADSTS65001/65004 → `AuthError::ConsentRequired`; the command must pre-acquire via
+  `AppState::ensure_*` for the "Grant consent" button to appear.
 
-For token/consent/auth issues:
-- **Token refresh** (`crates/azapptoolkit-auth/src/token_cache.rs`): is the token expired? Check `~60s before expiry` behavior.
-- **Keyring chunking**: Windows Credential Manager caps at 2560 UTF-16 bytes. If refresh tokens are chunked, check all chunks exist.
-- **Silent grants**: AADSTS65001/65004 → `ConsentRequired`. Check `AppState::ensure_*` pre-acquisition.
-- **Extra-scope tokens**: Admin-consent scopes (AuditLog, Policy.Read.All) ride ScopedTokenAdapter. If missing → `unavailable` message.
+## 4. Frontend (`apps/desktop/web-rs/`)
 
-## 4. Check the WASM native boundary (`src-tauri/src/lib.rs`)
+- `src/bindings/<domain>.rs` — command-name string and args struct match the handler
+  (`#[serde(rename_all = "camelCase")]`; Graph models are camelCase, DTOs snake_case)?
+- `src/state/` — `Session` `RwSignal`s; tenant-scoped filter state lives in `tenant_ui` and must
+  reset on tenant switch.
+- `src/views/`, `src/components/` — the rendering; loading/error surfaces use the `ui` primitives.
+- Demo/Pages only: an infallible `invoke()` with no fixture panics the whole page — check
+  `src/demo/mod.rs::register_fixtures`.
 
-- Are commands in `generate_handler![]`?
-- Is the typed stub in `web-rs/src/bindings/` correct (camelCase vs snake_case)?
-- Is the `connect-src` in `tauri.conf.json` correct for new origins?
-
-## 5. Output format
-
-Produce a debugging report:
-```
-# Debug Report — Token Refresh Failing
-
-## Symptom
-Token refresh failing after ~1 hour of idle time. Works fine on fresh start.
-
-## Hypothesis
-Keyring chunking issue — Windows Credential Manager may have dropped a chunk.
-
-## Evidence
-- Checked `src-tauri/src/token_cache.rs:47` — chunked read pattern.
-- Checked `AppState.refresh()` in `state.rs:156` — shares mutex with refresh.
-- Verified keyring entries exist via `keyring::Entry`.
-
-## Next steps
-1. Run `just dev` — observe token expiry in logs.
-2. Check keyring: `keyring list`
-3. If chunk missing → fix in `token_cache.rs:47-63`.
-
-## Files changed
-- src-tauri/src/token_cache.rs (suggested fix)
-```
-
-## Common symptoms and quick checks
+## 5. Common symptoms
 
 | Symptom | Quick check | Likely culprit |
-|---------|-------------|----------------|
-| Token refresh failing after idle | `just clippy` → run in background ~60s | Shared mutex deadlock in token_cache.rs |
-| List not loading | `app_name_index` + `sp_index` present? | Cache key missing `{tenant_id}\|` prefix |
-| WASM build error | `just web-build` (runs Trunk) | Server dep in wasm subtree (tokio, reqwest) |
-| CSP error on fetch | `tauri.conf.json` → web-rs fetch URL | Missing `connect-src` entry |
-| Command not found in frontend | Check bindings + handler list | command-parity-check.sh warning missed |
-| Wrong camelCase in UI | Check bindings vs backend | Graph models = camel, DTOs = snake |
-| Audit scores wrong | Check `score_application` + Exchange scopes | Mail scopes not scoped, org-wide assumed |
+|---|---|---|
+| "Session expired" / silent failures after idle | log for `refresh_missing` | re-auth path not taken; see §3 |
+| List empty or stale after a tenant switch | key prefix, `set_active_tenant` resets | unscoped cache key or a `Session` field outside `tenant_ui` |
+| Command "not found" from the UI | parity hook output | handler missing from `generate_handler![]` or the binding string differs |
+| Args rejected (`invalid args`) | binding args struct | camelCase/snake_case mismatch |
+| WASM build error | `just web-build` | server-only dep (tokio/reqwest/rustls) not `cfg(not(wasm32))`-gated |
+| Frontend `fetch` blocked | `tauri.conf.json` `connect-src` | only WASM-side fetches need CSP; backend reqwest never does |
+| Audit score looks wrong | `AppPermissions.mail_scopes` | empty map = org-wide by design; check the scope probe |
+| Long write ignores Cancel | `claim()` before first await? | `CancelToken` claimed late / no `SessionDead` latch |
 
-## Failure handling
+## 6. Report
 
-- If `just verify` passes but the issue persists → it's likely a runtime/logic bug.
-- If `just verify` fails → fix the failing gate first, then re-check if original issue remains.
-- If WASM only → check Trunk logs (`web-rs/dist/`), `console.log`, and WASM-specific errors.
+```
+# Debug — <symptom>
+## Hypothesis · ## Evidence (file:line) · ## Fix (or next probe) · ## Verified by (recipe run)
+```
+
+If `just verify` passes but the symptom persists, it is a runtime/logic bug: reproduce it in a
+`web-itest` GUI test or a crate unit test before fixing, so the fix carries its regression test.
