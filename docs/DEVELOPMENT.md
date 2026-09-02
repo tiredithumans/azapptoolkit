@@ -17,7 +17,7 @@ current by the staleness hook). In one line: `crates/` holds the eight shared li
 
 The Rust-side tooling reduces to **two manual steps** — `just setup` provisions everything else:
 
-1. **Rust**, via [rustup](https://rustup.rs). `rust-toolchain.toml` pins the channel (1.97), the
+1. **Rust**, via [rustup](https://rustup.rs). `rust-toolchain.toml` pins the channel (1.98), the
    `rustfmt` + `clippy` components, **and** the `wasm32-unknown-unknown` target, so rustup installs all
    of them automatically the first time you build in the repo — no `rustup target add` by hand.
 2. **`just`**, the cross-platform task runner: `cargo install just` (or `brew install just` /

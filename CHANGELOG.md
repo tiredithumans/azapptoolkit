@@ -2,6 +2,17 @@
 
 ### Changed
 
+- **Rust toolchain and MSRV move 1.97.1 → 1.98.0.** `rust-toolchain.toml` pins the exact patch
+  (1.98.0) so a silent stable bump can't break builds, and the workspace `rust-version` floor (root
+  `Cargo.toml` + `apps/desktop/web-rs`) rises to 1.98 in lockstep. The six `dtolnay/rust-toolchain`
+  SHA pins across `ci.yml`, `codeql.yml`, `pages.yml`, and `release.yml` advance to the matching
+  `1.98.0` commit so CI, CodeQL, the Pages demo, and the release matrix all build on the same
+  compiler as local `just verify`.
+- **Dropped five redundant `use leptos::prelude::*;` globs** from the frontend's `state/`
+  submodules. 1.98 reports a glob import whose names a second glob already supplies, and each of
+  those files sits under `use super::*`, which reaches `state/mod.rs`'s own prelude glob. Nothing
+  resolved through the local copies; without removing them `just web-clippy` (`-D warnings`) fails
+  on the new toolchain.
 - **Developer workflow.** `just check` (type-check both trees) and `just test-crate <crate>` join
   the recipes as the sanctioned inner loop; `just --list` now describes every recipe in one line;
   the `setup` bodies moved to `scripts/setup.{sh,ps1}`. `AGENTS.md` is a true one-line-per-rule

@@ -4,8 +4,6 @@
 //! `view` and a facet signal in the right order — the ordering matters
 //! (`set_view` collapses the workspace, so it must come before `open_item`).
 
-use leptos::prelude::*;
-
 use super::*;
 
 impl Session {

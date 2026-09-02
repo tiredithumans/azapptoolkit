@@ -4,8 +4,6 @@
 //! 2-up when split). There is no side detail pane and no `selected_*_id`
 //! signal — this IS the selection model.
 
-use leptos::prelude::*;
-
 use super::*;
 
 impl Session {
