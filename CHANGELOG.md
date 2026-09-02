@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-02
+
 ### Added
 
 - **The app restores your signed-in session at launch instead of asking you to sign in again.** The
