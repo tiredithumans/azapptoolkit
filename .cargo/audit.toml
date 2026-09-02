@@ -1,6 +1,9 @@
 # cargo-audit configuration (read by `just audit` and the rustsec/audit-check
 # CI action). Keep this in sync with the [advisories] ignore list in deny.toml.
 [advisories]
+# Keep square brackets out of the comments inside the array below:
+# `dependency_policy.rs` scans it with a hand-rolled parser that stops at the
+# first closing bracket, so one in a rationale hides every entry after it.
 ignore = [
     # RUSTSEC-2024-0429 (GHSA-wrw7-89jp-8q8g): unsound `glib::VariantStrIter`
     # iterators (null-deref crash). glib 0.18.5 is a transitive dep of Tauri's
@@ -12,15 +15,14 @@ ignore = [
     # macOS (WKWebView) builds, so the unsound path is unreachable in released
     # artifacts. Dismissed on GitHub Dependabot as tolerable risk. Drop this
     # ignore once Tauri's Linux backend ships on a glib >= 0.20 webview stack.
+    #
+    # THIS FILE is where the entry does work. The advisory is
+    # `informational = "unsound"`: cargo-audit reports those, so dropping the
+    # line adds a glib warning to the scan — while cargo-deny's advisories v2
+    # does not surface `unsound` at all and therefore prints
+    # `advisory-not-detected` for the same id in `just deny`. That warning
+    # describes cargo-deny's coverage, NOT a fixed advisory. The advisory is
+    # patched in glib >= 0.20.0; check the locked glib version against that
+    # before removing this entry.
     "RUSTSEC-2024-0429",
-    # RUSTSEC-2026-0194 / -0195: quick-xml 0.39 DoS-class parser issues
-    # (quadratic duplicate-attribute check; unbounded namespace allocation in
-    # NsReader). quick-xml is a transitive dep only via plist 1.9 -> tauri 2.11,
-    # and plist parses the app's OWN bundle metadata (Info.plist), never
-    # attacker-controlled XML, so neither DoS path is reachable from untrusted
-    # input. The fix is quick-xml >= 0.41, a semver-major jump plist hasn't
-    # shipped yet (1.9.0 pins 0.39 and is the latest release). Drop both
-    # ignores once `cargo update -p plist` pulls a release on quick-xml 0.41+.
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
 ]
