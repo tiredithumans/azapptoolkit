@@ -7,9 +7,9 @@
 
 /// A random v4 GUID in canonical lowercase 8-4-4-4-12 form.
 pub(crate) fn new_v4_guid() -> String {
-    use rand::RngCore;
+    use rand::Rng as _;
     let mut b = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut b);
+    rand::rng().fill_bytes(&mut b);
     b[6] = (b[6] & 0x0f) | 0x40; // version 4
     b[8] = (b[8] & 0x3f) | 0x80; // variant 1 (RFC 4122)
     format!(

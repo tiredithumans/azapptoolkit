@@ -173,16 +173,21 @@ pub fn generate_self_signed(
 /// pure ASCII, which matters because a PKCS#12 password is encoded as a
 /// BMPString (UTF-16BE) and ASCII is the range every reader agrees on.
 ///
-/// `OsRng` rather than the `thread_rng()` `commands::guid` uses: both are
+/// `SysRng` rather than the thread RNG `commands::guid` uses: both are
 /// CSPRNGs, but this is a credential, and the OS source has no reseeding or
-/// thread-local state to reason about.
+/// thread-local state to reason about. It reports failure rather than hiding
+/// it (`TryRng`), and an unavailable OS entropy source is not something a
+/// credential generator may paper over — so the `expect` is the honest end of
+/// that path, and matches what the pre-0.10 `OsRng` did internally.
 fn random_pfx_password() -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use rand::RngCore as _;
-    use rand::rngs::OsRng;
+    use rand::TryRng as _;
+    use rand::rngs::SysRng;
 
     let mut bytes = [0u8; 24];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("OS entropy source unavailable");
     let password = URL_SAFE_NO_PAD.encode(bytes);
     bytes.zeroize();
     password

@@ -56,7 +56,13 @@ tracing-appender = "0.2"
 url = "2"
 async-trait = "0.1"
 parking_lot = "0.12"
-base64 = "0.22"
+# `default-features = false` + `std` on purpose: 0.23's default feature set is
+# `["std", "simd-unsafe"]`, and this workspace lints `unsafe_code = "deny"` —
+# base64 sits in the JWT-claim, certificate-thumbprint and client-secret decode
+# paths, which is the last place to take unaudited SIMD for a few percent. The
+# scalar `GeneralPurpose` engine is what every call site already uses; opting
+# out of the default changes nothing but which engine is compiled in.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 zeroize = "1.9"
 # Testing
 wiremock = "0.6"

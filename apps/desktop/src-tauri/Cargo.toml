@@ -83,7 +83,7 @@ aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sy
 # `rsa` edge is reachable only through the `builder` feature, which nothing here
 # enables. `deny.toml`'s `[[bans.deny]] name = "rsa"` is what actually holds it.
 p12-keystore = { version = "0.2.1", default-features = false }
-rand = "0.8"
+rand = "0.10"
 zeroize = { workspace = true }
 time = "0.3"
 

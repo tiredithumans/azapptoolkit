@@ -116,42 +116,59 @@ deploys it (needs Settings → Pages → Source = "GitHub Actions"). The `demo` 
 - **No SPA fallback needed** — nav is signal-based (no router), so there is no `404.html`; only
   the `--public-url` subpath base-href matters.
 
-## Crypto dependencies: no `rsa`; deliberate `rand`/`sha2` pins
+## Crypto dependencies: no `rsa`; a deliberate `sha2` pin
 
 Self-signed cert generation (`src-tauri/src/cert.rs`) uses `rcgen` on the **`aws_lc_rs`** backend
 (already in-tree via rustls) *specifically* to keep the `rsa` crate (RUSTSEC-2023-0071) out of
 the dependency graph — **do not reintroduce `rsa`** (the `src-tauri/Cargo.toml` comment records
 why).
 
-The direct `rand = "0.8"` pin in `src-tauri/Cargo.toml` (random bytes for the v4 GUIDs
-`commands/guid.rs` mints, which `expose_api`/`app_roles`/`managed_identity` consume) and the
-`sha2 0.10` line the tree resolves to are held to match what **`oauth2` 5 + Tauri 2** already
-resolve. Note `sha2` is **not** a direct dependency: both certificate thumbprints digest on
-`aws-lc-rs`, the same backend rcgen signs with (`src-tauri/Cargo.toml` says so at the
-`aws-lc-rs` block). The only direct consumer of the 0.10 line is `p12-keystore`, pinned below
-precisely to keep it there. As of a full `cargo update` on **2026-09-02**, the only direct deps
-behind a major anywhere in the repo are the three held on purpose — `rand`, `base64` and
-`p12-keystore` (web-rs is current apart from its mirrored `base64` hold). The re-eval trigger
-below has **not** fired:
+The rule this section exists to apply is narrow: **do not move a crypto/encoding dep we declare
+onto a major nothing else in the tree is on**, because that adds a duplicate major rather than
+removing one. It is a statement about the *graph*, so it has to be re-derived against the graph,
+not inherited. Two of the three holds it used to cover were retired on **2026-09-14** when exactly
+that re-derivation showed their premise had lapsed:
 
-- **`rand` (0.8.7 → 0.10.2):** `oauth2` 5.0.0 — the latest oauth2 — still resolves `rand 0.8.7` /
-  `rand_core 0.6.4`. Bumping our direct dep to 0.10 leaves oauth2's `rand 0.8` in the tree
-  regardless (no dedup), and pulls `getrandom 0.3` alongside the in-tree 0.2.
+- **`rand` 0.8 → 0.10 (taken).** The hold assumed 0.10 would be a new major. It was not: the
+  `.pfx` writer `p12-keystore` 0.2.1 already pulled `rand 0.10`, so the tree carried 0.8 *and*
+  0.10 with our own two call sites sitting on the older one. Declaring 0.10 unified our direct
+  dep with the copy already compiled in and added **zero crates** to the lock file. `rand 0.8`
+  remains, reachable only through `oauth2` 5.0.0 — that edge is not ours to move, and it is the
+  same two majors either way. `getrandom` is likewise unchanged: 0.2 (oauth2), 0.3 (Tauri) and
+  0.4 (`uuid`, and `rand 0.10`) were all in the tree beforehand.
+  The migration is small but not mechanical — 0.9 renamed `thread_rng()` to `rng()`, 0.10 renamed
+  `rngs::OsRng` to `rngs::SysRng` and split the fallible half of `RngCore` into `TryRng`, so
+  `cert.rs`'s `.pfx` password now calls `try_fill_bytes` and `expect`s (an unavailable OS entropy
+  source is not something a credential generator may paper over, and it is what the old `OsRng`
+  did internally anyway).
+- **`base64` 0.22 → 0.23 (taken, `default-features = false`).** This one was never a
+  duplicate-major argument — the graph already carried 0.23 via `rcgen`→`pem`. The real objection
+  was that 0.23 defaults to `["std", "simd-unsafe"]`, and unaudited SIMD has no business in the
+  JWT-claim, certificate-thumbprint and client-secret decode paths of a workspace that lints
+  `unsafe_code = "deny"`. `default-features = false, features = ["std"]` answers that directly:
+  the scalar `GeneralPurpose` engine every call site already uses, on the current major, sharing
+  `pem`'s copy. `web-rs` declares it the same way rather than holding at 0.22 — it depends on
+  `azapptoolkit-core`, which inherits the root pin, so 0.23 is compiled into the wasm bundle
+  either way and a split would only scatter our own code across both.
+
+What remains held:
+
 - **`sha2` (0.10.9 → 0.11.0):** `sha2 0.10.9` is shared by oauth2 5, Tauri 2.11
   (`tauri-codegen` / `wry`) and the `p12-keystore` chain (`pkcs5`, `scrypt`), all unified on
-  `digest 0.10`. `secret-service` **left** that group in 5.2.0, which moved the Linux keyring's
-  session crypto onto the RustCrypto 0.11 line — so `sha2 0.11` and `digest 0.11` do now sit in
-  the lock file, reachable only through `zbus-secret-service-keyring-store` and therefore only on
-  Linux/FreeBSD. They are absent from the shipped Windows and macOS graphs, and nothing this repo
-  declares is on 0.11. Moving a dep we *do* declare onto 0.11 would still add the second major to
-  those two platforms — net *more* duplication where the artifacts actually ship.
-- **Cost with no benefit:** `rand` needs a code edit (`commands/guid.rs`: `rand::thread_rng()` →
-  `rng()`, renamed in 0.9+) and `cert.rs` uses `rand::rngs::OsRng` for the `.pfx` password — while
-  `cargo audit` is clean on both held versions, so nothing forces the move.
+  `digest 0.10`. Note `sha2` is **not** a direct dependency: both certificate thumbprints digest
+  on `aws-lc-rs`, the same backend rcgen signs with (`src-tauri/Cargo.toml` says so at the
+  `aws-lc-rs` block). `secret-service` **left** that group in 5.2.0, which moved the Linux
+  keyring's session crypto onto the RustCrypto 0.11 line — so `sha2 0.11` and `digest 0.11` do
+  now sit in the lock file, reachable only through `zbus-secret-service-keyring-store` and
+  therefore only on Linux/FreeBSD. They are absent from the shipped Windows and macOS graphs, and
+  nothing this repo declares is on 0.11. Moving a dep we *do* declare onto 0.11 would still add
+  the second major to those two platforms — net *more* duplication where the artifacts actually
+  ship. **Re-evaluate when `oauth2` or Tauri ships on `sha2 0.11`.**
 
-**Re-evaluate only when `oauth2` (or Tauri) ships a release on `rand 0.9+` / `sha2 0.11`** — then a
-bump dedups the tree instead of duplicating it. Both lockfiles otherwise track the latest
-semver-compatible versions — a plain `cargo update` is a no-op.
+As of a full `cargo update` on **2026-09-14**, the only direct deps behind a major anywhere in the
+repo are `p12-keystore` (below) and the transitive-only `sha2` above; both lockfiles otherwise
+track the latest semver-compatible versions, so a plain `cargo update` is a no-op. `cargo audit`
+is clean on every version named here.
 
 ### `p12-keystore` is pinned to 0.2.x — the same rule, applied to a new dep
 
@@ -164,12 +181,13 @@ of a tool that handles tenant credentials. `deny.toml` sets `yanked = "deny"` as
 check, and RustCrypto routinely retires superseded release candidates, so that combination lets
 an upstream yank break CI with no change on our side. 0.3.x also rides the RustCrypto 0.11 hash
 line, which would add a second `sha2` **and** `digest` major to the Windows and macOS graphs —
-exactly what the `rand`/`sha2` reasoning above exists to avoid. (Those majors reached the *Linux*
+exactly what the `sha2` reasoning above exists to avoid. (Those majors reached the *Linux*
 graph anyway when `secret-service` 5.2.0 moved; that does not extend to the two platforms this
 pin is protecting.)
 
 0.2.1 is all-stable and lands entirely on majors the lock file already carries — `sha2 0.10`,
-`hmac 0.12`, `cbc 0.1`, `rand 0.10`, `x509-parser 0.18`, `base64 0.22`, `thiserror 2` — so
+`hmac 0.12`, `cbc 0.1`, `rand 0.10`, `x509-parser 0.18`, `base64 0.22`, `thiserror 2` — the
+`rand 0.10` edge is in fact why the direct `rand` pin could move off 0.8 for free — so
 `cargo tree -d` gains **no new duplicate major at all**. The 16 crates it does add (`cms 0.2.3`,
 `pkcs12 0.1`, `pkcs5 0.7`, `der 0.7`, `spki 0.7`, `x509-cert 0.2`, `const-oid 0.9`, `sha1 0.10`,
 `pbkdf2`, `scrypt`, `salsa20`, `base64ct`, `pem-rfc7468`, `flagset`, `der_derive`) are all
