@@ -71,7 +71,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
         with:
           tool: just,cargo-audit
       # main-branch CI runs `just audit` per-merge, but an advisory filed after
@@ -126,14 +126,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
         with:
           tool: just,trunk
 
       - name: Install Tauri CLI
-        # Pinned to the exact `tauri` runtime version (Cargo.lock) for reproducible
-        # release tooling; bump in lockstep with the crate. --locked pins its deps.
-        run: cargo install tauri-cli --locked --version "=2.11.2"
+        # Pinned to the newest published `tauri-cli` at or below the locked `tauri`
+        # runtime (Cargo.lock) for reproducible release tooling — upstream does not
+        # cut a CLI release for every runtime patch, so the two can differ in the
+        # patch digit. Bump in lockstep with the crate. --locked pins its deps.
+        run: cargo install tauri-cli --locked --version "=2.11.4"
 
       - name: Build bundles (with updater artifacts)
         env:
