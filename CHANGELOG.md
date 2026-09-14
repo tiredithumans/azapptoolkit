@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+## [0.30.1] - 2026-09-14
+
+### Security
+
+- **The TLS stack every Graph, Exchange, Key Vault and ARM call rides on is patched.**
+  RUSTSEC-2026-0285 (published 2026-09-14, severity 5.3) had rustls accepting TLS 1.3
+  handshake messages across encryption level boundaries; 0.30.0 shipped the affected
+  0.23.43. This build carries 0.23.45 — a patch bump inside the same 0.23.x line, still
+  on the aws-lc-rs backend, with no other change to how the app talks to Azure.
+
 ## [0.30.0] - 2026-09-02
 
 ### Added
