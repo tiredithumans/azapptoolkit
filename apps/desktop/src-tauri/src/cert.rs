@@ -371,12 +371,20 @@ mod tests {
     fn each_pfx_password_is_fresh_and_paste_safe() {
         let a = random_pfx_password();
         let b = random_pfx_password();
-        assert_ne!(a, b, "a per-bundle password, not a constant");
+        // Neither assertion prints the value it is checking, and that is
+        // deliberate: a failing assert goes to stderr, CI keeps stderr, and
+        // these two strings are live PKCS#12 passwords from the same generator
+        // production uses. The `Debug`-redaction rule on `GeneratedCertificate`
+        // is worth nothing if the test suite spills the same secret one frame
+        // lower down. (CodeQL rust/cleartext-logging, alert #12.)
+        assert!(a != b, "a per-bundle password, not a constant");
         assert_eq!(a.len(), 32, "24 bytes as unpadded base64url");
         assert!(
             a.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
-            "ASCII, and free of shell/URL metacharacters: {a}",
+            "random_pfx_password() produced a character outside A-Za-z0-9-_; \
+             the offending password is withheld on purpose — re-read the \
+             alphabet in random_pfx_password(), that is where it regressed",
         );
     }
 
