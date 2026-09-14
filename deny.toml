@@ -88,8 +88,8 @@ name = "rsa"
 
 [sources]
 # Only crates.io and the one git dependency the frontend needs (tauri-sys,
-# pinned to its v2 branch) are permitted. A new git/registry source must be
-# added here deliberately.
+# pinned to an exact rev, not the v2 branch — see web-rs/Cargo.toml) are
+# permitted. A new git/registry source must be added here deliberately.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = ["https://github.com/JonasKruckenberg/tauri-sys"]

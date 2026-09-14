@@ -149,7 +149,7 @@ bake them via `.env`).
 ### Release & dependencies
 
 - **Release is a 3-OS matrix → one aggregated `latest.json`**, a draft a human publishes; CHANGELOG headers are `## [X.Y.Z] - YYYY-MM-DD` exactly (two parsers, pinned by test). → [release-updater-demo.md](docs/architecture/release-updater-demo.md)
-- **Crypto/encoding pins on purpose:** no `rsa` (`rcgen` on `aws_lc_rs`); `rand`/`sha2`/`base64` majors and `p12-keystore` 0.2.x held — rationale in `dependabot.yml`. → [release-updater-demo.md](docs/architecture/release-updater-demo.md)
+- **Crypto/encoding pins on purpose:** no `rsa` (`rcgen` on `aws_lc_rs`); `sha2` + `p12-keystore` 0.2.x held — re-derive a hold from the graph, don't restate it; see `dependabot.yml`. → [release-updater-demo.md](docs/architecture/release-updater-demo.md)
 - **web-rs has its own lockfile**, so the root audit/deny never reach it — `web-audit` / `web-deny` do.
 
 ## Coding fundamentals

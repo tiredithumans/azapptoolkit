@@ -32,19 +32,17 @@ updates:
       prefix: deps
     open-pull-requests-limit: 10
     ignore:
-      # rand 0.8 / sha2 0.10 are what `oauth2` 5 (via azapptoolkit-auth) and
-      # `tauri-codegen` already resolve to. Bumping these to rand 0.9+ /
-      # sha2 0.11+ would not remove the old majors — it would duplicate a crypto
-      # major in the graph (AGENTS.md "Crypto deps"). Drop these ignores once
-      # oauth2/Tauri move first. sha2 is transitive-only: certificate
-      # thumbprints digest on aws-lc-rs, the backend rcgen already signs with,
-      # so nothing here declares sha2 directly — `p12-keystore` is the only
-      # direct consumer of the 0.10 line, and it is pinned below to keep it
-      # there. NOTE: `rsa` is not in this graph at all — cert generation uses
-      # rcgen on the aws_lc_rs backend specifically to keep it out
-      # (RUSTSEC-2023-0071); don't reintroduce it.
-      - dependency-name: rand
-        versions: [">=0.9"]
+      # sha2 0.10 is what `oauth2` 5 (via azapptoolkit-auth), `p12-keystore` and
+      # `tauri-codegen` already resolve to, and it is TRANSITIVE-ONLY — nothing
+      # in this repo declares sha2 directly, because certificate thumbprints
+      # digest on aws-lc-rs, the backend rcgen already signs with. Bumping the
+      # lock entry to 0.11 would not remove the 0.10 line those three pin; it
+      # would add a second crypto major to the graph of a credential tool.
+      # Drop this ignore once oauth2/Tauri move first. NOTE: `rsa`
+      # (RUSTSEC-2023-0071) is not in this graph at all — cert generation uses
+      # rcgen on the aws_lc_rs backend specifically to keep it out, and
+      # `deny.toml`'s `[[bans.deny]] name = "rsa"` is what enforces that.
+      # Don't reintroduce it.
       - dependency-name: sha2
         versions: [">=0.11"]
       # p12-keystore stays on 0.2.x. 0.3 depends on `cms 0.3.0-pre`, which pulls
@@ -56,36 +54,10 @@ updates:
       # hmac 0.12, cbc 0.1, rand 0.10, x509-parser 0.18, base64 0.22), adding no
       # duplicate major at all. The output is identical either way: PBES2 /
       # AES-256-CBC with an HMAC-SHA256 MAC is both versions' default.
-      # Drop this ignore once `cms 0.3.0` ships final.
+      # Drop this ignore once `cms 0.3.0` ships final — still pre as of
+      # 2026-09-14 (`cms 0.3.0-pre.2`).
       - dependency-name: p12-keystore
         versions: [">=0.3"]
-      # base64 stays on 0.22 for ONE reason, and it is not the shape of the graph.
-      # 0.23's default feature set is `["std", "simd-unsafe"]`, so adopting it as
-      # declared would put `unsafe` SIMD into the JWT-claim, certificate-thumbprint
-      # and client-secret decode paths of a tool whose workspace lints declare
-      # `unsafe_code = "deny"`. Nothing pushes the other way: there is no advisory
-      # against 0.22.x.
-      #
-      # The duplicate-major argument this entry used to lead with is DEAD — do not
-      # restate it. The root tree already carries three base64 majors, and moving
-      # our pin would not change that count, only which one we sit on:
-      #
-      #   0.21.7   swift-rs -> tauri-utils
-      #   0.22.1   ours, and oauth2 5.0.0 (`>=0.21, <0.23`, a hard exclusion, and
-      #            5.0.0 is still the latest release) + hyper-util 0.1.20 (`^0.22`,
-      #            behind its optional `client-proxy` feature)
-      #   0.23.1   pem 4.0.0 -> rcgen 0.14.10, i.e. certificate generation is on
-      #            0.23 already
-      #
-      # (reqwest 0.12 left the graph when oauth2 was taken with
-      # `default-features = false`; only reqwest 0.13 remains, still on ^0.22.)
-      #
-      # Drop this ignore when 0.23 can be taken WITHOUT its defaults —
-      # `{ version = "0.23", default-features = false, features = ["std"] }` — or
-      # once upstream stops defaulting `simd-unsafe` on. oauth2's `<0.23` bound
-      # constrains oauth2's own copy, not ours, so it is not the blocker.
-      - dependency-name: base64
-        versions: [">=0.23"]
     groups:
       # Batch low-risk semver-compatible bumps; majors stay as individual PRs so a
       # breaking upgrade gets its own review.
@@ -104,13 +76,6 @@ updates:
     commit-message:
       prefix: deps
     open-pull-requests-limit: 10
-    ignore:
-      # Mirrors the root entry's base64 hold — this tree has its own lockfile, so
-      # Dependabot proposes the bump here separately. See the rationale above; the
-      # frontend tree carries a single base64 major, so the hold here is purely the
-      # `unsafe`-free decode posture, with no graph argument either way.
-      - dependency-name: base64
-        versions: [">=0.23"]
     groups:
       cargo-minor-patch:
         update-types:

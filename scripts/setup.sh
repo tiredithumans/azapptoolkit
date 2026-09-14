@@ -50,9 +50,11 @@ if need_cmd cargo-tauri; then
   ok "$(cargo tauri --version 2>/dev/null || echo 'tauri-cli present')"
 else
   warn "tauri-cli not installed — installing now (may take several minutes)"
-  # Pin the CLI to the exact `tauri` runtime version (Cargo.lock) for
-  # reproducible tooling. Bump both together. --locked pins the CLI's own deps.
-  cargo install tauri-cli --locked --version "=2.11.2"
+  # Pin the CLI to the newest published `tauri-cli` at or below the locked
+  # `tauri` runtime (Cargo.lock) for reproducible tooling — upstream does not
+  # cut a CLI release for every runtime patch, so the two can differ in the
+  # patch digit. Bump both together. --locked pins the CLI's own deps.
+  cargo install tauri-cli --locked --version "=2.11.4"
   ok "tauri-cli installed"
 fi
 

@@ -35,7 +35,14 @@ tauri-sys = { git = "https://github.com/JonasKruckenberg/tauri-sys", rev = "289b
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-base64 = "0.22"
+# Tracks the root workspace pin, `default-features = false` included: 0.23
+# defaults `simd-unsafe` on and this crate restates `unsafe_code = "deny"`
+# above (see `/Cargo.toml` for the full why). Matching core is also the
+# zero-cost choice for bundle size — `azapptoolkit-core` is a path dep that
+# inherits the root pin, so 0.23 is compiled into this wasm bundle either way,
+# and `leptos_server`/`server_fn` hold a 0.22 copy either way. Declaring 0.22
+# here would not remove a major, only split our own code across both.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 # `ClipboardEvent` + `DataTransfer` back the redirect-URI editor's multi-line
 # paste (`components/uri_list_editor.rs`). Both resolve transitively today
 # (tachys generates the `paste` event type, thaw pulls DataTransfer), so

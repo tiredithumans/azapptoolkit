@@ -28,9 +28,11 @@ if (Get-Command cargo-tauri -ErrorAction SilentlyContinue) {
     Write-Ok (cargo tauri --version 2>$null)
 } else {
     Write-WarnMsg "tauri-cli not installed — installing now (may take several minutes)"
-    # Pin the CLI to the exact `tauri` runtime version (Cargo.lock) for
-    # reproducible tooling. Bump both together. --locked pins the CLI's own deps.
-    cargo install tauri-cli --locked --version "=2.11.2"
+    # Pin the CLI to the newest published `tauri-cli` at or below the locked
+    # `tauri` runtime (Cargo.lock) for reproducible tooling — upstream does not
+    # cut a CLI release for every runtime patch, so the two can differ in the
+    # patch digit. Bump both together. --locked pins the CLI's own deps.
+    cargo install tauri-cli --locked --version "=2.11.4"
     Write-Ok "tauri-cli installed"
 }
 
