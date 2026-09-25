@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+## [0.30.2] - 2026-09-25
+
+### Changed
+
+- **Rust toolchain moves 1.98.0 → 1.98.1** (the MSRV stays 1.98). `rust-toolchain.toml` and the six
+  `dtolnay/rust-toolchain` SHA pins across CI, CodeQL, the Pages demo and the release matrix advance
+  together, so every build runs on the same compiler as a local `just verify`. `tauri-cli` moves
+  2.11.4 → 2.11.5 in the release workflow and both `setup` scripts.
+- **Semver-compatible dependency refresh across both lockfiles.** `tauri` 2.11.5 → 2.11.6,
+  `tauri-plugin-updater` 2.11.0 → 2.12.0 (the auto-update client), `rand` 0.10.2 → 0.10.3, the
+  TLS-adjacent `hyper-rustls` 0.27.9 → 0.27.10, `hyper-util` 0.1.20 → 0.1.21 and
+  `rustls-platform-verifier` 0.7.0 → 0.7.1, and `wasm-bindgen` 0.2.128 → 0.2.129 with its companions
+  in the frontend. The deliberate holds are unchanged (`p12-keystore` 0.2.x, since 0.3 still needs
+  `cms 0.3.0-pre.2`; `sha2` 0.10). `cargo audit` and `cargo deny` pass on both trees.
+
 ## [0.30.1] - 2026-09-14
 
 ### Security
