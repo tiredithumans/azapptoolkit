@@ -68,3 +68,9 @@ the first checkpoint commit are listed in `/.gitleaksignore`; delete that file t
 - Judge panel launched (wf_ae705326-921: judge:risk + judge:leverage, effort high). Its result feeds the assembler.
 - Remaining: writer for `buckets/5-gap-slices.json` -> `sections/5-gap-slices.md`; assembler -> `sections/0-head.md` +
   `sections/9-tail.md`; cat into `azapptoolkit-review-2026-09-26.md`; spot-check; SendUserFile + chat summary.
+
+## Progress 2026-09-26 17:06 UTC
+- ALL verification complete: 491 findings, 490 surviving (359 confirmed, 131 partially, 1 refuted: F205), 14 high.
+- Judge panel DONE -> `judges.json`. Writer summaries -> `writer-summaries.json`. Counts script -> `counts.py`.
+- Launched final workflow: writer for bucket 5 -> `sections/5-gap-slices.md`, then assembler -> `sections/0-head.md` + `sections/9-tail.md`.
+- Then: cat sections 0,1,2,3,4,5,9 -> `azapptoolkit-review-2026-09-26.md`; spot-check; SendUserFile; chat summary.

@@ -456,9 +456,6 @@
   "backend-app/recheck:cmd-apps",
   "cross-cutting/recheck:security",
   "cross-cutting/recheck:deps-hygiene",
-  "cross-cutting/recheck:graph-api-currency",
-  "gap-critic/verify:gap-observability-support-log",
-  "gap-critic/verify:gap-desktop-inline-test-oracles",
-  "gap-critic/recheck:gap-updater-install-format-platforms"
+  "cross-cutting/recheck:graph-api-currency"
  ]
 }

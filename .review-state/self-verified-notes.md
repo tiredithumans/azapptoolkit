@@ -46,3 +46,19 @@ clients share one taxonomy and the dto `is_reauth_fatal` agreement test covers E
   - `redundant_closure` x12, `derive_partial_eq_without_eq` x7, `ref_option` x4, `needless_continue` x3, `redundant_clone` x1.
   Candidate `[workspace.lints.clippy]` additions that the tree nearly passes already: `unused_async`, `redundant_clone`,
   `derive_partial_eq_without_eq`, `ref_option`, `needless_continue`, `future_not_send` (after fixing the 8).
+
+## Lead-session spot-checks of judge-ranked items (read directly in the code, 2026-09-26)
+Agree with the verified finding:
+- F036/F139 updater opt-out inert: `UserSettings::load` (the only reader of `AZAPPTOOLKIT_AUTO_UPDATE`) has no production caller; `auto_update` is never read by updater.rs or the frontend.
+- F105 domain-form tenant: config_screen.rs:125/176 accepts "contoso.onmicrosoft.com"; auth service/mod.rs:313 compares the id-token `tid` GUID to the configured string.
+- F151/F251 mailbox advisory: scoping.rs:194 `mailbox_named` covers only Mail./MailboxSettings./Calendars./Contacts.; no MailboxItem/MailboxFolder/Mail-Advanced anywhere in scoping.rs or audit/permissions.rs.
+- F178 list_all_sites: sharepoint.rs:105 `out.truncate(max); Ok(out)` returns no truncation signal.
+- F295 setup.sh:131-136 runs `cargo check --workspace` before `trunk build`; dist/ is gitignored.
+- F394 exchange_scoping_section.rs:324 gate is `if dry_run || !r.failures.is_empty()`; a partial report toasts "Migrated".
+- F424 dr.rs:502 callout says a re-run "recreates only what is missing"; restore.rs:218 calls `create_application_core` with no existence check.
+- F488 release.yml:105/109 Linux leg `runs-on: ubuntu-latest` (floating glibc baseline for the AppImage/.deb).
+- F440-F442 audit_cancel is claimed by audit.rs:147, aap_migration.rs:52 and bulk.rs:156/319/418/541/616; bulk.rs:125-135 doc claims the loops "never run at once"; `CancelFlag::cancel` stops every older generation.
+- F039 backup.rs:668-700 (pass 3) uses `batch_or_serial` with no `session` clone / `is_dead` check / `skipped` record, unlike passes 1-2 (backup.rs:205-215).
+- F002 permissions_resolve.rs:276-278 `.ok().flatten()` swallows SP-lookup errors; mod.rs:292 caches the resulting detail under CacheKind::Lists.
+- F371 sso/mod.rs:509-513 `Err(err) => { tracing::debug!(..); (None, None) }` collapses a failed claims-policy read into "no policy".
+Not independently confirmed (left to the agents' verification): F054 (EWS verdict), F055-F057 (permission tester paths), F070 (claims codec).
