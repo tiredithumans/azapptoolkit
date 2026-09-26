@@ -12,9 +12,10 @@ Genuinely unused (0 references in src/, tests/, build.rs):
 FALSE POSITIVES (needed by macro expansion): `thiserror` in arm/graph/keyvault — core's
 `http_error_enum!` (crates/azapptoolkit-core/src/http_error.rs:65) expands `#[derive(Debug, ::thiserror::Error)]`
 in the CALLER crate, so callers must declare thiserror even though their source never names it.
-Cleanup option: have core depend on thiserror, `pub use thiserror as __thiserror;` (or a `__private` module) and
-make the macro derive `$crate::__thiserror::Error`, then drop the three caller declarations; or add
-`[package.metadata.cargo-machete] ignored = ["thiserror"]` to the three crates and wire `cargo machete` into `just verify-full`/CI.
+CORRECTION (verifier, see report Appendix A / F214): a `$crate` re-export of thiserror does NOT work, because thiserror's
+derive hard-codes `::thiserror::__private` paths, so the three caller crates must keep declaring it. The right cleanup is a
+manifest comment on each plus `[package.metadata.cargo-machete] ignored = ["thiserror"]`, and a `cargo machete` recipe in
+`just verify-full`/CI to gate the six genuinely unused declarations.
 
 ## Policy drift candidate
 - AGENTS.md: "One definition per policy: HTTP error taxonomy from core::http_error_enum!" — but
