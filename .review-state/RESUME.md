@@ -60,3 +60,11 @@ F424 dr.rs:502 — DR view claims re-run restore "recreates only what is missing
 The repo's whole-history secrets scan (gitleaks private-key rule) fired on PEM armour text quoted in finding F008. The
 committed copies under `.review-state/` are defanged by `checkpoint.sh` (`[PEM BEGIN …]`), and the two fingerprints from
 the first checkpoint commit are listed in `/.gitleaksignore`; delete that file together with `.review-state/`.
+
+## Progress 2026-09-26 16:55 UTC (resumed after the second usage-limit pause)
+- Gap-critic finders all done: 52 gap findings (2 high, confirmed: F487 updater has no install-format gate for MSI/.deb;
+  F488 Linux release leg builds on floating ubuntu-latest). Two gap verifiers + one recheck were re-run
+  (wf_4f243e8f-296 resumed at 16:51); 26 gap findings were still `pending` at this checkpoint.
+- Judge panel launched (wf_ae705326-921: judge:risk + judge:leverage, effort high). Its result feeds the assembler.
+- Remaining: writer for `buckets/5-gap-slices.json` -> `sections/5-gap-slices.md`; assembler -> `sections/0-head.md` +
+  `sections/9-tail.md`; cat into `azapptoolkit-review-2026-09-26.md`; spot-check; SendUserFile + chat summary.
