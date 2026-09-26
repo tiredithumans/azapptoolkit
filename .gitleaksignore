@@ -1,0 +1,4 @@
+# gitleaks fingerprints for the TEMPORARY review checkpoint (.review-state/): the two hits are the literal PEM armour
+# text quoted in a review finding's rationale (F008), not key material. Remove this file together with .review-state/.
+f28e3d364863519e352c19e214a40dd420cb7a57:.review-state/buckets/1-bugs-security.json:private-key:1273
+f28e3d364863519e352c19e214a40dd420cb7a57:.review-state/all-findings.json:private-key:129
