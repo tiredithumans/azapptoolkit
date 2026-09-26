@@ -1,4 +1,4 @@
-# RESUME — comprehensive project review of azapptoolkit (checkpoint 2026-09-26 12:45 UTC)
+# RESUME — comprehensive project review of azapptoolkit (checkpoint 2026-09-26 12:45 UTC; pushed as .review-state on branch claude/project-review-improvements-8m8rke, draft PR #280)
 
 User request: "Do a comprehensive thorough scan of this project and let me know any improvements, enhancements,
 features, or cleanup opportunities." Deliverable = a report (no code changes were asked for). Ultracode was on.
