@@ -55,3 +55,8 @@ F295 scripts/setup.sh:132 — `just setup` panics on a fresh clone (cargo check 
 F371 sso_tab.rs:543 — unreadable claims policy rendered as empty editor; Save detaches the real policy.
 F394 exchange_scoping_section.rs:324 — toasts "Migrated" on a partial AAP report.
 F424 dr.rs:502 — DR view claims re-run restore "recreates only what is missing"; backend creates unconditionally.
+
+## Checkpoint hygiene
+The repo's whole-history secrets scan (gitleaks private-key rule) fired on PEM armour text quoted in finding F008. The
+committed copies under `.review-state/` are defanged by `checkpoint.sh` (`[PEM BEGIN …]`), and the two fingerprints from
+the first checkpoint commit are listed in `/.gitleaksignore`; delete that file together with `.review-state/`.
