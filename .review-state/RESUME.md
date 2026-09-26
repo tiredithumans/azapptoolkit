@@ -12,7 +12,7 @@ features, or cleanup opportunities." Deliverable = a report (no code changes wer
 - Self-verified notes (unused deps, Exchange error-taxonomy drift, pedantic clippy hot spots): `self-verified-notes.md`.
 - Completeness critic DONE (assessment + 6 gap slices; see `critic.json`). Its 6 gap FINDERS were still running
   when the checkpoint was taken (workflow wf_4f243e8f-296).
-- Section writers workflow (wf_e624a4c2-684) had just started writing `sections/1..4-*.md`; no section files existed yet.
+- Section writers workflow (wf_e624a4c2-684) COMPLETE at 13:12 UTC: `sections/1-bugs-security.md`, `2-cleanup-refactor-perf-deps.md`, `3-enhancements-features.md`, `4-docs-tests-tooling-a11y.md` written and completeness-checked (every id present once; duplicates merged). Writer summaries are in `journals/wf_e624a4c2-684.jsonl` (needed by the assembler).
 
 ## Workflow ids (transcripts under /root/.claude/projects/-home-user-azapptoolkit/12cb2860-e7bf-55f0-b15e-42e55e824c8b/subagents/workflows/)
 | purpose | run id | script (workflows/scripts/) | status |
@@ -36,7 +36,7 @@ Copies of every journal.jsonl are in `journals/<run id>.jsonl` (one `result` rec
    re-launch only what is missing: the 6 gap finders (prompts in `critic.json`), the section writers, judges, assembler.
 3. Remaining pipeline (plan in `plan-synthesis.md`, prompts in `synthesis-prompts.md`):
    a. gap finders → verify → recheck (wf_4f243e8f-296) → `python3 consolidate.py` → `buckets/5-gap-slices.json`.
-   b. section writers for buckets 1-4 (wf_e624a4c2-684) + one writer for bucket 5 → `sections/*.md`.
+   b. DONE for buckets 1-4; still needed: one writer for bucket 5 (gap findings) → `sections/5-gap-slices.md`.
    c. judge panel (2 lenses) → assembler writes `sections/0-head.md` (exec summary, scorecard, top-12, quick wins,
       strategic) and `sections/9-tail.md` (refuted, nits, coverage).
    d. `cat sections/0-head.md sections/1-*.md ... sections/9-tail.md > azapptoolkit-review-2026-09-26.md`; spot-check

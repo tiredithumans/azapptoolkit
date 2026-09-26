@@ -12,6 +12,6 @@ cp $S/buckets/*.json $R/buckets/ 2>/dev/null || true
 cp $S/sections/*.md $R/sections/ 2>/dev/null || true
 cp $S/*.md $R/ 2>/dev/null || true
 cp /root/.claude/projects/-home-user-azapptoolkit/12cb2860-e7bf-55f0-b15e-42e55e824c8b/workflows/scripts/*.js $R/
-# defang: "-----BEGIN X-----" / "-----END X-----" -> "[PEM BEGIN X]" / "[PEM END X]" (also the JSON-escaped \n variants stay intact)
+# defang: "[PEM BEGIN X]" / "[PEM END X]" -> "[PEM BEGIN X]" / "[PEM END X]" (also the JSON-escaped \n variants stay intact)
 grep -rlE -- '-----(BEGIN|END) [A-Z ]+-----' $R | while read -r f; do sed -i -E 's/-----(BEGIN|END) ([A-Z ]+)-----/[PEM \1 \2]/g' "$f"; done
 echo "checkpoint copied to $R; remaining armour literals: $(grep -rcE -- '-----(BEGIN|END) [A-Z ]+-----' $R | awk -F: '{s+=$2} END {print s+0}')"
