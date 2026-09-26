@@ -74,3 +74,8 @@ the first checkpoint commit are listed in `/.gitleaksignore`; delete that file t
 - Judge panel DONE -> `judges.json`. Writer summaries -> `writer-summaries.json`. Counts script -> `counts.py`.
 - Launched final workflow: writer for bucket 5 -> `sections/5-gap-slices.md`, then assembler -> `sections/0-head.md` + `sections/9-tail.md`.
 - Then: cat sections 0,1,2,3,4,5,9 -> `azapptoolkit-review-2026-09-26.md`; spot-check; SendUserFile; chat summary.
+
+## DONE 2026-09-26 17:50 UTC
+- Final report assembled: `azapptoolkit-review-2026-09-26.md` (2127 lines, ~65k words, all 490 surviving findings, appendices).
+  Also copied to `.review-state/azapptoolkit-review-2026-09-26.md` on the branch. Delivered to the user via SendUserFile.
+- Remaining housekeeping for the user: close/drop PR #280 and delete `.review-state/` + `/.gitleaksignore` (checkpoint only).
