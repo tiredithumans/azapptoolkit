@@ -162,7 +162,8 @@ enum ClaimsWrite {
 /// assigned to `sp_id`; `subjects` is the `appliesTo` ids of the one assigned
 /// policy (`None` when none is assigned). Any subject other than `sp_id` — a
 /// second SP, or an application object — makes the policy shared, and a shared
-/// policy is never edited in place or deleted. More than one assigned policy
+/// policy is never edited in place or deleted; so is an empty or missing
+/// `appliesTo`, which proves nothing about who else uses it. More than one assigned policy
 /// should be impossible (Graph allows one per SP); it fails closed, no writes.
 fn plan_claims_write(
     sp_id: &str,
@@ -170,7 +171,11 @@ fn plan_claims_write(
     subjects: Option<&[String]>,
     empty: bool,
 ) -> Result<ClaimsWrite, UiError> {
-    let sole = subjects.is_some_and(|subs| subs.iter().all(|s| s == sp_id));
+    // Sole ownership needs positive proof: `appliesTo` lists this SP and
+    // nothing else. An empty list (replication lag, an odd response) is not
+    // proof — the assignment listing just said this SP has the policy — and
+    // `all()` over nothing would be vacuously true.
+    let sole = subjects.is_some_and(|subs| !subs.is_empty() && subs.iter().all(|s| s == sp_id));
     match assigned {
         [] if empty => Ok(ClaimsWrite::Nothing),
         [] => Ok(ClaimsWrite::Create),
@@ -2345,7 +2350,8 @@ mod tests {
         let shared = vec!["sp".to_string(), "other".to_string()];
         /// (assigned, appliesTo, editor empty, expected plan)
         type Case<'a> = (&'a [String], Option<&'a [String]>, bool, ClaimsWrite);
-        let cases: [Case; 7] = [
+        let none: Vec<String> = Vec::new();
+        let cases: [Case; 9] = [
             (&[], None, true, ClaimsWrite::Nothing),
             (&[], None, false, ClaimsWrite::Create),
             (
@@ -2380,6 +2386,23 @@ mod tests {
             ),
             // No appliesTo proof ⇒ never treated as owned.
             (&one, None, false, ClaimsWrite::Fork { detach: "p".into() }),
+            // An empty appliesTo is inconsistent state, not proof of ownership:
+            // never patched in place, never deleted.
+            (
+                &one,
+                Some(&none),
+                false,
+                ClaimsWrite::Fork { detach: "p".into() },
+            ),
+            (
+                &one,
+                Some(&none),
+                true,
+                ClaimsWrite::Detach {
+                    policy_id: "p".into(),
+                    delete: false,
+                },
+            ),
         ];
         for (assigned, subjects, empty, want) in cases {
             assert_eq!(

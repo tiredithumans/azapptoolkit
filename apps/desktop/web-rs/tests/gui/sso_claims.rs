@@ -72,13 +72,28 @@ async fn an_unreadable_claims_policy_blocks_save_until_it_loads() {
     ts::tick().await;
     assert_eq!(ts::call_count("set_claims_mapping"), 0);
 
+    // Consent makes the next read succeed.
     ts::mock_ok("request_scope_consent", &());
+    let mut readable = fixtures::sso_config("sp-demo", "app-demo");
+    readable.claims_read_failed = false;
+    ts::mock_ok("get_sso_config", &readable);
     button("Load claims").click();
     ts::wait_for(|| ts::call_count("request_scope_consent") == 1).await;
     let call = ts::last_call("request_scope_consent").unwrap();
     assert_eq!(call.arg_str("feature").as_deref(), Some("policy_write"));
-    // Consent lands, then the config is read again.
+    // Consent lands, then the config is read again — and the guard lifts.
     ts::wait_for(|| ts::call_count("get_sso_config") == 2).await;
+    ts::wait_for(|| !ts::body_contains(UNREAD)).await;
+    // Tolerate the remount window, when the button is briefly absent.
+    ts::wait_for(|| {
+        ts::query_all("button").into_iter().any(|el| {
+            el.text_content().unwrap_or_default().trim() == "Save claims"
+                && !el.unchecked_ref::<web_sys::HtmlButtonElement>().disabled()
+        })
+    })
+    .await;
+    button("Save claims").click();
+    ts::wait_for(|| ts::call_count("set_claims_mapping") == 1).await;
 }
 
 #[wasm_bindgen_test]
