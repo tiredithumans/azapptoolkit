@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use chrono::NaiveDate;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -142,6 +143,16 @@ pub struct TenantScopedUi {
     // Lifted so Home's finding drills land with the right group open.
     pub audit_expanded_group: RwSignal<Option<String>>,
     pub credentials_facet: RwSignal<String>,
+    // Creation-date range of the App Registrations / Enterprise filter drawers
+    // (`None` leaves that side open). Nothing outside the views seeds them, but
+    // the lists stay mounted across a tenant switch (`util::keep_alive`), so a
+    // range set in one tenant would silently keep narrowing the next tenant's
+    // list — with the drawer collapsed and only the badge hinting why rows are
+    // missing.
+    pub apps_created_after: RwSignal<Option<NaiveDate>>,
+    pub apps_created_before: RwSignal<Option<NaiveDate>>,
+    pub enterprise_created_after: RwSignal<Option<NaiveDate>>,
+    pub enterprise_created_before: RwSignal<Option<NaiveDate>>,
     // One-shot "open the filter drawer on arrival" flag. The Enterprise list's
     // facet chips live in a drawer collapsed by default, so a drill would land
     // filtered with the active chip hidden; `open_enterprise_with_facet` sets
@@ -223,6 +234,10 @@ impl TenantScopedUi {
             audit_severity: RwSignal::new(String::from("all")),
             audit_expanded_group: RwSignal::new(None),
             credentials_facet: RwSignal::new(String::from("all")),
+            apps_created_after: RwSignal::new(None),
+            apps_created_before: RwSignal::new(None),
+            enterprise_created_after: RwSignal::new(None),
+            enterprise_created_before: RwSignal::new(None),
             pending_open_filters: RwSignal::new(false),
             pending_audit_run: RwSignal::new(false),
             tester_app_id: RwSignal::new(None),
@@ -255,6 +270,10 @@ impl TenantScopedUi {
         self.audit_severity.set(String::from("all"));
         self.audit_expanded_group.set(None);
         self.credentials_facet.set(String::from("all"));
+        self.apps_created_after.set(None);
+        self.apps_created_before.set(None);
+        self.enterprise_created_after.set(None);
+        self.enterprise_created_before.set(None);
         self.pending_open_filters.set(false);
         self.pending_audit_run.set(false);
         self.tester_app_id.set(None);
@@ -451,6 +470,11 @@ mod tests {
             ui.audit_severity.set("critical".into());
             ui.audit_expanded_group.set(Some("ownership".into()));
             ui.credentials_facet.set("expired".into());
+            let date = |d| NaiveDate::from_ymd_opt(2024, 1, d).unwrap();
+            ui.apps_created_after.set(Some(date(1)));
+            ui.apps_created_before.set(Some(date(2)));
+            ui.enterprise_created_after.set(Some(date(3)));
+            ui.enterprise_created_before.set(Some(date(4)));
             ui.pending_open_filters.set(true);
             ui.pending_audit_run.set(true);
             ui.tester_app_id
@@ -486,6 +510,10 @@ mod tests {
             assert_eq!(ui.audit_severity.get_untracked(), "all");
             assert_eq!(ui.audit_expanded_group.get_untracked(), None);
             assert_eq!(ui.credentials_facet.get_untracked(), "all");
+            assert_eq!(ui.apps_created_after.get_untracked(), None);
+            assert_eq!(ui.apps_created_before.get_untracked(), None);
+            assert_eq!(ui.enterprise_created_after.get_untracked(), None);
+            assert_eq!(ui.enterprise_created_before.get_untracked(), None);
             assert!(!ui.pending_open_filters.get_untracked());
             assert!(!ui.pending_audit_run.get_untracked());
             assert_eq!(ui.tester_app_id.get_untracked(), None);

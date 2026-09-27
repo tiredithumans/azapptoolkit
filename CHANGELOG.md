@@ -375,6 +375,17 @@
   counted only the two Log Analytics roles, so an operator with plain Reader saw "?" instead of a
   confirmed role.
 
+- **Key Vault no longer shows the previous tenant's secrets after you switch tenants.** The Key
+  Vault page kept the last vault name and its list of secret names, content types and expiry dates
+  when you switched tenant or signed out, so the next tenant's Key Vault page opened on another
+  tenant's listing, and Reveal sent the old vault name with the new tenant. Switching tenant or
+  signing out now clears the page, and a listing that finishes after you switched is discarded.
+
+- **The creation-date filter on the App Registrations and Enterprise Applications lists now resets
+  when you switch tenants.** A date range set in one tenant kept filtering the next tenant's list,
+  with the filter drawer collapsed so only the small active-filter badge hinted why apps were
+  missing. It now clears with the search and facet filters.
+
 ## [0.30.2] - 2026-09-25
 
 ### Changed

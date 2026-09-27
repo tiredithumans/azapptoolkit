@@ -7,6 +7,11 @@
 //! wipes the sensitive signals whenever the active view leaves Key Vault, so a
 //! revealed secret exists in memory only while this page is on screen — the
 //! page equivalent of the old `if !open` wipe.
+//!
+//! The listing, the vault name and the `loaded` flag are tenant-scoped: a
+//! tenant-watch wipes them on tenant switch / sign-out, and a list or reveal
+//! that resolves after the tenant changed is dropped rather than written into
+//! the next tenant's screen.
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Spinner, SpinnerSize};
@@ -46,6 +51,30 @@ pub fn KeyVaultView() -> impl IntoView {
         }
     });
 
+    // Tenant-scoped: clear on tenant switch / sign-out so another tenant's vault
+    // listing (secret names, content types, expiry) and vault name can never
+    // linger (cross-tenant leakage). `busy` / `revealing` are left to the
+    // in-flight task, which clears them; the task drops its result when the
+    // tenant has changed underneath it.
+    let tenant = session.active_tenant;
+    Effect::new(move |_| {
+        let _ = tenant.get();
+        listed.set(Vec::new());
+        loaded.set(false);
+        vault_name.set(String::new());
+        revealed.set(None);
+        error.set(None);
+    });
+
+    // Whether `tenant_id` is still the active tenant — a response that resolves
+    // after a switch belongs to the previous tenant and must not be shown.
+    let still_active = move |tenant_id: &str| {
+        session
+            .active_tenant
+            .get_untracked()
+            .is_some_and(|c| c.tenant_id == tenant_id)
+    };
+
     let load = move |_| {
         if busy.get() {
             return;
@@ -59,12 +88,15 @@ pub fn KeyVaultView() -> impl IntoView {
                 busy.set(false);
                 return;
             };
-            match keyvault::kv_list_secrets(&t.tenant_id, v.trim()).await {
-                Ok(items) => {
-                    listed.set(items);
-                    loaded.set(true);
+            let result = keyvault::kv_list_secrets(&t.tenant_id, v.trim()).await;
+            if still_active(&t.tenant_id) {
+                match result {
+                    Ok(items) => {
+                        listed.set(items);
+                        loaded.set(true);
+                    }
+                    Err(e) => error.set(Some(e.message)),
                 }
-                Err(e) => error.set(Some(e.message)),
             }
             busy.set(false);
         });
@@ -85,9 +117,12 @@ pub fn KeyVaultView() -> impl IntoView {
                 revealing.set(None);
                 return;
             };
-            match keyvault::kv_get_secret(&t.tenant_id, v.trim(), &secret_name).await {
-                Ok(value) => revealed.set(Some(value)),
-                Err(e) => error.set(Some(e.message)),
+            let result = keyvault::kv_get_secret(&t.tenant_id, v.trim(), &secret_name).await;
+            if still_active(&t.tenant_id) {
+                match result {
+                    Ok(value) => revealed.set(Some(value)),
+                    Err(e) => error.set(Some(e.message)),
+                }
             }
             revealing.set(None);
         });

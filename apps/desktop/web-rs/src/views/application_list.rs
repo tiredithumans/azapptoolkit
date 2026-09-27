@@ -179,11 +179,14 @@ pub fn ApplicationList() -> impl IntoView {
     // Client-side filters over the loaded rows. "any" disables the credential
     // filter; an unset date picker (None) leaves that side of the creation-date
     // range open — together they bound creation date to an inclusive window.
-    // (Local, not lifted: no Home metric drills into the apps credential facet —
-    // the Credential Health card drills into the per-credential Security surface.)
+    // The credential filter is local, not lifted: no Home metric drills into the
+    // apps credential facet (the Credential Health card drills into the
+    // per-credential Security surface). The date range IS lifted to
+    // `TenantScopedUi` so it resets on tenant switch — this view stays mounted,
+    // and a leftover range would silently narrow the next tenant's list.
     let cred_filter = RwSignal::new("any".to_string());
-    let created_after: RwSignal<Option<NaiveDate>> = RwSignal::new(None);
-    let created_before: RwSignal<Option<NaiveDate>> = RwSignal::new(None);
+    let created_after = session.tenant_ui.apps_created_after;
+    let created_before = session.tenant_ui.apps_created_before;
 
     // Row order. `None` keeps the order Graph returned. Local rather than
     // lifted to `TenantScopedUi` for the same reason as `cred_filter`: nothing

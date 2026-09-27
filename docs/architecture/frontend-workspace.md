@@ -143,13 +143,15 @@ which adds it to ONE shared, cross-entity working set:
 
 ## Tenant-scoped UI state: `TenantScopedUi`
 
-Per-list filter state that an outside surface can seed lives on `Session.tenant_ui` (the
-`TenantScopedUi` substruct) — the front-end mirror of the backend's cross-tenant cache-leakage
+Per-list filter state that an outside surface can seed — or that would silently narrow the next
+tenant's list if it survived a switch (the lists stay mounted via `util::keep_alive`) — lives on
+`Session.tenant_ui` (the `TenantScopedUi` substruct) — the front-end mirror of the backend's cross-tenant cache-leakage
 footgun, with the reset enforced **by structure, not vigilance**:
 
 - **What lives there** — the searches (`apps_search` / `enterprise_search` / `mi_search`); the
   facet of every drill target (`enterprise_facet`, `mi_facet`, `credentials_facet`, the audit's
-  `audit_severity`, the Findings pane's `audit_expanded_group`); both bulk selections
+  `audit_severity`, the Findings pane's `audit_expanded_group`); the two lists' creation-date
+  ranges (`apps_created_*` / `enterprise_created_*`); both bulk selections
   (`selected_app_ids`, `selected_audit_ids`); the pending deep-link tabs; and the shell dialog
   flags (`cache_open` / `create_open` / `sso_wizard_open`).
 - **Who seeds it** — Global Search seeds the list search; the Home dashboard's clickable metrics

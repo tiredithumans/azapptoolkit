@@ -3,6 +3,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
@@ -65,4 +66,35 @@ async fn list_error_renders_message() {
     ts::click(LIST_BTN);
 
     ts::wait_for(|| ts::body_contains("Caller lacks Key Vault Secrets User")).await;
+}
+
+#[wasm_bindgen_test]
+async fn tenant_switch_clears_listed_secrets_and_vault_name() {
+    // The view stays mounted across a tenant switch (keep-alive), so tenant A's
+    // listing and vault name must not survive into tenant B's Key Vault page.
+    ts::reset();
+    ts::mock_ok("kv_list_secrets", &fixtures::kv_secrets(&["db-password"]));
+
+    let m = ts::mount_view(|| view! { <KeyVaultView /> });
+    ts::tick().await;
+
+    ts::set_input_value(VAULT_INPUT, "myvault");
+    ts::click(LIST_BTN);
+    ts::wait_for(|| ts::body_contains("db-password")).await;
+
+    let mut other = ts::test_tenant();
+    other.tenant_id = "other-tenant".into();
+    m.session.set_active_tenant(Some(other));
+    ts::tick().await;
+
+    assert!(!ts::body_contains("db-password"), "listing must be wiped");
+    let input: web_sys::HtmlInputElement = ts::query(VAULT_INPUT)
+        .expect("vault input")
+        .dyn_into()
+        .expect("input element");
+    assert_eq!(input.value(), "", "vault name must be wiped");
+    assert!(
+        ts::body_contains("Enter a vault name"),
+        "back to the pre-load state"
+    );
 }

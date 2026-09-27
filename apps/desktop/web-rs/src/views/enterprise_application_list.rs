@@ -50,9 +50,11 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
     // the enterprise-app lens, so it's not offered here.
     let ent_filter = session.tenant_ui.enterprise_facet;
     // Unset date picker (None) leaves that side of the creation-date range open;
-    // together they bound creation date to an inclusive window.
-    let created_after: RwSignal<Option<NaiveDate>> = RwSignal::new(None);
-    let created_before: RwSignal<Option<NaiveDate>> = RwSignal::new(None);
+    // together they bound creation date to an inclusive window. Lifted to
+    // `TenantScopedUi` so it resets on tenant switch — this view stays mounted,
+    // and a leftover range would silently narrow the next tenant's list.
+    let created_after = session.tenant_ui.enterprise_created_after;
+    let created_before = session.tenant_ui.enterprise_created_before;
 
     // Collapsible advanced-filter drawer (saved views + created-on range + facet
     // chips); search stays outside it. Default collapsed to reclaim list space,
