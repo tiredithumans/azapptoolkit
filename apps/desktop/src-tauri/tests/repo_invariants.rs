@@ -21,6 +21,7 @@
 //! - [`commands`] — whole-command-layer scans, and the shared source table
 //! - [`ipc`] — the IPC contract: handler registry ↔ commands ↔ bindings, arg
 //!   keys, return types, and the single tauri-sys door
+//! - [`logging`] — tracing macros set their target with `target:`, not a field
 //! - [`release`] — version identity, CHANGELOG format, mirrored lint block, the
 //!   update gate, the Linux glibc floor and the NSIS install mode
 //! - [`trust`] — every path that mints an authentication trust validates it
@@ -35,6 +36,8 @@ mod commands;
 mod fanout;
 #[path = "repo_invariants/ipc.rs"]
 mod ipc;
+#[path = "repo_invariants/logging.rs"]
+mod logging;
 #[path = "repo_invariants/release.rs"]
 mod release;
 #[path = "repo_invariants/sources.rs"]

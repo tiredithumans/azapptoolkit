@@ -125,28 +125,51 @@ impl CancelToken {
     }
 }
 
+/// Where a resolved client/tenant id came from — logged at startup, because
+/// "is the env override, settings.json or the build winning?" is the classic
+/// support question the three-way resolution raises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdSource {
+    Env,
+    Settings,
+    Baked,
+    Unset,
+}
+
+impl IdSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            IdSource::Env => "env",
+            IdSource::Settings => "settings.json",
+            IdSource::Baked => "baked",
+            IdSource::Unset => "unset",
+        }
+    }
+}
+
 /// Resolution order for a client/tenant id: a non-empty runtime env var (for
 /// MDM/automation overrides), then the user's `settings.json` value (written by
 /// the first-run config screen), then the build-time bake from `.env`, then the
 /// placeholder default — which makes sign-in fail and the config screen show.
+/// Returns the value together with the [`IdSource`] that supplied it.
 fn resolve(
     env_var: &str,
     settings: Option<&str>,
     baked: Option<&'static str>,
     default: &'static str,
-) -> String {
+) -> (String, IdSource) {
     if let Ok(v) = std::env::var(env_var)
         && !v.is_empty()
     {
-        return v;
+        return (v, IdSource::Env);
     }
     if let Some(v) = settings.filter(|s| !s.is_empty()) {
-        return v.to_string();
+        return (v.to_string(), IdSource::Settings);
     }
-    baked
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| default.to_string())
+    match baked.filter(|s| !s.is_empty()) {
+        Some(v) => (v.to_owned(), IdSource::Baked),
+        None => (default.to_string(), IdSource::Unset),
+    }
 }
 
 /// Lock → check → build → insert: the shape every per-tenant client cache here
@@ -248,7 +271,7 @@ impl AppState {
         // The user's persisted IDs (first-run config screen) sit between env
         // vars and the build-time bake in the resolution order.
         let settings = UserSettings::stored(&crate::config_directory());
-        let client_id = resolve(
+        let (client_id, client_id_source) = resolve(
             "AZAPPTOOLKIT_CLIENT_ID",
             settings.client_id.as_deref(),
             BUILD_CLIENT_ID,
@@ -257,12 +280,13 @@ impl AppState {
         // Canonical (lowercase) so an env/`.env`-baked or pre-fix settings value
         // typed in uppercase still equals the id token's `tid`, the cache keys
         // and the remembered account's tenant.
-        let tenant_id = canonical_tenant_id(&resolve(
+        let (raw_tenant, tenant_id_source) = resolve(
             "AZAPPTOOLKIT_TENANT_ID",
             settings.tenant_id.as_deref(),
             BUILD_TENANT_ID,
             DEFAULT_TENANT_ID,
-        ));
+        );
+        let tenant_id = canonical_tenant_id(&raw_tenant);
         if tenant_id == DEFAULT_TENANT_ID {
             tracing::warn!(
                 "AZAPPTOOLKIT_TENANT_ID is not set; sign-in will fail until configured (first-run screen)."
@@ -273,8 +297,20 @@ impl AppState {
                 "AZAPPTOOLKIT_CLIENT_ID is not set; sign-in will fail until configured (first-run screen)."
             );
         }
+        let auth = EntraAuthService::new(client_id.clone(), tenant_id.clone());
+        // Both ids are public identifiers (docs/DEVELOPMENT.md) and the auth
+        // crate already logs the tenant; only the values and their sources are
+        // recorded here, never the rest of settings.json.
+        tracing::info!(
+            cloud = ?auth.cloud(),
+            tenant_id = %tenant_id,
+            tenant_id_source = tenant_id_source.as_str(),
+            client_id = %client_id,
+            client_id_source = client_id_source.as_str(),
+            "resolved auth config"
+        );
         Self {
-            auth: EntraAuthService::new(client_id.clone(), tenant_id.clone()),
+            auth,
             client_id,
             tenant_id,
             cache: Cache::new(),
@@ -743,7 +779,39 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::CancelFlag;
+    use super::{CancelFlag, IdSource, resolve};
+
+    /// Never set by anything, so the env-var branch is skipped. The `Env` arm
+    /// itself is not tested: it needs `std::env::set_var`, which is `unsafe`
+    /// and the workspace denies `unsafe_code`.
+    const NEVER_SET: &str = "AZAPPTOOLKIT_TEST_NEVER_SET_F484";
+
+    #[test]
+    fn a_settings_value_beats_the_bake() {
+        assert_eq!(
+            resolve(NEVER_SET, Some("s"), Some("b"), "d"),
+            ("s".to_string(), IdSource::Settings)
+        );
+    }
+
+    #[test]
+    fn an_empty_settings_value_falls_through_to_the_bake() {
+        assert_eq!(
+            resolve(NEVER_SET, Some(""), Some("b"), "d"),
+            ("b".to_string(), IdSource::Baked)
+        );
+    }
+
+    #[test]
+    fn nothing_configured_is_the_unset_default() {
+        assert_eq!(
+            resolve(NEVER_SET, None, Some(""), "d"),
+            ("d".to_string(), IdSource::Unset)
+        );
+        assert_eq!(resolve(NEVER_SET, None, None, "d").1, IdSource::Unset);
+        assert_eq!(IdSource::Unset.as_str(), "unset");
+        assert_eq!(IdSource::Settings.as_str(), "settings.json");
+    }
 
     #[test]
     fn a_claimed_run_starts_uncancelled_and_stops_on_cancel() {

@@ -119,7 +119,7 @@ pub async fn list_applications_with_pairing(
         .get::<Vec<ApplicationListRowDto>>(CacheKind::Lists, &cache_key)
     {
         tracing::debug!(
-            target = "azapptoolkit::cache",
+            target: "azapptoolkit::cache",
             kind = "Lists",
             key = cache_key,
             "hit"
@@ -127,7 +127,7 @@ pub async fn list_applications_with_pairing(
         return Ok(cached);
     }
     tracing::debug!(
-        target = "azapptoolkit::cache",
+        target: "azapptoolkit::cache",
         kind = "Lists",
         key = cache_key,
         "miss"

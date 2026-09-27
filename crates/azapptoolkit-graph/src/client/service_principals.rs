@@ -186,7 +186,7 @@ impl GraphClient {
         // others): if `first_page` saturates well below 999 while more pages
         // follow, the cap is the smaller value and raising `$top` is a no-op.
         tracing::debug!(
-            target = "azapptoolkit::graph",
+            target: "azapptoolkit::graph",
             first_page = page.items.len(),
             "service-principal index first page"
         );
@@ -206,14 +206,14 @@ impl GraphClient {
             .await?;
         if truncated {
             tracing::warn!(
-                target = "azapptoolkit::graph",
+                target: "azapptoolkit::graph",
                 cap = SP_INDEX_MAX,
                 "service-principal index hit the cap; returning the first {SP_INDEX_MAX} \
                  — lists/search cover this subset",
             );
         }
         tracing::debug!(
-            target = "azapptoolkit::graph",
+            target: "azapptoolkit::graph",
             total = all.len(),
             truncated,
             "service-principal index total"
@@ -254,7 +254,7 @@ impl GraphClient {
             .await?;
         if truncated {
             tracing::warn!(
-                target = "azapptoolkit::graph",
+                target: "azapptoolkit::graph",
                 cap = SP_INDEX_MAX,
                 "SAML SSO service-principal scan hit the cap; signing-certificate \
                  coverage is partial",

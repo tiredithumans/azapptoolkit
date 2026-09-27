@@ -408,12 +408,32 @@
   with the filter drawer collapsed so only the small active-filter badge hinted why apps were
   missing. It now clears with the search and facet filters.
 
+- **The app now starts when it cannot write its log folder.** If the log folder could not be
+  created or written (a read-only or redirected profile folder, a locked-down kiosk account), the
+  app closed at launch with no window, no error and no log to explain why. It now opens and logs to
+  the console instead.
+
+- **Log and settings folders are readable by your account only on macOS and Linux.** The logs
+  record tenant IDs, app names and Microsoft Graph error details, but their folder was created with
+  default permissions, so on a shared machine other accounts could read two weeks of them. The app
+  now creates both folders, and tightens existing ones, so that only your account can open them.
+
 ### Changed
 
 - **The Cache dialog can clear each cache on its own.** Service principal, permissions, audit and
   list entries each get a Clear button in their row, so dropping a stale audit result no longer
   means clearing everything and rebuilding the tenant-wide indexes. The on/off button now says what
   it will do ("Disable cache" / "Enable cache") instead of "Toggle enabled".
+
+- **On Windows, logs are now written to `%LOCALAPPDATA%\azapptoolkit\logs`.** They were in
+  `%APPDATA%` (Roaming), which roaming profiles copy between machines at every sign-in and sign-out.
+  Settings stay in `%APPDATA%\azapptoolkit`, and the old `%APPDATA%\azapptoolkit\logs` folder can
+  be deleted.
+
+- **Log files now say more about where they came from.** Each line names the component that wrote
+  it, and the first lines of a run record the OS, architecture, build type, cloud, tenant, and
+  whether the client and tenant IDs came from an environment variable, settings.json or the build.
+  A log excerpt attached to a bug report no longer needs these asked for separately.
 
 ## [0.30.2] - 2026-09-25
 

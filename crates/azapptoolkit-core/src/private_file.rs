@@ -53,6 +53,44 @@ pub fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     result
 }
 
+/// Creates `dir` (and any missing ancestors), readable only by its owner.
+///
+/// The directories this is for hold what the files above do not: the rolling
+/// logs carry tenant ids, app display names, correlation ids, Microsoft Graph
+/// error bodies and panic backtraces, and `tracing_appender` creates each log
+/// file at the process umask (commonly `0644`). A `0700` directory is the only
+/// control over who can read them, and the config directory beside them holds
+/// `settings.json`.
+///
+/// On **unix** every directory this call creates is `0700`; ancestors that
+/// already existed are left alone, and only the leaf is tightened, so a
+/// directory created before this existed does not keep its `0755` forever. A
+/// path with no final component (`.`, `/`, `x/..`) is never re-moded: the
+/// config directory falls back to `.` when `HOME` is unset, and chmodding the
+/// working directory is not this function's business.
+///
+/// **Windows** has no mode bits and Rust's std exposes no portable ACL API, so
+/// there this is `create_dir_all`: the directory inherits the ACL of the
+/// per-user profile it sits under, as [`write_owner_only`]'s files do.
+pub fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        if dir.file_name().is_some() {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
 /// A temp path beside `path`, so the rename stays within one filesystem.
 fn temp_sibling(path: &Path) -> std::path::PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -200,5 +238,61 @@ mod tests {
         write_owner_only(&path, b"a-long-previous-secret").unwrap();
         write_owner_only(&path, b"short").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "short");
+    }
+
+    #[test]
+    fn creates_nested_dirs() {
+        let dir = tempdir();
+        let nested = dir.0.join("a").join("b");
+        create_owner_only_dir(&nested).unwrap();
+        assert!(nested.is_dir());
+        // Idempotent: the app calls it on every launch.
+        create_owner_only_dir(&nested).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_dir_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        let nested = dir.0.join("a").join("b");
+        create_owner_only_dir(&nested).unwrap();
+        for d in [dir.0.join("a"), nested] {
+            let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{} was {mode:o}", d.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_world_readable_dir_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        let d = dir.0.join("d");
+        std::fs::create_dir(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        create_owner_only_dir(&d).unwrap();
+
+        let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "got {mode:o}");
+    }
+
+    /// The `.` fallback of the config directory must never chmod the working
+    /// directory. Exercised on a private temp dir only: were the guard broken,
+    /// running this against a real `.` or `/tmp` would re-mode it.
+    #[cfg(unix)]
+    #[test]
+    fn a_nameless_path_is_never_remoded() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let nameless = dir.0.join("sub").join("..");
+        assert!(nameless.file_name().is_none());
+        assert!(create_owner_only_dir(&nameless).is_ok());
+
+        let mode = std::fs::metadata(&dir.0).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "the parent was re-moded to {mode:o}");
     }
 }

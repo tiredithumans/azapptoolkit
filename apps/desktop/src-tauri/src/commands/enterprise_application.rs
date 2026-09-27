@@ -71,10 +71,10 @@ pub async fn list_enterprise_applications(
         .cache
         .get::<Vec<EnterpriseApplicationDto>>(CacheKind::Lists, &key)
     {
-        tracing::debug!(target = "azapptoolkit::cache", kind = "Lists", key = %key, "hit");
+        tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "hit");
         return Ok(cached);
     }
-    tracing::debug!(target = "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
+    tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
 
     let client = state.graph_for(&tenant_id);
 

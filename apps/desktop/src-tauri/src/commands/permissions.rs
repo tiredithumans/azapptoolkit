@@ -52,10 +52,10 @@ pub async fn list_app_role_resources(
         .cache
         .get::<Vec<CatalogResourceSummary>>(CacheKind::Lists, &key)
     {
-        tracing::debug!(target = "azapptoolkit::cache", kind = "Lists", key = %key, "hit");
+        tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "hit");
         return Ok(cached);
     }
-    tracing::debug!(target = "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
+    tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
 
     let client = state.graph_for(&tenant_id);
     let mut rows: Vec<CatalogResourceSummary> = client

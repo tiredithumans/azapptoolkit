@@ -54,10 +54,10 @@ pub async fn list_managed_identities(
         .cache
         .get::<Vec<ManagedIdentityDto>>(CacheKind::Lists, &key)
     {
-        tracing::debug!(target = "azapptoolkit::cache", kind = "Lists", key = %key, "hit");
+        tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "hit");
         return Ok(cached);
     }
-    tracing::debug!(target = "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
+    tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
 
     // Filter the SHARED service-principal index rather than running a second,
     // near-identical `/servicePrincipals` scan of our own. That index is

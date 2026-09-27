@@ -435,14 +435,15 @@ national-cloud admin center.
 
 ## Logs
 
-Rolling daily log files are written to the platform's app-data folder:
+Each day's log is a file named `azapptoolkit.YYYY-MM-DD.log`, in:
 
-- Windows: `%APPDATA%\azapptoolkit\logs\azapptoolkit.log*`
+- Windows: `%LOCALAPPDATA%\azapptoolkit\logs\` (earlier versions wrote to `%APPDATA%\azapptoolkit\logs\`, which can be deleted)
 - macOS: `~/Library/Application Support/azapptoolkit/logs/`
 - Linux: `~/.local/share/azapptoolkit/logs/`
 
-Increase verbosity with `RUST_LOG=debug` (or the narrower `EnvFilter`
-syntax — for example `azapptoolkit_graph=trace`).
+The newest 14 files (about two weeks) are kept and older ones are deleted. Each line names the component that wrote it, and a backend crash (panic) is written to the same file with a backtrace. The first lines of each run record the app version, OS, architecture, cloud and tenant. On macOS and Linux the folder is readable by your account only. If the folder can't be written, the app still starts and logs to the console instead.
+
+Increase verbosity with `RUST_LOG=debug` (or the narrower `EnvFilter` syntax, for example `azapptoolkit_graph=trace`, or `azapptoolkit::cache=debug` for cache hits and misses).
 
 ## Data and privacy
 
