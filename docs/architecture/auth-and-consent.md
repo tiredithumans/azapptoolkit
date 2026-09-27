@@ -10,7 +10,31 @@ Access tokens are refreshed lazily (~60s before expiry) behind a shared mutex; r
 persist in the OS keyring, access tokens never touch disk (in-memory, zeroized on drop). Write
 scopes are consented **incrementally** on first write — a browse-only session holds no
 mutate-capable token. Error codes distinguish failure modes (`not_signed_in`, `keyring`,
-`token_exchange`, `network`, `authorization`, `consent_required`).
+`token_exchange`, `network`, `authorization`, `consent_required`, `interaction_required`,
+`cancelled`).
+
+**The cache keys on CAE-ness.** Access tokens are cached per `(tenant, scope_key, cae)`. Every Graph
+adapter is `ScopedTokenAdapter::new_cae` (tokens minted with the `cp1` client capability, revoked
+promptly on a password reset, disabled user or risky sign-in), while ARM / Exchange / Key Vault /
+Log Analytics stay non-CAE. With CAE-ness outside the key, whichever flow seeded a slot first decided
+for both; now a mismatch costs one extra silent refresh, never a wrong token. The flows that seed a
+Graph slot mint CAE to match: `sign_in` and `reauthenticate` (the `claims` parameter rides both the
+`/authorize` URL and the code redemption), `refresh_session` / `restore_session`
+(`access_token_for_scopes_cae`), and consent / step-up when `EntraAuthService::is_graph_scope_set`
+says the requested set is a Graph one. The per-scope refresh lock stays keyed on
+`(tenant, scope_key)` only.
+
+**The `/token` POST rides the shared retry budget** (`core::http_retry::with_retries`): a 429
+(honouring `Retry-After`) or a 5xx / network failure is retried; any other rejection is terminal and
+classified as before. The class comes from the grant (`retry_class_for`): a `refresh_token` grant is
+idempotent, an `authorization_code` is single-use, so only a 429 replays it. A timeout is terminal,
+because the refresh holds its per-scope lock across the backoff (intended — same-key waiters get the
+retried result instead of re-POSTing into the same throttle).
+
+**An abandoned browser round trip is `cancelled`.** The redirect wait (`REDIRECT_WAIT`, 300 s)
+timing out, or Entra redirecting `access_denied` with `error_subcode=cancel` or with no AADSTS code
+in its description, is `AuthError::Cancelled`. A coded `access_denied` (AADSTS65004, a declined
+consent) stays `authorization`.
 
 **Launch restore.** The keyring entry is keyed `{tenant}:{oid}`, and the oid used to live only in
 memory — so nothing could read the refresh token back at startup, and every launch showed the
@@ -38,7 +62,7 @@ Some features need admin-consent/premium scopes beyond the sign-in bundle:
 | `Policy.Read.All` | Conditional Access visibility (the Conditional Access tab) |
 | `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` (one token) | Claims-mapping policies — SAML attribute & claim customization in the SSO wizard / detail "SSO" tab. The policy object itself needs only the Policy scope, but the service-principal `$ref` assign/list/remove need both in the same token, so one bundle (and one consent) covers reading and saving. A failed claims read sets `SsoConfigDto.claims_read_failed`; the SSO tab then turns Save off and offers "Load claims" (consent + reload) rather than saving over claims it never loaded. |
 | `Sites.FullControl.All` | SharePoint `Sites.Selected` — list/grant/revoke a site's per-app permissions in the Permissions tab's SharePoint site access section. The site-permission endpoints require it even for **reads**, since the verb-selected read token only holds `Directory.Read.All`. |
-| `GroupMember.ReadWrite.All` | Group-membership add/remove for a service principal (the enterprise-app Access tab's "Group memberships" section) — the access model for group-gated APIs like Power BI / Fabric tenant settings. Deliberately the membership-only scope, not `Group.ReadWrite.All` (the app never creates/deletes groups). Membership **reads** ride the sign-in `Directory.Read.All`; only the `$ref` writes need this. |
+| `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` (one token) | Group-membership add/remove for a service principal (the enterprise-app Access tab's "Group memberships" section) — the access model for group-gated APIs like Power BI / Fabric tenant settings. Learn's "Add members" table documents the pair for a `servicePrincipal` member (Graph must also write the SP); `Application.ReadWrite.All` is already in the write bundle, so this widens nothing. Deliberately the membership-only group scope, not `Group.ReadWrite.All` (the app never creates/deletes groups). Membership **reads** ride the sign-in `Directory.Read.All`; only the `$ref` writes need this. |
 | ARM `management.azure.com/.default` | Managed-identity Azure RBAC |
 | Log Analytics `api.loganalytics.azure.com/.default` | Observed Graph activity (granted-vs-used) — queries `MicrosoftGraphActivityLogs` from a Log Analytics workspace (its own data-plane host + audience, distinct from ARM; sovereign variants via `CloudEnvironment::log_analytics_resource`). Also needs the Log Analytics Reader Azure RBAC role on the workspace and Entra diagnostic settings exporting the table. |
 
@@ -105,6 +129,32 @@ discovers the gap) or needs a specific feature's button (e.g. `AppState::ensure_
   behind it is gated on that scope + Entra ID P1/P2;
   `AuditRunResult.sign_in_report_available`/`sign_in_consent_required` drive the banner/empty state.
 
+## A step-up is not a dead session
+
+A Conditional Access policy can demand an interactive step — MFA, registration, an external
+challenge — for **one resource** (a "Require MFA for Azure management" or authentication-strength
+policy). The silent grant for that audience then fails `interaction_required` / `login_required`,
+or `invalid_grant` carrying AADSTS50074/50076/50079/50158. `classify_token_error` maps all of these
+to `AuthError::InteractionRequired` (code **`interaction_required`**) — after the consent check, so a
+consent gap still wins — and `access_token_inner` does **not** purge on it: the refresh token is
+still valid for every other audience (MSAL keeps the account on `InteractionRequiredAuthError`).
+Classifying it as `InvalidGrant` used to delete the keyring token and forget the tenant, so an
+ARM-only MFA policy signed the operator out of Graph browsing, and re-authenticating on the Graph
+read scopes never met the ARM policy, so the purge repeated.
+
+- `interaction_required` is a `core::reauth::PASSTHROUGH_NON_FATAL_CODES` entry: it survives every
+  client's `Token` arm, never halts a fan-out, and is not retryable. It must never join
+  `REAUTH_FATAL_CODES`.
+- Recovery: `Session::report_interaction_required` raises a **Verify identity** toast whose action
+  calls `request_scope_step_up(tenant_id, feature)` → `EntraAuthService::step_up_for_scopes` — one
+  `prompt=login` round trip for that feature's scopes (the shared core with `consent_for_scopes`,
+  identity-checked the same way), which seeds the token cache so the retried command is silent. The
+  feature is the caller's declared `consent_feature` (default `"write"`), the same limitation as
+  consent: nothing in the error names the audience.
+- A step-up on the Graph read scopes (tenant-wide MFA, sign-in frequency) comes back from
+  `refresh_session` as `interaction_required`; **Refresh token** falls back to `reauthenticate`
+  for it, which is exactly that step-up.
+
 ## Force re-auth in place — never make the user sign out
 
 A dead refresh token can't be re-minted silently: `InvalidGrant` / `RefreshTokenMissing` both map
@@ -134,12 +184,14 @@ which a sign-out/sign-in cycle would.
   because Entra issues `tid` lowercase and the tid check, cache keys and launch restore compare
   verbatim.
 - Front-end wiring: `Session::spawn_refresh_token` tries silent `refresh_session` first, then
-  falls back to `reauthenticate` on those two codes. It is the one entry for the top-bar **Refresh
+  falls back to `reauthenticate` on those two codes (and on `interaction_required`, the Graph
+  read-scope step-up). It is the one entry for the top-bar **Refresh
   token** button (`shell.rs`, next to the tenant chip) and the 401 toast below, and its in-flight
   guard (`Session.token_refreshing` / `token_reauthing`) lives on the session, so neither trigger
   can race a second refresh or a second browser flow.
   `Session::report_recovery_action` is the one ordering of the recovery toasts — dead session
-  (**Re-authenticate**) → rejected token (**Refresh token**) → missing consent (**Grant consent**) —
+  (**Re-authenticate**) → rejected token (**Refresh token**) → missing consent (**Grant consent**)
+  → Conditional Access step-up (**Verify identity**) —
   used by both `report_command_error_for` (the central sink behind `run_toast_err`; anything else
   is a plain error toast) and `CommandState::run` (inline-error surfaces, which keep their inline
   text as well).

@@ -1,6 +1,7 @@
-//! Command-error reporting, in-place re-authentication, and incremental consent.
+//! Command-error reporting, in-place re-authentication, incremental consent,
+//! and Conditional Access step-up.
 //!
-//! Three failures reach this sink that the message alone can never resolve,
+//! Four failures reach this sink that the message alone can never resolve,
 //! and each has exactly one in-place lever:
 //!
 //! - a **dead session** is re-authenticated in place, never signed out (signing
@@ -9,10 +10,13 @@
 //!   by the same "Refresh token" lever the top bar offers, falling back to
 //!   re-authentication when the session turns out to be dead;
 //! - a **missing admin consent** is granted incrementally, because a silent
-//!   `refresh_token` grant can only *use* consent, never obtain it.
+//!   `refresh_token` grant can only *use* consent, never obtain it;
+//! - a **Conditional Access step-up** (`interaction_required` — MFA or another
+//!   interactive step one resource demands) is completed in the browser for
+//!   that resource, keeping the session: the refresh token is still good.
 //!
 //! Each gets a toast action rather than a red line, so none is a dead end.
-//! [`Session::report_recovery_action`] is the one ordering of the three, shared
+//! [`Session::report_recovery_action`] is the one ordering of the four, shared
 //! by the toast surfaces and the inline-error ones (`CommandState::run`).
 
 use super::*;
@@ -97,13 +101,42 @@ impl Session {
         });
     }
 
+    /// Complete a Conditional Access step-up for `feature`'s scopes — one
+    /// browser round trip (`prompt=login`) that satisfies the MFA or other
+    /// interactive step the resource demands — then tell the user the action
+    /// is theirs to repeat. The twin of [`Self::spawn_scope_consent`], with the
+    /// same feature keys and the same "retry" wording (this sink never holds
+    /// the failed operation, so it cannot replay it).
+    pub fn spawn_scope_step_up(&self, feature: &'static str) {
+        let session = *self;
+        leptos::task::spawn_local(async move {
+            let Some(tenant) = session.active_tenant.get_untracked() else {
+                return;
+            };
+            match crate::bindings::auth::request_scope_step_up(&tenant.tenant_id, feature).await {
+                Ok(()) => {
+                    session.toast_success("Verified — retry the action that failed.");
+                }
+                Err(e) => {
+                    session.toast_error(
+                        format!("Couldn't complete verification: {}", e.message),
+                        None,
+                    );
+                }
+            }
+        });
+    }
+
     /// Re-mint the session's tokens in place (no sign-out) so a rejected or
     /// stale token — or a role activated since sign-in — is replaced. Tries the
     /// silent `refresh_session` first; if the session is dead (an
     /// expired/revoked or missing refresh token, surfaced as
-    /// `refresh_missing`/`not_signed_in`), falls back to ONE interactive
-    /// `reauthenticate` — still no sign-out, so the cached lists + audit run
-    /// survive. `token_reauthing` is held true while the browser flow is open.
+    /// `refresh_missing`/`not_signed_in`) or needs a Conditional Access step-up
+    /// on the Graph read scopes (`interaction_required` — tenant-wide MFA or a
+    /// sign-in-frequency policy), falls back to ONE interactive
+    /// `reauthenticate` (`prompt=login` on exactly those scopes, so it is that
+    /// step-up) — still no sign-out, so the cached lists + audit run survive.
+    /// `token_reauthing` is held true while the browser flow is open.
     ///
     /// Only [`Self::spawn_refresh_token`] calls this, after claiming the
     /// in-flight flag.
@@ -119,10 +152,10 @@ impl Session {
                      Retry the action that failed.",
                 );
             }
-            Err(e) if e.is_reauth_fatal() => {
-                // Silent re-mint can't fix a dead refresh token; re-auth
-                // interactively in place rather than dumping the user to the
-                // sign-in screen.
+            Err(e) if e.is_reauth_fatal() || e.is_interaction_required() => {
+                // Silent re-mint can't fix a dead refresh token or satisfy a
+                // step-up; re-auth interactively in place rather than dumping
+                // the user to the sign-in screen.
                 session.token_reauthing.set(true);
                 match crate::bindings::auth::reauthenticate(&tenant).await {
                     Ok(_) => {
@@ -239,6 +272,43 @@ impl Session {
         true
     }
 
+    /// When `e` means a Conditional Access policy wants an interactive step
+    /// (`interaction_required` — MFA, registration, an external challenge) for
+    /// the resource the command needed, show the persistent error toast whose
+    /// action completes it (see [`Self::spawn_scope_step_up`]) and return
+    /// `true`; otherwise show nothing and return `false`.
+    ///
+    /// The session is fine — the refresh token still serves every other
+    /// audience, which is why this is not the Re-authenticate toast (and why
+    /// the backend no longer purges on this code). The wording is ours, not
+    /// `e.message`, which carries an AADSTS code the operator cannot act on.
+    ///
+    /// `feature` is the caller's declared `consent_feature` — the same
+    /// limitation as consent: nothing in the error names the audience. A
+    /// step-up is per audience, so for any Graph failure any Graph set works;
+    /// a component whose commands ride ARM / Exchange / Log Analytics declares
+    /// that feature via `use_command().with_consent_feature(..)`.
+    pub fn report_interaction_required(
+        &self,
+        e: &azapptoolkit_dto::UiError,
+        feature: &'static str,
+    ) -> bool {
+        if !e.is_interaction_required() {
+            return false;
+        }
+        let session = *self;
+        self.push_toast(
+            ToastKind::Error,
+            "Microsoft Entra needs you to verify your identity (for example, \
+             multi-factor authentication) for this action.",
+            Some("Verify identity".to_string()),
+            Some(std::rc::Rc::new(move || {
+                session.spawn_scope_step_up(feature)
+            })),
+        );
+        true
+    }
+
     /// Surface a failed command with the Graph **write** scopes as the consent
     /// recovery — see [`Self::report_command_error_for`], which this delegates
     /// to. Write scopes are the right default because every mutating command
@@ -252,9 +322,12 @@ impl Session {
     /// The recovery actions a message alone can never provide, in priority
     /// order: dead session ([`Self::report_if_session_dead`]) → rejected token
     /// ([`Self::report_if_token_rejected`]) → missing consent
-    /// ([`Self::report_consent_required`]). Raises at most one toast and returns
-    /// `true` when it did. A dead session outranks the rest because it can
-    /// neither refresh nor consent to anything.
+    /// ([`Self::report_consent_required`]) → Conditional Access step-up
+    /// ([`Self::report_interaction_required`]). Raises at most one toast and
+    /// returns `true` when it did. A dead session outranks the rest because it
+    /// can neither refresh, consent nor verify anything; the codes are
+    /// otherwise disjoint, so the order among the last three only fixes which
+    /// check runs first.
     ///
     /// The one ordering, shared by the toast surfaces
     /// ([`Self::report_command_error_for`]) and the inline-error ones
@@ -267,6 +340,7 @@ impl Session {
         self.report_if_session_dead(e)
             || self.report_if_token_rejected(e)
             || self.report_consent_required(e, consent_feature)
+            || self.report_interaction_required(e, consent_feature)
     }
 
     /// Surface a failed command: the recovery toast when one applies (see
@@ -393,6 +467,33 @@ mod tests {
                     !t.message.starts_with("unauthorized (401)"),
                     "the bare status line adds nothing: {}",
                     t.message
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn an_mfa_step_up_offers_verify_identity_not_reauth() {
+        // A CA step-up for one resource used to purge the whole session; the
+        // lever it needs is a scope-targeted verification, never Re-authenticate.
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            session.report_command_error(&UiError::new(
+                "interaction_required",
+                "additional verification required for this resource \
+                 (interaction_required (AADSTS50076))",
+                false,
+            ));
+            session.toasts.with_untracked(|list| {
+                assert_eq!(list.len(), 1);
+                let t = &list[0];
+                assert!(matches!(t.kind, ToastKind::Error));
+                assert_eq!(t.action_label.as_deref(), Some("Verify identity"));
+                assert!(t.action.is_some(), "the verify action is the whole point");
+                assert!(
+                    !t.message.contains("AADSTS"),
+                    "AAD's text names a code the operator can't act on"
                 );
             });
         });

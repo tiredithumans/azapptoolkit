@@ -79,6 +79,15 @@ pub async fn request_scope_consent(tenant_id: &str, feature: &str) -> Result<(),
     invoke_result("request_scope_consent", ConsentArgs { tenant_id, feature }).await
 }
 
+/// Completes a Conditional Access step-up (MFA, registration, an external
+/// challenge) for a feature's scopes — the recovery for a command that failed
+/// with the `interaction_required` code. One browser round trip with
+/// `prompt=login`, pinned to the signed-in account; the session is never
+/// dropped. Takes the same feature keys as [`request_scope_consent`].
+pub async fn request_scope_step_up(tenant_id: &str, feature: &str) -> Result<(), UiError> {
+    invoke_result("request_scope_step_up", ConsentArgs { tenant_id, feature }).await
+}
+
 /// Cheap probe used by the App shell to short-circuit when the WASM bundle is
 /// loaded outside the Tauri webview (e.g. during a `trunk serve` smoke run).
 pub fn is_tauri_runtime() -> bool {

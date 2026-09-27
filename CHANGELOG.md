@@ -2,6 +2,32 @@
 
 ### Fixed
 
+- **A multi-factor prompt required for Azure, Exchange or Log Analytics no longer signs you out of
+  everything.** When a Conditional Access policy required extra verification for one service, the
+  app threw away your whole session. Every view, including browsing Entra ID, then needed
+  Re-authenticate, and when the policy covered only that one service, re-authenticating didn't
+  clear it, so the prompt came back. Your session is now kept, and the error offers "Verify
+  identity", which completes the check for that service in your browser. Refresh token handles the
+  same prompt for Microsoft Graph by re-authenticating in place.
+- **Microsoft Graph tokens obtained at sign-in, launch, Refresh token and Grant consent now support
+  Continuous Access Evaluation.** The app has always asked Graph for tokens that are revoked
+  promptly when a password is reset, a user is disabled or a sign-in is flagged as risky. Tokens
+  from those flows lacked it for up to their full lifetime.
+- **A busy or briefly unavailable Microsoft sign-in service no longer fails the action or signs you
+  out at launch.** Token requests are now retried after a throttling (429) or server error, waiting
+  as long as the service asks, like every other Microsoft call the app makes. Access Readiness no
+  longer shows "Couldn't determine" for a scope just because several token requests ran at once. A
+  brief outage at launch no longer sends you back through the browser sign-in.
+- **Adding or removing an enterprise app from a security group now requests every permission
+  Microsoft Graph requires for it.** Graph needs Application.ReadWrite.All as well as
+  GroupMember.ReadWrite.All to add a service principal to a group. The app asked only for the
+  second, so the change could be refused even though Access Readiness said the scope was consented.
+  You may be asked to consent once; Access Readiness now lists both scopes.
+- **Closing the browser during sign-in, or cancelling at the Microsoft sign-in page, now says so
+  instead of blaming your network or an administrator.** An abandoned sign-in timed out after five
+  minutes with "Check your network and try again". Cancelling showed "The sign-in was declined. An
+  administrator may need to grant the app consent." Both now say the browser sign-in was closed
+  before it finished.
 - **The audit now scores the read-only halves of permission families it already scores high.**
   Org-wide application grants of `Contacts.Read`, `MailboxSettings.Read`, `Notes.Read.All`,
   `Device.Read.All`, `Application.Read.All`, `GroupMember.Read.All` and

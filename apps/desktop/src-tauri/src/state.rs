@@ -543,8 +543,10 @@ impl AppState {
                 tenant_id.to_string(),
                 self.auth.default_graph_sharepoint_scopes(),
             );
-            // GroupMember.ReadWrite.All for adding/removing a service principal as
-            // a security-group member (group-gated APIs like Power BI / Fabric).
+            // GroupMember.ReadWrite.All + Application.ReadWrite.All (Graph needs
+            // both to add a service principal) for adding/removing a service
+            // principal as a security-group member (group-gated APIs like
+            // Power BI / Fabric).
             // Same on-demand, incremental-consent contract — never at sign-in.
             let group_member_token = ScopedTokenAdapter::new_cae(
                 self.auth.clone(),
@@ -647,9 +649,10 @@ impl AppState {
     /// cached and the subsequent client call reuses it, so the happy path costs
     /// no extra round trip.
     ///
-    /// `cae` MUST match the CAE-ness of the adapter that later consumes the same
-    /// scope set: the token cache key omits CAE-ness, so a non-CAE pre-warm would
-    /// make a `new_cae` adapter reuse a non-CAE token (and vice versa). The Graph
+    /// `cae` should match the CAE-ness of the adapter that later consumes the
+    /// same scope set: the token cache keys on CAE-ness, so a mismatched pre-warm
+    /// can no longer serve a wrong token, but it lands in the other slot and the
+    /// adapter pays one extra silent refresh instead of reusing it. The Graph
     /// scopes ride `new_cae` (cae = true); ARM / Exchange / Log Analytics stay
     /// non-CAE (cae = false). This is the CAE/adapter pairing each wrapper's doc
     /// comment cross-references — keeping the branch in one place.
@@ -707,7 +710,8 @@ impl AppState {
         self.ensure_scoped_token(tenant_id, scopes, true).await
     }
 
-    /// Acquires (and caches) the `GroupMember.ReadWrite.All` token up front, so
+    /// Acquires (and caches) the `GroupMember.ReadWrite.All` +
+    /// `Application.ReadWrite.All` token up front, so
     /// a not-yet-consented scope surfaces as the typed
     /// [`AuthError::ConsentRequired`] before any membership change, bound to the
     /// `group_membership` feature the panel's "Grant consent" button requests.

@@ -48,6 +48,16 @@ pub fn is_reauth_fatal(code: &str) -> bool {
 /// `UiError::is_consent_required`.
 pub const CONSENT_REQUIRED: &str = "consent_required";
 
+/// The wire code for a Conditional Access step-up on one resource
+/// (`AuthError::InteractionRequired` — `interaction_required` /
+/// `login_required`, AADSTS50074/50076/50079/50158: MFA, registration, an
+/// external challenge). Per-resource, not fatal: the refresh token stays valid
+/// for every other audience, so it is deliberately NOT in
+/// [`REAUTH_FATAL_CODES`]. Not retryable either — a silent grant cannot satisfy
+/// the challenge; the recovery is an interactive step-up. One literal, read by
+/// the pass-through set below and by `UiError::is_interaction_required`.
+pub const INTERACTION_REQUIRED: &str = "interaction_required";
+
 /// The wire code for a rejected access token — a client 401 (a revoked token,
 /// or a Continuous Access Evaluation claims challenge the silent re-mint
 /// couldn't satisfy). Deliberately NOT in [`REAUTH_FATAL_CODES`]: one 401 does
@@ -74,7 +84,11 @@ pub const UNAUTHORIZED_STATUS: &str = "unauthorized (401)";
 ///   endpoint. Spelt in the client plane (not the auth plane's `network`) so
 ///   `http_retry::is_retryable_code` sees it as the transient failure it is,
 ///   exactly like the same outage one line later during the API call.
-pub const PASSTHROUGH_NON_FATAL_CODES: &[&str] = &[CONSENT_REQUIRED, "network_error"];
+/// * `interaction_required` — per-resource, like consent: a Conditional
+///   Access policy wants MFA (or another interactive step) for this audience.
+///   Not retryable; passing it through lets the UI offer "Verify identity".
+pub const PASSTHROUGH_NON_FATAL_CODES: &[&str] =
+    &[CONSENT_REQUIRED, "network_error", INTERACTION_REQUIRED];
 
 /// The `&'static str` for `code` when it is a classification a client's
 /// `ui_code()` passes through its own error enum instead of flattening it to
@@ -117,6 +131,7 @@ mod tests {
             "server_error",
             "network_error",
             "consent_required",
+            "interaction_required",
             "cancelled",
             "",
         ] {
@@ -145,6 +160,7 @@ mod tests {
         }
         assert!(PASSTHROUGH_NON_FATAL_CODES.contains(&CONSENT_REQUIRED));
         assert!(PASSTHROUGH_NON_FATAL_CODES.contains(&"network_error"));
+        assert!(PASSTHROUGH_NON_FATAL_CODES.contains(&INTERACTION_REQUIRED));
     }
 
     #[test]
@@ -162,6 +178,7 @@ mod tests {
     fn a_passed_through_refresh_outage_is_retryable_but_consent_is_not() {
         assert!(crate::http_retry::is_retryable_code("network_error"));
         assert!(!crate::http_retry::is_retryable_code(CONSENT_REQUIRED));
+        assert!(!crate::http_retry::is_retryable_code(INTERACTION_REQUIRED));
     }
 
     #[test]

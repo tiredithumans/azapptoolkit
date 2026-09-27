@@ -135,11 +135,12 @@ pub struct GraphClient {
     /// calls ride this token instead of the default read/write pair; acquired on
     /// demand (incremental consent).
     sharepoint_token: Option<Arc<dyn BearerProvider>>,
-    /// Optional `GroupMember.ReadWrite.All` token for adding/removing a service
-    /// principal as a member of a security group (the `$ref` member endpoints).
-    /// Membership *reads* ride the verb-selected `read_token`
-    /// (`Directory.Read.All` covers `memberOf`); only the writes need this
-    /// admin-consent scope, so it's acquired on demand (incremental consent).
+    /// Optional `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` token
+    /// (one token — Learn documents the pair for a `servicePrincipal` member) for
+    /// adding/removing a service principal as a member of a security group (the
+    /// `$ref` member endpoints). Membership *reads* ride the verb-selected
+    /// `read_token` (`Directory.Read.All` covers `memberOf`); only the writes need
+    /// this admin-consent pair, so it's acquired on demand (incremental consent).
     group_member_token: Option<Arc<dyn BearerProvider>>,
     throttle_observer: parking_lot::RwLock<Option<Arc<dyn ThrottleObserver>>>,
 }
@@ -226,8 +227,8 @@ impl GraphClient {
         self
     }
 
-    /// Attaches a `GroupMember.ReadWrite.All` token enabling group-membership
-    /// add/remove for service principals.
+    /// Attaches a `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` token
+    /// enabling group-membership add/remove for service principals.
     pub fn with_group_member_token(mut self, token: Arc<dyn BearerProvider>) -> Self {
         self.group_member_token = Some(token);
         self
@@ -302,14 +303,15 @@ impl GraphClient {
         self.require_token(self.sharepoint_token.as_ref(), "Sites.FullControl.All")
     }
 
-    /// The `GroupMember.ReadWrite.All` token the group-membership writes ride
+    /// The `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` token the
+    /// group-membership writes ride
     /// (see [`Self::with_group_member_token`]). `None` means the optional scope
     /// wasn't wired — surfaced as `Forbidden` so the UI degrades rather than
     /// panics.
     fn group_member_token(&self) -> Result<&Arc<dyn BearerProvider>> {
         self.require_token(
             self.group_member_token.as_ref(),
-            "GroupMember.ReadWrite.All",
+            "GroupMember.ReadWrite.All + Application.ReadWrite.All",
         )
     }
 

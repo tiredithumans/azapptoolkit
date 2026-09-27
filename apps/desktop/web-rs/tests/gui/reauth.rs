@@ -126,6 +126,67 @@ async fn unauthorized_refresh_falls_back_to_reauth_on_a_dead_session() {
     assert_eq!(ts::call_count("sign_out"), 0, "never a sign-out");
 }
 
+/// A Conditional Access step-up (`interaction_required` — MFA for one resource)
+/// used to purge the whole session. It now offers "Verify identity", which runs
+/// the scope-targeted step-up for the caller's feature — never a re-auth or a
+/// sign-out.
+#[wasm_bindgen_test]
+async fn interaction_required_toast_runs_the_scope_step_up() {
+    ts::reset();
+    ts::mock_ok("request_scope_step_up", &());
+    let m = ts::mount_view(|| view! { <ToastHost /> });
+
+    m.session.report_command_error(&fixtures::ui_error(
+        "interaction_required",
+        "additional verification required for this resource (interaction_required (AADSTS50076))",
+    ));
+
+    ts::wait_for(|| ts::query(".toast__action").is_some()).await;
+    assert_eq!(ts::text(".toast__action"), "Verify identity");
+    assert!(ts::body_contains("verify your identity"));
+
+    ts::click(".toast__action");
+    ts::wait_for(|| ts::call_count("request_scope_step_up") == 1).await;
+    let call = ts::last_call("request_scope_step_up").expect("request_scope_step_up called");
+    assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
+    assert_eq!(
+        call.arg_str("feature").as_deref(),
+        Some("write"),
+        "the shared sink offers the caller's declared feature",
+    );
+    ts::wait_for(|| ts::body_contains("Verified")).await;
+    assert_eq!(ts::call_count("reauthenticate"), 0);
+    assert_eq!(ts::call_count("sign_out"), 0, "never a sign-out");
+}
+
+/// A step-up on the Graph read scopes (tenant-wide MFA or sign-in frequency)
+/// comes back from the silent refresh as `interaction_required`; the in-place
+/// `reauthenticate` (`prompt=login` on exactly those scopes) is its step-up.
+#[wasm_bindgen_test]
+async fn a_refresh_needing_verification_falls_back_to_reauth() {
+    ts::reset();
+    ts::mock_err(
+        "refresh_session",
+        &fixtures::ui_error("interaction_required", "verify"),
+    );
+    ts::mock_ok(
+        "reauthenticate",
+        &SignInOutcome {
+            tenant: ts::test_tenant(),
+        },
+    );
+    let m = ts::mount_view(|| view! { <ToastHost /> });
+
+    m.session
+        .report_command_error(&fixtures::ui_error("unauthorized", "unauthorized (401)"));
+
+    ts::wait_for(|| ts::query(".toast__action").is_some()).await;
+    ts::click(".toast__action");
+    ts::wait_for(|| ts::call_count("reauthenticate") == 1).await;
+    assert_eq!(ts::call_count("refresh_session"), 1);
+    assert_eq!(ts::call_count("sign_out"), 0, "never a sign-out");
+}
+
 /// The in-flight guard lives on the session, not on a trigger: two 401 toasts
 /// (e.g. from parallel loads) clicked together start ONE refresh — never two
 /// racing `refresh_session` calls (or, on a dead session, two browser flows).

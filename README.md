@@ -358,7 +358,7 @@ one-click **Grant consent** prompt.
 | Graph | `AuditLog.Read.All` | **Activity** tab (directory change log) and **unused-app** detection in the security audit (the sign-in report also needs Entra ID **P1/P2**) | Optional |
 | Graph | `Policy.Read.All` | **Conditional Access** tab — which CA policies target an app (an Entra ID **P1/P2** feature) | Optional |
 | Graph | `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` (one token) | **Claims-mapping** policies — SAML attribute & claim customization in the SSO wizard and the enterprise-app SSO tab (assigning and listing a policy on a service principal needs both) | Optional |
-| Graph | `GroupMember.ReadWrite.All` | **Group memberships** — add/remove a service principal in security groups (the access model for group-gated APIs like Power BI / Fabric) | Optional |
+| Graph | `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` | **Group memberships** — add/remove a service principal in security groups (the access model for group-gated APIs like Power BI / Fabric) | Optional |
 | Graph | `Synchronization.Read.All` | SCIM **provisioning** job status on enterprise apps (needs Entra ID **P1/P2**) | Optional |
 | Graph | `Sites.FullControl.All` | SharePoint **Sites.Selected** — list / grant / revoke a site's per-app permissions (SharePoint site access section on the Permissions tab) | Optional |
 | Office 365 Exchange Online | `Exchange.Manage` | **Exchange mailbox scoping** (RBAC for Applications) — confine an app's mailbox access to specific groups | Optional |

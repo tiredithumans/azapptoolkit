@@ -38,9 +38,13 @@ pub(super) struct TokenErrorBody {
 /// rejection (AADSTS65001 "not consented", 65004 "user declined", or the
 /// `consent_required` OAuth code) is recoverable via interactive consent and
 /// must be distinguished *first* — unlike [`AuthError::InvalidGrant`], it must
-/// NOT purge the refresh token. Everything else `invalid_grant`-like means the
-/// refresh token is dead; the remainder is a generic exchange failure. The
-/// carried string is always the UI-safe redacted summary.
+/// NOT purge the refresh token. A Conditional Access step-up
+/// (`interaction_required` / `login_required`, or `invalid_grant` carrying
+/// AADSTS50074/50076/50079/50158 — MFA, registration, an external challenge)
+/// comes next: the refresh token is still good for other audiences, so it is
+/// [`AuthError::InteractionRequired`], never a purge. What remains of
+/// `invalid_grant` means the refresh token is dead; the rest is a generic
+/// exchange failure. The carried string is always the UI-safe redacted summary.
 pub(super) fn classify_token_error(body: &TokenErrorBody) -> AuthError {
     let safe = redacted_aad_error(body);
     let aadsts = body
@@ -54,8 +58,16 @@ pub(super) fn classify_token_error(body: &TokenErrorBody) -> AuthError {
     }
     if matches!(
         body.error.as_str(),
-        "invalid_grant" | "interaction_required" | "login_required"
-    ) {
+        "interaction_required" | "login_required"
+    ) || (body.error == "invalid_grant"
+        && matches!(
+            aadsts.as_deref(),
+            Some("AADSTS50074" | "AADSTS50076" | "AADSTS50079" | "AADSTS50158")
+        ))
+    {
+        return AuthError::InteractionRequired(safe);
+    }
+    if body.error == "invalid_grant" {
         return AuthError::InvalidGrant(safe);
     }
     AuthError::TokenExchange(safe)
@@ -77,7 +89,7 @@ pub(super) fn redacted_aad_error(body: &TokenErrorBody) -> String {
 }
 
 /// Pulls the first `AADSTSnnnnn` token out of an AAD error_description.
-fn extract_aadsts_code(description: &str) -> Option<String> {
+pub(super) fn extract_aadsts_code(description: &str) -> Option<String> {
     let idx = description.find("AADSTS")?;
     let tail = &description[idx + "AADSTS".len()..];
     // A non-digit right after "AADSTS" yields no digits below → `None`.
@@ -251,6 +263,58 @@ mod aad_redaction_tests {
         };
         assert!(matches!(
             classify_token_error(&explicit),
+            AuthError::ConsentRequired(_)
+        ));
+    }
+
+    #[test]
+    fn step_up_codes_classify_as_interaction_required_not_invalid_grant() {
+        // A CA step-up for one resource must NOT read as a dead refresh token.
+        for (error, description) in [
+            (
+                "interaction_required",
+                Some("AADSTS50076: Due to a configuration change..."),
+            ),
+            ("login_required", None),
+            (
+                "invalid_grant",
+                Some("AADSTS50079: The user is required to enroll..."),
+            ),
+            (
+                "invalid_grant",
+                Some("AADSTS50074: Strong Authentication is required."),
+            ),
+            (
+                "invalid_grant",
+                Some("AADSTS50158: External security challenge not satisfied."),
+            ),
+        ] {
+            let body = TokenErrorBody {
+                error: error.into(),
+                error_description: description.map(str::to_string),
+                correlation_id: None,
+            };
+            assert!(
+                matches!(
+                    classify_token_error(&body),
+                    AuthError::InteractionRequired(_)
+                ),
+                "{error} {description:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn consent_still_wins_over_interaction_required() {
+        let body = TokenErrorBody {
+            error: "interaction_required".into(),
+            error_description: Some(
+                "AADSTS65001: The user or administrator has not consented".into(),
+            ),
+            correlation_id: None,
+        };
+        assert!(matches!(
+            classify_token_error(&body),
             AuthError::ConsentRequired(_)
         ));
     }

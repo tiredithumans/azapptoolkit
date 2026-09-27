@@ -145,6 +145,10 @@ mod tests {
                 "consent_required",
             ),
             (
+                || AuthError::InteractionRequired("AADSTS50076".into()),
+                "interaction_required",
+            ),
+            (
                 || AuthError::TokenExchange("HTTP 400".into()),
                 "token_error",
             ),
@@ -198,11 +202,12 @@ mod tests {
     }
 
     #[test]
-    fn the_three_client_facing_codes_survive_into_a_graph_error() {
-        let makers: [fn() -> AuthError; 3] = [
+    fn the_client_facing_codes_survive_into_a_graph_error() {
+        let makers: [fn() -> AuthError; 4] = [
             || AuthError::NotSignedIn,
             || AuthError::InvalidGrant("invalid_grant".into()),
             || AuthError::ConsentRequired("AADSTS65001".into()),
+            || AuthError::InteractionRequired("AADSTS50076".into()),
         ];
         for make in makers {
             let through_graph = UiError::from(GraphError::Token(token_error(make())));

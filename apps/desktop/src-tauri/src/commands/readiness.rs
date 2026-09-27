@@ -273,11 +273,9 @@ async fn probe_scope(state: &AppState, tenant_id: &str, feature: &str) -> Verdic
     let Some(scopes) = state.consent_scopes_for(feature) else {
         return Verdict::Unknown;
     };
-    let is_graph = matches!(
-        feature,
-        "write" | "sync" | "audit_log" | "policy" | "policy_write" | "sharepoint"
-    );
-    let result = if is_graph {
+    // Derived from the scope set, not a hand-kept feature list: every Graph set
+    // rides a `new_cae` adapter (the list used to omit `group_membership`).
+    let result = if state.auth.is_graph_scope_set(&scopes) {
         state
             .auth
             .access_token_for_scopes_cae(tenant_id, &scopes, None)

@@ -249,6 +249,20 @@ mod tests {
     }
 
     #[test]
+    fn an_abandoned_browser_sign_in_says_so() {
+        // The backend now produces `cancelled` for a closed tab (redirect
+        // timeout) and a Cancel at Entra, instead of `loopback` / `authorization`,
+        // whose hints blamed the network or an administrator.
+        assert_eq!(
+            recovery_hint(
+                "cancelled",
+                "sign-in was cancelled or not completed in the browser"
+            ),
+            "The browser sign-in was closed before completing — retry when ready.",
+        );
+    }
+
+    #[test]
     fn an_unmapped_or_absent_code_falls_back_rather_than_guessing() {
         assert!(aadsts_hint("invalid_request (AADSTS99999)").is_none());
         assert!(aadsts_hint("invalid_request").is_none());

@@ -111,6 +111,19 @@ impl UiError {
         self.code == azapptoolkit_core::reauth::CONSENT_REQUIRED
     }
 
+    /// True when a Conditional Access policy demands an interactive step
+    /// (MFA, registration, an external challenge) for one resource
+    /// (`interaction_required`, from `AuthError::InteractionRequired`), read
+    /// from the one literal in [`azapptoolkit_core::reauth::INTERACTION_REQUIRED`].
+    ///
+    /// Not re-auth-fatal (the refresh token is fine for every other audience)
+    /// and not retryable (a silent grant cannot satisfy the challenge): the
+    /// recovery is the interactive `request_scope_step_up` behind the "Verify
+    /// identity" toast, or — for the Graph read scopes — `reauthenticate`.
+    pub fn is_interaction_required(&self) -> bool {
+        self.code == azapptoolkit_core::reauth::INTERACTION_REQUIRED
+    }
+
     /// True for a rejected access token (`unauthorized`, a client 401), read
     /// from the one literal in [`azapptoolkit_core::reauth::UNAUTHORIZED`].
     ///
@@ -200,6 +213,7 @@ mod backend_conv {
                 AuthError::RefreshTokenMissing(_) => ("refresh_missing", false),
                 AuthError::InvalidGrant(_) => ("refresh_missing", false),
                 AuthError::ConsentRequired(_) => ("consent_required", false),
+                AuthError::InteractionRequired(_) => ("interaction_required", false),
                 AuthError::TokenExchange(_) => ("token_exchange", true),
                 AuthError::Authorization(_) => ("authorization", true),
                 AuthError::Loopback(_) => ("loopback", true),
@@ -228,9 +242,10 @@ mod backend_conv {
         /// Pins the machine-readable `code` + `retryable` the front-end branches
         /// on for every constructible `AuthError` variant. These strings are a
         /// wire contract — `not_signed_in` drives the re-auth flow, and the
-        /// `consent_required` vs `refresh_missing` split is load-bearing
-        /// (AGENTS.md): `InvalidGrant` must purge the refresh token while
-        /// `ConsentRequired` must not. A silent change here breaks a UI branch
+        /// `consent_required` / `interaction_required` vs `refresh_missing`
+        /// split is load-bearing (AGENTS.md): `InvalidGrant` must purge the
+        /// refresh token while `ConsentRequired` and `InteractionRequired` (a
+        /// per-resource Conditional Access step-up) must not. A silent change here breaks a UI branch
         /// with no compile error, so lock it down.
         #[test]
         fn auth_error_maps_to_stable_code_and_retryable() {
@@ -249,6 +264,11 @@ mod backend_conv {
                 (
                     AuthError::ConsentRequired("AADSTS65001".into()),
                     "consent_required",
+                    false,
+                ),
+                (
+                    AuthError::InteractionRequired("AADSTS50076".into()),
+                    "interaction_required",
                     false,
                 ),
                 (
@@ -300,7 +320,7 @@ mod backend_conv {
         fn classified_token_codes_survive_every_client_error() {
             use azapptoolkit_core::token::TokenError;
 
-            let cases: [(TokenError, &str, bool); 5] = [
+            let cases: [(TokenError, &str, bool); 6] = [
                 (
                     TokenError::new("refresh_missing", "m"),
                     "refresh_missing",
@@ -314,6 +334,11 @@ mod backend_conv {
                 (
                     TokenError::new("consent_required", "m"),
                     "consent_required",
+                    false,
+                ),
+                (
+                    TokenError::new("interaction_required", "m"),
+                    "interaction_required",
                     false,
                 ),
                 (TokenError::new("network_error", "m"), "network_error", true),

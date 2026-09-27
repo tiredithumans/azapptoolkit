@@ -1,6 +1,6 @@
 //! Loopback redirect listener + system-browser launch for the interactive
 //! authorization-code flows. The caller (`run_auth_code_flow`) bounds the
-//! whole wait with a 300s timeout; nothing here needs its own deadline.
+//! whole wait with `REDIRECT_WAIT` (300s); nothing here needs its own deadline.
 
 use std::time::Duration;
 
@@ -62,11 +62,15 @@ pub(super) async fn listen_for_code(listener: TcpListener, expected_state: &str)
         let mut code: Option<String> = None;
         let mut state: Option<String> = None;
         let mut error: Option<String> = None;
+        let mut error_subcode: Option<String> = None;
+        let mut error_description: Option<String> = None;
         for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
             match k.as_ref() {
                 "code" => code = Some(v.into_owned()),
                 "state" => state = Some(v.into_owned()),
                 "error" => error = Some(v.into_owned()),
+                "error_subcode" => error_subcode = Some(v.into_owned()),
+                "error_description" => error_description = Some(v.into_owned()),
                 _ => {}
             }
         }
@@ -97,6 +101,9 @@ pub(super) async fn listen_for_code(listener: TcpListener, expected_state: &str)
         let _ = socket.shutdown().await;
 
         if let Some(err) = error {
+            if is_user_cancel(&err, error_subcode.as_deref(), error_description.as_deref()) {
+                return Err(AuthError::Cancelled);
+            }
             return Err(AuthError::Authorization(err));
         }
 
@@ -106,6 +113,18 @@ pub(super) async fn listen_for_code(listener: TcpListener, expected_state: &str)
         }
         return code.ok_or_else(|| AuthError::Authorization("no code returned".into()));
     }
+}
+
+/// Whether an `error=` redirect is the operator walking away at Entra rather
+/// than a refusal. Entra reports a cancel as `access_denied` with MSAL's
+/// `error_subcode=cancel`, or (Learn's example) with a plain-prose
+/// `error_description` that carries no AADSTS code. A coded `access_denied`
+/// (e.g. AADSTS65004 "user declined consent") stays an authorization error —
+/// the sign-in hints already read it as a decline.
+fn is_user_cancel(error: &str, subcode: Option<&str>, description: Option<&str>) -> bool {
+    error == "access_denied"
+        && (subcode == Some("cancel")
+            || description.is_some_and(|d| super::wire::extract_aadsts_code(d).is_none()))
 }
 
 /// Reads until the end of the request head (`\r\n\r\n`) or EOF, capped at
@@ -195,6 +214,49 @@ mod tests {
 
         let code = wait.await.unwrap().unwrap();
         assert_eq!(code, "c0de");
+    }
+
+    /// Sends one raw redirect `query` to a fresh listener and returns what
+    /// `listen_for_code` made of it.
+    async fn redirect_outcome(query: &str) -> Result<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let wait = tokio::spawn(async move { listen_for_code(listener, "s").await });
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(format!("GET /?{query} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        wait.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_sign_in_maps_to_cancelled() {
+        // MSAL's user-cancel signal.
+        let out = redirect_outcome("error=access_denied&error_subcode=cancel&state=s").await;
+        assert!(matches!(out, Err(AuthError::Cancelled)), "{out:?}");
+        // Learn's example: a prose description with no AADSTS code.
+        let out = redirect_outcome(
+            "error=access_denied&error_description=the%20user%20canceled%20the%20authentication&state=s",
+        )
+        .await;
+        assert!(matches!(out, Err(AuthError::Cancelled)), "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn a_declined_consent_stays_an_authorization_error() {
+        let out = redirect_outcome(
+            "error=access_denied&error_description=AADSTS65004%3A%20User%20declined&state=s",
+        )
+        .await;
+        assert!(
+            matches!(&out, Err(AuthError::Authorization(e)) if e == "access_denied"),
+            "{out:?}"
+        );
+        let out = redirect_outcome("error=invalid_request&state=s").await;
+        assert!(
+            matches!(&out, Err(AuthError::Authorization(e)) if e == "invalid_request"),
+            "{out:?}"
+        );
     }
 
     #[tokio::test]

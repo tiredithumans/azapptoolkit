@@ -304,13 +304,15 @@ pub static CAPABILITIES: &[Capability] = &[
             ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
         ],
         role_detect: RoleDetect::DirectoryRole,
-        scopes: &["GroupMember.ReadWrite.All"],
+        scopes: &["GroupMember.ReadWrite.All", "Application.ReadWrite.All"],
         scope_feature: Some("group_membership"),
         remediation: "Changing group membership needs the Groups Administrator role (User \
                       Administrator or Global Administrator also work) — or ownership of the \
-                      target group — plus the GroupMember.ReadWrite.All delegated scope, \
-                      consented on first use. Dynamic-membership groups can't be modified \
-                      directly (membership is rule-based).",
+                      target group — plus the GroupMember.ReadWrite.All and \
+                      Application.ReadWrite.All delegated scopes (Graph needs both to add a \
+                      service principal as a member), consented on first use. \
+                      Dynamic-membership groups can't be modified directly (membership is \
+                      rule-based).",
     },
     Capability {
         key: "keyvault_secrets",
@@ -453,6 +455,21 @@ pub fn matched_directory_role(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_membership_lists_the_service_principal_member_scope_pair() {
+        // Learn "Add members": a servicePrincipal member needs both delegated
+        // scopes, so the checklist must not read "have" with only the first.
+        let c = CAPABILITIES
+            .iter()
+            .find(|c| c.key == "group_membership")
+            .expect("group_membership capability");
+        assert_eq!(
+            c.scopes,
+            &["GroupMember.ReadWrite.All", "Application.ReadWrite.All"]
+        );
+        assert!(c.remediation.contains("Application.ReadWrite.All"));
+    }
 
     #[test]
     fn keys_are_unique() {

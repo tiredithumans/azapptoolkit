@@ -79,15 +79,36 @@ impl EntraAuthService {
         self.graph_scopes(&["Sites.FullControl.All"])
     }
 
-    /// `GroupMember.ReadWrite.All` Graph scope for adding/removing a service
-    /// principal as a member of a security group (group-gated APIs like
-    /// Power BI / Fabric admit service principals via group membership).
-    /// Deliberately the membership-only scope, not `Group.ReadWrite.All` — the
-    /// app never creates or deletes groups. Admin-consent-only; acquired on
-    /// demand, never at sign-in, with the same graceful-degradation contract
-    /// as the SharePoint scope (membership *reads* ride `Directory.Read.All`).
+    /// `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` — ONE token for
+    /// adding/removing a service principal as a member of a security group
+    /// (group-gated APIs like Power BI / Fabric admit service principals via
+    /// group membership). Learn's "Add members" permissions table documents
+    /// delegated "GroupMember.ReadWrite.All and Application.ReadWrite.All" for a
+    /// `servicePrincipal` member — the only member type this app adds — because
+    /// Graph also needs to write the service principal. `Application.ReadWrite.All`
+    /// is already in the write bundle, so pairing it here widens nothing.
+    /// Deliberately the membership-only group scope, not `Group.ReadWrite.All` —
+    /// the app never creates or deletes groups. Admin-consent-only; acquired on
+    /// demand, never at sign-in, with the same graceful-degradation contract as
+    /// the SharePoint scope (membership *reads* ride `Directory.Read.All`).
     pub fn default_graph_group_member_scopes(&self) -> Vec<String> {
-        self.graph_scopes(&["GroupMember.ReadWrite.All"])
+        self.graph_scopes(&["GroupMember.ReadWrite.All", "Application.ReadWrite.All"])
+    }
+
+    /// Whether `scopes` is a Microsoft Graph scope set — at least one scope, and
+    /// every scope other than the reserved OIDC ones (`offline_access`,
+    /// `openid`, `profile`) under this cloud's Graph resource. This is the CAE
+    /// pairing: `AppState::graph_for` consumes every Graph scope set through
+    /// `ScopedTokenAdapter::new_cae`, so an interactive flow that seeds one of
+    /// them must mint a CAE token (the token cache keys on CAE-ness), while
+    /// Exchange / ARM / Key Vault / Log Analytics stay non-CAE.
+    pub fn is_graph_scope_set(&self, scopes: &[String]) -> bool {
+        let prefix = format!("{}/", self.cloud.graph_resource());
+        let mut resource_scopes = scopes
+            .iter()
+            .filter(|s| !matches!(s.as_str(), "offline_access" | "openid" | "profile"))
+            .peekable();
+        resource_scopes.peek().is_some() && resource_scopes.all(|s| s.starts_with(&prefix))
     }
 
     /// Prefixes each Graph permission with the Graph resource URL and appends
@@ -188,6 +209,61 @@ mod tests {
         // Nothing else that writes rides this token.
         let writes: Vec<&String> = scopes.iter().filter(|s| s.contains("ReadWrite")).collect();
         assert_eq!(writes.len(), 2, "{writes:?}");
+    }
+
+    #[test]
+    fn group_member_scopes_pair_groupmember_with_application_readwrite() {
+        // Adding a servicePrincipal member needs both scopes in ONE token.
+        let scopes = EntraAuthService::new("c", "t").default_graph_group_member_scopes();
+        for perm in ["GroupMember.ReadWrite.All", "Application.ReadWrite.All"] {
+            assert!(
+                scopes
+                    .iter()
+                    .any(|s| s == &format!("https://graph.microsoft.com/{perm}")),
+                "missing {perm}: {scopes:?}"
+            );
+        }
+        assert!(scopes.iter().any(|s| s == "offline_access"));
+        // Membership only: never the group create/delete scope.
+        let writes: Vec<&String> = scopes.iter().filter(|s| s.contains("ReadWrite")).collect();
+        assert_eq!(writes.len(), 2, "{writes:?}");
+        assert!(
+            !scopes.iter().any(|s| s.ends_with("/Group.ReadWrite.All")),
+            "{scopes:?}"
+        );
+    }
+
+    #[test]
+    fn graph_scope_sets_are_told_apart_from_other_audiences() {
+        let svc = EntraAuthService::new("c", "t");
+        for graph in [
+            svc.default_graph_read_scopes(),
+            svc.default_graph_write_scopes(),
+            svc.default_graph_sync_scopes(),
+            svc.default_graph_audit_log_scopes(),
+            svc.default_graph_policy_scopes(),
+            svc.default_graph_policy_write_scopes(),
+            svc.default_graph_sharepoint_scopes(),
+            svc.default_graph_group_member_scopes(),
+        ] {
+            assert!(svc.is_graph_scope_set(&graph), "{graph:?}");
+        }
+        for other in [
+            svc.default_exchange_scopes(),
+            EntraAuthService::resource_default_scopes("https://management.azure.com"),
+            EntraAuthService::resource_default_scopes("https://vault.azure.net"),
+            // Only reserved scopes: no audience at all.
+            vec!["offline_access".to_string(), "openid".to_string()],
+            vec![],
+        ] {
+            assert!(!svc.is_graph_scope_set(&other), "{other:?}");
+        }
+        // A mixed set is not a Graph set.
+        let mixed = vec![
+            "https://graph.microsoft.com/User.Read".to_string(),
+            "https://management.azure.com/.default".to_string(),
+        ];
+        assert!(!svc.is_graph_scope_set(&mixed));
     }
 
     #[test]

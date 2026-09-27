@@ -118,3 +118,27 @@ pub async fn request_scope_consent(
         .await
         .map_err(UiError::from)
 }
+
+/// Completes a Conditional Access step-up for an optional `feature`'s scopes
+/// (e.g. `"arm"`, `"exchange"`, `"log_analytics"`). The recovery path the UI's
+/// "Verify identity" toast invokes after a command fails with the
+/// `interaction_required` code (MFA, registration or an external challenge a
+/// policy demands for that resource): one browser round trip with
+/// `prompt=login`, pinned to the signed-in account, that seeds the token cache
+/// so the retried command's silent acquisition succeeds. The session is never
+/// dropped — that code does not purge the refresh token.
+#[tauri::command]
+pub async fn request_scope_step_up(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    feature: String,
+) -> Result<(), UiError> {
+    let scopes = state.consent_scopes_for(&feature).ok_or_else(|| {
+        UiError::validation("bad_request", format!("unknown step-up feature: {feature}"))
+    })?;
+    state
+        .auth
+        .step_up_for_scopes(&tenant_id, &scopes)
+        .await
+        .map_err(UiError::from)
+}

@@ -35,6 +35,9 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
 
 use azapptoolkit_core::cloud::CloudEnvironment;
+use azapptoolkit_core::http_retry::{
+    Attempt, RetryClass, RetryReason, parse_retry_after_seconds, with_retries,
+};
 use azapptoolkit_core::identity::{SignInOutcome, TenantContext, canonical_tenant_id};
 
 use crate::error::{AuthError, Result};
@@ -50,8 +53,14 @@ use wire::{
 
 const REFRESH_LEEWAY_SECS: i64 = 60;
 
-/// Per-`(tenant, scope_key)` refresh locks, created lazily and keyed exactly
-/// like the token cache. See the `EntraAuthService::refresh_locks` field.
+/// How long an interactive flow waits for the browser's redirect before it
+/// treats the sign-in as abandoned ([`AuthError::Cancelled`]). Bounds a
+/// sleeping machine or a closed tab, which otherwise hold the loopback socket
+/// and block the caller forever.
+const REDIRECT_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Per-`(tenant, scope_key)` refresh locks, created lazily. See the
+/// `EntraAuthService::refresh_locks` field.
 type RefreshLocks = Mutex<HashMap<(String, String), Arc<AsyncMutex<()>>>>;
 
 /// Launches the `/authorize` URL for an interactive flow. See the
@@ -72,9 +81,13 @@ pub struct EntraAuthService {
     /// selects a sovereign cloud.
     cloud: CloudEnvironment,
     cache: Arc<TokenCache>,
-    /// Per-`(tenant, scope_key)` refresh locks, created lazily and keyed exactly
-    /// like the token cache. A refresh holds its lock across the token round trip
-    /// (up to the 30s HTTP timeout); a single global lock would let a slow Graph
+    /// Per-`(tenant, scope_key)` refresh locks, created lazily. The token cache
+    /// also keys on CAE-ness; the lock deliberately does not — a CAE and a
+    /// non-CAE refresh of the same scope set serialising is harmless and rare. A
+    /// refresh holds its lock across the token round trip (up to the 30s HTTP
+    /// timeout) and across `post_token`'s retry backoff — intended, because the
+    /// same-key waiters then get the retried result instead of each re-POSTing
+    /// into the same throttle. A single global lock would let a slow Graph
     /// refresh stall an unrelated Key Vault or cross-tenant refresh. Same-key
     /// concurrency still collapses to one network call via the double-checked
     /// cache read taken under the lock.
@@ -136,6 +149,7 @@ impl EntraAuthService {
         scope: &str,
         prompt: &str,
         login_hint: Option<&str>,
+        claims: Option<&str>,
     ) -> Result<url::Url> {
         let mut url = url::Url::parse(&format!("{authority}/oauth2/v2.0/authorize"))?;
         {
@@ -162,14 +176,55 @@ impl EntraAuthService {
             if let Some(hint) = login_hint {
                 pairs.append_pair("login_hint", hint);
             }
+            // CAE: advertise the `cp1` client capability for a Graph scope set,
+            // so the code redeemed below mints a CAE token.
+            if let Some(claims) = claims {
+                pairs.append_pair("claims", claims);
+            }
         }
         Ok(url)
     }
 
+    /// POSTs one `/token` request under the shared retry budget
+    /// (`core::http_retry`): a 429 (honouring `Retry-After`) or a 5xx / network
+    /// failure is retried when [`retry_class_for`] allows it for this grant; any
+    /// other rejection is terminal and classified exactly as before. A timeout
+    /// is terminal too — a 30s-silent endpoint retried would hold the caller's
+    /// per-scope refresh lock for minutes. `params` carry the refresh token /
+    /// code verifier, so only the grant type ever reaches the log label.
     async fn post_token(&self, authority: &str, params: &[(&str, &str)]) -> Result<TokenResponse> {
         let url = format!("{authority}/oauth2/v2.0/token");
-        let resp = self.http.post(&url).form(params).send().await?;
+        let label = format!("aad token {}", grant_type(params).unwrap_or("unknown"));
+        with_retries(&label, retry_class_for(params), |_| {
+            self.token_attempt(&url, params)
+        })
+        .await
+    }
+
+    /// One `/token` attempt, classified for [`with_retries`].
+    async fn token_attempt(
+        &self,
+        url: &str,
+        params: &[(&str, &str)],
+    ) -> Attempt<TokenResponse, AuthError> {
+        let resp = match self.http.post(url).form(params).send().await {
+            Ok(resp) => resp,
+            Err(e) if e.is_timeout() => return Attempt::Done(Err(e.into())),
+            Err(e) => {
+                return Attempt::Retry {
+                    reason: RetryReason::Transient,
+                    status: None,
+                    retry_after_secs: None,
+                    err: AuthError::Http(e),
+                };
+            }
+        };
         let status = resp.status();
+        let retry_after_secs = parse_retry_after_seconds(
+            resp.headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+        );
         // Captured before the body consumes `resp`: on the non-Entra branch
         // below it is the one genuinely diagnostic, non-content signal — an
         // `text/html` here says "a proxy answered", which is the actual
@@ -179,22 +234,27 @@ impl EntraAuthService {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
-        let bytes = resp.bytes().await?;
-        if !status.is_success() {
-            if let Ok(err_body) = serde_json::from_slice::<TokenErrorBody>(&bytes) {
-                // Log the OAuth error code, the AADSTS numeric code, and the
-                // correlation id for operators, but never the raw
-                // error_description: it routinely embeds tenant/user GUIDs and
-                // client IPs that should not flow into the UI or audit log.
-                tracing::warn!(
-                    target: "auth",
-                    aad_error = %err_body.error,
-                    aad_description = redacted_aad_error(&err_body),
-                    correlation_id = err_body.correlation_id.as_deref().unwrap_or(""),
-                    "AAD token endpoint rejected request"
-                );
-                return Err(classify_token_error(&err_body));
-            }
+        let bytes = match resp.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return Attempt::Done(Err(e.into())),
+        };
+        if status.is_success() {
+            return Attempt::Done(serde_json::from_slice(&bytes).map_err(Into::into));
+        }
+        let err = if let Ok(err_body) = serde_json::from_slice::<TokenErrorBody>(&bytes) {
+            // Log the OAuth error code, the AADSTS numeric code, and the
+            // correlation id for operators, but never the raw
+            // error_description: it routinely embeds tenant/user GUIDs and
+            // client IPs that should not flow into the UI or audit log.
+            tracing::warn!(
+                target: "auth",
+                aad_error = %err_body.error,
+                aad_description = redacted_aad_error(&err_body),
+                correlation_id = err_body.correlation_id.as_deref().unwrap_or(""),
+                "AAD token endpoint rejected request"
+            );
+            classify_token_error(&err_body)
+        } else {
             // Body wasn't a TokenErrorBody. Tracing is wired to a daily rolling
             // FILE appender at info, so this lands on disk — and every other AAD
             // error path here is meticulously redacted (`redacted_aad_error`
@@ -210,10 +270,46 @@ impl EntraAuthService {
                 content_type = content_type.as_deref().unwrap_or("<none>"),
                 "AAD token endpoint returned non-success without TokenErrorBody"
             );
-            return Err(AuthError::TokenExchange(format!("HTTP {status}")));
+            AuthError::TokenExchange(format!("HTTP {status}"))
+        };
+        match status.as_u16() {
+            429 => Attempt::Retry {
+                reason: RetryReason::Throttled,
+                status: Some(429),
+                retry_after_secs,
+                err,
+            },
+            code if code >= 500 => Attempt::Retry {
+                reason: RetryReason::Transient,
+                status: Some(code),
+                retry_after_secs,
+                err,
+            },
+            _ => Attempt::Done(Err(err)),
         }
-        let token: TokenResponse = serde_json::from_slice(&bytes)?;
-        Ok(token)
+    }
+}
+
+/// The `grant_type` of a `/token` request — the one parameter safe to log.
+fn grant_type<'a>(params: &[(&str, &'a str)]) -> Option<&'a str> {
+    params
+        .iter()
+        .find(|(k, _)| *k == "grant_type")
+        .map(|(_, v)| *v)
+}
+
+/// Whether a `/token` request may be replayed after an unknown outcome. A
+/// `refresh_token` grant is idempotent (Entra does not revoke the refresh token
+/// on use), so any transient failure may be replayed. An `authorization_code`
+/// is single-use: once Entra has redeemed it, a replay can only fail, so it is
+/// [`RetryClass::NonIdempotent`] — only a 429 (refused before any work) is
+/// retried. That is narrower than "retry a transport error before any
+/// response", which the shared seam cannot express without inventing a reason;
+/// a failed code exchange is recovered by the operator selecting Sign in again.
+fn retry_class_for(params: &[(&str, &str)]) -> RetryClass {
+    match grant_type(params) {
+        Some("refresh_token") => RetryClass::Idempotent,
+        _ => RetryClass::NonIdempotent,
     }
 }
 
@@ -223,13 +319,21 @@ impl EntraAuthService {
     /// `/authorize` endpoint (with the given `prompt` and optional
     /// `login_hint`), waits for the redirect, and redeems the code at `/token`.
     /// Returns the redeemed token response plus the parsed ID-token claims.
-    /// Shared by [`Self::sign_in`] (read scopes, `prompt=select_account`) and
-    /// [`Self::consent_for_scopes`] (incremental scopes, `prompt=consent`).
+    /// Shared by [`Self::sign_in`] (read scopes, `prompt=select_account`),
+    /// [`Self::reauthenticate`] (read scopes, `prompt=login`),
+    /// [`Self::consent_for_scopes`] (incremental scopes, `prompt=consent`) and
+    /// [`Self::step_up_for_scopes`] (a resource's scopes, `prompt=login`).
+    ///
+    /// `cae` requests a Continuous Access Evaluation token: the `cp1` claims
+    /// ride both the `/authorize` URL and the code redemption, so the token the
+    /// caller seeds into the CAE cache slot is one the Graph adapters
+    /// (`ScopedTokenAdapter::new_cae`) may serve. Pass it for a Graph scope set.
     async fn run_auth_code_flow(
         &self,
         scopes: &[String],
         prompt: &str,
         login_hint: Option<&str>,
+        cae: bool,
     ) -> Result<(TokenResponse, IdClaims)> {
         let authority = format!("{}/{}", self.auth_root, self.tenant_id);
 
@@ -249,6 +353,7 @@ impl EntraAuthService {
         let nonce = CsrfToken::new_random();
 
         let scope = scopes.join(" ");
+        let cae_claims = cae.then(|| build_cae_claims(None));
         let auth_url = self.authorize_url(
             &authority,
             &redirect,
@@ -258,6 +363,7 @@ impl EntraAuthService {
             &scope,
             prompt,
             login_hint,
+            cae_claims.as_deref(),
         )?;
 
         // Log the non-sensitive fields needed to diagnose AAD rejections
@@ -282,19 +388,21 @@ impl EntraAuthService {
             );
         }
 
-        // Bound the wait on the browser redirect so a sleeping machine or a
-        // browser that never completes the flow can't hang sign-in forever
-        // (the future holds the loopback socket and blocks the caller).
+        // Bound the wait on the browser redirect (`REDIRECT_WAIT`) so a sleeping
+        // machine or a browser that never completes the flow can't hang sign-in
+        // forever (the future holds the loopback socket and blocks the caller).
+        // A redirect that never arrives is an abandoned sign-in — the operator
+        // closed the tab — not a network fault, so it surfaces as `Cancelled`.
         let code = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
+            REDIRECT_WAIT,
             listen_for_code(listener, csrf_state.secret()),
         )
         .await
-        .map_err(|_| AuthError::Loopback("timed out waiting for the sign-in redirect".into()))??;
+        .map_err(|_| AuthError::Cancelled)??;
 
         let verifier_secret =
             zeroize::Zeroizing::new(PkceCodeVerifier::secret(&pkce_verifier).to_string());
-        let params = [
+        let mut params = vec![
             ("client_id", self.client_id.as_str()),
             ("grant_type", "authorization_code"),
             ("code", code.as_str()),
@@ -302,6 +410,9 @@ impl EntraAuthService {
             ("code_verifier", verifier_secret.as_str()),
             ("scope", scope.as_str()),
         ];
+        if let Some(claims) = cae_claims.as_deref() {
+            params.push(("claims", claims));
+        }
         let token = self.post_token(&authority, &params).await?;
         let claims = parse_id_token(token.id_token.as_deref())?;
         // Bind the id_token to THIS request: its `nonce` must equal the value we
@@ -324,9 +435,10 @@ impl EntraAuthService {
                 self.tenant_id
             )));
         }
+        // The Graph read scopes: minted CAE, the slot `graph_for` reads.
         let initial_scopes = self.default_graph_read_scopes();
         let (token, claims) = self
-            .run_auth_code_flow(&initial_scopes, "select_account", None)
+            .run_auth_code_flow(&initial_scopes, "select_account", None, true)
             .await?;
 
         let tenant_id = claims
@@ -355,7 +467,7 @@ impl EntraAuthService {
 
         // Initial sign-in: no requested-scope fallback (matches the original
         // `unwrap_or_default`); the grant response always echoes `scope` here.
-        self.store_token_outcome(&tenant_id, &account_oid, &initial_scopes, &[], token)
+        self.store_token_outcome(&tenant_id, &account_oid, &initial_scopes, &[], true, token)
             .await?;
         self.known_tenants
             .lock()
@@ -374,6 +486,38 @@ impl EntraAuthService {
     /// must take a user through the browser once. After this returns `Ok`, the
     /// next [`Self::access_token_for_scopes`] for the same `scopes` is silent.
     pub async fn consent_for_scopes(&self, tenant_id: &str, scopes: &[String]) -> Result<()> {
+        self.interactive_for_scopes(tenant_id, scopes, "consent", "consent")
+            .await
+    }
+
+    /// Completes a **Conditional Access step-up** for `scopes`' resource: one
+    /// browser round trip with `prompt=login`, pinned to the signed-in account,
+    /// that forces the credential plus whatever interactive challenge (MFA,
+    /// registration, an external factor) a policy demands for that audience.
+    /// The new refresh token carries the satisfied claims, so later silent
+    /// refreshes for the resource succeed.
+    ///
+    /// This is the recovery path for [`AuthError::InteractionRequired`]. It is
+    /// scope-targeted on purpose: re-authenticating on the Graph read scopes
+    /// never meets a policy scoped to ARM (or Exchange, or Log Analytics), so
+    /// the next refresh for that audience failed again — a loop.
+    pub async fn step_up_for_scopes(&self, tenant_id: &str, scopes: &[String]) -> Result<()> {
+        self.interactive_for_scopes(tenant_id, scopes, "login", "verification")
+            .await
+    }
+
+    /// Shared core of [`Self::consent_for_scopes`] and
+    /// [`Self::step_up_for_scopes`]: one interactive round trip for `scopes`
+    /// with `prompt`, identity-checked against the session (`action` names the
+    /// flow in a mismatch error), cached under the requested `scopes` — in the
+    /// CAE slot for a Graph scope set, matching the adapter that consumes it.
+    async fn interactive_for_scopes(
+        &self,
+        tenant_id: &str,
+        scopes: &[String],
+        prompt: &str,
+        action: &str,
+    ) -> Result<()> {
         let tenant = self
             .known_tenants
             .lock()
@@ -382,8 +526,8 @@ impl EntraAuthService {
             .ok_or(AuthError::NotSignedIn)?;
 
         // The round trip needs an ID token (to confirm the same account
-        // consented) and a refresh token, so ensure the OIDC/offline scopes are
-        // present even for bare resource `.default` scopes (e.g. ARM), which
+        // completed it) and a refresh token, so ensure the OIDC/offline scopes
+        // are present even for bare resource `.default` scopes (e.g. ARM), which
         // omit them. The access token's audience is still set by the resource
         // scope; these reserved scopes only affect the id/refresh tokens.
         let mut auth_scopes = scopes.to_vec();
@@ -393,13 +537,15 @@ impl EntraAuthService {
             }
         }
 
+        let cae = self.is_graph_scope_set(scopes);
         let (token, claims) = self
-            .run_auth_code_flow(&auth_scopes, "consent", tenant.username.as_deref())
+            .run_auth_code_flow(&auth_scopes, prompt, tenant.username.as_deref(), cae)
             .await?;
 
-        // Defense-in-depth: a consent screen can switch tenant/account even
-        // with a login_hint. Refuse to cache a token for a different identity.
-        ensure_same_identity(&claims, &tenant, "consent")?;
+        // Defense-in-depth: a consent/login screen can switch tenant/account
+        // even with a login_hint. Refuse to cache a token for a different
+        // identity.
+        ensure_same_identity(&claims, &tenant, action)?;
 
         // Cache under the *requested* `scopes` (not `auth_scopes`) so the next
         // silent acquisition for the same set hits this entry. `scope_key`
@@ -409,6 +555,7 @@ impl EntraAuthService {
             &tenant.account_oid,
             scopes,
             scopes,
+            cae,
             token,
         )
         .await?;
@@ -460,10 +607,11 @@ impl EntraAuthService {
     }
 
     /// Shared tail of every token-yielding flow (`sign_in`,
-    /// `consent_for_scopes`, `reauthenticate`, `access_token_inner`): computes
-    /// expiry, parses the issued scopes (`scope_fallback` covers responses
-    /// that omit the `scope` echo), persists a rotated refresh token, and
-    /// seeds the access-token cache under `cache_scopes`. The keyring write is
+    /// `interactive_for_scopes`, `reauthenticate`, `access_token_inner`):
+    /// computes expiry, parses the issued scopes (`scope_fallback` covers
+    /// responses that omit the `scope` echo), persists a rotated refresh token,
+    /// and seeds the access-token cache under `cache_scopes` in the slot `cae`
+    /// names — which must be how the token was minted. The keyring write is
     /// a blocking OS syscall (Windows Credential Manager iterates numbered
     /// chunk entries), so it runs off the async worker via `spawn_blocking` —
     /// centralizing here is what keeps the interactive flows from stalling
@@ -474,6 +622,7 @@ impl EntraAuthService {
         account_oid: &str,
         cache_scopes: &[String],
         scope_fallback: &[String],
+        cae: bool,
         token: TokenResponse,
     ) -> Result<AccessToken> {
         let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
@@ -490,7 +639,7 @@ impl EntraAuthService {
             scopes,
         };
         self.cache
-            .put(tenant_id.to_string(), cache_scopes, access.clone());
+            .put(tenant_id.to_string(), cache_scopes, cae, access.clone());
         Ok(access)
     }
 
@@ -501,8 +650,11 @@ impl EntraAuthService {
         claims: Option<&str>,
         bypass_cache: bool,
     ) -> Result<AccessToken> {
+        // A CAE request (`claims` always carries cp1) reads and fills the CAE
+        // slot; a plain one the non-CAE slot — never the other's token.
+        let cae = claims.is_some();
         if !bypass_cache
-            && let Some(existing) = self.cache.get(tenant_id, scopes)
+            && let Some(existing) = self.cache.get(tenant_id, scopes, cae)
             && !existing.needs_refresh(REFRESH_LEEWAY_SECS)
         {
             return Ok(existing);
@@ -511,7 +663,7 @@ impl EntraAuthService {
         let lock = self.refresh_lock_for(tenant_id, scopes);
         let _guard = lock.lock().await;
         if !bypass_cache
-            && let Some(fresh) = self.cache.get(tenant_id, scopes)
+            && let Some(fresh) = self.cache.get(tenant_id, scopes, cae)
             && !fresh.needs_refresh(REFRESH_LEEWAY_SECS)
         {
             return Ok(fresh);
@@ -597,6 +749,17 @@ impl EntraAuthService {
                 tracing::info!(tenant_id = %tenant.tenant_id, %scope, %reason, "scope needs interactive consent");
                 return Err(AuthError::ConsentRequired(reason));
             }
+            Err(AuthError::InteractionRequired(reason)) => {
+                // A Conditional Access step-up for THIS resource (MFA,
+                // registration, an external challenge). The refresh token is
+                // still valid for every other audience — MSAL keeps the account
+                // on `InteractionRequiredAuthError` — so do NOT purge, drop the
+                // cached tokens or forget the tenant: that signed the operator
+                // out of Graph browsing over an ARM-only MFA policy. Surface so
+                // the caller can run `step_up_for_scopes`.
+                tracing::info!(tenant_id = %tenant.tenant_id, %scope, %reason, "resource needs an interactive step-up");
+                return Err(AuthError::InteractionRequired(reason));
+            }
             Err(e) => return Err(e),
         };
 
@@ -605,6 +768,7 @@ impl EntraAuthService {
             &tenant.account_oid,
             scopes,
             scopes,
+            cae,
             token,
         )
         .await
@@ -641,9 +805,11 @@ impl EntraAuthService {
     /// (already-consented) read scopes both validates the session and surfaces a
     /// dead refresh token immediately as [`AuthError::RefreshTokenMissing`] —
     /// the same "sign in again" signal a lazy refresh would have produced.
+    /// The read token is minted CAE, seeding the slot the Graph adapter
+    /// (`ScopedTokenAdapter::new_cae`) reads.
     pub async fn refresh_session(&self, tenant_id: &str) -> Result<()> {
         self.cache.invalidate_tenant(tenant_id);
-        self.access_token_for_scopes(tenant_id, &self.default_graph_read_scopes())
+        self.access_token_for_scopes_cae(tenant_id, &self.default_graph_read_scopes(), None)
             .await?;
         Ok(())
     }
@@ -662,7 +828,9 @@ impl EntraAuthService {
     ///
     /// Errors exactly as [`Self::refresh_session`] does, `RefreshTokenMissing`
     /// included; a dead session is the *expected* outcome, so the caller shows
-    /// the normal sign-in card rather than an error.
+    /// the normal sign-in card rather than an error. Like
+    /// [`Self::refresh_session`] it mints the read token CAE, seeding the slot
+    /// the Graph adapter reads.
     pub async fn restore_session(&self, tenant: &TenantContext) -> Result<SignInOutcome> {
         // `access_token_inner` resolves the account — and therefore the keyring
         // key — through `known_tenants`, so the context has to be registered
@@ -677,7 +845,7 @@ impl EntraAuthService {
             .lock()
             .insert(tenant.tenant_id.clone(), tenant.clone());
         match self
-            .access_token_for_scopes(&tenant.tenant_id, &self.default_graph_read_scopes())
+            .access_token_for_scopes_cae(&tenant.tenant_id, &self.default_graph_read_scopes(), None)
             .await
         {
             Ok(_) => Ok(SignInOutcome {
@@ -697,7 +865,10 @@ impl EntraAuthService {
     /// re-mapped to [`AuthError::RefreshTokenMissing`] after the stale token is
     /// purged) or a missing one — which the silent [`Self::refresh_session`]
     /// can't fix, sparing the user a full sign-out/sign-in (the latter would also
-    /// wipe the cached lists + audit run).
+    /// wipe the cached lists + audit run). It is also the step-up for the Graph
+    /// read scopes: a tenant-wide MFA or sign-in-frequency policy fails
+    /// `refresh_session` with [`AuthError::InteractionRequired`], and this very
+    /// round trip is what satisfies it.
     ///
     /// Runs one browser round trip with `prompt=login` (forcing a fresh
     /// credential entry — the right behaviour for a revoked session) pinned to
@@ -714,7 +885,7 @@ impl EntraAuthService {
     pub async fn reauthenticate(&self, tenant: &TenantContext) -> Result<SignInOutcome> {
         let initial_scopes = self.default_graph_read_scopes();
         let (token, claims) = self
-            .run_auth_code_flow(&initial_scopes, "login", tenant.username.as_deref())
+            .run_auth_code_flow(&initial_scopes, "login", tenant.username.as_deref(), true)
             .await?;
 
         // Defense-in-depth (mirrors `consent_for_scopes`): a login screen can
@@ -726,6 +897,7 @@ impl EntraAuthService {
             &tenant.account_oid,
             &initial_scopes,
             &initial_scopes,
+            true,
             token,
         )
         .await?;
@@ -922,25 +1094,62 @@ mod tests {
         forged_nonce: Option<&str>,
         nonce_slot: Arc<Mutex<Option<String>>>,
     ) {
-        let (tid, oid) = (tid.to_string(), oid.map(str::to_string));
-        let forged_nonce = forged_nonce.map(str::to_string);
         Mock::given(method("POST"))
             .and(path(format!("/{configured_tenant}/oauth2/v2.0/token")))
-            .respond_with(move |_: &wiremock::Request| {
-                let nonce = forged_nonce
-                    .clone()
-                    .or_else(|| nonce_slot.lock().clone())
-                    .expect("the browser was opened before the code was redeemed");
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "access_token": "interactive-at",
-                    "expires_in": 3600,
-                    "token_type": "Bearer",
-                    "refresh_token": "rt-interactive",
-                    "id_token": id_token(&tid, oid.as_deref(), &nonce),
-                }))
-            })
+            .respond_with(interactive_token_response(
+                tid,
+                oid,
+                forged_nonce,
+                nonce_slot,
+            ))
             .mount(server)
             .await;
+    }
+
+    /// The code-redemption response `mount_interactive_token` serves, for a
+    /// test that needs its own matchers on the same mock.
+    fn interactive_token_response(
+        tid: &str,
+        oid: Option<&str>,
+        forged_nonce: Option<&str>,
+        nonce_slot: Arc<Mutex<Option<String>>>,
+    ) -> impl wiremock::Respond + use<> {
+        let (tid, oid) = (tid.to_string(), oid.map(str::to_string));
+        let forged_nonce = forged_nonce.map(str::to_string);
+        move |_: &wiremock::Request| {
+            let nonce = forged_nonce
+                .clone()
+                .or_else(|| nonce_slot.lock().clone())
+                .expect("the browser was opened before the code was redeemed");
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "interactive-at",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+                "refresh_token": "rt-interactive",
+                "id_token": id_token(&tid, oid.as_deref(), &nonce),
+            }))
+        }
+    }
+
+    /// Wraps an opener so the authorize URL it was handed can be inspected.
+    fn recording_opener(
+        inner: BrowserOpener,
+        url_slot: Arc<Mutex<Option<String>>>,
+    ) -> BrowserOpener {
+        Box::new(move |url: &str| {
+            *url_slot.lock() = Some(url.to_string());
+            inner(url)
+        })
+    }
+
+    /// The query of the authorize URL a recording opener saw.
+    fn recorded_query(url_slot: &Mutex<Option<String>>) -> HashMap<String, String> {
+        let url = url_slot.lock().clone().expect("the browser was opened");
+        url::Url::parse(&url)
+            .unwrap()
+            .query_pairs()
+            .into_owned()
+            .collect()
     }
 
     /// A service for `tenant` wired to the redirecting opener, plus the shared
@@ -984,7 +1193,7 @@ mod tests {
         assert_eq!(context.username.as_deref(), Some("ada@contoso.com"));
         assert_eq!(
             svc.cache
-                .get(tenant, &svc.default_graph_read_scopes())
+                .get(tenant, &svc.default_graph_read_scopes(), true)
                 .expect("read token cached")
                 .token,
             "interactive-at"
@@ -1032,8 +1241,8 @@ mod tests {
         // Nothing of the foreign token was kept anywhere.
         assert!(svc.known_tenants.lock().is_empty());
         let read = svc.default_graph_read_scopes();
-        assert!(svc.cache.get(tenant, &read).is_none());
-        assert!(svc.cache.get(other, &read).is_none());
+        assert!(svc.cache.get(tenant, &read, true).is_none());
+        assert!(svc.cache.get(other, &read, true).is_none());
         assert_eq!(stored_token(other, oid), None);
         assert_eq!(stored_token(tenant, oid), None);
     }
@@ -1055,7 +1264,7 @@ mod tests {
         assert!(svc.known_tenants.lock().is_empty());
         assert!(
             svc.cache
-                .get(tenant, &svc.default_graph_read_scopes())
+                .get(tenant, &svc.default_graph_read_scopes(), true)
                 .is_none()
         );
         assert_eq!(stored_token(tenant, oid), None);
@@ -1078,7 +1287,7 @@ mod tests {
         assert!(svc.known_tenants.lock().is_empty());
         assert!(
             svc.cache
-                .get(tenant, &svc.default_graph_read_scopes())
+                .get(tenant, &svc.default_graph_read_scopes(), true)
                 .is_none()
         );
     }
@@ -1128,7 +1337,7 @@ mod tests {
             "{:?}",
             result.err()
         );
-        assert!(svc.cache.get(tenant, &scopes).is_none());
+        assert!(svc.cache.get(tenant, &scopes, false).is_none());
         assert_eq!(
             stored_token(tenant, oid).as_deref(),
             Some("stored-refresh-token")
@@ -1196,6 +1405,7 @@ mod tests {
         svc.cache.put(
             tenant.to_string(),
             &read,
+            true,
             AccessToken {
                 token: "cached".into(),
                 expires_at: Utc::now() + Duration::seconds(3600),
@@ -1210,7 +1420,7 @@ mod tests {
         let result = svc.sign_out(&context).await;
         assert!(matches!(result, Err(AuthError::Keyring(_))), "{result:?}");
         assert!(svc.tenant_context(tenant).is_some());
-        assert!(svc.cache.get(tenant, &read).is_some());
+        assert!(svc.cache.get(tenant, &read, true).is_some());
         assert_eq!(
             stored_token(tenant, oid).as_deref(),
             Some("stored-refresh-token")
@@ -1219,7 +1429,7 @@ mod tests {
         // The retry succeeds and clears all three.
         svc.sign_out(&context).await.unwrap();
         assert!(svc.tenant_context(tenant).is_none());
-        assert!(svc.cache.get(tenant, &read).is_none());
+        assert!(svc.cache.get(tenant, &read, true).is_none());
         assert_eq!(stored_token(tenant, oid), None);
     }
 
@@ -1375,6 +1585,7 @@ mod tests {
         svc.cache.put(
             tenant.to_string(),
             &read,
+            true,
             AccessToken {
                 token: "stale-from-before-pim-activation".into(),
                 expires_at: Utc::now() + Duration::seconds(3600),
@@ -1388,7 +1599,10 @@ mod tests {
         // proving the session re-mints from the token endpoint (picking up the
         // user's current directory roles, e.g. a PIM role activated after
         // sign-in) instead of serving the cached pre-activation token.
-        let cached = svc.cache.get(tenant, &read).expect("read token re-cached");
+        let cached = svc
+            .cache
+            .get(tenant, &read, true)
+            .expect("read token re-cached");
         assert_eq!(cached.token, "freshly-minted");
         // The session is intact: the keyring refresh token and tenant survive.
         assert_eq!(
@@ -1430,7 +1644,7 @@ mod tests {
         assert_eq!(outcome.tenant.account_oid, oid);
         assert_eq!(
             svc.cache
-                .get(tenant, &svc.default_graph_read_scopes())
+                .get(tenant, &svc.default_graph_read_scopes(), true)
                 .expect("read token cached")
                 .token,
             "restored-token"
@@ -1484,6 +1698,7 @@ mod tests {
                 &scope,
                 "select_account",
                 None,
+                None,
             )
             .unwrap();
         let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
@@ -1511,6 +1726,7 @@ mod tests {
         assert!(query.get("scope").unwrap().contains("offline_access"));
         // No login_hint when none is passed (the sign-in case).
         assert!(!query.contains_key("login_hint"));
+        assert!(!query.contains_key("claims"));
     }
 
     #[test]
@@ -1529,6 +1745,7 @@ mod tests {
                 &scope,
                 "consent",
                 Some("admin@contoso.com"),
+                None,
             )
             .unwrap();
         let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
@@ -1543,6 +1760,7 @@ mod tests {
                 .unwrap()
                 .contains("https://management.azure.com/.default")
         );
+        assert!(!query.contains_key("claims"));
     }
 
     #[test]
@@ -1580,5 +1798,495 @@ mod tests {
             Err(AuthError::Authorization(_))
         ));
         assert!(ensure_same_identity(&IdClaims::default(), &tenant, "consent").is_err());
+    }
+
+    fn token_ok(access_token: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": access_token,
+            "expires_in": 3600,
+            "token_type": "Bearer"
+        }))
+    }
+
+    fn arm_scopes() -> Vec<String> {
+        EntraAuthService::resource_default_scopes("https://management.azure.com")
+    }
+
+    fn fresh_token(token: &str, scopes: &[String]) -> AccessToken {
+        AccessToken {
+            token: token.into(),
+            expires_at: Utc::now() + Duration::seconds(3600),
+            scopes: scopes.to_vec(),
+        }
+    }
+
+    // ---- F113: an abandoned browser round trip is `Cancelled` ----
+
+    /// The operator closed the tab: no redirect ever arrives. Paused time
+    /// auto-advances past `REDIRECT_WAIT` while the listener waits.
+    #[tokio::test(start_paused = true)]
+    async fn an_abandoned_browser_sign_in_is_cancelled() {
+        let svc = fresh_service(
+            "http://localhost".into(),
+            "abandoned-tenant",
+            Box::new(|_| Ok(())),
+        );
+
+        let result = svc.sign_in().await;
+
+        assert!(matches!(result, Err(AuthError::Cancelled)), "{result:?}");
+        assert!(svc.known_tenants.lock().is_empty());
+    }
+
+    // ---- F111: the /token POST rides the shared retry budget ----
+
+    #[tokio::test]
+    async fn a_throttled_refresh_is_retried_and_cached() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("retry-429-tenant", "retry-429-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .up_to_n_times(1)
+            .expect(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(token_ok("after-throttle"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+
+        let token = svc
+            .access_token_for_scopes(tenant, &arm_scopes())
+            .await
+            .unwrap();
+
+        assert_eq!(token.token, "after-throttle");
+        assert_eq!(
+            svc.cache.get(tenant, &arm_scopes(), false).unwrap().token,
+            "after-throttle"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_server_error_on_refresh_is_retried() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("retry-503-tenant", "retry-503-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "0"))
+            .up_to_n_times(1)
+            .expect(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(token_ok("after-outage"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+
+        let token = svc
+            .access_token_for_scopes(tenant, &arm_scopes())
+            .await
+            .unwrap();
+
+        assert_eq!(token.token, "after-outage");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_rejection_is_not_retried() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("retry-400-tenant", "retry-400-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_client",
+                "error_description": "AADSTS7000215: Invalid client secret"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+
+        let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+        assert!(
+            matches!(&result, Err(AuthError::TokenExchange(m)) if m == "invalid_client (AADSTS7000215)"),
+            "{result:?}"
+        );
+        server.verify().await;
+    }
+
+    /// An authorization code is single-use: a 5xx after Entra may already have
+    /// redeemed it is never replayed.
+    #[tokio::test]
+    async fn the_code_exchange_is_not_replayed_after_a_server_error() {
+        let server = MockServer::start().await;
+        let tenant = "retry-code-tenant";
+        let (svc, _, _) = interactive_service(server.uri(), tenant);
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(ResponseTemplate::new(500).insert_header("Retry-After", "0"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = svc.sign_in().await;
+
+        assert!(
+            matches!(&result, Err(AuthError::TokenExchange(m)) if m.contains("500")),
+            "{result:?}"
+        );
+        server.verify().await;
+    }
+
+    #[test]
+    fn only_a_refresh_grant_is_idempotent() {
+        assert_eq!(
+            retry_class_for(&[("grant_type", "refresh_token")]),
+            RetryClass::Idempotent
+        );
+        assert_eq!(
+            retry_class_for(&[("grant_type", "authorization_code")]),
+            RetryClass::NonIdempotent
+        );
+        assert_eq!(retry_class_for(&[]), RetryClass::NonIdempotent);
+    }
+
+    // ---- F107: Graph flows mint CAE, and the cache keys on it ----
+
+    #[test]
+    fn authorize_url_carries_cae_claims_when_given() {
+        let svc = EntraAuthService::new("client-id-xyz", "tenant-id-abc");
+        let (challenge, _verifier) = PkceCodeChallenge::new_random_sha256();
+        let claims = build_cae_claims(None);
+        let url = svc
+            .authorize_url(
+                "https://login.microsoftonline.com/tenant-id-abc",
+                "http://127.0.0.1:1234",
+                "state-xyz",
+                "nonce-xyz",
+                &challenge,
+                "openid",
+                "login",
+                None,
+                Some(&claims),
+            )
+            .unwrap();
+        let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        let v: serde_json::Value = serde_json::from_str(&query["claims"]).unwrap();
+        assert_eq!(v["access_token"]["xms_cc"]["values"][0], "cp1");
+    }
+
+    #[tokio::test]
+    async fn restore_and_refresh_mint_cae_graph_tokens() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("cae-restore-tenant", "cae-restore-oid");
+        // A request without the cp1 claims falls through to a 404 and fails.
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .and(wiremock::matchers::body_string_contains("xms_cc"))
+            .respond_with(token_ok("cae-read"))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let svc = relaunched_service(server.uri(), tenant, oid);
+        let context = TenantContext {
+            tenant_id: tenant.into(),
+            account_oid: oid.into(),
+            username: None,
+            display_name: None,
+        };
+
+        svc.restore_session(&context).await.unwrap();
+        svc.refresh_session(tenant).await.unwrap();
+
+        let read = svc.default_graph_read_scopes();
+        assert_eq!(
+            svc.cache.get(tenant, &read, true).unwrap().token,
+            "cae-read"
+        );
+        assert!(svc.cache.get(tenant, &read, false).is_none());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn sign_in_requests_a_cae_token() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("cae-signin-tenant", "cae-signin-oid");
+        let (mut svc, nonce, opened) = interactive_service(server.uri(), tenant);
+        let url_slot = Arc::new(Mutex::new(None));
+        svc.open_browser =
+            recording_opener(redirecting_opener(nonce.clone(), opened), url_slot.clone());
+        // The code redemption must carry the cp1 claims too.
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .and(wiremock::matchers::body_string_contains("xms_cc"))
+            .respond_with(interactive_token_response(tenant, Some(oid), None, nonce))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        svc.sign_in().await.unwrap();
+
+        let query = recorded_query(&url_slot);
+        let v: serde_json::Value = serde_json::from_str(&query["claims"]).unwrap();
+        assert_eq!(v["access_token"]["xms_cc"]["values"][0], "cp1");
+        let read = svc.default_graph_read_scopes();
+        assert!(svc.cache.get(tenant, &read, true).is_some());
+        assert!(svc.cache.get(tenant, &read, false).is_none());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn consent_mints_cae_only_for_a_graph_scope_set() {
+        // A non-Graph audience (ARM) stays non-CAE.
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("cae-consent-arm-tenant", "cae-consent-arm-oid");
+        let mut svc = signed_in_service(server.uri(), tenant, oid);
+        let (nonce, url_slot) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        svc.open_browser = recording_opener(
+            redirecting_opener(nonce.clone(), Arc::new(AtomicUsize::new(0))),
+            url_slot.clone(),
+        );
+        mount_interactive_token(&server, tenant, tenant, Some(oid), None, nonce).await;
+
+        svc.consent_for_scopes(tenant, &arm_scopes()).await.unwrap();
+
+        assert!(!recorded_query(&url_slot).contains_key("claims"));
+        assert_eq!(
+            svc.cache.get(tenant, &arm_scopes(), false).unwrap().token,
+            "interactive-at"
+        );
+        assert!(svc.cache.get(tenant, &arm_scopes(), true).is_none());
+
+        // A Graph scope set is minted CAE — the slot `new_cae` reads.
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("cae-consent-graph-tenant", "cae-consent-graph-oid");
+        let mut svc = signed_in_service(server.uri(), tenant, oid);
+        let (nonce, url_slot) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        svc.open_browser = recording_opener(
+            redirecting_opener(nonce.clone(), Arc::new(AtomicUsize::new(0))),
+            url_slot.clone(),
+        );
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .and(wiremock::matchers::body_string_contains("xms_cc"))
+            .respond_with(interactive_token_response(tenant, Some(oid), None, nonce))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let write = svc.default_graph_write_scopes();
+
+        svc.consent_for_scopes(tenant, &write).await.unwrap();
+
+        let query = recorded_query(&url_slot);
+        assert_eq!(query.get("prompt").map(String::as_str), Some("consent"));
+        assert!(query.contains_key("claims"));
+        assert!(svc.cache.get(tenant, &write, true).is_some());
+        assert!(svc.cache.get(tenant, &write, false).is_none());
+        server.verify().await;
+    }
+
+    // ---- F108: a Conditional Access step-up is not a dead session ----
+
+    #[tokio::test]
+    async fn interaction_required_keeps_the_refresh_token_and_session() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("step-up-tenant", "step-up-oid");
+        mount_token_error(
+            &server,
+            tenant,
+            serde_json::json!({
+                "error": "interaction_required",
+                "error_description": "AADSTS50076: Due to a configuration change made by your administrator, you must use multi-factor authentication"
+            }),
+        )
+        .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+        let read = svc.default_graph_read_scopes();
+        svc.cache.put(
+            tenant.to_string(),
+            &read,
+            true,
+            fresh_token("graph-read", &read),
+        );
+
+        let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+        assert!(
+            matches!(result, Err(AuthError::InteractionRequired(_))),
+            "{result:?}"
+        );
+        // Nothing was purged: the keyring token, the tenant and every other
+        // audience's cached token all survive.
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("stored-refresh-token")
+        );
+        assert!(svc.known_tenants.lock().get(tenant).is_some());
+        assert_eq!(
+            svc.cache.get(tenant, &read, true).unwrap().token,
+            "graph-read"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_up_for_scopes_seeds_the_resource_token() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("step-up-ok-tenant", "step-up-ok-oid");
+        let mut svc = signed_in_service(server.uri(), tenant, oid);
+        let (nonce, url_slot) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        svc.open_browser = recording_opener(
+            redirecting_opener(nonce.clone(), Arc::new(AtomicUsize::new(0))),
+            url_slot.clone(),
+        );
+        mount_interactive_token(&server, tenant, tenant, Some(oid), None, nonce).await;
+
+        svc.step_up_for_scopes(tenant, &arm_scopes()).await.unwrap();
+
+        // `prompt=login` forces the credential plus the resource's CA challenge.
+        let query = recorded_query(&url_slot);
+        assert_eq!(query.get("prompt").map(String::as_str), Some("login"));
+        assert_eq!(
+            svc.cache.get(tenant, &arm_scopes(), false).unwrap().token,
+            "interactive-at"
+        );
+        assert_eq!(stored_token(tenant, oid).as_deref(), Some("rt-interactive"));
+        assert!(svc.tenant_context(tenant).is_some());
+    }
+
+    #[tokio::test]
+    async fn step_up_as_a_different_account_is_rejected() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("step-up-id-tenant", "step-up-id-oid");
+        let mut svc = signed_in_service(server.uri(), tenant, oid);
+        let nonce = Arc::new(Mutex::new(None));
+        svc.open_browser = redirecting_opener(nonce.clone(), Arc::new(AtomicUsize::new(0)));
+        mount_interactive_token(&server, tenant, tenant, Some("someone-else"), None, nonce).await;
+
+        let result = svc.step_up_for_scopes(tenant, &arm_scopes()).await;
+
+        assert!(
+            matches!(&result, Err(AuthError::Authorization(m)) if m.starts_with("verification")),
+            "{result:?}"
+        );
+        assert!(svc.cache.get(tenant, &arm_scopes(), false).is_none());
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("stored-refresh-token")
+        );
+    }
+
+    // ---- F115: the single-flight refresh, proven by behaviour ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_same_scope_requests_collapse_to_one_token_call() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("single-flight-tenant", "single-flight-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(token_ok("one-and-only").set_delay(std::time::Duration::from_millis(200)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let svc = Arc::new(signed_in_service(server.uri(), tenant, oid));
+
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let svc = svc.clone();
+            set.spawn(async move {
+                svc.access_token_for_scopes("single-flight-tenant", &arm_scopes())
+                    .await
+                    .map(|t| t.token.clone())
+            });
+        }
+        let mut tokens = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            tokens.push(joined.unwrap().unwrap());
+        }
+
+        assert_eq!(tokens.len(), 8);
+        assert!(tokens.iter().all(|t| t == "one-and-only"), "{tokens:?}");
+        server.verify().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn different_scope_sets_refresh_independently() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("per-key-tenant", "per-key-oid");
+        let delay = std::time::Duration::from_millis(500);
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(token_ok("per-key").set_delay(delay))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let svc = Arc::new(signed_in_service(server.uri(), tenant, oid));
+        let vault = EntraAuthService::resource_default_scopes("https://vault.azure.net");
+
+        let arm = arm_scopes();
+        let started = std::time::Instant::now();
+        let (a, b) = tokio::join!(
+            svc.access_token_for_scopes(tenant, &arm),
+            svc.access_token_for_scopes(tenant, &vault),
+        );
+        let elapsed = started.elapsed();
+
+        a.unwrap();
+        b.unwrap();
+        server.verify().await;
+        // Serialised behind one lock this takes two full delays; the per-key
+        // locks let the two audiences overlap (generous margin for a busy box).
+        assert!(
+            elapsed < delay * 2 - std::time::Duration::from_millis(100),
+            "{elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cae_challenge_bypasses_the_cache_and_sends_claims() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("cae-challenge-tenant", "cae-challenge-oid");
+        // The challenge's claims are forwarded (merged with cp1).
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .and(wiremock::matchers::body_string_contains("claims="))
+            .and(wiremock::matchers::body_string_contains("1700000000"))
+            .respond_with(token_ok("re-minted"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+        let read = svc.default_graph_read_scopes();
+        svc.cache.put(
+            tenant.to_string(),
+            &read,
+            true,
+            fresh_token("seeded", &read),
+        );
+        let challenge = URL_SAFE_NO_PAD
+            .encode(r#"{"access_token":{"nbf":{"essential":true,"value":"1700000000"}}}"#);
+
+        let token = svc
+            .access_token_for_scopes_cae(tenant, &read, Some(&challenge))
+            .await
+            .unwrap();
+
+        assert_eq!(token.token, "re-minted");
+        assert_eq!(
+            svc.cache.get(tenant, &read, true).unwrap().token,
+            "re-minted"
+        );
+        server.verify().await;
     }
 }

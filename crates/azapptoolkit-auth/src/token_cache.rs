@@ -1,8 +1,10 @@
 //! Access- and refresh-token storage.
 //!
-//! Access tokens stay in memory (never written to disk) and are keyed by the
-//! pair `(tenant_id, scope_key)` so multi-audience apps (Graph + Key Vault +
-//! ARM) can keep a fresh token per resource without evicting the others.
+//! Access tokens stay in memory (never written to disk) and are keyed by
+//! `(tenant_id, scope_key, cae)` so multi-audience apps (Graph + Key Vault +
+//! ARM) can keep a fresh token per resource without evicting the others, and a
+//! token minted without the `cp1` client capability is never served to a
+//! Continuous Access Evaluation consumer (or vice versa).
 //! Refresh tokens, which are scope-agnostic, live in the OS secret store via
 //! [`keyring_core`] — Windows Credential Manager / macOS Keychain / Secret
 //! Service — and are shared across audiences for the same account.
@@ -124,10 +126,17 @@ pub fn scope_key(scopes: &[String]) -> String {
     owned.join(" ")
 }
 
-/// Token storage keyed by `(tenant_id, scope_key)`.
+/// Token storage keyed by `(tenant_id, scope_key, cae)`.
+///
+/// CAE-ness is part of the key because the same scope set is consumed both
+/// ways: the Graph adapters (`ScopedTokenAdapter::new_cae`) need a token minted
+/// with the `cp1` claims (revoked promptly on a password reset, disabled user
+/// or risky sign-in), while a plain probe or a non-Graph audience does not. A
+/// key without it let whichever flow seeded the slot first decide for both, so
+/// a mismatch now costs one extra silent refresh instead of a wrong token.
 #[derive(Default)]
 pub struct TokenCache {
-    by_key: RwLock<HashMap<(String, String), AccessToken>>,
+    by_key: RwLock<HashMap<(String, String, bool), AccessToken>>,
 }
 
 impl TokenCache {
@@ -135,19 +144,23 @@ impl TokenCache {
         Arc::new(Self::default())
     }
 
-    pub fn get(&self, tenant_id: &str, scopes: &[String]) -> Option<AccessToken> {
-        let key = (tenant_id.to_string(), scope_key(scopes));
+    /// The cached token for `scopes`, minted with (`cae = true`) or without
+    /// the `cp1` CAE client capability.
+    pub fn get(&self, tenant_id: &str, scopes: &[String], cae: bool) -> Option<AccessToken> {
+        let key = (tenant_id.to_string(), scope_key(scopes), cae);
         self.by_key.read().get(&key).cloned()
     }
 
-    pub fn put(&self, tenant_id: String, scopes: &[String], token: AccessToken) {
-        let key = (tenant_id, scope_key(scopes));
+    /// Caches `token` for `scopes` in the CAE (`cae = true`) or non-CAE slot.
+    pub fn put(&self, tenant_id: String, scopes: &[String], cae: bool, token: AccessToken) {
+        let key = (tenant_id, scope_key(scopes), cae);
         self.by_key.write().insert(key, token);
     }
 
-    /// Drops every cached access token for `tenant_id`, across all scopes.
+    /// Drops every cached access token for `tenant_id`, across all scopes and
+    /// both CAE slots.
     pub fn invalidate_tenant(&self, tenant_id: &str) {
-        self.by_key.write().retain(|(t, _), _| t != tenant_id);
+        self.by_key.write().retain(|(t, _, _), _| t != tenant_id);
     }
 }
 
@@ -663,6 +676,7 @@ mod tests {
         cache.put(
             "tenant".into(),
             &graph_scopes,
+            false,
             AccessToken {
                 token: "graph".into(),
                 expires_at: Utc::now() + Duration::seconds(3600),
@@ -672,14 +686,40 @@ mod tests {
         cache.put(
             "tenant".into(),
             &kv_scopes,
+            false,
             AccessToken {
                 token: "kv".into(),
                 expires_at: Utc::now() + Duration::seconds(3600),
                 scopes: kv_scopes.clone(),
             },
         );
-        assert_eq!(cache.get("tenant", &graph_scopes).unwrap().token, "graph");
-        assert_eq!(cache.get("tenant", &kv_scopes).unwrap().token, "kv");
+        assert_eq!(
+            cache.get("tenant", &graph_scopes, false).unwrap().token,
+            "graph"
+        );
+        assert_eq!(cache.get("tenant", &kv_scopes, false).unwrap().token, "kv");
+    }
+
+    #[test]
+    fn token_cache_separates_cae_from_non_cae() {
+        let cache = TokenCache::new();
+        let scopes = vec!["https://graph.microsoft.com/Directory.Read.All".to_string()];
+        let token = |t: &str| AccessToken {
+            token: t.into(),
+            expires_at: Utc::now() + Duration::seconds(3600),
+            scopes: scopes.clone(),
+        };
+        // A non-CAE seed is never served to a CAE consumer.
+        cache.put("tenant".into(), &scopes, false, token("plain"));
+        assert!(cache.get("tenant", &scopes, true).is_none());
+        // Both slots coexist, each returning its own token.
+        cache.put("tenant".into(), &scopes, true, token("cae"));
+        assert_eq!(cache.get("tenant", &scopes, false).unwrap().token, "plain");
+        assert_eq!(cache.get("tenant", &scopes, true).unwrap().token, "cae");
+        // Sign-out / refresh drops both.
+        cache.invalidate_tenant("tenant");
+        assert!(cache.get("tenant", &scopes, false).is_none());
+        assert!(cache.get("tenant", &scopes, true).is_none());
     }
 
     #[test]
@@ -689,6 +729,7 @@ mod tests {
         cache.put(
             "tenant".into(),
             &scopes,
+            true,
             AccessToken {
                 token: "t".into(),
                 expires_at: Utc::now() + Duration::seconds(3600),
@@ -696,7 +737,7 @@ mod tests {
             },
         );
         cache.invalidate_tenant("tenant");
-        assert!(cache.get("tenant", &scopes).is_none());
+        assert!(cache.get("tenant", &scopes, true).is_none());
     }
 
     /// A set whose chunks do not match its own declared count must load as "no
