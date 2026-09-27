@@ -2,6 +2,22 @@
 
 ### Fixed
 
+- **Scope checks no longer trip over how Exchange capitalises group names.** Exchange returns a
+  group's distinguished name in its own casing. The legacy-policy migration compared these exactly,
+  so it could refuse an app whose management scope already pointed at the right group, with "still
+  does not confine access to the groups this migration computed". "Move to managed group" could
+  also repoint a scope that was already on the managed group and then list that group as a cleanup
+  candidate. Group comparisons now ignore case, as the post-write check already did. Granting scoped
+  access against an existing scope whose filter can't be fully read is now refused instead of
+  treated as matching.
+- **A legacy Application Access Policy reads the same in the audit as in the migration.** A
+  `RestrictAccess` value with stray spaces was migrated as confining, but the security audit and the
+  permission tester reported the app as reaching every mailbox and scored it at full risk. Both now
+  read it as confining, so such apps can rank lower in the audit.
+- **Deleting a retired scope group is refused when Exchange's scope or policy list can't be read.**
+  A rejected read whose message happened to say "not found" was treated as an empty list, so the
+  reference check could report no references to a group that was still in use. It now fails, and
+  the delete is withheld.
 - **Exchange changes are no longer re-sent after a server error or a dropped connection.** The
   Exchange client ran a retry loop of its own that replayed every cmdlet after a 5xx or network
   failure, including `New-ManagementRoleAssignment`, `New-ManagementScope`, `New-ServicePrincipal`

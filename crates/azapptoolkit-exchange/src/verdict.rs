@@ -135,9 +135,7 @@ pub fn aap_verdict_for(
             p.app_id
                 .as_deref()
                 .is_some_and(|a| a.eq_ignore_ascii_case(app_id))
-                && p.access_right
-                    .as_deref()
-                    .is_some_and(|r| r.eq_ignore_ascii_case("RestrictAccess"))
+                && p.is_restrict_access()
         })
         .collect();
     if matching.is_empty() {
@@ -346,7 +344,7 @@ mod tests {
             app_id: Some(app_id.to_string()),
             scope_name: Some(scope.to_string()),
             scope_identity: None,
-            access_right: Some(right.to_string()),
+            access_right: Some(right.into()),
             description: Some("desc".to_string()),
         }
     }
@@ -829,5 +827,43 @@ mod tests {
         )
         .expect_err("genuine 403 must propagate");
         assert!(matches!(err, ExchangeError::Forbidden { .. }));
+    }
+
+    /// The migration planner and the audit / permission-tester verdict read an
+    /// `AccessRight` through ONE definition, so a policy the migration treats as
+    /// confining is never reported org-wide (full risk) by the audit, and a
+    /// blocklist is never confining in either. Built via the wire path, since
+    /// that is where padding and casing arrive.
+    #[test]
+    fn restrict_access_reads_the_same_in_the_planner_and_the_verdict() {
+        use crate::aap::group_policies_for_migration;
+        for raw in [
+            "RestrictAccess",
+            " RestrictAccess ",
+            "restrictaccess",
+            "DenyAccess",
+            " denyaccess",
+            "Other",
+            "",
+        ] {
+            let p: ExoApplicationAccessPolicy = serde_json::from_value(serde_json::json!({
+                "AppId": "app-1",
+                "ScopeName": "Sales",
+                "AccessRight": raw,
+            }))
+            .expect("policy deserializes");
+            let verdict = aap_verdict_for(std::slice::from_ref(&p), "app-1").is_some();
+            let migratable = !group_policies_for_migration(vec![p]).0.is_empty();
+            assert_eq!(verdict, migratable, "{raw:?}");
+        }
+
+        // The drift this pins: the planner trimmed, the verdict did not.
+        let padded: ExoApplicationAccessPolicy = serde_json::from_value(serde_json::json!({
+            "AppId": "app-1",
+            "ScopeName": "Sales",
+            "AccessRight": " RestrictAccess ",
+        }))
+        .unwrap();
+        assert!(aap_verdict_for(std::slice::from_ref(&padded), "app-1").is_some());
     }
 }

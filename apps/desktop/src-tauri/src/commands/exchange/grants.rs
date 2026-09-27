@@ -238,9 +238,15 @@ pub(super) async fn apply_exchange_mailbox_scope(
                     ),
                 ));
             };
-            let wanted: std::collections::HashSet<String> = dns.iter().cloned().collect();
-            let have = group_dns_in_filter(existing_filter);
-            if have != wanted {
+            // Same confinement, case-folded (Exchange echoes DNs in its own
+            // casing) and fail-closed: a filter with a `MemberOfGroup` clause
+            // this parser cannot read is never agreement, even when the part it
+            // did read equals the requested groups.
+            let wanted = ScopeGroups {
+                dns: dns.iter().cloned().collect(),
+                complete: true,
+            };
+            if !scope_groups_in_filter(existing_filter).same_groups_as(&wanted) {
                 return Err(UiError::validation(
                     "scope_group_mismatch",
                     format!(

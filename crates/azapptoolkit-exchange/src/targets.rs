@@ -495,9 +495,33 @@ impl ScopeGroups {
     /// proof then tells the operator the scope was NOT repointed, after the
     /// filter has already been applied to every role assignment on it, which is
     /// the worst direction for that message to be wrong in.
+    ///
+    /// Each DN folds through [`fold_dn`], the one definition every "same group"
+    /// comparison in the crate and the desktop commands shares.
     pub fn folded_dns(&self) -> HashSet<String> {
-        self.dns.iter().map(|d| d.to_ascii_lowercase()).collect()
+        self.dns.iter().map(|d| fold_dn(d)).collect()
     }
+
+    /// Same confinement: BOTH fully read and equal case-folded DN sets. An
+    /// incomplete parse is never equal, not even to itself — its unread
+    /// remainder is exactly what could differ.
+    pub fn same_groups_as(&self, other: &ScopeGroups) -> bool {
+        self.complete && other.complete && self.folded_dns() == other.folded_dns()
+    }
+}
+
+/// Case-folds one group DN for comparison (Exchange echoes DNs in its own
+/// casing). Unicode lowercase rather than ASCII, so a `CN=Zürich,…` DN folds
+/// too; folding more can only turn a false refusal into agreement, never widen
+/// anything, because AD distinguished names are unique case-insensitively.
+pub fn fold_dn(dn: &str) -> String {
+    dn.to_lowercase()
+}
+
+/// True when two group DNs name the same group, ignoring the casing Exchange
+/// echoes them back in. See [`fold_dn`].
+pub fn same_dn(a: &str, b: &str) -> bool {
+    fold_dn(a) == fold_dn(b)
 }
 
 /// Parses a management scope's recipient filter into the group DNs it names.
@@ -724,7 +748,12 @@ pub fn plan_consolidation(
         return Err(Refusal::UnverifiedMembers(unverified_members));
     }
     Ok(ConsolidationPlan {
-        repoint: !(source_dns.len() == 1 && source_dns[0] == managed_dn),
+        // Case-folded: the source DNs are parsed from the filter Exchange
+        // echoed, the managed DN comes from a group object, and the two can
+        // differ only in casing. `all` (not `len() == 1`) also covers a filter
+        // naming the managed group twice in different casings. `source_dns` is
+        // non-empty: `rewritable_scope_dns` refuses a filter with no clause.
+        repoint: !source_dns.iter().all(|d| same_dn(d, managed_dn)),
         scope_dns: vec![managed_dn.to_string()],
     })
 }
@@ -1365,5 +1394,66 @@ mod tests {
         let already = crate::client::member_of_group_filter(&["CN=Managed,DC=x".to_string()]);
         let plan = plan_consolidation(&already, managed(), &[], 0).unwrap();
         assert!(!plan.repoint, "no rewrite when the scope already names it");
+
+        // Exchange echoes DNs in its own casing: still the managed group.
+        let echoed = crate::client::member_of_group_filter(&["cn=managed,dc=X".to_string()]);
+        let plan = plan_consolidation(&echoed, managed(), &[], 0).unwrap();
+        assert!(!plan.repoint, "a case-only difference is not a repoint");
+
+        // The same group named twice in two casings is still only that group.
+        let twice = crate::client::member_of_group_filter(&[
+            "CN=Managed,DC=x".to_string(),
+            "CN=MANAGED,DC=X".to_string(),
+        ]);
+        let plan = plan_consolidation(&twice, managed(), &[], 0).unwrap();
+        assert!(
+            !plan.repoint,
+            "case variants of the managed group are one group"
+        );
+
+        // A second, different group still has to be folded away.
+        let extra = crate::client::member_of_group_filter(&[
+            "CN=Managed,DC=x".to_string(),
+            "CN=Other,DC=x".to_string(),
+        ]);
+        let plan = plan_consolidation(&extra, managed(), &[], 0).unwrap();
+        assert!(
+            plan.repoint,
+            "another group in the filter still needs a rewrite"
+        );
+    }
+
+    #[test]
+    fn same_groups_as_folds_case_and_refuses_incomplete() {
+        let a = scope_groups_in_filter("MemberOfGroup -eq 'CN=A,DC=x'");
+        assert!(a.same_groups_as(&scope_groups_in_filter("MemberOfGroup -eq 'cn=a,DC=X'")));
+        assert!(same_dn("CN=A,DC=x", "cn=a,dc=X"));
+
+        // Unicode folding, not ASCII-only.
+        assert!(
+            scope_groups_in_filter("MemberOfGroup -eq 'CN=Zürich,DC=x'").same_groups_as(
+                &scope_groups_in_filter("MemberOfGroup -eq 'cn=ZÜRICH,DC=x'")
+            )
+        );
+
+        let ab = scope_groups_in_filter(
+            "(MemberOfGroup -eq 'CN=A,DC=x') -or (MemberOfGroup -eq 'CN=B,DC=x')",
+        );
+        assert!(ab.complete);
+        assert!(
+            !a.same_groups_as(&ab),
+            "a different group set is not the same"
+        );
+        assert!(!ab.same_groups_as(&a));
+
+        let partial =
+            scope_groups_in_filter("MemberOfGroup -eq 'CN=A,DC=x' -or MemberOfGroup -like 'CN=B*'");
+        assert!(!partial.complete);
+        assert!(
+            !partial.same_groups_as(&partial),
+            "an incomplete parse is never the same, not even as itself"
+        );
+        assert!(!partial.same_groups_as(&a));
+        assert!(!a.same_groups_as(&partial));
     }
 }

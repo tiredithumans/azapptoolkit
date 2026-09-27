@@ -9,6 +9,7 @@ use azapptoolkit_core::scoping::{
     EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
     exchange_role_for_resource_permission,
 };
+use azapptoolkit_exchange::targets::group_dns_in_filter;
 
 fn target(value: &str) -> ExchangeTarget {
     ExchangeTarget {
@@ -719,6 +720,11 @@ fn a_divergent_or_unreadable_scope_filter_is_never_agreement() {
     // this must NOT read as divergent or every re-run would refuse.
     assert!(scope_filter_agrees(
         "(MemberOfGroup  -eq  'CN=Managed,DC=x')",
+        &wanted
+    ));
+    // Exchange echoes DNs in its own casing: still the same group.
+    assert!(scope_filter_agrees(
+        "MemberOfGroup -eq 'cn=managed,dc=X'",
         &wanted
     ));
 

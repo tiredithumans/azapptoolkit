@@ -137,13 +137,18 @@ impl ExchangeClient {
     /// EXO `Get-*` cmdlets throw when an `-Identity` doesn't resolve) to an
     /// empty result, so callers can treat a missing object as `None`.
     ///
+    /// Only for a lookup keyed on an `-Identity`/assignee that may not resolve.
+    /// Never route an identity-less list-all through this; see
+    /// `list_service_principals`. A list-all has no object to be missing, so a
+    /// "not found" rejection of it would read as an empty tenant.
+    ///
     /// Only a **first-page** `NotFound` can reach these arms:
     /// [`Self::invoke_command`] reclassifies a mid-pagination not-found error as
     /// `Protocol` (other mid-pagination errors keep their own class — they
     /// cannot reach these arms anyway). Without that, a continuation that 404'd
     /// turned a partially read collection into "this object has nothing", which
-    /// the consolidation planner and the reverse scope lookup both read as proof
-    /// of absence.
+    /// the consolidation planner and the per-assignee role lookup both read as
+    /// proof of absence.
     pub(crate) async fn invoke_optional(
         &self,
         cmdlet: &str,

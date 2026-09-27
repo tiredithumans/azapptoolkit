@@ -24,10 +24,11 @@ use azapptoolkit_exchange::models::{
 };
 use azapptoolkit_exchange::references::{GroupIdentity, references_to_group};
 use azapptoolkit_exchange::targets::{
-    ExchangeTarget, Refusal, RoleStep, UnrewritableFilter, count_member_of_group, exchange_target,
-    filter_targets_by_value, group_dns_in_filter, mailbox_resources_complete, plan_consolidation,
-    plan_role_assignments, policies_safe_to_remove, require_scopable_targets, rewritable_scope_dns,
-    scope_groups_in_filter, targets_from_declared, targets_from_grants, targets_safe_to_strip,
+    ExchangeTarget, Refusal, RoleStep, ScopeGroups, UnrewritableFilter, count_member_of_group,
+    exchange_target, filter_targets_by_value, fold_dn, mailbox_resources_complete,
+    plan_consolidation, plan_role_assignments, policies_safe_to_remove, require_scopable_targets,
+    rewritable_scope_dns, same_dn, scope_groups_in_filter, targets_from_declared,
+    targets_from_grants, targets_safe_to_strip,
 };
 // The pure mailbox-scope decisions now live in the crate, where they are
 // unit-testable without a Tauri `State`. This file keeps the I/O around them.

@@ -263,7 +263,9 @@ limit and takes a typed confirmation, and the command re-verifies every guard ag
 before acting: the group must still resolve *as a distribution/mail-enabled security group*, must not
 be this app's managed scope group (deleting that removes the app's access entirely), and must have
 **zero** references from a check that **completed** — `reference_check_complete: false` is an unknown
-and is refused, never read as clean. No invalidation: a distribution group is absent from the app/SP
+and is refused, never read as clean. Both org-wide reads behind it (`list_management_scopes`,
+`get_application_access_policies`) fail on any rejection rather than reading "not found" as an empty
+list — only an `-Identity` lookup goes through `invoke_optional`. No invalidation: a distribution group is absent from the app/SP
 and name indexes, and both the group listing and the scope verdict are read live.
 
 The grant flow is **unchanged**: the UI passes the managed group's identifier in the existing

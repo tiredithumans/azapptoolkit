@@ -45,7 +45,8 @@ use crate::models::{ExoApplicationAccessPolicy, ExoGroupMember};
 /// in whatever case it stored, and a GUID differing only in case is the same
 /// application — so a case-sensitive grouping splits one app into two batches
 /// and reproduces exactly the failure the second rule exists to prevent. Every
-/// other comparison in this module already casefolds (`AccessRight`,
+/// other comparison in this module already casefolds (the `AccessRight`, parsed
+/// once into [`AapAccessRight`](crate::models::AapAccessRight), and
 /// `SourceMember::key`); this one did not.
 pub fn group_policies_for_migration(
     policies: Vec<ExoApplicationAccessPolicy>,
@@ -57,8 +58,8 @@ pub fn group_policies_for_migration(
             excluded.push("policy without an AppId skipped".to_string());
             continue;
         };
-        match policy.access_right.as_deref().map(str::trim) {
-            Some(right) if right.eq_ignore_ascii_case("RestrictAccess") => {}
+        match &policy.access_right {
+            Some(right) if right.is_restrict() => {}
             Some(right) => {
                 excluded.push(format!(
                     "{policy_app_id}: skipped a {right} policy — only RestrictAccess policies are \
@@ -209,7 +210,7 @@ mod tests {
     fn aap(app_id: &str, right: &str, group: Option<&str>) -> ExoApplicationAccessPolicy {
         ExoApplicationAccessPolicy {
             app_id: Some(app_id.to_string()),
-            access_right: Some(right.to_string()),
+            access_right: Some(right.into()),
             scope_name: group.map(str::to_string),
             ..Default::default()
         }
