@@ -87,6 +87,12 @@ async fn the_account_menu_reopens_this_versions_release_notes() {
 
     ts::click(".shell__account-version .link-btn");
     ts::wait_for(|| ts::query(".changelog").is_some()).await;
+    // The menu's focus return (to the chip) must not steal focus from the
+    // dialog the item opened: the item closes the menu before opening it.
+    wait_for_focus("the release-notes dialog", || {
+        active().is_some_and(|a| a.closest(".modal").ok().flatten().is_some())
+    })
+    .await;
     assert!(
         ts::body_contains(&format!("What's new in v{}", env!("CARGO_PKG_VERSION"))),
         "the dialog must name the version it is showing notes for"
@@ -95,6 +101,84 @@ async fn the_account_menu_reopens_this_versions_release_notes() {
         !ts::text(".changelog").is_empty(),
         "release notes for this build must be baked in, not an empty box"
     );
+}
+
+/// The focused element, for asserting where a key sent focus.
+fn active() -> Option<web_sys::Element> {
+    web_sys::window()?.document()?.active_element()
+}
+
+/// Trimmed text of the focused element.
+fn active_text() -> String {
+    active()
+        .and_then(|e| e.text_content())
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// Polls until `pred` holds for the focused element, like [`ts::wait_for`], but
+/// a timeout names what actually has focus — a focus regression is otherwise an
+/// opaque "condition not met".
+async fn wait_for_focus(what: &str, pred: impl Fn() -> bool) {
+    for _ in 0..300 {
+        if pred() {
+            return;
+        }
+        ts::tick().await;
+    }
+    panic!(
+        "focus never reached {what}; focused: <{}> class={:?} text={:?}",
+        active().map(|e| e.tag_name()).unwrap_or_default(),
+        active().map(|e| e.class_name()).unwrap_or_default(),
+        active_text()
+    );
+}
+
+/// The account menu announces `role="menu"`, so it must behave like one: focus
+/// lands on the first item on open, Arrow/Home/End move between items (wrapping
+/// at the ends), and Escape closes it with focus back on the chip. The chip's
+/// `aria-expanded` is a real `"true"`/`"false"` string, not a boolean attribute.
+#[wasm_bindgen_test]
+async fn the_account_menu_follows_the_menu_keyboard_contract() {
+    ts::reset();
+    let _m = ts::mount_view(|| view! { <AppShell><div /></AppShell> });
+    ts::wait_for(|| ts::query(".shell__tenant-chip").is_some()).await;
+    let expanded =
+        || ts::query(".shell__tenant-chip").and_then(|c| c.get_attribute("aria-expanded"));
+    assert_eq!(expanded().as_deref(), Some("false"));
+
+    // The keyboard route: Enter/Space on the focused chip fires its click.
+    ts::focus(".shell__tenant-chip");
+    ts::click(".shell__tenant-chip");
+    ts::wait_for(|| ts::query(".shell__account-menu").is_some()).await;
+    assert_eq!(expanded().as_deref(), Some("true"));
+    wait_for_focus("Access Readiness", || {
+        active_text().contains("Access Readiness")
+    })
+    .await;
+
+    // Dispatched on an item: it bubbles to the panel, whose handler reads the
+    // focused element rather than the event target.
+    let item = ".shell__account-menu [role=menuitem]";
+    ts::press_key(item, "ArrowDown");
+    wait_for_focus("Settings", || active_text().contains("Settings")).await;
+    ts::press_key(item, "End");
+    wait_for_focus("What's new", || active_text().contains("What's new")).await;
+    ts::press_key(item, "Home");
+    wait_for_focus("Access Readiness", || {
+        active_text().contains("Access Readiness")
+    })
+    .await;
+    ts::press_key(item, "ArrowUp");
+    wait_for_focus("What's new", || active_text().contains("What's new")).await;
+
+    ts::press_key("body", "Escape");
+    ts::wait_for(|| ts::query(".shell__account-menu").is_none()).await;
+    wait_for_focus("the tenant chip", || {
+        active().is_some_and(|a| a.class_name().contains("shell__tenant-chip"))
+    })
+    .await;
 }
 
 /// Summary-first is the contract: the splash and this dialog show what changed

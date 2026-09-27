@@ -22,7 +22,7 @@ use leptos::ev::KeyboardEvent;
 use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{Element, HtmlElement, HtmlInputElement, NodeList};
+use web_sys::{Element, HtmlElement, NodeList};
 
 /// Whether the container holds every row, or only a scrolled window of them.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -90,30 +90,6 @@ fn set_roving(rows: &NodeList, target: Option<u32>) {
     }
 }
 
-/// True when the keystroke came from a text-entry control, where a bare arrow
-/// key belongs to the caret and not to the grid.
-///
-/// The surface-local twin of the window-level check in `use_shortcuts` — that
-/// module is deliberately scoped to *window* bindings and a surface hook must
-/// not reach into it. A row's bulk-select checkbox is explicitly not a text
-/// field: arrowing off it is exactly what a keyboard user expects.
-fn in_text_field(ev: &KeyboardEvent) -> bool {
-    let Some(el) = ev.target().and_then(|t| t.dyn_into::<HtmlElement>().ok()) else {
-        return false;
-    };
-    if el.is_content_editable() {
-        return true;
-    }
-    match el.tag_name().to_ascii_lowercase().as_str() {
-        "textarea" | "select" => true,
-        "input" => !matches!(
-            el.unchecked_ref::<HtmlInputElement>().type_().as_str(),
-            "checkbox" | "radio" | "button" | "submit" | "reset"
-        ),
-        _ => false,
-    }
-}
-
 /// Wires keyboard navigation onto the rows `row_selector` matches inside
 /// `container`, and returns the `keydown` handler to bind with `on:keydown`.
 ///
@@ -175,7 +151,10 @@ pub fn use_row_keynav(
     });
 
     move |ev: KeyboardEvent| {
-        if in_text_field(&ev) {
+        // The shared predicate (`hooks::is_text_entry`), not a surface-local
+        // twin: a row's bulk-select checkbox is explicitly not a text field —
+        // arrowing off it is exactly what a keyboard user expects.
+        if super::is_text_entry(&ev) {
             return;
         }
         let Some(root) = container() else { return };

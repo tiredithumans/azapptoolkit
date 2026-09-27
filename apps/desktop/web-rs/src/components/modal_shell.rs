@@ -4,14 +4,27 @@
 //! instead of each re-implementing `<Show>` + `modal-backdrop` and (as several
 //! did) silently omitting `use_focus_trap` / `use_escape`.
 //!
+//! Each instance mints its own title id (`modal-shell-title-{n}`) for
+//! `aria-labelledby`: several shells are mounted at once, so a fixed id would
+//! make every label resolve to whichever came first in the document.
+//!
 //! `ConfirmDialog` and the dedicated dialog components predate this and keep
-//! their own (equivalent) wiring.
+//! their own (equivalent) wiring, each with its own unique hard-coded title id.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use leptos::html;
 use leptos::prelude::*;
 
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
+
+/// Source of per-instance title ids. Several `ModalShell`s can be mounted at
+/// once — the shell alone mounts `ShortcutsHelp`, `UpdateSplash`,
+/// `ReleaseNotesDialog` and `CacheDiagnosticsDialog` together — so the fixed
+/// `id="modal-shell-title"` this replaced made `aria-labelledby` resolve to
+/// whichever shell came first, and stacked dialogs shared one id.
+static NEXT_MODAL_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[component]
 pub fn ModalShell(
@@ -45,6 +58,10 @@ pub fn ModalShell(
     let modal_ref: NodeRef<html::Div> = NodeRef::new();
     use_focus_trap(modal_ref, open);
     let modal_class = if wide { "modal modal--wide" } else { "modal" };
+    let title_id = StoredValue::new(format!(
+        "modal-shell-title-{}",
+        NEXT_MODAL_ID.fetch_add(1, Ordering::Relaxed)
+    ));
 
     view! {
         <Show when=move || open.get() fallback=|| view! { <></> }>
@@ -52,10 +69,10 @@ pub fn ModalShell(
                 class="modal-backdrop"
                 role="dialog"
                 aria-modal="true"
-                aria-labelledby="modal-shell-title"
+                aria-labelledby=move || title_id.get_value()
             >
                 <div class=modal_class node_ref=modal_ref>
-                    <h3 id="modal-shell-title">{move || title.get()}</h3>
+                    <h3 id=move || title_id.get_value()>{move || title.get()}</h3>
                     {children()}
                 </div>
             </div>

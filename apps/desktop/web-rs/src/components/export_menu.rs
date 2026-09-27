@@ -16,6 +16,7 @@ use wasm_bindgen::JsCast;
 
 use crate::components::icon::{Icon, IconName};
 use crate::hooks::use_escape::use_escape;
+use crate::hooks::use_menu_keynav::use_menu_keynav;
 
 /// One selectable format: `(format_key, label)`. The key is handed back to
 /// `on_select` verbatim (`"csv"`, `"json"`, `"html"`).
@@ -32,8 +33,12 @@ pub fn ExportMenu(
 ) -> impl IntoView {
     let open = RwSignal::new(false);
     let root_ref = NodeRef::<leptos::html::Div>::new();
-    // Close when a mousedown lands outside the dropdown, and on Escape — the
-    // same pattern shell.rs uses for the account menu.
+    // The `role="menu"` keyboard contract, shared with shell.rs's account menu:
+    // focus the first item on open, Arrow/Home/End between items, and focus
+    // back to the trigger however the panel closes. Close itself happens when a
+    // mousedown lands outside the dropdown, on Escape, or on an item click.
+    let panel_ref = NodeRef::<leptos::html::Div>::new();
+    let on_menu_key = use_menu_keynav(panel_ref, open.into());
     let outside = window_event_listener(ev::mousedown, move |evt| {
         if !open.get_untracked() {
             return;
@@ -60,12 +65,19 @@ pub fn ExportMenu(
                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                 disabled=disabled
                 on_click=Box::new(move |_| open.update(|o| *o = !*o))
+                attr:aria-haspopup="menu"
+                attr:aria-expanded=move || open.get().to_string()
             >
                 "Export"
                 <Icon name=IconName::ChevronDown size=16 />
             </Button>
             <Show when=move || open.get() fallback=|| view! { <></> }>
-                <div class="export-menu__panel" role="menu">
+                <div
+                    class="export-menu__panel"
+                    role="menu"
+                    node_ref=panel_ref
+                    on:keydown=on_menu_key.clone()
+                >
                     {move || {
                         options
                             .get_value()

@@ -32,6 +32,16 @@
 
 ### Fixed
 
+- **`/` now jumps to the filter on the page you're looking at.** Once you had opened App
+  Registrations, pressing `/` on Enterprise Applications, Managed Identities or Security did
+  nothing, because it found the hidden App Registrations filter first. With an app open, it now
+  goes to that app's filter box where it has one. `/` and `?` also work right after you tick a
+  row's checkbox, and `?` no longer opens the shortcut list on top of another dialog, where one
+  Escape closed both.
+- **The account menu and the Export menu now work from the keyboard.** Opening either one moves
+  focus to its first item. The arrow keys, Home and End move between items, and Escape puts you
+  back on the button that opened it. Screen readers announced both as menus, but neither supported
+  this, and the Export button didn't say whether its menu was open.
 - **Deleting apps, removing expired credentials or Refresh no longer sends the App Registrations
   and Enterprise Apps lists back to the top.** Any change that reloads the list used to drop you
   back at the first row, so on a large tenant you lost your place. The list now returns to where

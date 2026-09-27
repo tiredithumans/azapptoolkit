@@ -83,6 +83,23 @@ surfaces reuse it rather than re-implementing the markup.
   Two things legitimately stay different, and "consolidate" must not eat them: `FilterChip` keeps
   its count badge and zero-count disabled state (thaw's `Tab` takes only `class`/`value`/`children`
   and could not express either), and `.ui-select` stays where the option list is long or open-ended.
+- **Dropdown menu** — a plain-DOM disclosure (`ExportMenu`, the shell's account menu), **not** a
+  thaw `Menu`: an export opens the native Save dialog, and doing that from inside a teleported thaw
+  overlay froze the webview on WebView2 as the overlay tore down. Its `role="menu"` panel wires
+  `hooks::use_menu_keynav` — focus the first enabled item on open, Arrow Up/Down (wrapping) and
+  Home/End between items, and focus back to the trigger however it closes (through
+  `use_focus_return`); Escape itself stays with the caller's `use_escape`. Tab is not handled —
+  closing on Tab would race the focus return against the browser's own move. The trigger carries
+  `aria-haspopup="menu"` and a *string* `aria-expanded` (see `aria-selected` above); on a thaw
+  `Button` both go on as `attr:`. An item that opens a dialog closes the menu **first**, so the
+  menu's focus return runs before the dialog's trap records and places focus. Never ship
+  `role="menu"` without the hook — the role promises keys that would otherwise not exist.
+- **Modal** — `components::modal_shell::ModalShell` (backdrop, `role="dialog"`, focus trap,
+  Escape). It mints a per-instance title id (`modal-shell-title-{n}`): the shell alone mounts four
+  shells at once, so a fixed id labelled every one of them with the first. Global bare keys (`?`,
+  `/`) no-op while any `.modal-backdrop` is present (`hooks::modal_is_open`, which the workspace's
+  Escape also gates on), so `?` can't stack the sheet over a dialog and `/` can't pull focus out of
+  its trap; the one exception is `?` closing the sheet it opened.
 - **Directory search-and-pick** — `components::directory_search::DirectorySearch`, the single
   debounced "type 2+ chars, pick a `DirectoryObject`" control (`OwnerPicker`, `GroupAutocomplete`
   and the Settings DL picker are thin named wrappers over it). It **never mutates** — it hands the

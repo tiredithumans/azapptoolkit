@@ -26,12 +26,7 @@ pub fn OpenItemsWorkspace() -> impl IntoView {
     // Escape there closes the modal — via its own handler — instead of both.
     use_escape(
         move || {
-            session.shown_items.with_untracked(|s| !s.is_empty())
-                && document()
-                    .query_selector(".modal-backdrop")
-                    .ok()
-                    .flatten()
-                    .is_none()
+            session.shown_items.with_untracked(|s| !s.is_empty()) && !crate::hooks::modal_is_open()
         },
         move || session.shown_items.set(Vec::new()),
     );

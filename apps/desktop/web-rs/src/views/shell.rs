@@ -19,6 +19,7 @@ use crate::components::shortcuts_help::ShortcutsHelp;
 use crate::components::toast::{ToastHost, ToastKind};
 use crate::components::update_splash::UpdateSplash;
 use crate::hooks::use_escape::use_escape;
+use crate::hooks::use_menu_keynav::use_menu_keynav;
 use crate::hooks::use_shortcuts::use_shortcuts;
 use crate::state::{ActiveView, use_session};
 use crate::views::dialogs::{
@@ -202,6 +203,11 @@ pub fn AppShell(children: Children) -> impl IntoView {
         move || menu_open.get_untracked(),
         move || menu_open.set(false),
     );
+    // `role="menu"` keyboard contract (shared with `ExportMenu`): focus the
+    // first item on open, Arrow/Home/End between items, focus back to the chip
+    // however the menu closes.
+    let menu_ref = NodeRef::<leptos::html::Div>::new();
+    let on_menu_key = use_menu_keynav(menu_ref, menu_open.into());
 
     // A menu row that navigates to `target` and closes the menu. Marks the active
     // view with `aria-current` + a selected class (mirrors `nav_row_view`).
@@ -315,7 +321,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                 type="button"
                                 title="Account — access readiness, settings, sign out"
                                 aria-haspopup="menu"
-                                aria-expanded=move || menu_open.get()
+                                aria-expanded=move || menu_open.get().to_string()
                                 on:click=move |_| menu_open.update(|o| *o = !*o)
                             >
                                 <span class="shell__tenant-chip-icon">
@@ -363,7 +369,12 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                 </span>
                             </button>
                             <Show when=move || menu_open.get()>
-                                <div class="shell__account-menu" role="menu">
+                                <div
+                                    class="shell__account-menu"
+                                    role="menu"
+                                    node_ref=menu_ref
+                                    on:keydown=on_menu_key.clone()
+                                >
                                     <div class="shell__account-menu-header">
                                         <span class="shell__account-menu-label">"Signed in as"</span>
                                         <span class="shell__account-menu-user">
@@ -387,8 +398,11 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                         type="button"
                                         role="menuitem"
                                         on:click=move |_| {
-                                            session.tenant_ui.cache_open.set(true);
+                                            // Close the menu FIRST, so its focus
+                                            // return to the chip runs before the
+                                            // dialog's trap records and places focus.
                                             menu_open.set(false);
+                                            session.tenant_ui.cache_open.set(true);
                                         }
                                     >
                                         <span class="nav__icon"><Icon name=IconName::Activity size=16 /></span>
@@ -460,8 +474,9 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                             type="button"
                                             role="menuitem"
                                             on:click=move |_| {
-                                                release_notes_open.set(true);
+                                                // Menu first — see "Cache diagnostics".
                                                 menu_open.set(false);
+                                                release_notes_open.set(true);
                                             }
                                         >
                                             "What's new"
