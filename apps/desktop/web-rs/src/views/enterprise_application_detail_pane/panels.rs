@@ -78,10 +78,15 @@ pub fn ProvisioningContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> 
                         }
                             .into_any()
                     }
+                    // The backend splices the `provisioning_read` catalog
+                    // remediation (the roles to activate) into the message.
                     Err(e) if e.code == "forbidden" => {
                         view! {
                             <Callout tone="warn">
-                                "Provisioning status is unavailable. Your account needs a role that can read provisioning, and the tenant an Entra ID P1/P2 license."
+                                <Body1>
+                                    "Provisioning status is unavailable. Your account needs a role that can read provisioning, and the tenant an Entra ID P1/P2 license."
+                                </Body1>
+                                <Body1>{e.message}</Body1>
                             </Callout>
                         }
                             .into_any()

@@ -74,10 +74,18 @@ async fn a_403_names_the_role_gap_without_a_consent_button() {
     ts::reset();
     ts::mock_err(
         "get_enterprise_app_provisioning",
-        &fixtures::ui_error("forbidden", "Insufficient privileges"),
+        // The backend's `provisioning_err` appends the catalog remediation.
+        &fixtures::ui_error(
+            "forbidden",
+            "Insufficient privileges. Provisioning status needs … a role that can read \
+             provisioning — Application Administrator, Cloud Application Administrator or \
+             Hybrid Identity Administrator (Global Administrator also works).",
+        ),
     );
     let _m = mount();
 
     ts::wait_for(|| ts::body_contains("Provisioning status is unavailable")).await;
+    // The role names reach the operator, not only the fixed sentence.
+    assert!(ts::body_contains("Hybrid Identity Administrator"));
     assert!(!ts::body_contains(GRANT));
 }
