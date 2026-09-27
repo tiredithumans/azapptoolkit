@@ -250,15 +250,9 @@ pub async fn list_managed_identity_azure_roles(
 
     let skipped = per_sub.iter().filter(|(_, list)| list.is_none()).count();
 
-    // Flatten, keeping each assignment's owning subscription display name.
-    let flat: Vec<(String, RoleAssignment)> = per_sub
-        .into_iter()
-        .flat_map(|(display, list)| {
-            list.unwrap_or_default()
-                .into_iter()
-                .map(move |a| (display.clone(), a))
-        })
-        .collect();
+    // Flatten, keeping each assignment's owning subscription display name and
+    // collapsing the above-subscription copies every subscription returns.
+    let flat = flatten_assignments(per_sub);
 
     // Resolve the unique role-definition ids to names concurrently.
     let unique_ids: HashSet<String> = flat
@@ -337,6 +331,70 @@ pub async fn list_managed_identity_azure_roles(
         total,
         skipped,
     })
+}
+
+/// The Subscription column's label for an assignment made above the
+/// subscription level (a management group or the tenant root): every
+/// subscription beneath it returns it, so no single subscription owns it.
+const ABOVE_SUBSCRIPTION_LABEL: &str = "(inherited from above the subscription)";
+
+/// Dedupe key for one role assignment: its ARM id (an absolute path embedding
+/// the assignment's own scope, so identical whichever subscription surfaced
+/// it), lowercased; `scope|roleDefinitionId|principalId` when the id is absent.
+fn assignment_key(a: &RoleAssignment) -> String {
+    match a.id.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => id.to_ascii_lowercase(),
+        None => {
+            let p = &a.properties;
+            format!(
+                "{}|{}|{}",
+                p.scope.as_deref().unwrap_or_default(),
+                p.role_definition_id.as_deref().unwrap_or_default(),
+                p.principal_id.as_deref().unwrap_or_default(),
+            )
+            .to_ascii_lowercase()
+        }
+    }
+}
+
+/// Flattens the per-subscription `principalId eq` results into one
+/// `(subscription label, assignment)` list, each assignment once.
+///
+/// ARM's `principalId eq {id}` filter returns assignments **at, above or
+/// below** the subscription queried, so a management-group or tenant-root
+/// assignment comes back once per subscription beneath it — without this
+/// dedupe one Reader on a management group over 20 subscriptions renders as
+/// 20 rows. Such an above-subscription row is labelled
+/// [`ABOVE_SUBSCRIPTION_LABEL`] rather than the subscription that happened to
+/// return it first, so the output does not depend on the `buffer_unordered`
+/// arrival order; a subscription-or-below assignment is only ever returned by
+/// its own subscription, so first-wins is exact for it. An empty or absent
+/// scope keeps the subscription label (where it sits is unknown). A failed
+/// subscription (`None`) contributes nothing. `readiness.rs` needs no such
+/// dedupe: it collects role GUIDs into a `HashSet`.
+fn flatten_assignments(
+    per_sub: Vec<(String, Option<Vec<RoleAssignment>>)>,
+) -> Vec<(String, RoleAssignment)> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut flat = Vec::new();
+    for (display, list) in per_sub {
+        for a in list.into_iter().flatten() {
+            if !seen.insert(assignment_key(&a)) {
+                continue;
+            }
+            let above_subscription =
+                a.properties.scope.as_deref().is_some_and(|scope| {
+                    !scope.is_empty() && subscription_from_scope(scope).is_none()
+                });
+            let label = if above_subscription {
+                ABOVE_SUBSCRIPTION_LABEL.to_string()
+            } else {
+                display.clone()
+            };
+            flat.push((label, a));
+        }
+    }
+    flat
 }
 
 /// Extracts the subscription id from an ARM `scope` path
@@ -514,6 +572,94 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert!(lines[1].contains("User-assigned"));
         assert!(!lines[2].starts_with('='));
+    }
+
+    fn ra(id: Option<&str>, scope: &str, roledef: &str) -> RoleAssignment {
+        RoleAssignment {
+            id: id.map(str::to_string),
+            properties: azapptoolkit_arm::RoleAssignmentProperties {
+                role_definition_id: Some(roledef.to_string()),
+                scope: Some(scope.to_string()),
+                principal_id: Some("mi-principal".to_string()),
+                principal_type: None,
+            },
+        }
+    }
+
+    #[test]
+    fn flatten_dedupes_a_management_group_assignment_returned_by_every_subscription() {
+        const MG: &str = "/providers/Microsoft.Management/managementGroups/mg";
+        let mg_id = format!("{MG}/providers/Microsoft.Authorization/roleAssignments/ra-1");
+        let rg = "/subscriptions/sub-1/resourceGroups/rg";
+        let rg_id = format!("{rg}/providers/Microsoft.Authorization/roleAssignments/ra-2");
+        let prod = (
+            "Prod".to_string(),
+            Some(vec![
+                ra(Some(&mg_id), MG, "/roleDefinitions/reader"),
+                ra(Some(&rg_id), rg, "/roleDefinitions/contributor"),
+            ]),
+        );
+        let dev = (
+            "Dev".to_string(),
+            Some(vec![ra(Some(&mg_id), MG, "/roleDefinitions/reader")]),
+        );
+        let broken = ("Broken".to_string(), None);
+
+        // `per_sub` arrives in `buffer_unordered` order: the result must not
+        // depend on which subscription returned the MG row first.
+        for per_sub in [
+            vec![prod.clone(), dev.clone(), broken.clone()],
+            vec![dev.clone(), broken.clone(), prod.clone()],
+        ] {
+            let flat = flatten_assignments(per_sub);
+            assert_eq!(flat.len(), 2, "one row per assignment: {flat:?}");
+            let label_of = |id: &str| {
+                flat.iter()
+                    .find(|(_, a)| a.id.as_deref() == Some(id))
+                    .map(|(label, _)| label.clone())
+                    .expect("row present")
+            };
+            assert_eq!(label_of(&mg_id), ABOVE_SUBSCRIPTION_LABEL);
+            assert_eq!(label_of(&rg_id), "Prod");
+        }
+    }
+
+    #[test]
+    fn flatten_dedupes_ids_case_insensitively_and_falls_back_to_scope_role_principal() {
+        let sub = "/subscriptions/sub-1";
+        let flat = flatten_assignments(vec![
+            (
+                "Prod".to_string(),
+                Some(vec![
+                    ra(
+                        Some("/subscriptions/sub-1/providers/x/ra-1"),
+                        sub,
+                        "/rd/reader",
+                    ),
+                    ra(None, sub, "/rd/owner"),
+                    ra(None, sub, "/rd/contributor"),
+                ]),
+            ),
+            (
+                "Prod again".to_string(),
+                Some(vec![
+                    ra(
+                        Some("/SUBSCRIPTIONS/SUB-1/providers/X/RA-1"),
+                        sub,
+                        "/rd/reader",
+                    ),
+                    ra(None, "/Subscriptions/Sub-1", "/RD/Owner"),
+                ]),
+            ),
+        ]);
+        let roledefs: Vec<&str> = flat
+            .iter()
+            .map(|(_, a)| a.properties.role_definition_id.as_deref().unwrap())
+            .collect();
+        // Same id in a different case collapses; two id-less copies with the
+        // same scope/role/principal collapse; a different role is kept.
+        assert_eq!(roledefs, ["/rd/reader", "/rd/owner", "/rd/contributor"]);
+        assert!(flat.iter().all(|(label, _)| label == "Prod"));
     }
 
     #[test]

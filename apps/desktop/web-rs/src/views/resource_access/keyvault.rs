@@ -1,5 +1,6 @@
-//! Key Vault panel — a tenant-wide sweep of every reachable Key Vault's direct
-//! Azure-RBAC role assignments, filterable by vault or principal. Answers "which
+//! Key Vault panel — a tenant-wide sweep of every reachable Key Vault's
+//! Azure-RBAC role assignments (made on the vault or inherited from an ancestor
+//! scope, the latter badged Inherited), filterable by vault or principal. Answers "which
 //! apps / managed identities can touch this vault?" (and, filtered by principal,
 //! the reverse). Mirrors the Sites panel; the plane is ARM, so consent uses the
 //! `arm` feature and rows come from role assignments rather than site grants.
@@ -49,9 +50,14 @@ fn row_haystack(row: &KeyVaultAccessRow) -> String {
     hay
 }
 
-/// A stable key for the keyed `<For>` — one principal holds one role per vault.
+/// A stable key for the keyed `<For>`. The scope is part of it: with inherited
+/// rows listed, one principal can hold the same role on a vault both directly
+/// and from an ancestor (Reader on the vault AND on its subscription).
 fn row_key(row: &KeyVaultAccessRow) -> String {
-    format!("{}|{}|{}", row.vault_id, row.principal_id, row.role_name)
+    format!(
+        "{}|{}|{}|{}",
+        row.vault_id, row.principal_id, row.role_name, row.scope
+    )
 }
 
 #[component]
@@ -241,7 +247,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
 
     view! {
         <Body1>
-            "Scans every reachable Key Vault's direct Azure RBAC role assignments; search by principal to see the vaults an app or managed identity can reach, or by vault to see who can touch it. Only direct (atScope) grants are shown — roles inherited from the subscription or resource group aren't listed."
+            "Scans every reachable Key Vault's Azure RBAC role assignments — those made on the vault and those inherited from its resource group, subscription or management group (marked Inherited); search by principal to see the vaults an app or managed identity can reach, or by vault to see who can touch it."
         </Body1>
         <div class="actions-row">
             {move || {
@@ -350,7 +356,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                     fallback=|| {
                         view! {
                             <Body1>
-                                "No role assignments match. Vaults without direct RBAC assignments produce no rows — a vault in legacy access-policy mode, or one reachable only via inherited subscription roles, won't appear here (see the Security audit for the broader picture)."
+                                "No role assignments match. A vault in legacy access-policy mode grants data access through access policies, which aren't listed here (see the Security audit for the broader picture)."
                             </Body1>
                         }
                     }
@@ -388,6 +394,8 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                                     let principal_secondary = row.principal_id.clone();
                                     let high = row.high_privilege;
                                     let role_name = row.role_name.clone();
+                                    let inherited = row.inherited;
+                                    let scope = row.scope.clone();
                                     view! {
                                         <tr>
                                             <td class="cell-mid">{vault_primary}</td>
@@ -405,6 +413,15 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                                                     .then(|| {
                                                         view! {
                                                             <Badge label="High-privilege" tone="warning" />
+                                                        }
+                                                    })}
+                                                {inherited
+                                                    .then(|| {
+                                                        view! {
+                                                            <Badge
+                                                                label="Inherited"
+                                                                title=format!("Inherited from {scope}")
+                                                            />
                                                         }
                                                     })}
                                             </td>

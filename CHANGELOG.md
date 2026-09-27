@@ -349,6 +349,32 @@
   waiting on the network when you re-authenticated could fail afterwards and delete the new sign-in,
   putting you back on the Re-authenticate prompt. It now leaves the newer sign-in alone.
 
+- **A managed identity's Azure roles no longer list a management-group role once per
+  subscription.** Azure returns a role assigned at a management group (or the tenant root) with every
+  subscription beneath it, so an identity with Reader on a management group over 20 subscriptions
+  showed 20 identical rows, each labelled with a different subscription, and the high-privilege
+  roles looked 20 times more widespread than they are. Each assignment is now shown once, and one
+  made above the subscription level is labelled "(inherited from above the subscription)" instead
+  of borrowing a subscription's name.
+
+- **Vault access now marks roles inherited from a parent scope instead of calling them direct.**
+  The Key Vault sweep said it listed only roles assigned on the vault itself, but Azure also
+  returns roles inherited from the vault's resource group, subscription and management group, so a
+  subscription Owner appeared as a per-vault grant. Those rows are now marked Inherited (hover for
+  the scope they come from), the export has an Inherited column, and the panel text describes what
+  is actually listed.
+
+- **Observed Graph usage is no longer built on a partial Log Analytics result.** When a usage query
+  hit a Log Analytics limit, the service returned the rows it had with a "PartialError" warning,
+  which the app ignored. The panel could then show fewer call patterns than the app really makes,
+  and suggest removing a permission it still uses. A partial result now shows an error asking you
+  to retry, instead of an incomplete summary.
+
+- **Access Readiness accepts Reader, Contributor or Owner on the Log Analytics workspace for usage
+  analysis.** The guidance already said "Log Analytics Reader (or Reader)", but the checklist
+  counted only the two Log Analytics roles, so an operator with plain Reader saw "?" instead of a
+  confirmed role.
+
 ## [0.30.2] - 2026-09-25
 
 ### Changed

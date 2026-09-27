@@ -53,9 +53,14 @@ impl ArmClient {
             .await
     }
 
-    /// Role assignments held by `principal_id` at or below the subscription
-    /// scope. The default (no `atScope()`) collection returns assignments across
-    /// the whole subscription hierarchy, so one call per subscription is enough.
+    /// Role assignments held by `principal_id` **at, above or below** the
+    /// subscription scope. ARM's `$filter=principalId eq {id}` returns the
+    /// subscription's own assignments, everything beneath it, and those
+    /// inherited from above it (a management group, the tenant root) — so an
+    /// above-subscription assignment comes back once per subscription queried.
+    /// A caller that fans out over subscriptions must dedupe by assignment id
+    /// (`managed_identity::flatten_assignments` in the desktop crate); a caller
+    /// that only collects role GUIDs into a set (readiness) is unaffected.
     pub async fn list_role_assignments_for_principal(
         &self,
         subscription_id: &str,
@@ -88,11 +93,13 @@ impl ArmClient {
             .await
     }
 
-    /// Role assignments granted **directly at** `scope` (a vault / resource /
-    /// resource-group / subscription ARM path). The `atScope()` filter excludes
-    /// assignments inherited from ancestor scopes, so this answers "who is
-    /// explicitly granted on this resource" — the actionable least-privilege
-    /// view — rather than drowning it in every inherited subscription Owner.
+    /// Role assignments that apply **at or above** `scope` (a vault / resource /
+    /// resource-group / subscription ARM path). `$filter=atScope()` returns the
+    /// ones made on `scope` itself plus every one inherited from its ancestors
+    /// (resource group, subscription, management group, root), and excludes
+    /// those on child scopes. Each row's `properties.scope` says where it was
+    /// made, so a caller separates direct from inherited by comparing it to
+    /// `scope`.
     pub async fn list_role_assignments_at_scope(&self, scope: &str) -> Result<Vec<RoleAssignment>> {
         let url = format!(
             "{}/{}/providers/Microsoft.Authorization/roleAssignments",
@@ -532,6 +539,54 @@ mod tests {
         assert_eq!(
             got[0].properties.principal_type.as_deref(),
             Some("ServicePrincipal")
+        );
+    }
+
+    #[tokio::test]
+    async fn role_assignments_at_scope_returns_inherited_ancestor_rows_with_their_own_scope() {
+        let server = MockServer::start().await;
+        let scope =
+            "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv-1";
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "{scope}/providers/Microsoft.Authorization/roleAssignments"
+            )))
+            .and(query_param("$filter", "atScope()"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    {
+                        "id": "/ra/direct",
+                        "properties": {
+                            "roleDefinitionId": "/providers/Microsoft.Authorization/roleDefinitions/def-1",
+                            "scope": scope,
+                            "principalId": "sp-1"
+                        }
+                    },
+                    {
+                        "id": "/ra/inherited",
+                        "properties": {
+                            "roleDefinitionId": "/providers/Microsoft.Authorization/roleDefinitions/def-2",
+                            "scope": "/subscriptions/sub-1",
+                            "principalId": "sp-2"
+                        }
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let got = client(&server.uri())
+            .list_role_assignments_at_scope(scope)
+            .await
+            .unwrap();
+        // The client never filters or rewrites provenance: the inherited
+        // subscription row comes back beside the direct one, each carrying the
+        // scope it was actually made at.
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].properties.scope.as_deref(), Some(scope));
+        assert_eq!(
+            got[1].properties.scope.as_deref(),
+            Some("/subscriptions/sub-1")
         );
     }
 

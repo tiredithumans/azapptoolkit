@@ -6,10 +6,12 @@
 //! path ending in a GUID), never the human name — so we match by GUID. The
 //! satisfaction sets are deliberately conservative: they include only
 //! unambiguous supersets (Owner/Contributor grant control-plane read; Owner
-//! grants role-assignment write), and they do NOT assume a control-plane role
-//! grants Key Vault **data-plane** secret access (which in RBAC mode needs a
-//! data-plane role). The goal is to never report "Have" for access the operator
-//! may not actually have.
+//! grants role-assignment write; the control-plane `*/read` in Reader,
+//! Contributor and Owner also satisfies a Log Analytics workspace query, which
+//! is a control-plane action). Only Key Vault **data-plane** secret access
+//! excludes control-plane roles (in RBAC mode it needs a data-plane role). The
+//! goal is to never report "Have" for access the operator may not actually
+//! have.
 
 use std::collections::HashSet;
 
@@ -40,7 +42,17 @@ fn satisfying_guids(required_role_name: &str) -> &'static [&'static str] {
         // Key Vault secret *data-plane* access — control-plane roles do NOT grant
         // this in RBAC mode, so only the data-plane roles qualify.
         "Key Vault Secrets Officer" => &[KV_SECRETS_OFFICER, KV_ADMINISTRATOR],
-        "Log Analytics Reader" => &[LOG_ANALYTICS_READER, LOG_ANALYTICS_CONTRIBUTOR],
+        // A workspace query (`Microsoft.OperationalInsights/workspaces/query/*/read`)
+        // is a control-plane action covered by the `*/read` in Reader,
+        // Contributor and Owner (Microsoft Learn, "Manage access to Log
+        // Analytics workspaces") — matching the catalog's "(or Reader)".
+        "Log Analytics Reader" => &[
+            LOG_ANALYTICS_READER,
+            LOG_ANALYTICS_CONTRIBUTOR,
+            READER,
+            CONTRIBUTOR,
+            OWNER,
+        ],
         _ => &[],
     }
 }
@@ -106,6 +118,26 @@ mod tests {
         assert!(!azure_role_satisfied(
             "Key Vault Secrets Officer",
             &held(&[CONTRIBUTOR])
+        ));
+    }
+
+    #[test]
+    fn control_plane_read_satisfies_log_analytics_reader() {
+        for role in [
+            READER,
+            CONTRIBUTOR,
+            OWNER,
+            LOG_ANALYTICS_READER,
+            LOG_ANALYTICS_CONTRIBUTOR,
+        ] {
+            assert!(
+                azure_role_satisfied("Log Analytics Reader", &held(&[role])),
+                "{role} carries */read, which covers a workspace query"
+            );
+        }
+        assert!(!azure_role_satisfied(
+            "Log Analytics Reader",
+            &held(&[KV_SECRETS_OFFICER])
         ));
     }
 

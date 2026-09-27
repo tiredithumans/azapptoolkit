@@ -85,7 +85,10 @@ pub struct AzureRoleDto {
     pub scope: String,
     /// Derived from `scope`: Subscription / Resource group / Resource / ….
     pub scope_level: String,
-    /// Display name (or id) of the owning subscription.
+    /// Display name (or id) of the subscription that returned it; a
+    /// management-group / tenant-root assignment (returned once per
+    /// subscription beneath it, shown once) carries an "inherited from above
+    /// the subscription" label instead.
     pub subscription: String,
     /// True for broadly-privileged roles (Owner, Contributor, …).
     pub high_privilege: bool,

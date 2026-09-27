@@ -10,8 +10,8 @@
 //!   Filtering by app answers "which sites can this app reach?" — the
 //!   `Sites.Selected` blind spot — and filtering by site answers "which apps
 //!   can touch this site?".
-//! - **Vault access**: a tenant-wide sweep of every reachable vault's direct Azure
-//!   RBAC role assignments (`sweep_key_vault_access`, progress-streamed,
+//! - **Vault access**: a tenant-wide sweep of every reachable vault's Azure RBAC
+//!   role assignments, direct and inherited (`sweep_key_vault_access`, progress-streamed,
 //!   backend-cached). Filtering by principal answers "which vaults can this app
 //!   / managed identity reach?" and filtering by vault answers "who can touch
 //!   this vault?".

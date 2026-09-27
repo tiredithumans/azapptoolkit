@@ -21,6 +21,7 @@ pub use client::{ARM_BASE, ArmClient};
 pub use error::{ArmError, Result};
 pub use loganalytics::LogAnalyticsClient;
 pub use models::{
-    KeyVaultResource, LogAnalyticsWorkspace, LogsQueryResponse, LogsQueryTable, RoleAssignment,
-    RoleAssignmentProperties, RoleDefinition, RoleDefinitionProperties, Subscription,
+    KeyVaultResource, LogAnalyticsWorkspace, LogsQueryError, LogsQueryResponse, LogsQueryTable,
+    RoleAssignment, RoleAssignmentProperties, RoleDefinition, RoleDefinitionProperties,
+    Subscription,
 };

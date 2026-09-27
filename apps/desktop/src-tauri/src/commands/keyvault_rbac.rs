@@ -2,8 +2,9 @@
 //!
 //! The resource → identities view Graph/ARM don't offer directly: sweep every
 //! Key Vault the signed-in user can reach and, for each, list the principals
-//! holding an Azure RBAC role **directly on the vault** — "which apps / managed
-//! identities can touch this vault?". Complements the per-managed-identity
+//! holding an Azure RBAC role that applies to the vault — made on it or
+//! inherited from an ancestor scope — "which apps / managed identities can
+//! touch this vault?". Complements the per-managed-identity
 //! forward view (MI → its Azure roles); this is the reverse.
 //!
 //! ARM plane (management.azure.com), so it mirrors the SharePoint site sweep's
@@ -80,11 +81,12 @@ fn keyvault_rbac_err(err: azapptoolkit_arm::ArmError) -> UiError {
     ui
 }
 
-/// Sweeps every reachable Key Vault's direct Azure-RBAC role assignments to
+/// Sweeps every reachable Key Vault's Azure-RBAC role assignments to
 /// build the reverse-lookup index: vault → principals ("who can touch this
 /// vault?") and, filtered by principal, principal → vaults. Enumerates vaults
-/// across every accessible subscription, then reads each vault's `atScope()`
-/// role assignments with bounded concurrency, resolving role-definition ids to
+/// across every accessible subscription, then reads each vault's at-or-above-scope
+/// (`atScope()`) role assignments — direct and inherited, flagged per row —
+/// with bounded concurrency, resolving role-definition ids to
 /// names and service-principal ids to display names.
 ///
 /// Long-running: emits `keyvault-sweep-progress` per vault and polls its own
@@ -163,7 +165,8 @@ pub async fn sweep_key_vault_access(
         },
     );
 
-    // Phase 2 — role assignments directly on each vault (bounded, cancellable).
+    // Phase 2 — role assignments that apply to each vault, made on it or
+    // inherited from an ancestor (bounded, cancellable).
     let done = Arc::new(Mutex::new(0usize));
     let mut pairs: Vec<(KeyVaultResource, Vec<RoleAssignment>)> = Vec::new();
     let mut vaults_scanned = 0usize;
@@ -281,6 +284,7 @@ pub async fn sweep_key_vault_access(
             .map(|(vault, a)| {
                 let props = a.properties;
                 let vault_id = vault.id.unwrap_or_default();
+                let inherited = is_inherited(props.scope.as_deref(), &vault_id);
                 let scope = props.scope.unwrap_or_else(|| vault_id.clone());
                 let role_def_id = props.role_definition_id.unwrap_or_default();
                 let role_name = if role_def_id.is_empty() {
@@ -302,14 +306,17 @@ pub async fn sweep_key_vault_access(
                     principal_type: props.principal_type,
                     principal_display_name,
                     high_privilege,
+                    inherited,
                 }
             })
             .collect();
-    // High-privilege first, then by vault, then by role — the risky grants lead.
+    // High-privilege first, then by vault (its direct grants before its
+    // inherited ones), then by role — the risky grants lead.
     rows.sort_by(|a, b| {
         b.high_privilege
             .cmp(&a.high_privilege)
             .then_with(|| a.vault_name.cmp(&b.vault_name))
+            .then_with(|| a.inherited.cmp(&b.inherited))
             .then_with(|| a.role_name.cmp(&b.role_name))
     });
 
@@ -422,22 +429,37 @@ pub async fn save_key_vault_access_to_file(
     .await
 }
 
+/// True when an assignment returned for `vault_id` by `atScope()` was made at
+/// an ancestor scope (resource group, subscription, management group, root)
+/// rather than on the vault itself. ARM scopes are case-insensitive; an absent
+/// or empty scope falls back to the vault (as the row builder does), so it
+/// reads as direct.
+fn is_inherited(scope: Option<&str>, vault_id: &str) -> bool {
+    match scope.filter(|s| !s.is_empty()) {
+        None => false,
+        Some(scope) => !scope
+            .trim_end_matches('/')
+            .eq_ignore_ascii_case(vault_id.trim_end_matches('/')),
+    }
+}
+
 /// Serializes vault-access rows as CSV under the shared coverage comment block.
 /// Principal display names come from the directory, so every field is routed
 /// through `csv_field` (formula-injection guard + delimiter quoting).
 fn key_vault_access_to_csv(rows: &[KeyVaultAccessRow], summary: &str) -> String {
     let mut out = coverage_comment_block(
-        "azapptoolkit — Key Vault access (direct Azure RBAC role assignments)",
+        "azapptoolkit — Key Vault access (Azure RBAC role assignments, direct and inherited)",
         summary,
     );
     out.push_str(
-        "Vault,VaultResourceId,Scope,Role,HighPrivilege,Principal,PrincipalId,PrincipalType\n",
+        "Vault,VaultResourceId,Scope,Inherited,Role,HighPrivilege,Principal,PrincipalId,PrincipalType\n",
     );
     for r in rows {
         let row = [
             csv_field(r.vault_name.as_deref().unwrap_or("")),
             csv_field(&r.vault_id),
             csv_field(&r.scope),
+            r.inherited.to_string(),
             csv_field(&r.role_name),
             r.high_privilege.to_string(),
             csv_field(r.principal_display_name.as_deref().unwrap_or("")),
@@ -469,7 +491,37 @@ mod tests {
             principal_type: Some("ServicePrincipal".into()),
             principal_display_name: Some(principal.into()),
             high_privilege: false,
+            inherited: false,
         }
+    }
+
+    #[test]
+    fn is_inherited_compares_scope_to_the_vault_case_insensitively() {
+        let vault = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv";
+        assert!(!is_inherited(Some(vault), vault));
+        assert!(!is_inherited(Some(&vault.to_uppercase()), vault));
+        assert!(!is_inherited(Some(&format!("{vault}/")), vault));
+        assert!(!is_inherited(None, vault));
+        assert!(!is_inherited(Some(""), vault));
+        assert!(is_inherited(Some("/subscriptions/s"), vault));
+        assert!(is_inherited(
+            Some("/subscriptions/s/resourceGroups/rg"),
+            vault
+        ));
+        assert!(is_inherited(
+            Some("/providers/Microsoft.Management/managementGroups/mg"),
+            vault
+        ));
+    }
+
+    #[test]
+    fn csv_carries_an_inherited_column_after_scope() {
+        let mut inherited = access_row("kv", "Contoso API");
+        inherited.scope = "/subscriptions/s".into();
+        inherited.inherited = true;
+        let csv = key_vault_access_to_csv(&[inherited], "complete");
+        assert!(csv.contains(",Scope,Inherited,"), "{csv}");
+        assert!(csv.contains(",/subscriptions/s,true,"), "{csv}");
     }
 
     #[test]

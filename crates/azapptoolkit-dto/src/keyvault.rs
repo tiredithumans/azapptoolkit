@@ -13,7 +13,9 @@ pub struct KeyVaultSweepProgress {
     pub cancelled: bool,
 }
 
-/// One direct Azure-RBAC role assignment on a Key Vault — the reverse-lookup's
+/// One Azure-RBAC role assignment that applies to a Key Vault — made on the
+/// vault itself or inherited from its resource group / subscription /
+/// management group (`inherited`) — the reverse-lookup's
 /// row unit ("which principal holds which role on which vault"). `principal_id`
 /// resolves to `principal_display_name` for service principals (apps + managed
 /// identities); users/groups carry only `principal_type` + the id.
@@ -22,7 +24,8 @@ pub struct KeyVaultSweepProgress {
 pub struct KeyVaultAccessRow {
     pub vault_id: String,
     pub vault_name: Option<String>,
-    /// The ARM scope the assignment sits at (the vault resource path).
+    /// The ARM scope the assignment was made at (the vault path, or an
+    /// ancestor's when `inherited`).
     pub scope: String,
     pub role_name: String,
     pub principal_id: String,
@@ -32,6 +35,10 @@ pub struct KeyVaultAccessRow {
     pub principal_display_name: Option<String>,
     /// True for broadly-privileged roles (Owner, Key Vault Administrator, …).
     pub high_privilege: bool,
+    /// True when the assignment was made at an ancestor scope (resource group,
+    /// subscription, management group, root), not on the vault itself.
+    #[serde(default)]
+    pub inherited: bool,
 }
 
 /// Result of a tenant-wide Key Vault RBAC sweep, with coverage so the UI can

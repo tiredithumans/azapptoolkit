@@ -11,6 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use azapptoolkit_core::http_error::sanitize_error_body;
 use azapptoolkit_core::token::BearerProvider;
 
 use crate::error::{ArmError, Result};
@@ -42,7 +43,11 @@ impl LogAnalyticsClient {
     /// (e.g. `P90D`), returning the first result table. A workspace that doesn't
     /// contain a referenced table answers 400 (semantic error) — surfaced as
     /// [`ArmError::Api`] so callers probing for table presence can treat it as
-    /// "not here" rather than a hard failure.
+    /// "not here" rather than a hard failure. A 200 that carries an `error`
+    /// object (Log Analytics' `PartialError`: the query hit a limit and the
+    /// rows are incomplete) is refused as [`ArmError::Protocol`] — the Kusto
+    /// guidance is to ignore the entire result rather than read a truncated
+    /// one as complete.
     pub async fn query(
         &self,
         workspace_customer_id: &str,
@@ -67,6 +72,16 @@ impl LogAnalyticsClient {
         .await?;
         let parsed: LogsQueryResponse =
             serde_json::from_slice(&bytes).map_err(|e| ArmError::Deserialize(e.to_string()))?;
+        // Any present `error` means the rows are partial — don't match on the
+        // literal "PartialError", a differently-coded warning is no safer.
+        if let Some(e) = parsed.error {
+            return Err(ArmError::Protocol(format!(
+                "Log Analytics returned a partial result ({}): {}. The result was discarded \
+                 because incomplete rows would undercount the app's calls; retry later.",
+                sanitize_error_body(&e.code),
+                sanitize_error_body(&e.message),
+            )));
+        }
         parsed
             .tables
             .into_iter()
@@ -116,6 +131,59 @@ mod tests {
         assert_eq!(table.name, "PrimaryResult");
         assert_eq!(table.column_index("AppId"), Some(0));
         assert_eq!(table.rows, vec![vec![serde_json::json!("app-1")]]);
+    }
+
+    #[tokio::test]
+    async fn query_with_a_partial_error_is_refused() {
+        // Log Analytics signals a runaway / truncated query with 200 + tables +
+        // an `error` object; the rows are incomplete and must not be read as a
+        // complete usage picture.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/workspaces/ws-guid/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tables": [{
+                    "name": "PrimaryResult",
+                    "columns": [{"name": "AppId"}],
+                    "rows": [["app-1"]]
+                }],
+                "error": {
+                    "code": "PartialError",
+                    "message": "Query result set has exceeded the internal data size limit",
+                    "details": []
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(&server.uri())
+            .query("ws-guid", "AppEvents", "P90D")
+            .await
+            .unwrap_err();
+        let ArmError::Protocol(ref msg) = err else {
+            panic!("expected a protocol error, got {err:?}");
+        };
+        assert!(msg.contains("PartialError"), "names the code: {msg}");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn query_with_a_null_error_returns_the_table() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/workspaces/ws-guid/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tables": [{"name": "PrimaryResult", "columns": [], "rows": []}],
+                "error": null
+            })))
+            .mount(&server)
+            .await;
+
+        let table = client(&server.uri())
+            .query("ws-guid", "AppEvents", "P1D")
+            .await
+            .expect("a null error is a complete result");
+        assert_eq!(table.name, "PrimaryResult");
     }
 
     #[tokio::test]

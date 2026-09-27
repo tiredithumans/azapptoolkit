@@ -40,11 +40,26 @@ pub struct LogAnalyticsWorkspaceProperties {
 }
 
 /// One Azure Monitor Logs query response — `tables[0]` carries the result set
-/// as a column schema plus untyped rows.
+/// as a column schema plus untyped rows. A present `error` means execution hit
+/// a non-fatal failure (HTTP 200, `code == "PartialError"`) and the rows are
+/// incomplete; `LogAnalyticsClient::query` refuses such a response.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LogsQueryResponse {
     #[serde(default)]
     pub tables: Vec<LogsQueryTable>,
+    #[serde(default)]
+    pub error: Option<LogsQueryError>,
+}
+
+/// The OneAPI error object a Logs query response carries beside `tables` when
+/// execution hit a non-fatal failure — HTTP 200 with `code == "PartialError"`
+/// (runaway / timeout / truncation). The rows are then incomplete.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LogsQueryError {
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
