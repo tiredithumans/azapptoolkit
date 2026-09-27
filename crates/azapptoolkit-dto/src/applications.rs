@@ -118,6 +118,18 @@ impl ApplicationListRowDto {
             paired_service_principal_id,
         }
     }
+
+    /// Holds at least one client secret. The one predicate behind Home's
+    /// "With secrets" count and the list's matching filter chip, so the count
+    /// you click and the rows you land on can't disagree.
+    pub fn has_secrets(&self) -> bool {
+        self.password_credential_count > 0
+    }
+
+    /// Holds at least one certificate — the "With certs" count and chip.
+    pub fn has_certs(&self) -> bool {
+        self.key_credential_count > 0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

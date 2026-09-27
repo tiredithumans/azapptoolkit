@@ -111,19 +111,27 @@ pub fn HomeDashboard() -> impl IntoView {
                             match apps.await {
                                 Some(Ok(rows)) => {
                                     let total = rows.len();
-                                    let with_secrets = rows
-                                        .iter()
-                                        .filter(|r| r.password_credential_count > 0)
-                                        .count();
-                                    let with_certs = rows
-                                        .iter()
-                                        .filter(|r| r.key_credential_count > 0)
-                                        .count();
+                                    let with_secrets =
+                                        rows.iter().filter(|r| r.has_secrets()).count();
+                                    let with_certs =
+                                        rows.iter().filter(|r| r.has_certs()).count();
                                     view! {
                                         <span class="dash-card__count">{total}</span>
                                         <div class="dash-metrics">
-                                            {metric(with_secrets, "With secrets", "warning")}
-                                            {metric(with_certs, "With certs", "warning")}
+                                            // Drill into the App Registrations
+                                            // chip of the same name.
+                                            {metric_link(
+                                                with_secrets,
+                                                "With secrets",
+                                                "warning",
+                                                move || session.open_apps_with_facet("secrets"),
+                                            )}
+                                            {metric_link(
+                                                with_certs,
+                                                "With certs",
+                                                "warning",
+                                                move || session.open_apps_with_facet("certs"),
+                                            )}
                                         </div>
                                         <div class="dash-card__actions">
                                             <Button
@@ -600,21 +608,6 @@ fn finding_row(
             )>{n}</span>
             <Icon name=IconName::ChevronRight size=16 class="posture-finding__chevron" />
         </button>
-    }
-}
-
-fn metric(n: usize, label: &'static str, tone: &'static str) -> impl IntoView {
-    // Zero counts are muted; non-zero use the tone colour.
-    let num_class = if n == 0 {
-        "dash-metric__num".to_string()
-    } else {
-        format!("dash-metric__num dash-metric__num--{tone}")
-    };
-    view! {
-        <div class="dash-metric">
-            <span class=num_class>{n}</span>
-            <span class="dash-metric__label">{label}</span>
-        </div>
     }
 }
 

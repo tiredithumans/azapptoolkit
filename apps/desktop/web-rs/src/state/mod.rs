@@ -133,9 +133,10 @@ pub struct TenantScopedUi {
     // Facet selection for each surface the Home dashboard drills INTO: a metric
     // click seeds it via `open_*_with_facet` so the destination lands
     // pre-filtered to that subset. Defaults are each surface's "show all"
-    // sentinel ("all"). The App Registrations list keeps a local facet — no
-    // metric drills into it (its card's secret/cert counts have no matching
-    // facet).
+    // sentinel — "all", except the App Registrations credential facet, whose
+    // sentinel has always been "any" (kept so saved views stay valid). Home's
+    // "With secrets" / "With certs" metrics drill into `apps_facet`.
+    pub apps_facet: RwSignal<String>,
     pub enterprise_facet: RwSignal<String>,
     pub mi_facet: RwSignal<String>,
     // The All-apps audit pane's ONE filter dimension (risk severity); Home's
@@ -159,13 +160,17 @@ pub struct TenantScopedUi {
     pub apps_created_before: RwSignal<Option<NaiveDate>>,
     pub enterprise_created_after: RwSignal<Option<NaiveDate>>,
     pub enterprise_created_before: RwSignal<Option<NaiveDate>>,
-    // One-shot "open the filter drawer on arrival" flag. The Enterprise list's
-    // facet chips live in a drawer collapsed by default, so a drill would land
-    // filtered with the active chip hidden; `open_enterprise_with_facet` sets
-    // this and the list consumes it once to expand the drawer (MI shows its
-    // chips unconditionally and the audit/credentials surfaces show tabs, so
-    // neither needs this).
-    pub pending_open_filters: RwSignal<bool>,
+    // One-shot "open the filter drawer on arrival" flag, naming the list it is
+    // for. The App Registrations and Enterprise lists keep their facet chips in
+    // a drawer collapsed by default, so a drill would land filtered with the
+    // active chip hidden; `open_apps_with_facet` / `open_enterprise_with_facet`
+    // set this and the named list consumes it once to expand its drawer. It
+    // carries the destination because both lists stay mounted (keep-alive): a
+    // bare flag would be taken by whichever list's effect ran first, opening
+    // the wrong drawer and leaving the drilled one shut. (MI shows its chips
+    // unconditionally and the audit/credentials surfaces show tabs, so neither
+    // needs this.)
+    pub pending_open_filters: RwSignal<Option<ActiveView>>,
     // One-shot "start a scan on arrival" flag. Home's Security Posture card is
     // the only writer: its call to action used to *navigate* to the Security
     // tab and leave the operator to find and press "Run audit" a second time.
@@ -244,6 +249,7 @@ impl TenantScopedUi {
             apps_search: RwSignal::new(String::new()),
             enterprise_search: RwSignal::new(String::new()),
             mi_search: RwSignal::new(String::new()),
+            apps_facet: RwSignal::new(String::from("any")),
             enterprise_facet: RwSignal::new(String::from("all")),
             mi_facet: RwSignal::new(String::from("all")),
             audit_severity: RwSignal::new(String::from("all")),
@@ -253,7 +259,7 @@ impl TenantScopedUi {
             apps_created_before: RwSignal::new(None),
             enterprise_created_after: RwSignal::new(None),
             enterprise_created_before: RwSignal::new(None),
-            pending_open_filters: RwSignal::new(false),
+            pending_open_filters: RwSignal::new(None),
             pending_audit_run: RwSignal::new(false),
             tester_app_id: RwSignal::new(None),
             selected_app_ids: RwSignal::new(HashSet::new()),
@@ -282,6 +288,7 @@ impl TenantScopedUi {
         self.apps_search.set(String::new());
         self.enterprise_search.set(String::new());
         self.mi_search.set(String::new());
+        self.apps_facet.set(String::from("any"));
         self.enterprise_facet.set(String::from("all"));
         self.mi_facet.set(String::from("all"));
         self.audit_severity.set(String::from("all"));
@@ -291,7 +298,7 @@ impl TenantScopedUi {
         self.apps_created_before.set(None);
         self.enterprise_created_after.set(None);
         self.enterprise_created_before.set(None);
-        self.pending_open_filters.set(false);
+        self.pending_open_filters.set(None);
         self.pending_audit_run.set(false);
         self.tester_app_id.set(None);
         self.selected_app_ids.update(HashSet::clear);
@@ -485,6 +492,7 @@ mod tests {
             ui.apps_search.set("query".into());
             ui.enterprise_search.set("query".into());
             ui.mi_search.set("query".into());
+            ui.apps_facet.set("secrets".into());
             ui.enterprise_facet.set("disabled".into());
             ui.mi_facet.set("user".into());
             ui.audit_severity.set("critical".into());
@@ -495,7 +503,7 @@ mod tests {
             ui.apps_created_before.set(Some(date(2)));
             ui.enterprise_created_after.set(Some(date(3)));
             ui.enterprise_created_before.set(Some(date(4)));
-            ui.pending_open_filters.set(true);
+            ui.pending_open_filters.set(Some(ActiveView::Apps));
             ui.pending_audit_run.set(true);
             ui.tester_app_id
                 .set(Some("11111111-2222-3333-4444-555555555555".into()));
@@ -527,6 +535,7 @@ mod tests {
             assert_eq!(ui.apps_search.get_untracked(), "");
             assert_eq!(ui.enterprise_search.get_untracked(), "");
             assert_eq!(ui.mi_search.get_untracked(), "");
+            assert_eq!(ui.apps_facet.get_untracked(), "any");
             assert_eq!(ui.enterprise_facet.get_untracked(), "all");
             assert_eq!(ui.mi_facet.get_untracked(), "all");
             assert_eq!(ui.audit_severity.get_untracked(), "all");
@@ -536,7 +545,7 @@ mod tests {
             assert_eq!(ui.apps_created_before.get_untracked(), None);
             assert_eq!(ui.enterprise_created_after.get_untracked(), None);
             assert_eq!(ui.enterprise_created_before.get_untracked(), None);
-            assert!(!ui.pending_open_filters.get_untracked());
+            assert_eq!(ui.pending_open_filters.get_untracked(), None);
             assert!(!ui.pending_audit_run.get_untracked());
             assert_eq!(ui.tester_app_id.get_untracked(), None);
             ui.selected_app_ids

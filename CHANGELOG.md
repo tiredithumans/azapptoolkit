@@ -2,6 +2,11 @@
 
 ### Added
 
+- **Home's "With secrets" and "With certs" counts now open the matching App Registrations.** They
+  were the only numbers on Home you couldn't click, and the list had no way to show every app that
+  holds a client secret or a certificate — the question to answer before moving apps from secrets
+  to certificates. App Registrations has two new filter chips, With secrets and With certs. Its
+  credential filter also now clears when you switch tenants, like the other lists' filters.
 - **Access Readiness now covers SCIM provisioning and SAML claims mapping.** Both features need
   their own consented scope (`Synchronization.Read.All`, `Policy.ReadWrite.ApplicationConfiguration`)
   and an app-management role, but the checklist didn't list them, so it couldn't show why the

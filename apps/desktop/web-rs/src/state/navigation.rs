@@ -159,8 +159,25 @@ impl Session {
     pub fn open_enterprise_with_facet(&self, facet: &str) {
         self.tenant_ui.enterprise_facet.set(facet.to_string());
         self.tenant_ui.enterprise_search.set(String::new());
-        self.tenant_ui.pending_open_filters.set(true);
+        self.tenant_ui
+            .pending_open_filters
+            .set(Some(ActiveView::EnterpriseApps));
         self.set_view(ActiveView::EnterpriseApps);
+    }
+
+    /// Navigate to the App Registrations list pre-filtered to a credential
+    /// facet (`"secrets"` | `"certs"` | `"active"` | `"expiring"` |
+    /// `"expired"` | `"none"`). Used by the Home dashboard's "With secrets" /
+    /// "With certs" metrics. Same shape as [`Self::open_enterprise_with_facet`]:
+    /// clears the list search and opens the collapsed filter drawer once so the
+    /// active chip is visible.
+    pub fn open_apps_with_facet(&self, facet: &str) {
+        self.tenant_ui.apps_facet.set(facet.to_string());
+        self.tenant_ui.apps_search.set(String::new());
+        self.tenant_ui
+            .pending_open_filters
+            .set(Some(ActiveView::Apps));
+        self.set_view(ActiveView::Apps);
     }
 
     /// Navigate to the Managed Identities list pre-filtered to a facet

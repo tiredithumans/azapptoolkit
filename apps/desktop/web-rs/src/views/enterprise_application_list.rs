@@ -29,7 +29,7 @@ use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
 use crate::hooks::use_list_export::use_list_export;
-use crate::state::{OpenItemKind, use_session};
+use crate::state::{ActiveView, OpenItemKind, use_session};
 use crate::util::{contains_ignore_case, created_in_range};
 use crate::views::pairing::jump_to_paired_app;
 
@@ -62,12 +62,12 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
     let filters_open = RwSignal::new(false);
     // A Home dashboard drill (open_enterprise_with_facet) lands here pre-filtered
     // but with the drawer collapsed, hiding the active facet chip. Consume the
-    // one-shot flag to expand the drawer once so the chip is visible (this is the
-    // sole consumer, so no view-guard is needed).
+    // one-shot flag to expand the drawer once so the chip is visible — only when
+    // it names THIS list: the App Registrations list consumes the same flag.
     Effect::new(move |_| {
-        if session.tenant_ui.pending_open_filters.get() {
+        if session.tenant_ui.pending_open_filters.get() == Some(ActiveView::EnterpriseApps) {
             filters_open.set(true);
-            session.tenant_ui.pending_open_filters.set(false);
+            session.tenant_ui.pending_open_filters.set(None);
         }
     });
     let active_filters = Signal::derive(move || {

@@ -215,10 +215,13 @@ footgun, with the reset enforced **by structure, not vigilance**:
   `tenant_switch_resets_every_tenant_scoped_field` pinning test asserts every field resets. A new
   tenant-scoped signal goes INTO `TenantScopedUi` with a `reset()` line + a test assertion —
   never as a bare `Session` field with a hand-added reset.
-- **Exceptions/nuances** — the App Registrations credential facet stays local to the view (no
-  metric drills into it). Drilling into the Enterprise list also trips the one-shot
-  `pending_open_filters` so the list expands its collapsed filter drawer and reveals the active
-  chip.
+- **Exceptions/nuances** — the App Registrations credential facet (`apps_facet`) keeps its
+  historical `"any"` show-all sentinel so saved views stay valid; Home's "With secrets" / "With
+  certs" drill into it via `open_apps_with_facet`. Drilling into the App Registrations or
+  Enterprise list also trips the one-shot `pending_open_filters`, which names its destination
+  (`Some(ActiveView::Apps | EnterpriseApps)`) because both lists stay mounted and a bare flag
+  would be consumed by whichever list's effect ran first; the named list expands its collapsed
+  filter drawer once to reveal the active chip.
 
 ## Security workbench layout
 

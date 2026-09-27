@@ -182,18 +182,16 @@ pub fn ApplicationList() -> impl IntoView {
     // Client-side filters over the loaded rows. "any" disables the credential
     // filter; an unset date picker (None) leaves that side of the creation-date
     // range open — together they bound creation date to an inclusive window.
-    // The credential filter is local, not lifted: no Home metric drills into the
-    // apps credential facet (the Credential Health card drills into the
-    // per-credential Security surface). The date range IS lifted to
-    // `TenantScopedUi` so it resets on tenant switch — this view stays mounted,
-    // and a leftover range would silently narrow the next tenant's list.
-    let cred_filter = RwSignal::new("any".to_string());
+    // Both are lifted to `TenantScopedUi`: the credential facet because Home's
+    // "With secrets" / "With certs" metrics seed it (`open_apps_with_facet`),
+    // and both so they reset on tenant switch — this view stays mounted, and a
+    // leftover filter would silently narrow the next tenant's list.
+    let cred_filter = session.tenant_ui.apps_facet;
     let created_after = session.tenant_ui.apps_created_after;
     let created_before = session.tenant_ui.apps_created_before;
 
     // Row order. `None` keeps the order Graph returned. Local rather than
-    // lifted to `TenantScopedUi` for the same reason as `cred_filter`: nothing
-    // outside this view seeds it, and it lives above `LoadedApps` so a Refresh
+    // lifted to `TenantScopedUi`: nothing outside this view seeds it, and it lives above `LoadedApps` so a Refresh
     // doesn't silently drop the operator back into Graph order.
     let sort: RwSignal<Option<(AppSortCol, bool)>> = RwSignal::new(None);
 
@@ -202,6 +200,16 @@ pub fn ApplicationList() -> impl IntoView {
     // to reclaim list space; the toggle badges the active-filter count so a
     // filter hidden behind it stays discoverable.
     let filters_open = RwSignal::new(false);
+    // A Home drill (`open_apps_with_facet`) lands here pre-filtered with the
+    // drawer collapsed, hiding the active chip. Consume the one-shot flag — only
+    // when it names THIS list; the Enterprise list consumes the same flag — to
+    // expand the drawer once.
+    Effect::new(move |_| {
+        if session.tenant_ui.pending_open_filters.get() == Some(ActiveView::Apps) {
+            filters_open.set(true);
+            session.tenant_ui.pending_open_filters.set(None);
+        }
+    });
     let active_filters = Signal::derive(move || {
         (cred_filter.get() != "any") as usize
             + created_after.get().is_some() as usize
@@ -427,9 +435,12 @@ fn LoadedApps(
         },
         facet: cred_filter,
         facet_any: "any",
-        // The credential chips partition the base set; each chip's predicate is
+        // The four status chips partition the base set; each one's predicate is
         // the same `as_facet` test the count and the partition share, so a
-        // chip's count always agrees with what clicking it shows.
+        // chip's count always agrees with what clicking it shows. The two kind
+        // chips (With secrets / With certs) overlap them, as the Enterprise
+        // list's Disabled/Foreign chips do, and carry the Home metrics' labels
+        // and predicates so the chip a drill lands on matches what was clicked.
         facets: vec![
             Facet::new("Active", "active", |row: &ApplicationListRowDto| {
                 row.credential_status.as_facet() == "active"
@@ -443,6 +454,12 @@ fn LoadedApps(
             Facet::new("No creds", "none", |row: &ApplicationListRowDto| {
                 row.credential_status.as_facet() == "none"
             }),
+            Facet::new(
+                "With secrets",
+                "secrets",
+                ApplicationListRowDto::has_secrets,
+            ),
+            Facet::new("With certs", "certs", ApplicationListRowDto::has_certs),
         ],
         // The export snapshot is taken from `sorted` below instead, so what you
         // export matches what you see down to the row order.
@@ -460,6 +477,8 @@ fn LoadedApps(
     let expiring = list.count_of("expiring");
     let expired = list.count_of("expired");
     let none = list.count_of("none");
+    let secrets = list.count_of("secrets");
+    let certs = list.count_of("certs");
 
     // The sort sits BETWEEN the filtered set and the `VirtualList`: the scroller
     // is handed an already-ordered `Arc<Vec<_>>` exactly as it is handed the
@@ -557,6 +576,8 @@ fn LoadedApps(
                 <FilterChip label="Expiring" value="expiring" count=expiring facet=cred_filter />
                 <FilterChip label="Expired" value="expired" count=expired facet=cred_filter />
                 <FilterChip label="No creds" value="none" count=none facet=cred_filter />
+                <FilterChip label="With secrets" value="secrets" count=secrets facet=cred_filter />
+                <FilterChip label="With certs" value="certs" count=certs facet=cred_filter />
             </div>
         </Show>
         <SelectAllBar

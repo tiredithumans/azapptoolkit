@@ -94,3 +94,26 @@ async fn no_cached_run_trips_pending_audit_run_in_one_click() {
     assert_eq!(m.session.view.get_untracked(), ActiveView::Security);
     assert_eq!(m.session.security_tab.get_untracked(), "findings");
 }
+
+/// "With secrets" was the one number on Home you couldn't click; it now drills
+/// into the App Registrations chip of the same name.
+#[wasm_bindgen_test]
+async fn with_secrets_metric_drills_into_the_apps_facet() {
+    ts::reset();
+    mock_inventory();
+    ts::mock_ok("get_cached_audit_summary", &None::<CachedAuditSummary>);
+
+    let m = ts::mount_view(|| view! { <HomeDashboard /> });
+    const WITH_SECRETS: &str = "button.dash-metric--link[title=\"Show With secrets\"]";
+    ts::wait_for(|| ts::query(WITH_SECRETS).is_some()).await;
+    ts::click(WITH_SECRETS);
+    ts::tick().await;
+
+    assert_eq!(m.session.view.get_untracked(), ActiveView::Apps);
+    assert_eq!(m.session.tenant_ui.apps_facet.get_untracked(), "secrets");
+    assert_eq!(
+        m.session.tenant_ui.pending_open_filters.get_untracked(),
+        Some(ActiveView::Apps),
+        "the drawer-open one-shot names the App Registrations list"
+    );
+}

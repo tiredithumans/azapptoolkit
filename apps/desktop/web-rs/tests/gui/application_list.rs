@@ -346,3 +346,41 @@ async fn an_empty_search_does_not_carry_the_offset_into_the_next_result() {
     assert_eq!(m.session.tenant_ui.apps_scroll_top.get_untracked(), 0.0);
     assert!(ts::body_contains("App 000"));
 }
+
+/// Home's "With secrets" metric drills here (`open_apps_with_facet`): the list
+/// lands filtered to apps holding a client secret, with the collapsed filter
+/// drawer opened once by the destination-aware one-shot so the active chip is
+/// visible.
+#[wasm_bindgen_test]
+async fn a_home_drill_lands_on_the_with_secrets_chip() {
+    ts::reset();
+    let mut with_secret = fixtures::app_row("app-1", "Payroll API");
+    with_secret.password_credential_count = 1;
+    let mut cert_only = fixtures::app_row("app-2", "HR Sync");
+    cert_only.password_credential_count = 0;
+    cert_only.key_credential_count = 1;
+    ts::mock_ok(
+        "list_applications_with_pairing",
+        &vec![with_secret, cert_only],
+    );
+
+    let m = ts::mount_view(|| view! { <ApplicationList /> });
+    ts::wait_for(|| ts::text(COUNT) == "2 app registrations").await;
+    assert!(
+        ts::query(".filter-chips").is_none(),
+        "drawer starts collapsed"
+    );
+
+    m.session.open_apps_with_facet("secrets");
+
+    ts::wait_for(|| ts::query(".filter-chips").is_some()).await;
+    ts::wait_for(|| ts::text(COUNT) == "1 of 2 app registrations").await;
+    assert!(ts::body_contains("Payroll API"));
+    assert!(!ts::body_contains("HR Sync"));
+    assert!(ts::body_contains("With secrets"));
+    assert_eq!(
+        m.session.tenant_ui.pending_open_filters.get_untracked(),
+        None
+    );
+    assert_eq!(m.session.tenant_ui.apps_facet.get_untracked(), "secrets");
+}
