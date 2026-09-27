@@ -322,7 +322,8 @@ healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed
 (`remediation::remediate_remove_redundant_permissions`, `exchange::grant_exchange_mailbox_access`
 with `permissions: None` = all, `remediation::remediate_scope_sharepoint_access`) — **not** the
 `dispatch_capped` spawn fan-out, because those cores take `State` (not `Send` into a spawn) and
-the selection is a small admin-chosen set. They `reset()` + poll `audit_cancel`, emit
+the selection is a small admin-chosen set. They `claim()` a `bulk_cancel` token once, before the
+first await, and poll it, emit
 `bulk-progress` (no `in_flight_cap`), and degrade to a per-app `error` rather than aborting; each
 per-app core busts its own cache. The scope targets (mailbox groups / site URLs + role) are
 **uniform across the selection**.

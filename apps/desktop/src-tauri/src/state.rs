@@ -90,7 +90,10 @@ impl CancelFlag {
     /// Cancelling older generations too is deliberate: the alternative is a
     /// displaced run continuing to write after the operator pressed Cancel.
     /// Stopping a run that was going to be superseded anyway is harmless; the
-    /// reverse is not.
+    /// reverse is not. That holds only because every flag carries ONE run kind
+    /// (see the [`AppState`] cancel fields): on a flag shared between kinds, one
+    /// kind's Cancel would stop the other. The mapping is pinned by
+    /// `tests/repo_invariants/cancel.rs`.
     pub fn cancel(&self) {
         let current = self.0.current.load(Ordering::Acquire);
         self.0.cancelled.fetch_max(current, Ordering::AcqRel);
@@ -212,19 +215,31 @@ pub struct AppState {
     /// its own host + token audience, distinct from ARM). Built on first use
     /// for the granted-vs-used Graph activity analysis.
     pub la_clients: Mutex<HashMap<String, Arc<LogAnalyticsClient>>>,
-    /// Flipped by the `cancel_audit` Tauri command; checked by the audit loop
-    /// between tasks. Reset to `false` at the top of every run.
+    // One flag per run kind. `CancelFlag::cancel` stops every generation on its
+    // flag, and the views that start these runs stay mounted (keep-alive views,
+    // display-toggled panels), so runs of different kinds overlap: a flag shared
+    // between kinds lets one kind's Cancel stop the other. Each flag is claimed
+    // (`CancelFlag::claim`, once, before the first await) by one run kind and
+    // cancelled by exactly one command — pinned by
+    // `tests/repo_invariants/cancel.rs`.
+    /// `run_audit`; cancelled by `cancel_audit`.
     pub audit_cancel: CancelFlag,
-    /// Cancel flag for the SharePoint site-permission sweep — deliberately its
-    /// own flag (not `audit_cancel`) so cancelling a sweep can't abort a
-    /// concurrent audit/bulk run, and vice versa. Reset at the top of every
-    /// sweep; flipped by `cancel_site_sweep`.
-    pub sweep_cancel: CancelFlag,
-    /// Cancel flag for the DR backup/restore fan-out — its own flag (not
-    /// `audit_cancel`) so cancelling a long backup or restore can't abort a
-    /// concurrent audit/bulk/sweep run, and vice versa. Reset at the top of
-    /// every backup/restore; flipped by `cancel_dr`.
-    pub dr_cancel: CancelFlag,
+    /// Every `bulk_*` command; cancelled by `cancel_bulk`. Two bulk runs started
+    /// from different bulk action bars share it, so one Cancel stops both.
+    pub bulk_cancel: CancelFlag,
+    /// `migrate_application_access_policies`; cancelled by `cancel_aap_migration`.
+    pub migration_cancel: CancelFlag,
+    /// `sweep_site_permissions` (Resource Access Sites tab and the per-app site
+    /// panel); cancelled by `cancel_site_sweep`.
+    pub site_sweep_cancel: CancelFlag,
+    /// `sweep_key_vault_access`; cancelled by `cancel_key_vault_sweep`.
+    pub key_vault_sweep_cancel: CancelFlag,
+    /// `find_mailbox_reachers`; cancelled by `cancel_mailbox_probe`.
+    pub mailbox_probe_cancel: CancelFlag,
+    /// `backup_tenant`; cancelled by `cancel_backup`.
+    pub backup_cancel: CancelFlag,
+    /// `restore_tenant`; cancelled by `cancel_restore`.
+    pub restore_cancel: CancelFlag,
 }
 
 impl AppState {
@@ -266,8 +281,13 @@ impl AppState {
             arm_clients: Mutex::new(HashMap::new()),
             la_clients: Mutex::new(HashMap::new()),
             audit_cancel: CancelFlag::new(),
-            sweep_cancel: CancelFlag::new(),
-            dr_cancel: CancelFlag::new(),
+            bulk_cancel: CancelFlag::new(),
+            migration_cancel: CancelFlag::new(),
+            site_sweep_cancel: CancelFlag::new(),
+            key_vault_sweep_cancel: CancelFlag::new(),
+            mailbox_probe_cancel: CancelFlag::new(),
+            backup_cancel: CancelFlag::new(),
+            restore_cancel: CancelFlag::new(),
         }
     }
 
@@ -303,8 +323,13 @@ impl AppState {
             arm_clients: Mutex::new(HashMap::new()),
             la_clients: Mutex::new(HashMap::new()),
             audit_cancel: CancelFlag::new(),
-            sweep_cancel: CancelFlag::new(),
-            dr_cancel: CancelFlag::new(),
+            bulk_cancel: CancelFlag::new(),
+            migration_cancel: CancelFlag::new(),
+            site_sweep_cancel: CancelFlag::new(),
+            key_vault_sweep_cancel: CancelFlag::new(),
+            mailbox_probe_cancel: CancelFlag::new(),
+            backup_cancel: CancelFlag::new(),
+            restore_cancel: CancelFlag::new(),
         }
     }
 
@@ -732,8 +757,8 @@ mod tests {
 
     #[test]
     fn distinct_cancel_flags_are_independent() {
-        // The flag separation (audit_cancel vs sweep_cancel vs dr_cancel):
-        // cancelling a sweep must not abort a concurrent audit, and vice versa.
+        // One flag per run kind (see the AppState field docs): cancelling a
+        // sweep must not abort a concurrent audit, and vice versa.
         let audit = CancelFlag::new();
         let sweep = CancelFlag::new();
         let audit_run = audit.claim();

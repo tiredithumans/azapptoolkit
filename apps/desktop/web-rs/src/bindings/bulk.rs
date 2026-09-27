@@ -7,8 +7,9 @@ use tauri_sys::core::{invoke, invoke_result};
 
 pub use azapptoolkit_dto::bulk::*;
 
-/// Signals the in-flight bulk action to stop at the next item boundary. Shares
-/// the audit cancel flag on the backend; returns nothing (fire-and-forget).
+/// Signals the in-flight bulk run(s) to stop at the next item boundary, via the
+/// backend's own bulk flag — it never touches the audit or the AAP migration.
+/// Returns nothing (fire-and-forget).
 pub async fn cancel_bulk() {
     invoke::<()>("cancel_bulk", ()).await
 }

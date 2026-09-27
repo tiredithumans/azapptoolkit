@@ -2,6 +2,16 @@
 
 ### Fixed
 
+- **Cancel now stops only the run it belongs to.** The security audit, every bulk action and the
+  legacy-policy migration shared one stop signal. So did the Resource Access site scan, Key Vault
+  scan and mailbox probe, and the Disaster Recovery backup and restore. Because those screens keep
+  running while you work elsewhere, pressing Cancel on one stopped the others as well: cancelling a
+  read-only audit or mailbox probe could halt a bulk delete, a scoping change or a multi-minute site
+  scan part-way, and cancelling a backup could stop a restore between passes. Each kind of run now
+  has its own Cancel. Two bulk actions running at the same time still stop together. The "Migrate
+  to RBAC for Applications" flows gain a Stop migration button: it stops before the next
+  application, and one already being migrated finishes. A stopped or interrupted bulk run's
+  progress bar now shows how far it got instead of jumping to 100%.
 - **Turning off update checks now works.** `AZAPPTOOLKIT_AUTO_UPDATE=0` and `"auto_update": false`
   in settings.json were documented but never read, so the app still contacted the release endpoint
   on every launch and offered updates. Both now stop the launch check, the account-menu check and

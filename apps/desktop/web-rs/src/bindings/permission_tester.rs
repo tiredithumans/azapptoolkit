@@ -34,6 +34,12 @@ pub async fn find_mailbox_reachers(
     invoke_result("find_mailbox_reachers", ReachersArgs { tenant_id, mailbox }).await
 }
 
+/// Signals an in-progress mailbox reverse-lookup probe to stop at the next
+/// dispatch boundary.
+pub async fn cancel_mailbox_probe() -> Result<(), UiError> {
+    invoke_result("cancel_mailbox_probe", ()).await
+}
+
 pub async fn test_mailbox_access(
     tenant_id: &str,
     app_id: &str,

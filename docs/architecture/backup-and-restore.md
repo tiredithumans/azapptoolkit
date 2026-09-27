@@ -131,9 +131,9 @@ wired as the Graph client's `ThrottleObserver` halves the chunk cap on each 429
 and recovers it when quiet; the cap is fed to `dispatch_capped` and emitted as
 `BulkProgress.in_flight_cap` so the DR view can show it (and a back-off notice).
 
-It is long-running, so it resets and polls the dedicated `AppState.dr_cancel`
-flag (its own — **not** `audit_cancel` — so a backup and a concurrent audit/bulk
-run can't cancel each other; checked at chunk boundaries) and emits
+It is long-running, so it claims (once, before the first await) its own
+`backup_cancel` token (cancelled only by `cancel_backup`, so neither a restore
+nor an audit/bulk run can stop it; checked at chunk boundaries) and emits
 `backup-progress` (`BulkProgress` shape) events the DR view renders. A cancelled
 run is an **error**, not a truncated success — a partial backup is a dangerous DR
 artifact. `save_backup_to_file` writes JSON only (the manifest is a structured
@@ -227,9 +227,11 @@ be the person who wrote it. So pass 2 treats each one as untrusted input:
   only later at token exchange), so a planted trust is otherwise invisible.
   `wire_application` returns these alongside the `RestoredApp` for that reason.
 
-It refuses a **cross-cloud** manifest outright, resets/polls `dr_cancel` (a
-cancel stops creating *new* apps but still finishes wiring the created ones —
-never bare shells), emits `restore-progress`, and busts the destination's list
+It refuses a **cross-cloud** manifest outright, claims its own `restore_cancel`
+(stopped only by `cancel_restore`, never by a backup's Cancel; a cancel stops at
+the next item in whichever pass is running and the report flags the run
+cancelled, so a re-run adopts the already-created, tagged apps and finishes
+them), emits `restore-progress`, and busts the destination's list
 caches (`invalidate_app_lists`) when anything was created. The `RestoreReport`
 carries the new ids, the show-once regenerated secrets, unresolved owners,
 certificates needing manual re-upload, per-app warnings, and hard failures.

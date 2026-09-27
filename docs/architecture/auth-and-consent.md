@@ -315,7 +315,7 @@ additive and inactive, so a bulk run changes nothing for users; activation flips
 `preferredTokenSigningKeyThumbprint` and is a coordinated switch, which is why it stays per-app.
 
 - Runs through `run_bulk_seq` like the other bulk remediations — sequential (the per-app core takes
-  `State`, so it is not `Send`), claiming `audit_cancel` before any suspension point, degrading to a
+  `State`, so it is not `Send`), claiming `bulk_cancel` before any suspension point, degrading to a
   per-app `BulkError`, and halting on a re-auth-fatal code rather than failing every remaining app
   identically.
 - **Idempotent by design.** `stage_if_not_already` re-resolves live state and skips an app that

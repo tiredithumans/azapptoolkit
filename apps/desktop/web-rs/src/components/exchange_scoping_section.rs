@@ -20,7 +20,7 @@ use azapptoolkit_core::defaults::TenantDefaults;
 
 use crate::bindings::exchange::{self, AapMigrationReport};
 use crate::bindings::{auth, defaults};
-use crate::components::aap_migration_report::AapMigrationReportView;
+use crate::components::aap_migration_report::{AapMigrationReportView, AapMigrationStop};
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
 use crate::components::retired_scope_groups::RetiredScopeGroups;
@@ -320,8 +320,11 @@ pub fn ExchangeScopingSection(
                 // execute reloads the caller (which rebuilds this section), so
                 // the summary rides a toast instead. A partial failure keeps
                 // the report inline (no reload) so the failure lines survive;
-                // Refresh picks up whatever did land.
-                if dry_run || !r.failures.is_empty() {
+                // Refresh picks up whatever did land. So does a stopped run
+                // (Stop migration, or a dead session): it did nothing, and a
+                // "Migrated 0 policy(ies)" success toast would read as done —
+                // the report's "This run stopped…" callout says what happened.
+                if dry_run || !r.failures.is_empty() || r.incomplete {
                     mig_result.set(Some(r));
                 } else {
                     session.toast_success(format!("Migrated {} policy(ies).", r.items.len()));
@@ -748,6 +751,7 @@ pub fn ExchangeScopingSection(
                                         }
                                     }}
                                 </Button>
+                                {move || mig_cmd.busy.get().then(|| view! { <AapMigrationStop /> })}
                             </div>
                             {move || {
                                 mig_cmd

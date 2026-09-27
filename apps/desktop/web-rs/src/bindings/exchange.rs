@@ -302,3 +302,11 @@ pub async fn migrate_application_access_policies(
     )
     .await
 }
+
+/// Signals an in-progress AAP migration to stop before the next application. An
+/// application already mid-migration finishes (its steps are ordered never to
+/// leave it half-scoped), so a single-app run stops only if this lands before
+/// that application starts.
+pub async fn cancel_aap_migration() -> Result<(), UiError> {
+    invoke_result("cancel_aap_migration", ()).await
+}

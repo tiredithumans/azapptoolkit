@@ -95,7 +95,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
     };
     let cancel_backup = move |_| {
         leptos::task::spawn_local(async move {
-            let _ = backup::cancel_dr().await;
+            let _ = backup::cancel_backup().await;
         });
     };
     let save_file = move |_| {
@@ -183,7 +183,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
     };
     let cancel_restore = move |_| {
         leptos::task::spawn_local(async move {
-            let _ = backup::cancel_dr().await;
+            let _ = backup::cancel_restore().await;
         });
     };
     let save_report = Callback::new(move |()| {

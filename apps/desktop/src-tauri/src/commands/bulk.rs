@@ -123,15 +123,15 @@ const VALID_AUDIENCES: &[&str] = &[
     "PersonalMicrosoftAccount",
 ];
 
-/// Signals an in-progress bulk action (delete / grant / create / expired-secret
-/// sweep) to stop at the next item boundary. Shares [`AppState::audit_cancel`]
-/// with the security audit — the two long-running loops never run at once, so
-/// one flag covers both; this intent-named command lets the Bulk Actions view
-/// wire its own Cancel button without reaching for `cancel_audit`. Already
-/// in-flight per-item work finishes so partial results stay clean.
+/// Signals every in-flight bulk action (delete / grant / create / expired-secret
+/// sweep / scoping / owner / sign-in) to stop at the next item boundary. Runs
+/// started from different bulk action bars share the kind flag
+/// [`AppState::bulk_cancel`], so one Cancel stops all of them; it never touches
+/// the security audit or the AAP migration, which have flags of their own.
+/// Already in-flight per-item work finishes so partial results stay clean.
 #[tauri::command]
 pub fn cancel_bulk(state: State<'_, AppState>) {
-    state.audit_cancel.cancel();
+    state.bulk_cancel.cancel();
 }
 
 /// Sweeps app registrations and deletes any password credential (secret) that
@@ -147,8 +147,8 @@ pub fn cancel_bulk(state: State<'_, AppState>) {
 /// that cannot be read is reported as a failure row rather than silently left
 /// out. When `None`, every app in the tenant is walked, capped at
 /// [`APPS_MAX`](super::applications::APPS_MAX) like every other tenant-wide
-/// enumeration. Cancellation flows through [`AppState::audit_cancel`] — the
-/// audit and bulk loops share it so the UI only needs one Cancel button concept.
+/// enumeration. Cancellation flows through [`AppState::bulk_cancel`], stopped by
+/// [`cancel_bulk`].
 #[tauri::command]
 pub async fn bulk_remove_expired_credentials(
     app_handle: AppHandle,
@@ -161,7 +161,7 @@ pub async fn bulk_remove_expired_credentials(
     // claimed after it carries a higher generation than a cancel issued during
     // it, which `is_cancelled()` then discards. Pinned by
     // `repo_invariants::cancel`.
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
     let client = state.graph_for(&tenant_id);
     let session = SessionDead::new();
     let mut summaries: Vec<AppRemovalSummary> = Vec::new();
@@ -328,6 +328,20 @@ pub async fn bulk_remove_expired_credentials(
     )
     .await;
 
+    // Terminal event, same contract as the delete/grant fan-outs: `done` is the
+    // number of apps actually processed (every spawned task has joined).
+    emit_progress(
+        &app_handle,
+        "bulk-progress",
+        BulkProgress {
+            done: meter.done(),
+            total,
+            current_app: None,
+            cancelled: cancelled_early || cancel.is_cancelled(),
+            in_flight_cap: Some(meter.limit()),
+        },
+    );
+
     // Invalidate BEFORE the dead-session check: the removals that already
     // landed are real, so the caches are stale either way. Returning the error
     // without busting them would leave the UI showing credentials this run
@@ -373,7 +387,7 @@ pub async fn bulk_delete_applications(
 ) -> Result<BulkDeleteResult, UiError> {
     let client = state.graph_for(&tenant_id);
     let total = object_ids.len();
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     // Bounded-concurrency fan-out with adaptive 429 backoff, replacing the old
     // serial loop + fixed 50ms pause (which slowed the healthy case yet never
@@ -436,7 +450,10 @@ pub async fn bulk_delete_applications(
         &app_handle,
         "bulk-progress",
         BulkProgress {
-            done: total,
+            // Items actually processed: `dispatch_capped` has joined every
+            // spawned task, so the meter's count is final. Equal to `total`
+            // only for a run that finished.
+            done: meter.done(),
             total,
             current_app: None,
             cancelled: cancelled_early || cancel.is_cancelled(),
@@ -462,7 +479,8 @@ pub async fn bulk_delete_applications(
 /// Grants admin consent to each application in `object_ids`, reusing the same
 /// orchestration as the single-app command. Bounded-concurrency fan-out with
 /// adaptive 429 backoff (each app issues several Graph writes, so the throttle
-/// matters); cancellation and progress share the audit/bulk plumbing.
+/// matters); cancellation rides [`AppState::bulk_cancel`] and progress the
+/// shared `bulk-progress` stream.
 #[tauri::command]
 pub async fn bulk_grant_permissions(
     app_handle: AppHandle,
@@ -472,7 +490,7 @@ pub async fn bulk_grant_permissions(
 ) -> Result<BulkGrantResult, UiError> {
     let client = state.graph_for(&tenant_id);
     let total = object_ids.len();
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     // Bounded-concurrency fan-out with adaptive 429 backoff, replacing the old
     // serial loop + fixed 50ms pause. Each grant is a multi-write orchestration,
@@ -554,7 +572,10 @@ pub async fn bulk_grant_permissions(
         &app_handle,
         "bulk-progress",
         BulkProgress {
-            done: total,
+            // Items actually processed: `dispatch_capped` has joined every
+            // spawned task, so the meter's count is final. Equal to `total`
+            // only for a run that finished.
+            done: meter.done(),
             total,
             current_app: None,
             cancelled: cancelled_early || cancel.is_cancelled(),
@@ -595,7 +616,7 @@ pub async fn bulk_create_applications(
     specs: Vec<BulkCreateSpec>,
     validate_only: bool,
 ) -> Result<BulkCreateResult, UiError> {
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
     let client = state.graph_for(&tenant_id);
 
     let (outcomes, cancelled) = run_bulk_seq(
@@ -661,7 +682,7 @@ pub async fn bulk_create_applications(
 /// so the live re-resolution + safety rules + per-app cache invalidation are
 /// identical to the one-click fix. Runs sequentially (each call is a multi-read
 /// manifest re-plan, and the selection is the admin's hand-picked set), polling
-/// the shared cancel flag between apps and degrading to a per-app `error` rather
+/// [`AppState::bulk_cancel`] between apps and degrading to a per-app `error` rather
 /// than aborting. No `in_flight_cap` — there's no concurrent fan-out to back off.
 #[tauri::command]
 pub async fn bulk_remove_redundant_permissions(
@@ -670,7 +691,7 @@ pub async fn bulk_remove_redundant_permissions(
     tenant_id: String,
     object_ids: Vec<String>,
 ) -> Result<BulkRemoveRedundantResult, UiError> {
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -728,7 +749,7 @@ pub async fn bulk_scope_mailbox_access(
     object_ids: Vec<String>,
     groups: Vec<String>,
 ) -> Result<BulkScopeResult, UiError> {
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -778,7 +799,7 @@ pub async fn bulk_scope_sharepoint_access(
     site_urls: Vec<String>,
     role: String,
 ) -> Result<BulkScopeResult, UiError> {
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -828,7 +849,7 @@ pub async fn bulk_add_owner(
     object_ids: Vec<String>,
     principal_id: String,
 ) -> Result<BulkAddOwnerResult, UiError> {
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
     let client = state.graph_for(&tenant_id);
 
     let (outcomes, cancelled) = run_bulk_seq(
@@ -896,7 +917,7 @@ pub async fn bulk_disable_sign_in(
     tenant_id: String,
     object_ids: Vec<String>,
 ) -> Result<BulkDisableSignInResult, UiError> {
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -959,7 +980,7 @@ pub async fn bulk_stage_sso_certificates(
     // Claimed once, before any suspension point: a token claimed later carries a
     // higher generation than a cancel issued in the meantime, which
     // `is_cancelled()` then discards. Pinned by `repo_invariants::cancel`.
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -1025,11 +1046,14 @@ pub async fn bulk_stage_sso_certificates(
 ///
 /// Runs `per_item` on each `items` element in order, emitting a `bulk-progress`
 /// event (`done = i`, `in_flight_cap: None` — there's no fan-out to back off)
-/// with `label(&item)` as the current app *before* each item, then a final
-/// `done = total` event. Polls the shared cancel flag between items (already
-/// in-flight work finishes). Returns `(outcomes, cancelled)`; callers apply their
-/// own cache invalidation from the outcomes. The caller resets the flag and
-/// clones it (the `reset()` must stay at the command top, the AGENTS.md footgun).
+/// with `label(&item)` as the current app *before* each item, then a terminal
+/// event whose `done` is the number of items actually processed (equal to
+/// `total` only for a run that finished; a cancelled or session-halted run
+/// reports how far it got). Polls the run's `CancelToken` between items
+/// (already in-flight work finishes). Returns `(outcomes, cancelled)`; callers
+/// apply their own cache invalidation from the outcomes. The caller claims the
+/// token once, before its first await (pinned by `repo_invariants::cancel`),
+/// and passes it in.
 async fn run_bulk_seq<S: ProgressSink, T, O, Fut>(
     progress: &S,
     cancel: &CancelToken,
@@ -1069,7 +1093,7 @@ where
         }
     }
     progress.emit(BulkProgress {
-        done: total,
+        done: outcomes.len(),
         total,
         current_app: None,
         cancelled: cancel.is_cancelled(),
@@ -1185,9 +1209,48 @@ mod tests {
         let (out, cancelled) = drive_with(&rec, &cancel, vec![scope_outcome("a", None)]).await;
         assert!(out.is_empty(), "cancelled before item 1 ⇒ nothing ran");
         assert!(cancelled);
-        // Only the terminal event, and it reports the cancellation.
-        assert_eq!(rec.events(), vec![(1, None)]);
+        // Only the terminal event: it reports nothing processed, and the
+        // cancellation.
+        assert_eq!(rec.events(), vec![(0, None)]);
         assert!(rec.0.lock().unwrap()[0].cancelled);
+    }
+
+    #[tokio::test]
+    async fn a_cancel_mid_run_reports_how_far_it_got() {
+        // The terminal event's `done` is the processed count, not `total`, so a
+        // stopped run's bar shows how far it got instead of snapping to 100%.
+        let flag = CancelFlag::new();
+        let cancel = flag.claim();
+        let rec = Recorder::default();
+        let (out, cancelled) = run_bulk_seq(
+            &rec,
+            &cancel,
+            vec![
+                scope_outcome("a", None),
+                scope_outcome("b", None),
+                scope_outcome("c", None),
+                scope_outcome("d", None),
+            ],
+            |o| o.object_id.clone(),
+            |o| {
+                if o.object_id == "b" {
+                    flag.cancel();
+                }
+                async move { o }
+            },
+        )
+        .await;
+        assert_eq!(
+            out.iter().map(|o| o.object_id.as_str()).collect::<Vec<_>>(),
+            ["a", "b"],
+            "the in-flight item finishes, the next one never starts"
+        );
+        assert!(cancelled);
+        assert_eq!(
+            rec.events(),
+            vec![(0, Some("a".into())), (1, Some("b".into())), (2, None)]
+        );
+        assert!(rec.0.lock().unwrap().last().unwrap().cancelled);
     }
 
     #[tokio::test]
@@ -1238,6 +1301,11 @@ mod tests {
         );
         // Not a user cancellation — the distinction drives different UI copy.
         assert!(!cancelled);
+        assert_eq!(
+            rec.events().last(),
+            Some(&(2, None)),
+            "the terminal event reports how far the run got"
+        );
     }
 
     #[test]

@@ -832,9 +832,9 @@ fn fold_site_result(
 /// in-flight cap.
 ///
 /// Long-running: emits `site-sweep-progress` after each chunk of
-/// [`SWEEP_BATCH`] sites and polls the dedicated `AppState.sweep_cancel` atomic
-/// (NOT `audit_cancel` — a sweep cancel must not abort a concurrent audit/bulk
-/// run) between dispatches. Per-site read failures increment `sites_failed`
+/// [`SWEEP_BATCH`] sites and polls its own `AppState.site_sweep_cancel` token
+/// (stopped only by [`cancel_site_sweep`], so no other run's Cancel can abort
+/// it, and it aborts no other run) between dispatches. Per-site read failures increment `sites_failed`
 /// rather than aborting or silently reading as "no grants", so coverage is
 /// never overstated. The result is cached (60-minute audit TTL) under a
 /// tenant-prefixed key; a cancelled or partially-failed run is never cached,
@@ -850,7 +850,7 @@ pub async fn sweep_site_permissions(
     // tenant, and a token claimed after it carries a higher generation than a
     // cancel issued during it, which `is_cancelled()` then discards. Pinned by
     // `repo_invariants::cancel`.
-    let cancel = state.sweep_cancel.claim();
+    let cancel = state.site_sweep_cancel.claim();
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
 
     let (sites, truncated) = client
@@ -1030,11 +1030,12 @@ fn sweep_is_cacheable(cancelled: bool, sites_failed: usize) -> bool {
     !cancelled && sites_failed == 0
 }
 
-/// Signals the in-progress resource sweep/probe (site sweep or mailbox probe —
-/// both poll `sweep_cancel`) to stop at the next dispatch boundary.
+/// Signals an in-progress [`sweep_site_permissions`] run to stop at the next
+/// dispatch boundary. Covers both the Resource Access Sites tab and the per-app
+/// site panel: same sweep, same flag (`AppState.site_sweep_cancel`).
 #[tauri::command]
-pub fn cancel_resource_sweep(state: State<'_, AppState>) {
-    state.sweep_cancel.cancel();
+pub fn cancel_site_sweep(state: State<'_, AppState>) {
+    state.site_sweep_cancel.cancel();
 }
 
 /// Returns the cached sweep for this tenant, if one finished within the cache

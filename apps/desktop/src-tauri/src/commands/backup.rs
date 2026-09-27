@@ -59,9 +59,9 @@ const INITIAL_DR_CONCURRENCY: usize = 4;
 // the lists' `APPS_MAX` / `SP_INDEX_MAX`. A local copy could only drift from them.
 
 /// Captures a full, portable backup of the tenant's app estate. Long-running
-/// (a batched per-app fan-out), so it polls the dedicated [`AppState::dr_cancel`]
-/// flag — its own, not `audit_cancel`, so a backup and a concurrent audit/bulk
-/// run can't cancel each other. Emits `backup-progress` ([`BulkProgress`]) events
+/// (a batched per-app fan-out), so it polls its own [`AppState::backup_cancel`]
+/// token, stopped only by [`cancel_backup`]: a restore's Cancel cannot stop it
+/// and vice versa, nor can an audit/bulk run's. Emits `backup-progress` ([`BulkProgress`]) events
 /// carrying the live adaptive concurrency cap.
 #[tauri::command]
 pub async fn backup_tenant(
@@ -75,7 +75,7 @@ pub async fn backup_tenant(
     // discards it — so a Cancel pressed during the index enumeration below,
     // which on a large tenant is most of the wait before any progress appears,
     // did nothing. Pinned by `repo_invariants::cancel`.
-    let cancel = state.dr_cancel.claim();
+    let cancel = state.backup_cancel.claim();
     let session = SessionDead::new();
     let client = state.graph_for(&tenant_id);
 
@@ -332,11 +332,11 @@ pub async fn load_backup_from_file(app_handle: AppHandle) -> Result<Option<Tenan
     .map_err(|e| UiError::io(e.to_string()))?
 }
 
-/// Signals an in-progress backup or restore to stop at the next dispatch
-/// boundary. In-flight per-app reads finish so their results don't dangle.
+/// Signals an in-progress backup to stop at the next dispatch boundary.
+/// In-flight per-app reads finish so their results don't dangle.
 #[tauri::command]
-pub fn cancel_dr(state: State<'_, AppState>) {
-    state.dr_cancel.cancel();
+pub fn cancel_backup(state: State<'_, AppState>) {
+    state.backup_cancel.cancel();
 }
 
 // ---------------- internals ----------------
@@ -723,7 +723,7 @@ fn assemble_enterprise_backup(
 /// re-bindable permission). Three batched phases: (1) every MI's held
 /// assignments in one batched read, (2) resolve each distinct resource SP once
 /// via a batched prewarm, (3) assemble (all resolves are now cache hits). Azure
-/// RBAC isn't scanned here — it's runbook-only on restore. Polls `dr_cancel`
+/// RBAC isn't scanned here — it's runbook-only on restore. Polls the backup's token
 /// between phases and per MI. (Uses the batch helpers' own internal concurrency
 /// rather than the adaptive chunk cap: the MI set is small and Pass 1/2 are the
 /// throttle pressure that matters.)

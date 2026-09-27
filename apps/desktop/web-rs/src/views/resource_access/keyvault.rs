@@ -14,7 +14,6 @@ use crate::bindings::events;
 use crate::bindings::keyvault_rbac::{
     self, KeyVaultAccessRow, KeyVaultSweepProgress, KeyVaultSweepResult,
 };
-use crate::bindings::sharepoint;
 use crate::components::export_menu::ExportMenu;
 use crate::components::ui::SearchInput;
 use crate::components::ui::{Badge, Callout, ShowMore};
@@ -236,7 +235,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
 
     let cancel = move |_| {
         leptos::task::spawn_local(async move {
-            let _ = sharepoint::cancel_resource_sweep().await;
+            let _ = keyvault_rbac::cancel_key_vault_sweep().await;
         });
     };
 

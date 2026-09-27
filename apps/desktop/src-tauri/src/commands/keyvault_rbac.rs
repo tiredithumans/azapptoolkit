@@ -87,8 +87,9 @@ fn keyvault_rbac_err(err: azapptoolkit_arm::ArmError) -> UiError {
 /// role assignments with bounded concurrency, resolving role-definition ids to
 /// names and service-principal ids to display names.
 ///
-/// Long-running: emits `keyvault-sweep-progress` per vault and polls the shared
-/// `AppState.sweep_cancel` (NOT `audit_cancel`) between dispatches. A per-vault
+/// Long-running: emits `keyvault-sweep-progress` per vault and polls its own
+/// `AppState.key_vault_sweep_cancel` token (stopped only by
+/// [`cancel_key_vault_sweep`]) between dispatches. A per-vault
 /// read failure increments `vaults_failed` rather than aborting or silently
 /// reading as "no access", so coverage is never overstated. A complete result
 /// is cached (60-minute audit TTL) under a tenant-prefixed key; a cancelled or
@@ -104,7 +105,7 @@ pub async fn sweep_key_vault_access(
     // and a token claimed after them discards any cancel issued during them
     // (`is_cancelled()` compares `cancelled >= generation`). Pinned by
     // `repo_invariants::cancel`.
-    let cancel = state.sweep_cancel.claim();
+    let cancel = state.key_vault_sweep_cancel.claim();
     // Acquire the ARM token up front so a missing-consent rejection surfaces as
     // the typed `consent_required` code (the UI offers a consent button)
     // instead of a generic error deep inside the ARM client.
@@ -331,6 +332,13 @@ pub async fn sweep_key_vault_access(
         cache.put(CacheKind::Audit, kv_sweep_cache_key(&tenant_id), &result);
     }
     Ok(result)
+}
+
+/// Signals an in-progress [`sweep_key_vault_access`] run to stop at the next
+/// dispatch boundary.
+#[tauri::command]
+pub fn cancel_key_vault_sweep(state: State<'_, AppState>) {
+    state.key_vault_sweep_cancel.cancel();
 }
 
 /// Batch-resolves service-principal object ids to display names. A non-SP id

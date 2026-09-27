@@ -38,8 +38,9 @@ pub async fn migrate_application_access_policies(
     // could not stop a whole-tenant migration once started, and a session that
     // died on the first app still burned through every remaining one, producing
     // an identical "failed" line per app that read as a tenant rejecting the
-    // writes. Shares `audit_cancel` with the security audit and bulk actions
-    // (AGENTS.md), claimed ONCE so a cancel can't be lost at a boundary.
+    // writes. The migration has its own flag, `migration_cancel`, stopped only
+    // by `cancel_aap_migration` — an audit or bulk Cancel can no longer stop it
+    // — and is claimed ONCE so a cancel can't be lost at a boundary.
     //
     // Claimed BEFORE the three tenant-wide reads below, not after them — the
     // same rule and the same reason as `run_audit`: `claim()` takes a fresh
@@ -49,7 +50,7 @@ pub async fn migrate_application_access_policies(
     // (`cancelled >= generation`) never sees it. `get_application_access_policies`
     // walks every policy in the tenant, so pressing Cancel while it ran was both
     // likely and, until this moved, silently discarded.
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.migration_cancel.claim();
     let session = SessionDead::new();
     let mut cancelled = false;
 
@@ -143,6 +144,18 @@ pub async fn migrate_application_access_policies(
         incomplete: cancelled,
         unattempted,
     })
+}
+
+/// Signals an in-progress [`migrate_application_access_policies`] run to stop
+/// before the next application. The run checks only at application boundaries:
+/// an application already mid-migration finishes, because [`migrate_one`]'s
+/// steps are ordered never to leave it half-scoped. So a single-app run stops
+/// only if the Cancel lands during the tenant-wide reads, before its one
+/// application starts; a stopped run reports `incomplete` and names the
+/// applications it never reached in `unattempted`.
+#[tauri::command]
+pub fn cancel_aap_migration(state: State<'_, AppState>) {
+    state.migration_cancel.cancel();
 }
 
 #[allow(clippy::too_many_arguments)]

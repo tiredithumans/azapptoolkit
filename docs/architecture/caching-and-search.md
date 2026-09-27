@@ -371,4 +371,16 @@ stays empty.
   than a partial result. Sequential flows that have already mutated (restore, AAP migration) instead
   break each pass and flag the report — stopping is not enough once writes have landed.
 
-Flags: `audit_cancel` (audit + bulk), `sweep_cancel`, `dr_cancel`.
+**One flag per run kind, each with exactly one Cancel command.** `audit_cancel` (`run_audit`,
+`cancel_audit`), `bulk_cancel` (every `bulk_*`, `cancel_bulk`), `migration_cancel` (the AAP
+migration, `cancel_aap_migration`), `site_sweep_cancel` (`sweep_site_permissions`, from the Sites
+tab and the per-app site panel, `cancel_site_sweep`), `key_vault_sweep_cancel`
+(`cancel_key_vault_sweep`), `mailbox_probe_cancel` (`find_mailbox_reachers`,
+`cancel_mailbox_probe`), `backup_cancel` (`cancel_backup`) and `restore_cancel` (`cancel_restore`).
+Why per kind: `CancelFlag::cancel` stamps the flag's current generation, so it stops *every* run on
+the flag, and the views that start these runs stay mounted (keep-alive views, display-toggled
+panels), so runs of different kinds overlap — a shared flag let cancelling a read-only audit halt a
+bulk delete, or a mailbox probe's Cancel throw away a site sweep. The one remaining same-kind
+overlap: two bulk runs started from different bulk action bars share `bulk_cancel`, so one Cancel
+stops both (separating them needs a per-run id). Pinned by `repo_invariants/cancel.rs`
+(`every_cancel_flag_belongs_to_one_run_kind_and_one_cancel_command`).

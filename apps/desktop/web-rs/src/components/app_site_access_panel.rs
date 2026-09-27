@@ -136,7 +136,7 @@ pub fn AppSiteAccessPanel(
 
     let cancel = move |_| {
         leptos::task::spawn_local(async move {
-            let _ = sharepoint::cancel_resource_sweep().await;
+            let _ = sharepoint::cancel_site_sweep().await;
         });
     };
 

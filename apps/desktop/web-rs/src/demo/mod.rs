@@ -678,4 +678,16 @@ fn register_fixtures() {
     ] {
         mock_ok(cmd, &());
     }
+    // Fire-and-forget Cancel commands: Result-returning, but a demo Cancel
+    // should resolve rather than reject.
+    for cmd in [
+        "cancel_site_sweep",
+        "cancel_key_vault_sweep",
+        "cancel_mailbox_probe",
+        "cancel_backup",
+        "cancel_restore",
+        "cancel_aap_migration",
+    ] {
+        mock_ok(cmd, &());
+    }
 }

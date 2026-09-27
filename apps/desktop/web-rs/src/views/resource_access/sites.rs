@@ -243,7 +243,7 @@ pub(super) fn SitesPanel() -> impl IntoView {
 
     let cancel = move |_| {
         leptos::task::spawn_local(async move {
-            let _ = sharepoint::cancel_resource_sweep().await;
+            let _ = sharepoint::cancel_site_sweep().await;
         });
     };
 

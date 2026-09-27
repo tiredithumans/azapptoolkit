@@ -45,10 +45,11 @@ pub async fn sweep_site_permissions(tenant_id: &str) -> Result<SiteSweepResult, 
     invoke_result("sweep_site_permissions", TenantArg { tenant_id }).await
 }
 
-/// Signals the in-progress resource sweep/probe (site sweep or mailbox probe)
-/// to stop at the next dispatch boundary.
-pub async fn cancel_resource_sweep() -> Result<(), UiError> {
-    invoke_result("cancel_resource_sweep", ()).await
+/// Signals an in-progress site-permission sweep to stop at the next dispatch
+/// boundary. Covers both the Resource Access Sites tab and the per-app site
+/// panel: same sweep, same flag.
+pub async fn cancel_site_sweep() -> Result<(), UiError> {
+    invoke_result("cancel_site_sweep", ()).await
 }
 
 /// The cached sweep for this tenant, if one completed within the cache TTL.

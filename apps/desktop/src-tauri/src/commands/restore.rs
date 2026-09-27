@@ -35,9 +35,11 @@
 //! had already expired when the backup was taken; certificates are reported as
 //! needing manual re-upload from the operator's own PKI.
 //!
-//! Long-running, so it polls the dedicated `AppState.dr_cancel` flag and emits
-//! `restore-progress`. A cancel stops creating *new* apps but still finishes
-//! wiring the ones already created (never leaves bare shells), and reports it.
+//! Long-running, so it polls its own `AppState.restore_cancel` token (stopped
+//! only by `cancel_restore`, never by a backup's Cancel) and emits
+//! `restore-progress`. A cancel stops at the next item in whichever pass is
+//! running, and the report flags the run cancelled (partial); a re-run adopts
+//! the already-created, tagged apps and finishes wiring them.
 
 use std::collections::{HashMap, HashSet};
 
@@ -414,7 +416,7 @@ pub async fn restore_tenant(
     // assignees, and group memberships is searched once, not per occurrence.
     let mut principals: HashMap<String, Option<String>> = HashMap::new();
     // The apps we actually created, paired with their backup + new ids, so
-    // passes 2–3 finish wiring exactly those (even after a cancel).
+    // passes 2–3 wire exactly those.
     let mut created: Vec<CreatedApp> = Vec::new();
     // One latch across all five passes: the first re-auth-fatal error stops the
     // rest instead of letting each remaining item fail the same way.
@@ -422,7 +424,7 @@ pub async fn restore_tenant(
     // One cancel token for the whole restore, claimed before the first write.
     // Claiming per pass would take a new generation each time and lose a cancel
     // the operator issued during an earlier pass.
-    let cancel = state.dr_cancel.claim();
+    let cancel = state.restore_cancel.claim();
 
     // ---- Pass 1: create shells ----
     let mut done = 0;
@@ -667,8 +669,12 @@ pub async fn save_restore_report_to_file(
     .await
 }
 
-// Cancellation shares `cancel_dr` (and `AppState.dr_cancel`) with the backup
-// command in `commands::backup`.
+/// Signals an in-progress [`restore_tenant`] to stop at the next item of
+/// whichever pass is running; the report flags the run cancelled.
+#[tauri::command]
+pub fn cancel_restore(state: State<'_, AppState>) {
+    state.restore_cancel.cancel();
+}
 
 // ---------------- internals ----------------
 

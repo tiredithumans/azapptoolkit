@@ -10,13 +10,16 @@ mechanisms these tools observe are in [exchange-scoping.md](./exchange-scoping.m
 
 The Resource Access page (`ActiveView::ResourceAccess`) answers the inverted question the
 Permission tester can't: not "can this app reach that resource?" but "**who** can reach this
-resource?". One tab per resource plane; both long-running operations poll the shared
-`AppState.sweep_cancel` atomic — NOT `audit_cancel` — so the page's Cancel can never abort a
-concurrent audit/bulk run (and vice versa); `cancel_resource_sweep` flips it. All four long-running
+resource?". One tab per resource plane. The panels stay mounted across tab switches and can run at
+the same time, so each long-running operation has its own cancel flag and command: the site sweep
+`site_sweep_cancel` / `cancel_site_sweep` (shared by the Sites tab and the per-app site panel — same
+sweep), the Key Vault sweep `key_vault_sweep_cancel` / `cancel_key_vault_sweep`, and the mailbox
+probe `mailbox_probe_cancel` / `cancel_mailbox_probe`. One panel's Cancel never aborts another
+panel's scan, nor an audit/bulk run (and vice versa). All four long-running
 fan-out loops (audit, site sweep, mailbox probe, bulk credential sweep) ride
 `commands::dispatch::dispatch_capped`, which delivers **every** completed task to the collector and
-returns an early-stop latch — callers report cancellation from that latch rather than re-reading a
-shared cancel flag a concurrent command may have reset.
+returns an early-stop latch — callers report cancellation from that latch rather than re-reading the
+token afterwards.
 
 **Sites tab (`sweep_site_permissions`).** Graph offers no `appId → sites` lookup, so the per-site
 grants behind `Sites.Selected` are invisible from the app side. The sweep builds the index the

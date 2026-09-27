@@ -438,10 +438,11 @@ const PROBE_CONCURRENCY: usize = 4;
 /// candidate source is necessarily absent in that degraded mode — the UI's
 /// `exchange_available = false` summary already flags the partial coverage.
 ///
-/// Long-running: emits `mailbox-probe-progress` and polls the shared
-/// `AppState.sweep_cancel` atomic (the Resource Access page's cancel covers
-/// both this probe and the site sweep; the two never run concurrently from the
-/// UI, and neither may abort an audit/bulk run).
+/// Long-running: emits `mailbox-probe-progress` and polls its own
+/// `AppState.mailbox_probe_cancel` token, stopped only by
+/// [`cancel_mailbox_probe`]. The probe has its own flag because the Resource
+/// Access panels stay mounted and can run at the same time as the site and
+/// Key Vault sweeps: a shared flag let one panel's Cancel abort the others.
 #[tauri::command]
 pub async fn find_mailbox_reachers(
     app_handle: AppHandle,
@@ -453,7 +454,7 @@ pub async fn find_mailbox_reachers(
     // app-role-assignment read below run before the dispatch, and a token
     // claimed after them discards a cancel issued during them. Pinned by
     // `repo_invariants::cancel`.
-    let cancel = state.sweep_cancel.claim();
+    let cancel = state.mailbox_probe_cancel.claim();
     let mailbox = mailbox.trim().to_string();
     if mailbox.is_empty() {
         return Err(UiError::validation(
@@ -678,6 +679,13 @@ pub async fn find_mailbox_reachers(
         exchange_available,
         cancelled,
     })
+}
+
+/// Signals an in-progress [`find_mailbox_reachers`] probe to stop at the next
+/// dispatch boundary.
+#[tauri::command]
+pub fn cancel_mailbox_probe(state: State<'_, AppState>) {
+    state.mailbox_probe_cancel.cancel();
 }
 
 /// Folds the Exchange-registered service principals into the candidate map

@@ -12,7 +12,6 @@ use crate::bindings::events;
 use crate::bindings::permission_tester::{
     self, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
 };
-use crate::bindings::sharepoint;
 use crate::components::export_menu::ExportMenu;
 use crate::components::ui::{Callout, ShowMore};
 use crate::constants::*;
@@ -195,7 +194,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
 
     let cancel = move |_| {
         leptos::task::spawn_local(async move {
-            let _ = sharepoint::cancel_resource_sweep().await;
+            let _ = permission_tester::cancel_mailbox_probe().await;
         });
     };
 

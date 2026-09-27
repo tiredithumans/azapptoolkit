@@ -11,7 +11,8 @@
 //! Adaptive concurrency: a [`ConcurrencyThrottle`](crate::commands::throttle)
 //! wired as the Graph client's `ThrottleObserver` decrements the in-flight cap
 //! on every 429 and gradually recovers it after 30s of quiet. Cancellation is
-//! signalled via `AppState.audit_cancel`; the loop polls it between dispatches.
+//! signalled via `AppState.audit_cancel` (cancelled only by `cancel_audit`); the
+//! loop polls it between dispatches.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

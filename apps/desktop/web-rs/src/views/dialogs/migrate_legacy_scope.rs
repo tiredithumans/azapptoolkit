@@ -25,7 +25,7 @@ use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 use azapptoolkit_core::audit::RemediationAction;
 
 use crate::bindings::exchange::{self, AapMigrationReport};
-use crate::components::aap_migration_report::AapMigrationReportView;
+use crate::components::aap_migration_report::{AapMigrationReportView, AapMigrationStop};
 use crate::components::modal_shell::ModalShell;
 use crate::state::use_session;
 
@@ -136,6 +136,7 @@ pub fn MigrateLegacyScopeButton(
                                 <div class="actions-row">
                                     <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
                                     <Body1>"Working…"</Body1>
+                                    <AapMigrationStop />
                                 </div>
                             }
                         })

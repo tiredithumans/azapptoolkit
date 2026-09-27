@@ -492,8 +492,8 @@ pub fn BulkActionBar(
         summary.set(None);
         failures.set(Vec::new());
         error.set(None);
-        // The last run's final event said `done == total`; leaving it in place
-        // opens the new run on a full progress bar.
+        // The last run's terminal event is still in place (a full bar for a
+        // completed run); leaving it opens the new run on a stale bar.
         progress.set(None);
         let tenant = session.active_tenant.get();
         leptos::task::spawn_local(async move {
