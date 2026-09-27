@@ -6,10 +6,9 @@
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
-use wasm_bindgen_futures::JsFuture;
 
 use crate::bindings::sso::{OidcSsoSummary, SamlSsoSummary};
-use crate::components::ui::{Callout, CopyIconButton};
+use crate::components::ui::{Callout, CopyBlock, CopyIconButton};
 
 /// One labelled value in an app-owner summary.
 ///
@@ -106,41 +105,6 @@ pub fn CopyField(#[prop(into)] label: String, #[prop(into)] value: String) -> im
                         view! { <CopyIconButton value=copy_value aria_label=aria.clone() /> }
                     })}
             </span>
-        </div>
-    }
-}
-
-/// A large monospace block (certificate / secret) with a copy button.
-#[component]
-fn CopyBlock(
-    #[prop(into)] label: String,
-    #[prop(into)] value: String,
-    #[prop(into)] hint: String,
-) -> impl IntoView {
-    let copied = RwSignal::new(false);
-    let copy_value = value.clone();
-    let copy = move |_| {
-        let v = copy_value.clone();
-        copied.set(false);
-        leptos::task::spawn_local(async move {
-            if let Some(win) = web_sys::window() {
-                let promise = win.navigator().clipboard().write_text(&v);
-                let _ = JsFuture::from(promise).await;
-                copied.set(true);
-            }
-        });
-    };
-    view! {
-        <div class="sso-block">
-            <span class="sso-field__label">{label}</span>
-            {(!hint.is_empty()).then(|| view! { <Body1 class="hint">{hint}</Body1> })}
-            <pre class="secret-reveal">{value}</pre>
-            <Button
-                appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                on_click=Box::new(copy)
-            >
-                {move || if copied.get() { "Copied" } else { "Copy" }}
-            </Button>
         </div>
     }
 }

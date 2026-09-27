@@ -3596,10 +3596,17 @@ h3 {
   gap: var(--space-2);
   word-break: break-all;
 }
-.sso-block {
+/* `components::ui::CopyBlock` — a large copyable value (certificate / one-time
+   secret). The label matches `.sso-field__label`, the summaries it sits in. */
+.copy-block {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+.copy-block__label {
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
 }
 /* "Copy all details" sits between the lede and the fields it copies, so the
    affordance is visible before the operator starts copying values one at a

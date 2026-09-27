@@ -1,8 +1,8 @@
 #![allow(clippy::unnecessary_wraps)]
 
-//! Detail pane for a selected enterprise application service principal.
-//! Header strip + tab list (Overview, Credentials, Owners, Permissions) with
-//! per-tab content. Mirrors the App Registrations detail pane structure.
+//! Detail pane for a selected enterprise application service principal: header
+//! strip, then the tab bar (the tab list is `views::tabs::EnterpriseTab::ALL`)
+//! with per-tab content. Mirrors the App Registrations detail pane structure.
 
 use std::collections::HashSet;
 use std::sync::Arc;

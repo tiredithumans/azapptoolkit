@@ -7,6 +7,7 @@
 mod badge;
 mod callout;
 mod card;
+mod copy_block;
 mod copy_icon_button;
 mod copyable_id;
 mod data_table;
@@ -22,6 +23,7 @@ mod tab_bar;
 pub use badge::Badge;
 pub use callout::Callout;
 pub use card::Card;
+pub use copy_block::CopyBlock;
 pub use copy_icon_button::CopyIconButton;
 pub use copyable_id::CopyableId;
 pub use data_table::DataTable;

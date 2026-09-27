@@ -57,6 +57,11 @@ surfaces reuse it rather than re-implementing the markup.
   App Registration Authentication tab (3 lists) and the enterprise SSO tab (5); don't reintroduce
   a newline-separated `<Textarea>` for a set of values. `sso_wizard_dialog.rs` is the one
   remaining migration.
+- **Large copyable value (certificate / one-time secret)** — `components::ui::CopyBlock`: label,
+  optional hint, `pre.secret-reveal`, and a Copy button that rides `util::write_clipboard` and
+  reports a failed clipboard write instead of claiming "Copied". Used by the SSO owner summaries
+  and the SSO tab's staged / rotated certificate reveals; don't hand-roll a `pre` plus a clipboard
+  call.
 - **Select / dropdown** — `.ui-select` (a class, not a component: these are bare `<select>`s
   inside a thaw `Field`). Metrics match the thaw input/button they sit beside, chevron is an
   inline-SVG data URI because the CSP forbids fetching one, and the stroke colour is baked into

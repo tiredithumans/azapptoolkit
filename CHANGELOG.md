@@ -22,6 +22,11 @@
 
 ### Fixed
 
+- **The new certificate from "Rotate and activate immediately" now stays on screen.** Entra returns
+  the new signing certificate only once, but the SSO tab reloaded right after the rotation and the
+  certificate vanished before you could copy it. It now stays up through the reload. It, and the
+  certificate shown after staging a replacement, now has a label, a hint and a Copy button that
+  says so when the clipboard write fails.
 - **The SSO certificate board shows thumbprints the way the SSO tab and the Entra portal do.** When
   Entra stored an app's nominated signing key in lower case, the board's Thumbprint column showed it
   that way, beside the upper-case value the SSO tab shows for the same certificate. The board and
@@ -590,6 +595,11 @@
 
 ### Changed
 
+- **Rotating a SAML signing certificate immediately, and retiring the previous one, now ask
+  first.** An immediate rotation stops sign-in for any application that holds a single static
+  certificate, and retiring removes your only rollback. Both ran on one click, unlike every other
+  destructive action in the enterprise app pane. Rotating now asks you to type ROTATE; retiring
+  asks for confirmation. Removing an expired certificate is still one click.
 - **The SSO tab opens with about half the Microsoft Graph requests.** Opening it read the service
   principal, its application and its claims policy, then read them all again for "Details for the
   application owner", and read the service principal a third time for the signing-certificate
