@@ -25,8 +25,10 @@ unsafe_code = "deny"
 azapptoolkit-core = { path = "../../../crates/azapptoolkit-core" }
 azapptoolkit-dto = { path = "../../../crates/azapptoolkit-dto" }
 
-# `just future-incompat` lists proc-macro-error2 2.0.1 (E0365) under the view
-# macros: leptos_macro -> rstml 0.12 -> syn_derive, and thaw_utils -> reactive_stores_macro 0.2.
+# `just future-incompat` lists proc-macro-error2 2.0.1 (E0365), used by leptos_macro directly,
+# by syn_derive (via rstml 0.12), and by reactive_stores_macro 0.4 (leptos/tachys) and 0.2
+# (thaw_utils). Clearing it needs a fixed proc-macro-error2 or leptos AND thaw both dropping it;
+# the justfile `future-incompat` comment has the full chain and the `[patch]` fallback.
 leptos = { version = "0.8", features = ["csr"] }
 thaw = { version = "0.5.0-beta", features = ["csr"] }
 

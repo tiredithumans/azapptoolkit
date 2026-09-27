@@ -333,11 +333,17 @@ check: _stub-frontend-dist
 # no `--manifest-path` and errors on a tree with no report, so it is not used here.
 #
 # Known today (web-rs only): proc-macro-error2 2.0.1, E0365 "extern crate
-# `proc_macro` is private" (rust#127909), reached via leptos_macro -> rstml 0.12
-# -> syn_derive 0.2 and thaw_utils -> reactive_stores 0.2 -> reactive_stores_macro
-# 0.2.6. No semver update removes it: the exits are leptos adopting rstml >= 0.13
-# (which drops syn_derive) and thaw moving off reactive_stores 0.2; the fallback
-# is a `[patch.crates-io]` to a fixed fork (plus a deny.toml `allow-git` entry).
+# `proc_macro` is private" (rust#127909). Four proc-macros depend on it (from
+# `cargo tree -i proc-macro-error2 --target all` in web-rs):
+#   - leptos_macro 0.8.17 directly (leptos's `view!`);
+#   - syn_derive 0.2 <- rstml 0.12 <- leptos_macro / leptos_hot_reload;
+#   - reactive_stores_macro 0.4.3 <- reactive_stores 0.4.3 <- tachys (leptos's own);
+#   - reactive_stores_macro 0.2.6 <- reactive_stores 0.2.5 <- thaw_utils.
+# No semver update removes it. The exits are a fixed proc-macro-error2 release,
+# or leptos (leptos_macro, rstml, reactive_stores) AND thaw all dropping it —
+# one upstream alone does not clear the warning. The fallback is a
+# `[patch.crates-io]` of proc-macro-error2 to a fixed fork (plus a deny.toml
+# `allow-git` entry), which covers all four paths at once.
 
 # Future-incompat report for both trees (not a gate) — run before a toolchain bump.
 future-incompat: _stub-frontend-dist
