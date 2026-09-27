@@ -1046,7 +1046,7 @@ async fn prefetch_graph_app_roles(
 ) -> (HashMap<String, Vec<String>>, Option<AuditCoverageGap>) {
     let mut graph_roles_by_sp: HashMap<String, Vec<String>> = HashMap::new();
     if let Ok((graph_sp_id, role_value_by_id)) = graph_role_index(client).await {
-        match client.list_app_role_assigned_to(&graph_sp_id).await {
+        match client.list_app_role_assigned_to_cached(&graph_sp_id).await {
             Ok(assigned) => {
                 for a in assigned {
                     // App permissions held by an app's SP — Users/Groups can't

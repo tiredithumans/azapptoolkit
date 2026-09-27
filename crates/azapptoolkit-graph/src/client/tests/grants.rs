@@ -343,8 +343,8 @@ fn assigned_to_page() -> serde_json::Value {
 }
 
 /// The tenant-wide inbound read (`appRoleAssignedTo` on the Graph SP) is the
-/// one the audit and the consent view both walk end to end, so it is the one
-/// the read-through cache sits on. `expect(1)` is the assertion.
+/// one the audit and the consent view both walk end to end, so they read it
+/// through the cached variant. `expect(1)` is the assertion.
 #[tokio::test]
 async fn the_tenant_wide_assigned_to_read_is_cached() {
     let server = MockServer::start().await;
@@ -357,7 +357,7 @@ async fn the_tenant_wide_assigned_to_read_is_cached() {
     let client = make_client(&server.uri());
     assert_eq!(
         client
-            .list_app_role_assigned_to("sp-graph")
+            .list_app_role_assigned_to_cached("sp-graph")
             .await
             .unwrap()
             .len(),
@@ -365,7 +365,7 @@ async fn the_tenant_wide_assigned_to_read_is_cached() {
     );
     assert_eq!(
         client
-            .list_app_role_assigned_to("sp-graph")
+            .list_app_role_assigned_to_cached("sp-graph")
             .await
             .unwrap()
             .len(),
@@ -397,11 +397,40 @@ async fn a_grant_write_invalidates_the_cached_assigned_to_read() {
         .await;
 
     let client = make_client(&server.uri());
-    client.list_app_role_assigned_to("sp-graph").await.unwrap();
+    client
+        .list_app_role_assigned_to_cached("sp-graph")
+        .await
+        .unwrap();
     client
         .grant_app_role("sp-client", "sp-graph", "role-2")
         .await
         .unwrap();
+    client
+        .list_app_role_assigned_to_cached("sp-graph")
+        .await
+        .unwrap();
+}
+
+/// The plain inbound read stays live: the Enterprise Access tab, the
+/// permission tester, the EWS check and the backup fallback must see a grant
+/// made in the portal on their next reload. `expect(3)` pins the absence of a
+/// cache (one cold cached read, then two live reads) even after the cached
+/// variant has seeded the same key.
+#[tokio::test]
+async fn the_plain_assigned_to_read_is_live() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-graph/appRoleAssignedTo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(assigned_to_page()))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    client
+        .list_app_role_assigned_to_cached("sp-graph")
+        .await
+        .unwrap();
+    client.list_app_role_assigned_to("sp-graph").await.unwrap();
     client.list_app_role_assigned_to("sp-graph").await.unwrap();
 }
 

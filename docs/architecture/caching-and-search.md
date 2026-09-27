@@ -360,12 +360,15 @@ logs its effective first-page size for exactly that reason. Batched sub-requests
 The read that dominates is `appRoleAssignedTo` **on the Microsoft Graph service principal**: it holds
 every application-permission grant in the tenant, and both the security audit
 (`prefetch_graph_app_roles`) and the consent view walk it end-to-end *before* they can score
-anything. It is the read behind the Permissions-kind read-through
-(`{tenant}|grants:assigned_to:{sp}`, in `list_app_role_assigned_to`), swept by every grant mutator
-in the client (`invalidate_grant_cache`). A grant changed outside the app (the portal) can lag by up
-to the Permissions TTL, the same contract as `grants:oauth2_all`; the Cache dialog's Permissions
-clear resets it. `appRoleAssignments` (what one SP holds) is deliberately **uncached**: it is
-per-SP and small, and the pre-write `existing` checks read it, so it must be live.
+anything. Those two — and only those two — read it through the Permissions-kind read-through
+`list_app_role_assigned_to_cached` (`{tenant}|grants:assigned_to:{sp}`), swept by every grant
+mutator in the client (`invalidate_grant_cache`). A grant changed outside the app (the portal) can
+lag there by up to the Permissions TTL, the same contract as `grants:oauth2_all`; the Cache dialog's
+Permissions clear resets it. Every other `appRoleAssignedTo` reader — the Enterprise Access tab, the
+permission tester, the audit's EWS full-access check, the DR backup's per-SP fallback — calls the
+live `list_app_role_assigned_to`, so its reload or re-run always sees portal-side changes.
+`appRoleAssignments` (what one SP holds) is deliberately **uncached**: it is per-SP and small, and
+the pre-write `existing` checks read it, so it must be live.
 
 The write fan-outs (bulk delete / grant / remove-expired, DR backup writes) **can't `$batch`** —
 Graph batches GETs — so their win is bounded concurrency + adaptive 429 backoff, not round-trip

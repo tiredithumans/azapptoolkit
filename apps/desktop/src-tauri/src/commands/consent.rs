@@ -197,7 +197,7 @@ pub async fn list_app_permission_grants(
                     .map(|r| (r.id.clone(), r.value.clone()))
                     .collect();
                 let resource_display_name = resource.display_name.clone();
-                let assignments = match client.list_app_role_assigned_to(&resource.id).await {
+                let assignments = match client.list_app_role_assigned_to_cached(&resource.id).await {
                     Ok(a) => a,
                     Err(err) => {
                         tracing::warn!(?err, resource = %resource_app_id, "app-permission scan: appRoleAssignedTo failed; skipping");

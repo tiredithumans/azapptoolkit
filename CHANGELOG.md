@@ -500,7 +500,10 @@
   every app registration and every service principal. Moving between the security audit and the
   Application permissions consent view also no longer re-reads every application-permission grant
   in the tenant, and permission changes now always check an app's current grants instead of a copy
-  up to an hour old.
+  up to an hour old. Changes made in the app show up in both views at once; an application
+  permission granted or revoked outside the app (for example in the Entra portal) can take up to an
+  hour to appear there, or until you clear Permissions in the Cache dialog. The Enterprise Apps
+  Access tab and the permission tester still read assignments live.
 
 - **The Cache dialog can clear each cache on its own.** Service principal, permissions, audit and
   list entries each get a Clear button in their row, so dropping a stale audit result no longer
