@@ -32,6 +32,20 @@
 
 ### Fixed
 
+- **Opening an app that's already open no longer changes which tab the next app opens on.** "Open"
+  from the credential dashboard, a Security finding or a mailbox-scope row asks for a specific tab.
+  If the app was already open, it came to the front on the tab you'd left it on, but the request
+  stayed queued, so the next app you opened from a list landed on Credentials or Permissions
+  instead of your last-used tab. Enterprise applications had the same problem.
+- **Refresh on the App Registrations and Enterprise Applications lists now always fetches fresh
+  rows.** The list could reload before the app had cleared its cached copy, so Refresh spun and
+  showed the same rows. It now clears the cache first, as the detail pane's Refresh already did.
+- **Re-authenticating from the "session has expired" message now re-checks Access Readiness.** The
+  top bar's Refresh token already did this; the message's Re-authenticate button left an open
+  Access Readiness checklist showing your old access.
+- **Sign-in errors for a wrong tenant or client ID now point to the Change link on the sign-in
+  card.** They said to check Settings → Tenant connection, which can't be opened until you've
+  signed in.
 - **Choosing "Org-wide" in the Grant access wizard no longer strands a SharePoint grant.** For a
   SharePoint site permission, or a library, folder or file permission, picking "Org-wide — no
   scoping" hid the site or item picker, and nothing on that step brought it back: you had to go

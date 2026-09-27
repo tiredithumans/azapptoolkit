@@ -46,6 +46,7 @@ async fn dead_session_error_offers_reauth_action_that_calls_reauthenticate() {
 
     // Clicking it runs the interactive re-auth in place, pinned to the session's
     // tenant — no sign-out.
+    let before = m.session.readiness_reload.get_untracked();
     ts::click(".toast__action");
     ts::wait_for(|| ts::call_count("reauthenticate") == 1).await;
     let call = ts::last_call("reauthenticate").expect("reauthenticate called");
@@ -56,6 +57,14 @@ async fn dead_session_error_offers_reauth_action_that_calls_reauthenticate() {
             .and_then(|v| v.as_str()),
         Some("test-tenant"),
         "re-auth must target the active tenant",
+    );
+    // A new session may carry different roles, so it re-runs a mounted Access
+    // Readiness checklist — as the top bar's Refresh-token fallback does.
+    ts::wait_for(|| ts::body_contains("Re-authenticated")).await;
+    assert_eq!(
+        m.session.readiness_reload.get_untracked(),
+        before + 1,
+        "re-auth from the toast must re-check Access Readiness"
     );
 }
 
@@ -129,10 +138,13 @@ async fn unauthorized_refresh_falls_back_to_reauth_on_a_dead_session() {
         .report_command_error(&fixtures::ui_error("unauthorized", "unauthorized (401)"));
 
     ts::wait_for(|| ts::query(".toast__action").is_some()).await;
+    let before = m.session.readiness_reload.get_untracked();
     ts::click(".toast__action");
     ts::wait_for(|| ts::call_count("reauthenticate") == 1).await;
     assert_eq!(ts::call_count("refresh_session"), 1);
     assert_eq!(ts::call_count("sign_out"), 0, "never a sign-out");
+    ts::wait_for(|| ts::body_contains("Re-authenticated")).await;
+    assert_eq!(m.session.readiness_reload.get_untracked(), before + 1);
 }
 
 /// A Conditional Access step-up (`interaction_required` — MFA for one resource)
@@ -294,10 +306,13 @@ async fn a_refresh_needing_verification_falls_back_to_reauth() {
         .report_command_error(&fixtures::ui_error("unauthorized", "unauthorized (401)"));
 
     ts::wait_for(|| ts::query(".toast__action").is_some()).await;
+    let before = m.session.readiness_reload.get_untracked();
     ts::click(".toast__action");
     ts::wait_for(|| ts::call_count("reauthenticate") == 1).await;
     assert_eq!(ts::call_count("refresh_session"), 1);
     assert_eq!(ts::call_count("sign_out"), 0, "never a sign-out");
+    ts::wait_for(|| ts::body_contains("Re-authenticated")).await;
+    assert_eq!(m.session.readiness_reload.get_untracked(), before + 1);
 }
 
 /// The in-flight guard lives on the session, not on a trigger: two 401 toasts

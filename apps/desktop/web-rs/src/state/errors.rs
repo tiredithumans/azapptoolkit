@@ -28,23 +28,34 @@ impl Session {
     /// The tenant id is unchanged (the backend validates the returned identity
     /// matches), so this deliberately does **not** call `set_active_tenant`:
     /// re-setting it would needlessly reset the user's filters and selection.
-    /// Used by the smart Refresh button's fallback and the
-    /// [`Self::report_command_error`] "Re-authenticate" toast action.
+    /// The [`Self::report_command_error`] "Re-authenticate" toast action; it
+    /// shares [`Self::reauth_in_place`] with [`Self::refresh_token_in_place`]'s
+    /// fallback, so both re-authentications have the same side effects.
     pub fn spawn_reauth(&self) {
         let session = *self;
         leptos::task::spawn_local(async move {
             let Some(tenant) = session.active_tenant.get_untracked() else {
                 return;
             };
-            match crate::bindings::auth::reauthenticate(&tenant).await {
-                Ok(_) => {
-                    session.toast_success("Re-authenticated — retry the action that failed.");
-                }
-                Err(e) => {
-                    session.toast_error(format!("Couldn't re-authenticate: {}", e.message), None);
-                }
-            }
+            session.reauth_in_place(&tenant).await;
         });
+    }
+
+    /// The one interactive re-authentication round trip and what follows it:
+    /// on success re-run a mounted Access Readiness checklist (the new session
+    /// may carry different roles) and toast; on failure toast the reason.
+    /// Every in-place re-auth goes through here, so a new post-re-auth side
+    /// effect is added once.
+    async fn reauth_in_place(self, tenant: &TenantContext) {
+        match crate::bindings::auth::reauthenticate(tenant).await {
+            Ok(_) => {
+                self.bump_readiness_reload();
+                self.toast_success("Re-authenticated — retry the action that failed.");
+            }
+            Err(e) => {
+                self.toast_error(format!("Couldn't re-authenticate: {}", e.message), None);
+            }
+        }
     }
 
     /// When `e` means the **session is dead** — the refresh token
@@ -157,14 +168,7 @@ impl Session {
                 // step-up; re-auth interactively in place rather than dumping
                 // the user to the sign-in screen.
                 session.token_reauthing.set(true);
-                match crate::bindings::auth::reauthenticate(&tenant).await {
-                    Ok(_) => {
-                        session.bump_readiness_reload();
-                        session.toast_success("Re-authenticated — retry the action that failed.")
-                    }
-                    Err(e) => session
-                        .toast_error(format!("Couldn't re-authenticate: {}", e.message), None),
-                };
+                session.reauth_in_place(&tenant).await;
                 session.token_reauthing.set(false);
             }
             Err(e) => {

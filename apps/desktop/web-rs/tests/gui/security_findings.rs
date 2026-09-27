@@ -604,12 +604,26 @@ async fn open_deep_links_to_the_section_it_was_clicked_in() {
     ts::wait_for(|| has_button("Remove 1 expired credential")).await;
     click_row_open("Legacy Policy App");
     assert_eq!(tab().as_deref(), Some("credentials"));
+    // What the mounted detail pane does: consume the tab once. (The harness
+    // mounts no workspace pane, so the test plays its part.)
+    m.session.tenant_ui.pending_app_tab.set(None);
 
     m.session
         .tenant_ui
         .audit_expanded_group
         .set(Some("legacy_mailbox_scope".to_string()));
     ts::wait_for(|| has_button("Migrate to RBAC for Applications")).await;
+    // The app is still open: it keeps its live tab, and no pane mounts to
+    // consume a queued one — queuing it would land the NEXT app on it.
+    click_row_open("Legacy Policy App");
+    assert_eq!(
+        tab(),
+        None,
+        "an already-open app must not queue a tab for the next app"
+    );
+
+    // Closed again, Open from this section lands on Permissions.
+    m.session.close_all_items();
     click_row_open("Legacy Policy App");
     assert_eq!(tab().as_deref(), Some("permissions"));
 }

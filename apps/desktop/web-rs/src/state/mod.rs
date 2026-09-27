@@ -196,11 +196,13 @@ pub struct TenantScopedUi {
     // Deep-link target tab for the app detail pane. Set by `open_app_on_tab`
     // (e.g. the credential dashboard's "Open" action) and consumed once by the
     // detail pane on mount so it opens directly on that tab instead of
-    // Overview.
+    // Overview. Set only when a new pane will mount to consume it — a
+    // deep-link to an already-open app queues nothing (see `open_app_on_tab`).
     pub pending_app_tab: RwSignal<Option<String>>,
     // Same deep-link mechanism for the enterprise-app detail pane (e.g. a
     // consent-grant "Open" jumping straight to its Permissions tab). Consumed
-    // once by the enterprise pane on mount.
+    // once by the enterprise pane on mount, and likewise set only when a new
+    // pane will mount.
     pub pending_enterprise_tab: RwSignal<Option<String>>,
     // Shell-owned tool dialog flag. Lifted here so the dialog can be mounted by
     // the persistent shell and triggered from the nav rail no matter which view
@@ -329,10 +331,10 @@ pub struct Session {
     // "Security Posture" tile, which stays mounted (keep-alive) across view
     // switches — refetch the freshly cached run instead of showing stale state.
     pub audit_reload: RwSignal<u32>,
-    // Bumped when the operator refreshes their token (re-applying roles activated
-    // since sign-in), so a mounted Access Readiness checklist re-runs its check in
-    // place. The Refresh-token control is the single "re-check my access" trigger —
-    // there is no separate Re-check button.
+    // Bumped after a token refresh (re-applying roles activated since sign-in)
+    // or any in-place re-authentication (`Session::reauth_in_place`), so a
+    // mounted Access Readiness checklist re-runs its check in place. There is no
+    // separate Re-check button.
     pub readiness_reload: RwSignal<u32>,
     // In-flight flags of the one in-place token refresh
     // (`Session::spawn_refresh_token`), shared by its two triggers — the top-bar
@@ -563,6 +565,40 @@ mod tests {
             session
                 .shown_items
                 .with_untracked(|shown| assert_eq!(shown, &vec![a]));
+        });
+    }
+
+    #[test]
+    fn deep_linking_an_open_item_queues_no_tab_for_the_next_pane() {
+        with_session(|session| {
+            let ui = session.tenant_ui;
+            // A new app: the tab is queued for the pane that will mount.
+            session.open_app_on_tab("app-1".into(), "credentials");
+            assert_eq!(
+                ui.pending_app_tab.get_untracked().as_deref(),
+                Some("credentials")
+            );
+            // ...which the mounted pane consumes.
+            ui.pending_app_tab.set(None);
+            // Already open: no pane mounts, so nothing may be queued — it
+            // would land the NEXT app opened from a list on this tab.
+            session.open_app_on_tab("app-1".into(), "permissions");
+            assert_eq!(ui.pending_app_tab.get_untracked(), None);
+
+            // Opened plainly (from a list), then deep-linked: still nothing.
+            session.open_item(OpenItemKind::AppReg, "app-2", "Contoso");
+            session.open_app_on_tab("app-2".into(), "credentials");
+            assert_eq!(ui.pending_app_tab.get_untracked(), None);
+
+            // The enterprise pane's signal behaves the same.
+            session.open_enterprise_on_tab("sp-1".into(), "permissions");
+            assert_eq!(
+                ui.pending_enterprise_tab.get_untracked().as_deref(),
+                Some("permissions")
+            );
+            ui.pending_enterprise_tab.set(None);
+            session.open_enterprise_on_tab("sp-1".into(), "overview");
+            assert_eq!(ui.pending_enterprise_tab.get_untracked(), None);
         });
     }
 

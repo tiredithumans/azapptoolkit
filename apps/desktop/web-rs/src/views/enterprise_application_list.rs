@@ -114,14 +114,12 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
             return;
         };
         refreshing.set(true);
-        // Bump immediately so the resource refetches on next tick.
-        reload.update(|n| *n = n.wrapping_add(1));
         leptos::task::spawn_local(async move {
-            let _ = diagnostics::invalidate_list_cache(
-                t.tenant_id.clone(),
-                ListCacheKindDto::Enterprise,
-            )
-            .await;
+            diagnostics::invalidate_list_cache(t.tenant_id.clone(), ListCacheKindDto::Enterprise)
+                .await;
+            // Only now: the backend's cache-hit path is synchronous, so a
+            // refetch started first could re-serve the list being dropped.
+            reload.update(|n| *n = n.wrapping_add(1));
         });
     };
 

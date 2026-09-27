@@ -5,6 +5,7 @@
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_web_rs::ipc_mock;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::enterprise_application_list::EnterpriseApplicationList;
 
@@ -127,6 +128,32 @@ async fn refresh_invokes_invalidate_list_cache() {
     ts::click("button[aria-label=\"Refresh Enterprise Applications\"]");
 
     ts::wait_for(|| ts::call_count("invalidate_list_cache") >= 1).await;
+    let call = ts::last_call("invalidate_list_cache").unwrap();
+    assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
+    assert_eq!(call.arg_str("kind").as_deref(), Some("enterprise"));
+}
+
+/// Refresh refetches only once the backend has dropped its cached list (see
+/// the App Registrations twin): the mock serves the old rows until the
+/// invalidation arrives, as the backend's cache would.
+#[wasm_bindgen_test]
+async fn refresh_refetches_only_after_the_cache_is_dropped() {
+    ts::reset();
+    ipc_mock::mock_each("list_enterprise_applications", |_| {
+        if ts::call_count("invalidate_list_cache") == 0 {
+            fixtures::enterprise_apps(&["Before Refresh"])
+        } else {
+            fixtures::enterprise_apps(&["After Refresh"])
+        }
+    });
+    ts::mock_ok("invalidate_list_cache", &());
+
+    let _m = ts::mount_view(|| view! { <EnterpriseApplicationList /> });
+    ts::wait_for(|| ts::body_contains("Before Refresh")).await;
+
+    ts::click("button[aria-label=\"Refresh Enterprise Applications\"]");
+
+    ts::wait_for(|| ts::body_contains("After Refresh")).await;
     let call = ts::last_call("invalidate_list_cache").unwrap();
     assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
     assert_eq!(call.arg_str("kind").as_deref(), Some("enterprise"));

@@ -15,6 +15,7 @@ use chrono::{Duration, Utc};
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_web_rs::ipc_mock;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::application_list::ApplicationList;
 
@@ -210,5 +211,32 @@ async fn refresh_invokes_invalidate_list_cache() {
     let call = ts::last_call("invalidate_list_cache").expect("recorded call");
     assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
     // The per-page Refresh scopes invalidation to this list's kind only.
+    assert_eq!(call.arg_str("kind").as_deref(), Some("apps"));
+}
+
+/// Refresh refetches only once the backend has dropped its cached list. The
+/// backend's cache-hit path is synchronous, so a refetch started before the
+/// invalidation lands re-serves the very list Refresh meant to drop. The mock
+/// plays that cache: it serves the old rows until the invalidation arrives.
+#[wasm_bindgen_test]
+async fn refresh_refetches_only_after_the_cache_is_dropped() {
+    ts::reset();
+    ipc_mock::mock_each("list_applications_with_pairing", |_| {
+        if ts::call_count("invalidate_list_cache") == 0 {
+            fixtures::apps(&["Before Refresh"])
+        } else {
+            fixtures::apps(&["After Refresh"])
+        }
+    });
+    ts::mock_ok("invalidate_list_cache", &());
+
+    let _mounted = ts::mount_view(|| view! { <ApplicationList /> });
+    ts::wait_for(|| ts::body_contains("Before Refresh")).await;
+
+    ts::click("button[aria-label=\"Refresh App Registrations\"]");
+
+    ts::wait_for(|| ts::body_contains("After Refresh")).await;
+    let call = ts::last_call("invalidate_list_cache").expect("recorded call");
+    assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
     assert_eq!(call.arg_str("kind").as_deref(), Some("apps"));
 }

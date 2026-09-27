@@ -106,19 +106,34 @@ impl Session {
     /// straight into the rotation workflow. The detail pane consumes
     /// `pending_app_tab` once on mount; the chip starts labelled with the id and
     /// the pane corrects it to the real name once it loads.
+    ///
+    /// An already-open app keeps its live tab and nothing is queued: no pane
+    /// mounts to consume the tab, so setting it would leak into the *next* app
+    /// opened from a list. The signal is deliberately left untouched (not
+    /// cleared) in that case — a double-clicked "Open" calls this twice before
+    /// the new pane mounts, and clearing it would drop the first call's tab.
     pub fn open_app_on_tab(&self, object_id: String, tab: &str) {
-        self.tenant_ui.pending_app_tab.set(Some(tab.to_string()));
+        if self.is_open(OpenItemKind::AppReg, &object_id).is_none() {
+            self.tenant_ui.pending_app_tab.set(Some(tab.to_string()));
+        }
         self.open_item(OpenItemKind::AppReg, object_id.clone(), object_id);
     }
 
     /// Open an enterprise application in the workspace on a specific tab (e.g.
     /// `"permissions"`). Used to deep-link from a risky consent grant or
     /// delegated-permission finding straight to where it can be revoked. The
-    /// enterprise pane consumes `pending_enterprise_tab` once on mount.
+    /// enterprise pane consumes `pending_enterprise_tab` once on mount; an
+    /// already-open enterprise app keeps its live tab and nothing is queued
+    /// (same reasoning as [`Self::open_app_on_tab`]).
     pub fn open_enterprise_on_tab(&self, sp_object_id: String, tab: &str) {
-        self.tenant_ui
-            .pending_enterprise_tab
-            .set(Some(tab.to_string()));
+        if self
+            .is_open(OpenItemKind::Enterprise, &sp_object_id)
+            .is_none()
+        {
+            self.tenant_ui
+                .pending_enterprise_tab
+                .set(Some(tab.to_string()));
+        }
         self.open_item(OpenItemKind::Enterprise, sp_object_id.clone(), sp_object_id);
     }
 

@@ -185,16 +185,17 @@ fn aadsts_hint(message: &str) -> Option<&'static str> {
         .collect();
     Some(match digits.as_str() {
         // The two "you are pointed at the wrong directory" shapes. A well-formed
-        // but wrong tenant GUID fails exactly like this, which is why the hint
-        // names Settings: the ids are editable there.
+        // but wrong tenant GUID fails exactly like this, so the hint points at
+        // the card's own Change link, which reopens the config form holding
+        // both ids — Settings is behind the sign-in that just failed.
         "90002" | "900023" => {
-            "That tenant doesn't resolve. Check the tenant ID under Settings → \
-             Tenant connection — a well-formed but wrong GUID fails exactly this way."
+            "That tenant doesn't resolve. Select Change above to correct the tenant \
+             ID — a well-formed but wrong GUID fails exactly this way."
         }
         "700016" | "700054" => {
             "No app registration with this client ID exists in the configured \
-             tenant. Check the client ID under Settings → Tenant connection, or \
-             that you're pointed at the right tenant."
+             tenant. Select Change above to check the client ID, or that you're \
+             pointed at the right tenant."
         }
         // Right tenant, wrong account.
         "50020" | "50034" | "500011" => {
@@ -246,6 +247,18 @@ mod tests {
         // hint names the actual cause.
         let hint = recovery_hint("token_exchange", "invalid_request (AADSTS90002)");
         assert!(hint.contains("tenant doesn't resolve"), "{hint}");
+    }
+
+    #[test]
+    fn a_wrong_id_hint_points_at_the_cards_change_link_not_settings() {
+        // These render on the sign-in card, where Settings is unreachable (it is
+        // behind the sign-in that failed); the card's Change link is the way to
+        // the ids.
+        for code in ["90002", "900023", "700016", "700054"] {
+            let hint = recovery_hint("token_exchange", &format!("invalid_request (AADSTS{code})"));
+            assert!(hint.contains("Change"), "AADSTS{code}: {hint}");
+            assert!(!hint.contains("Settings"), "AADSTS{code}: {hint}");
+        }
     }
 
     #[test]
