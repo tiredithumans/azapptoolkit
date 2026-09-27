@@ -102,7 +102,7 @@ fn grant_row(session: crate::state::Session, r: OAuth2GrantDto) -> impl IntoView
             <td>
                 <div class="scope-chips">{scope_chips}</div>
             </td>
-            <td>
+            <td class="cell-mid">
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
                     on_click=Box::new(move |_| {

@@ -73,15 +73,26 @@ pub fn ls_set(key: &str, value: &str) {
     }
 }
 
+/// Writes `value` to the system clipboard and reports whether it landed.
+///
+/// `writeText` can reject (the webview lost focus, clipboard permission denied),
+/// so a caller that shows "Copied" — above all on a one-time reveal, whose value
+/// is gone once the dialog closes — must honour this result rather than assume
+/// success. `false` also when there is no window.
+pub async fn write_clipboard(value: &str) -> bool {
+    let Some(win) = web_sys::window() else {
+        return false;
+    };
+    let promise = win.navigator().clipboard().write_text(value);
+    JsFuture::from(promise).await.is_ok()
+}
+
 /// Copies `value` to the system clipboard (fire-and-forget). Shared by the
 /// detail panes and the SSO summary, all of which surface copy-to-clipboard
-/// fields.
+/// fields. One clipboard implementation: this rides [`write_clipboard`].
 pub fn copy_text(value: String) {
     leptos::task::spawn_local(async move {
-        if let Some(win) = web_sys::window() {
-            let promise = win.navigator().clipboard().write_text(&value);
-            let _ = JsFuture::from(promise).await;
-        }
+        let _ = write_clipboard(&value).await;
     });
 }
 

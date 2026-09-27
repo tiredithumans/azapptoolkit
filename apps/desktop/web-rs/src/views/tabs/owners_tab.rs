@@ -316,7 +316,7 @@ pub fn OwnersTab(
                                         <td>{display}</td>
                                         <td class="mono">{upn}</td>
                                         <td>{kind}</td>
-                                        <td>
+                                        <td class="cell-mid">
                                             <Button
                                                 class="button--danger"
                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)

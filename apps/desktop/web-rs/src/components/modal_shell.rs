@@ -32,10 +32,14 @@ pub fn ModalShell(
     /// Widens the box (`modal--wide`) for content like reveal/PEM blocks.
     #[prop(optional)]
     wide: bool,
+    /// `false` for one-time reveals whose dismissal destroys unrecoverable
+    /// material; the caller's own button is then the only way out.
+    #[prop(default = true)]
+    close_on_escape: bool,
     children: ChildrenFn,
 ) -> impl IntoView {
     use_escape(
-        move || open.get_untracked() && !busy.get_untracked(),
+        move || close_on_escape && open.get_untracked() && !busy.get_untracked(),
         move || on_close.run(()),
     );
     let modal_ref: NodeRef<html::Div> = NodeRef::new();

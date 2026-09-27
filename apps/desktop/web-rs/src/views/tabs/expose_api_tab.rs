@@ -386,7 +386,7 @@ fn ExposeApiLoaded(
                                             view! {
                                                 <tr>
                                                     <td class="mono">{uri.clone()}</td>
-                                                    <td>
+                                                    <td class="cell-mid">
                                                         <Button
                                                             class="button--danger"
                                                             appearance=Signal::derive(|| ButtonAppearance::Subtle)

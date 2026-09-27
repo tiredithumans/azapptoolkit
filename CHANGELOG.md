@@ -2,6 +2,28 @@
 
 ### Fixed
 
+- **"Rotate & remove existing" now asks before deleting your other client secrets.** In the Rotate
+  secret into Key Vault dialog, this button removed every client secret on the app, including
+  active ones, in a single click, and its label didn't say how many. It now reads "Rotate & remove
+  N existing" and asks for confirmation, naming the app and the count, as removing one secret or
+  sweeping expired ones already did. If an old secret couldn't be removed, the message now names
+  it and gives the reason instead of "see the log".
+
+- **Lifetimes you type for a rotated secret or a generated certificate are no longer silently
+  changed.** Text that wasn't a number became 180 or 365 days, and longer values were cut to 730
+  or 1095 days, without a message. An out-of-range or non-numeric value now shows "Enter a whole
+  number of days between 1 and 730." (1095 for certificates), and nothing is created.
+
+- **The one-time secret and private-key reveals no longer say "Copied" when the copy failed, and
+  Escape no longer closes them.** If the clipboard refused, the new-secret reveal still said
+  "Copied", and "Copy private key" gave no feedback at all. Once the dialog closes the value is
+  gone for good. A failed copy now says so and asks you to copy the text by hand, and both dialogs
+  close only with Done.
+
+- **Row buttons on the Security dashboards and several detail tabs now line up with their row,
+  and the Credentials tab's empty lists match the rest of the app.** The Open, Remove and similar
+  buttons sat a few pixels below the text of their row.
+
 - **Search and the other commands that read the cached directory indexes now check that you are
   signed in.** Top-bar search, the directory cap notice, DR backup, the delegated-grants audit, the
   enterprise-app detail, the gallery picker, the Key Vault access sweep, a managed identity's Azure

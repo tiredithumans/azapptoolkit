@@ -177,7 +177,7 @@ pub fn KeyVaultView() -> impl IntoView {
                                     <td class="mono">{name}</td>
                                     <td>{item.content_type.unwrap_or_else(|| "—".into())}</td>
                                     <td>{item.expires.unwrap_or_else(|| "—".into())}</td>
-                                    <td>
+                                    <td class="cell-mid">
                                         <Button
                                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                             disabled=any_revealing

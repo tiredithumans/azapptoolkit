@@ -302,3 +302,63 @@ async fn the_reveal_defers_the_detail_reload_until_it_is_dismissed() {
         "the deferred reload must still happen once the operator is done"
     );
 }
+
+/// Escape must not dismiss the private-key reveal.
+///
+/// Dismissing releases the deferred reload, which unmounts the reveal and the
+/// one-time key with it. A reflex Escape after a copy that silently failed lost
+/// the key for good; only the explicit Done button may close it.
+#[wasm_bindgen_test]
+async fn escape_does_not_dismiss_the_private_key_reveal() {
+    let (_m, changes) = mount_tab_counting();
+
+    ts::wait_for(|| ts::body_contains("Generate certificate…")).await;
+    click_button("Generate certificate…");
+    ts::wait_for(|| ts::body_contains("shows the private key once")).await;
+    click_button("Generate");
+    ts::wait_for(|| ts::body_contains("PRIVATEPART")).await;
+
+    ts::press_key("body", "Escape");
+    ts::tick().await;
+    assert!(
+        ts::body_contains("PRIVATEPART"),
+        "Escape must not destroy the one-time private key"
+    );
+    assert_eq!(changes.get_untracked(), 0);
+
+    click_button("Done");
+    ts::wait_for(|| !ts::body_contains("PRIVATEPART")).await;
+    assert_eq!(changes.get_untracked(), 1);
+}
+
+/// The same for the new-client-secret reveal, the other one-time value.
+#[wasm_bindgen_test]
+async fn escape_does_not_dismiss_the_new_secret_reveal() {
+    let (_m, changes) = mount_tab_counting();
+    ts::mock_ok(
+        "add_password",
+        &azapptoolkit_core::models::PasswordCredential {
+            key_id: "new".into(),
+            secret_text: Some("SECRETVALUE".into()),
+            ..Default::default()
+        },
+    );
+
+    ts::wait_for(|| ts::body_contains("+ New secret")).await;
+    click_button("+ New secret");
+    ts::wait_for(|| ts::body_contains("New client secret")).await;
+    click_button("Create");
+    ts::wait_for(|| ts::body_contains("SECRETVALUE")).await;
+
+    ts::press_key("body", "Escape");
+    ts::tick().await;
+    assert!(
+        ts::body_contains("SECRETVALUE"),
+        "Escape must not destroy the one-time secret"
+    );
+    assert_eq!(changes.get_untracked(), 0);
+
+    click_button("Done");
+    ts::wait_for(|| !ts::body_contains("SECRETVALUE")).await;
+    assert_eq!(changes.get_untracked(), 1);
+}

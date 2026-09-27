@@ -291,7 +291,7 @@ pub fn SharePointSitesSection(
                                                             <tr>
                                                                 <td>{app}</td>
                                                                 <td class="mono">{p.roles.join(", ")}</td>
-                                                                <td>
+                                                                <td class="cell-mid">
                                                                     <Button
                                                                         class="button--danger"
                                                                         appearance=Signal::derive(|| ButtonAppearance::Subtle)

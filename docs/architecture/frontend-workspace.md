@@ -27,6 +27,9 @@ surfaces reuse it rather than re-implementing the markup.
 - **Notices/alerts** — `components::ui::Callout` (`info`/`ok`/`warn`/`danger`, reusing the `.alert`
   classes). New alert markup goes through it; migrate any raw `<div class="alert alert--…">` you
   touch.
+- **Empty states** — a table's empty is `DataTable`'s `empty_message`; a whole section/pane with
+  nothing to show is `EmptyState`; never a bare `<Body1>`. `.muted` (colour only) and `.hint`
+  (smaller field-hint size) are different jobs — don't merge them.
 - **Repeatable list-of-values field** — `components::uri_list_editor::UriListEditor`, backed by a
   `Copy` `UriListState` the parent builds from its DTO and reads back with `to_uris()` (pure
   presentation + state; the caller owns the save). One plain `<input>` per entry inside a

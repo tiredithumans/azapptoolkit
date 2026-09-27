@@ -264,7 +264,7 @@ fn sso_cert_row(
                     view! { <span class="badge badge--warning">"Nobody"</span> }
                 }}
             </td>
-            <td>
+            <td class="cell-mid">
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
                     on_click=Box::new(move |_| {

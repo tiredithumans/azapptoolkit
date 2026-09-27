@@ -98,7 +98,7 @@ fn grant_row(session: crate::state::Session, r: AppPermissionGrantDto) -> impl I
             <td>
                 <span class=risk_class>{risk_label}</span>
             </td>
-            <td>
+            <td class="cell-mid">
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
                     on_click=Box::new(move |_| {

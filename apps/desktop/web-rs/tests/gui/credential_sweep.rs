@@ -17,6 +17,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::applications::{KeyFailure, RemoveExpiredResult};
+use azapptoolkit_dto::keyvault::RotateCredentialResult;
 use azapptoolkit_web_rs::components::toast::ToastHost;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::tabs::credentials_tab::CredentialsTab;
@@ -42,6 +43,15 @@ fn expired_secret(key_id: &str) -> PasswordCredential {
         key_id: key_id.to_string(),
         display_name: Some(key_id.to_string()),
         end_date_time: Some(chrono::Utc::now() - chrono::Duration::days(30)),
+        ..Default::default()
+    }
+}
+
+fn active_secret(key_id: &str) -> PasswordCredential {
+    PasswordCredential {
+        key_id: key_id.to_string(),
+        display_name: Some(key_id.to_string()),
+        end_date_time: Some(chrono::Utc::now() + chrono::Duration::days(90)),
         ..Default::default()
     }
 }
@@ -139,4 +149,111 @@ async fn a_partial_sweep_says_that_some_secrets_survived() {
         ts::query(".toast--error").is_some(),
         "a partial failure must not be styled as a clean success"
     );
+}
+
+/// Mocks what the rotate dialog reads on open (the tenant default vault and the
+/// vault picker's discovery) plus a rotation that removed one of two secrets
+/// and warned about the other.
+fn mock_rotation() {
+    ts::mock_ok(
+        "get_tenant_defaults",
+        &azapptoolkit_core::defaults::TenantDefaults {
+            default_vault: Some("kv-contoso".into()),
+            ..Default::default()
+        },
+    );
+    ts::mock_ok("list_available_key_vaults", &Vec::<String>::new());
+    ts::mock_ok(
+        "rotate_app_credential",
+        &RotateCredentialResult {
+            new_key_id: "key-new".to_string(),
+            vault_name: "kv-contoso".to_string(),
+            secret_name: "secret-app-1".to_string(),
+            expires: None,
+            removed_key_ids: vec!["key-1".to_string()],
+            warnings: vec!["failed to remove key-2: forbidden".to_string()],
+        },
+    );
+}
+
+/// Opens the rotate dialog, waits for the async vault prefill, and clicks the
+/// danger button — which must open a confirm, not dispatch.
+async fn open_rotate_remove_confirm() {
+    ts::wait_for(|| ts::body_contains("Rotate into Key Vault…")).await;
+    click_button("Rotate into Key Vault…");
+    ts::wait_for(|| {
+        ts::query_all(".modal input").iter().any(|el| {
+            el.clone()
+                .unchecked_into::<web_sys::HtmlInputElement>()
+                .value()
+                == "kv-contoso"
+        })
+    })
+    .await;
+    ts::wait_for(|| ts::body_contains("Rotate & remove 2 existing")).await;
+    click_button("Rotate & remove 2 existing");
+    ts::wait_for(|| ts::body_contains("Remove every existing client secret?")).await;
+}
+
+/// "Rotate & remove" deletes every client secret on the app, active ones
+/// included. It used to do that on one click under a label with no count; it
+/// must name how many, ask first, and report a removal that failed by name
+/// rather than "see the log" (there is no log viewer in the UI).
+#[wasm_bindgen_test]
+async fn rotate_and_remove_names_the_count_and_waits_for_confirmation() {
+    ts::reset();
+    mock_rotation();
+    let _m = mount_with_toasts(vec![active_secret("key-1"), active_secret("key-2")]);
+
+    open_rotate_remove_confirm().await;
+    assert_eq!(
+        ts::call_count("rotate_app_credential"),
+        0,
+        "the danger button must open a confirm, not rotate"
+    );
+    let subject = ts::text(".confirm-dialog__subject");
+    assert!(
+        subject.contains("Contoso CRM") && subject.contains("2 existing"),
+        "the confirm must name the app and the count, got {subject:?}"
+    );
+
+    click_button("Rotate & remove");
+    ts::wait_for(|| ts::call_count("rotate_app_credential") == 1).await;
+    let call = ts::last_call("rotate_app_credential").unwrap();
+    assert_eq!(
+        call.args["input"]["removeKeyIds"],
+        serde_json::json!(["key-1", "key-2"]),
+        "the set removed is the set the confirm counted"
+    );
+
+    ts::wait_for(|| ts::query(".toast").is_some()).await;
+    assert!(
+        ts::text(".toast").contains("failed to remove key-2"),
+        "a secret that survived must be named, got {:?}",
+        ts::text(".toast"),
+    );
+}
+
+/// With the confirm stacked on the rotate dialog, one Escape reaches both
+/// modals' listeners. It must back out of the confirm only — not also throw
+/// away the vault and secret name the operator filled in underneath.
+#[wasm_bindgen_test]
+async fn escape_on_the_rotate_confirm_closes_only_the_confirm() {
+    ts::reset();
+    mock_rotation();
+    let _m = mount_with_toasts(vec![active_secret("key-1"), active_secret("key-2")]);
+
+    open_rotate_remove_confirm().await;
+    ts::press_key("body", "Escape");
+    ts::tick().await;
+
+    assert!(
+        !ts::body_contains("Remove every existing client secret?"),
+        "Escape must close the confirm"
+    );
+    assert!(
+        ts::body_contains("Rotate secret into Key Vault"),
+        "and leave the rotate dialog underneath open"
+    );
+    assert_eq!(ts::call_count("rotate_app_credential"), 0);
 }

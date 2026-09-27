@@ -9,19 +9,17 @@ use thaw::{
     Body1, Button, ButtonAppearance, DatePicker, Field, Input, Select, Spinner, SpinnerSize,
 };
 
-use wasm_bindgen_futures::JsFuture;
-
 use crate::bindings::applications::{
     self, AddPasswordInput, ApplicationDetail, GenerateCertificateInput,
     GeneratedCertificateResult, RemoveExpiredResult,
 };
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{Callout, CopyableId};
+use crate::components::ui::{Callout, CopyableId, DataTable};
 use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
-use crate::util::{ls_get, ls_set};
+use crate::util::{ls_get, ls_set, write_clipboard};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::dialogs::secret_reveal_dialog::SecretRevealDialog;
 use crate::views::dialogs::upload_certificate_dialog::UploadCertificateDialog;
@@ -113,7 +111,24 @@ const EXPIRES_PRESETS: &[(&str, &str)] = &[
 ];
 
 const CUSTOM_PRESET: &str = "custom";
-const MAX_SECRET_LIFETIME_DAYS: i64 = 730;
+const MAX_SECRET_LIFETIME_DAYS: u32 = 730;
+/// Longest validity the generate-certificate dialog accepts. Mirrors src-tauri
+/// `cert::MAX_VALIDITY_DAYS`, which rejects anything outside `1..=1095`; checked
+/// here so the operator is told before submitting.
+const MAX_CERT_VALIDITY_DAYS: u32 = 1095;
+
+/// Parses a typed lifetime in whole days, rejecting anything outside
+/// `min..=max` instead of coercing it. The rotate and generate-certificate
+/// dialogs used to turn garbage into a default (180/365) and clamp an
+/// over-long value to the cap, so the credential minted was not the one the
+/// operator asked for — and nothing said so.
+fn parse_days(raw: &str, min: u32, max: u32) -> Result<u32, String> {
+    raw.trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|d| (min..=max).contains(d))
+        .ok_or_else(|| format!("Enter a whole number of days between {min} and {max}."))
+}
 
 /// `AddPasswordInput`'s `(lifetime_days, start_date_time, end_date_time)`.
 type ExpiryFields = (
@@ -143,7 +158,7 @@ fn resolve_expiry_fields(
     if end <= effective_start {
         return Err("End date must be after the start date.".to_string());
     }
-    if (end - effective_start).num_days() > MAX_SECRET_LIFETIME_DAYS {
+    if (end - effective_start).num_days() > i64::from(MAX_SECRET_LIFETIME_DAYS) {
         return Err("Secret lifetime cannot exceed 24 months.".to_string());
     }
     // Midnight construction never fails on a valid NaiveDate, so to_utc is
@@ -272,6 +287,12 @@ pub fn CredentialsTab(
             .unwrap_or_default()
     });
     let pending_expired = RwSignal::new(false);
+    // "Rotate & remove" deletes EVERY existing client secret, active ones
+    // included, so it is confirm-gated like the per-row Remove and the expired
+    // sweep. `existing_count` reads the same `secrets` list `do_rotate` builds
+    // `remove_key_ids` from, so the count confirmed is the set removed.
+    let pending_rotate_remove = RwSignal::new(false);
+    let existing_count = Signal::derive(move || secrets.with(Vec::len));
 
     let rotate_open = RwSignal::new(false);
     let rotate_vault = RwSignal::new(String::new());
@@ -356,6 +377,9 @@ pub fn CredentialsTab(
     let pfx_saving = RwSignal::new(false);
     let pfx_saved: RwSignal<Option<String>> = RwSignal::new(None);
     let pfx_error: RwSignal<Option<String>> = RwSignal::new(None);
+    // `None` until "Copy private key" is tried; then whether the clipboard
+    // actually took it (a rejected write used to give no feedback at all).
+    let pk_copy: RwSignal<Option<bool>> = RwSignal::new(None);
 
     let expired_count = Signal::derive(move || {
         secrets.with(|list| {
@@ -492,23 +516,33 @@ pub fn CredentialsTab(
         );
     };
 
+    // The rotate dialog's pre-dispatch validation: `(vault, secret name,
+    // lifetime days)`, or the reason in the shared `error` signal and `None`.
+    // Shared by `do_rotate` and the "Rotate & remove" button, which validates
+    // before opening its confirm so the confirm never sits over a bad form.
+    let rotate_inputs = move || -> Option<(String, String, u32)> {
+        let vault = rotate_vault.get().trim().to_string();
+        let secret_name = rotate_secret_name.get().trim().to_string();
+        if vault.is_empty() || secret_name.is_empty() {
+            error.set(Some("Vault name and secret name are required.".into()));
+            return None;
+        }
+        match parse_days(&rotate_lifetime.get(), 1, MAX_SECRET_LIFETIME_DAYS) {
+            Ok(days) => Some((vault, secret_name, days)),
+            Err(msg) => {
+                error.set(Some(msg));
+                None
+            }
+        }
+    };
+
     let do_rotate = move |remove_existing: bool| {
         error.set(None);
         let id = object_id.get();
         let app = app_id.get();
-        let vault = rotate_vault.get().trim().to_string();
-        let secret_name = rotate_secret_name.get().trim().to_string();
-        // Required-field validation runs before dispatch (was inside the spawn);
-        // surface it in the shared `error` signal and don't dispatch.
-        if vault.is_empty() || secret_name.is_empty() {
-            error.set(Some("Vault name and secret name are required.".into()));
+        let Some((vault, secret_name, days)) = rotate_inputs() else {
             return;
-        }
-        let days = rotate_lifetime
-            .get()
-            .parse::<u32>()
-            .unwrap_or(180)
-            .clamp(1, 730);
+        };
         let remove_key_ids: Vec<String> = if remove_existing {
             secrets.with(|list| list.iter().map(|s| s.key_id.clone()).collect())
         } else {
@@ -536,7 +570,14 @@ pub fn CredentialsTab(
                     session.toast_success(msg);
                 } else {
                     session.toast_error(
-                        format!("{msg} {} warning(s) \u{2014} see the log.", r.warnings.len()),
+                        // The warnings themselves (e.g. "failed to remove {key_id}:
+                        // {reason}"), not just a count: there is no log viewer in
+                        // the UI, so "see the log" pointed nowhere.
+                        format!(
+                            "{msg} {} warning(s): {}",
+                            r.warnings.len(),
+                            r.warnings.join("; "),
+                        ),
                         None,
                     );
                 }
@@ -567,11 +608,13 @@ pub fn CredentialsTab(
             error.set(Some("Subject (common name) is required.".into()));
             return;
         }
-        let days = gencert_validity
-            .get()
-            .parse::<u32>()
-            .unwrap_or(365)
-            .clamp(1, 1095);
+        let days = match parse_days(&gencert_validity.get(), 1, MAX_CERT_VALIDITY_DAYS) {
+            Ok(d) => d,
+            Err(msg) => {
+                error.set(Some(msg));
+                return;
+            }
+        };
         cmd_gencert.run_with(
             move |r| {
                 gencert_open.set(false);
@@ -604,6 +647,7 @@ pub fn CredentialsTab(
         gencert_result.set(None);
         pfx_saved.set(None);
         pfx_error.set(None);
+        pk_copy.set(None);
         on_changed.run(());
     });
 
@@ -656,74 +700,57 @@ pub fn CredentialsTab(
                     </div>
                 </header>
                 {move || {
-                    let secrets = secrets.get();
-                    if secrets.is_empty() {
-                        view! { <Body1>"No secrets."</Body1> }.into_any()
-                    } else {
-                        view! {
-                            <table class="data-table">
-                                <thead>
+                    view! {
+                        <DataTable
+                            headers=vec!["Description", "Hint", "Secret ID", "Expires", "Status", ""]
+                            rows=secrets.get()
+                            empty_message="No secrets."
+                            row=move |s| {
+                                let days = days_until(s.end_date_time);
+                                // Offer the rotate shortcut on secrets that are
+                                // expiring soon or already expired — where rotation
+                                // is the relevant action.
+                                let near_expiry = matches!(days, Some(d) if d <= WARN_DAYS);
+                                view! {
                                     <tr>
-                                        <th>"Description"</th>
-                                        <th>"Hint"</th>
-                                        <th>"Secret ID"</th>
-                                        <th>"Expires"</th>
-                                        <th>"Status"</th>
-                                        <th></th>
+                                        <td>{s.display_name.clone().unwrap_or_else(|| "—".into())}</td>
+                                        <td class="mono">
+                                            {s.hint
+                                                .clone()
+                                                .map(|h| format!("{h}********"))
+                                                .unwrap_or_else(|| "—".into())}
+                                        </td>
+                                        <td>
+                                            <CopyableId value=s.key_id.clone() label="secret ID" />
+                                        </td>
+                                        <td>
+                                            {s
+                                                .end_date_time
+                                                .map(|d| d.date_naive().to_string())
+                                                .unwrap_or_else(|| "—".into())}
+                                        </td>
+                                        <td>{status_badge(days)}</td>
+                                        <td class="cell-mid">
+                                            <div class="cell-actions">
+                                                {near_expiry
+                                                    .then(|| {
+                                                        view! {
+                                                            <Button
+                                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                                on_click=Box::new(move |_| open_rotate())
+                                                            >
+                                                                "Rotate"
+                                                            </Button>
+                                                        }
+                                                    })}
+                                                {remove_button(removing, pending_secret, s.key_id.clone())}
+                                            </div>
+                                        </td>
                                     </tr>
-                                </thead>
-                                <tbody>
-                                    {secrets
-                                        .into_iter()
-                                        .map(|s| {
-                                            let days = days_until(s.end_date_time);
-                                            // Offer the rotate shortcut on secrets that are
-                                            // expiring soon or already expired — where rotation
-                                            // is the relevant action.
-                                            let near_expiry = matches!(days, Some(d) if d <= WARN_DAYS);
-                                            view! {
-                                                <tr>
-                                                    <td>{s.display_name.clone().unwrap_or_else(|| "—".into())}</td>
-                                                    <td class="mono">
-                                                        {s.hint
-                                                            .clone()
-                                                            .map(|h| format!("{h}********"))
-                                                            .unwrap_or_else(|| "—".into())}
-                                                    </td>
-                                                    <td>
-                                                        <CopyableId value=s.key_id.clone() label="secret ID" />
-                                                    </td>
-                                                    <td>
-                                                        {s
-                                                            .end_date_time
-                                                            .map(|d| d.date_naive().to_string())
-                                                            .unwrap_or_else(|| "—".into())}
-                                                    </td>
-                                                    <td>{status_badge(days)}</td>
-                                                    <td>
-                                                        <div class="actions-row">
-                                                            {near_expiry
-                                                                .then(|| {
-                                                                    view! {
-                                                                        <Button
-                                                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                            on_click=Box::new(move |_| open_rotate())
-                                                                        >
-                                                                            "Rotate"
-                                                                        </Button>
-                                                                    }
-                                                                })}
-                                                            {remove_button(removing, pending_secret, s.key_id.clone())}
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            }
-                                        })
-                                        .collect_view()}
-                                </tbody>
-                            </table>
-                        }
-                            .into_any()
+                                }
+                                    .into_any()
+                            }
+                        />
                     }
                 }}
             </section>
@@ -749,68 +776,58 @@ pub fn CredentialsTab(
                     </div>
                 </header>
                 {move || {
-                    let certs = certs.get();
-                    if certs.is_empty() {
-                        view! { <Body1>"No certificates."</Body1> }.into_any()
-                    } else {
-                        view! {
-                            <table class="data-table">
-                                <thead>
+                    view! {
+                        <DataTable
+                            headers=vec![
+                                "Name",
+                                "Thumbprint",
+                                "Key ID",
+                                "Usage",
+                                "Type",
+                                "Expires",
+                                "Status",
+                                "",
+                            ]
+                            rows=certs.get()
+                            empty_message="No certificates."
+                            row=move |c| {
+                                let days = days_until(c.end_date_time);
+                                let thumbprint = c
+                                    .custom_key_identifier
+                                    .as_deref()
+                                    .and_then(crate::util::thumbprint_hex);
+                                view! {
                                     <tr>
-                                        <th>"Name"</th>
-                                        <th>"Thumbprint"</th>
-                                        <th>"Key ID"</th>
-                                        <th>"Usage"</th>
-                                        <th>"Type"</th>
-                                        <th>"Expires"</th>
-                                        <th>"Status"</th>
-                                        <th></th>
+                                        <td>{c.display_name.clone().unwrap_or_else(|| "—".into())}</td>
+                                        <td>
+                                            {match thumbprint {
+                                                Some(tp) => view! {
+                                                    <CopyableId value=tp label="thumbprint" />
+                                                }
+                                                    .into_any(),
+                                                None => view! { "—" }.into_any(),
+                                            }}
+                                        </td>
+                                        <td>
+                                            <CopyableId value=c.key_id.clone() label="key ID" />
+                                        </td>
+                                        <td>{c.usage.clone().unwrap_or_else(|| "—".into())}</td>
+                                        <td>{c.r#type.clone().unwrap_or_else(|| "—".into())}</td>
+                                        <td>
+                                            {c
+                                                .end_date_time
+                                                .map(|d| d.date_naive().to_string())
+                                                .unwrap_or_else(|| "—".into())}
+                                        </td>
+                                        <td>{status_badge(days)}</td>
+                                        <td class="cell-mid">
+                                            {remove_button(removing_cert, pending_cert, c.key_id.clone())}
+                                        </td>
                                     </tr>
-                                </thead>
-                                <tbody>
-                                    {certs
-                                        .into_iter()
-                                        .map(|c| {
-                                            let days = days_until(c.end_date_time);
-                                            let thumbprint = c
-                                                .custom_key_identifier
-                                                .as_deref()
-                                                .and_then(crate::util::thumbprint_hex);
-                                            view! {
-                                                <tr>
-                                                    <td>{c.display_name.clone().unwrap_or_else(|| "—".into())}</td>
-                                                    <td>
-                                                        {match thumbprint {
-                                                            Some(tp) => view! {
-                                                                <CopyableId value=tp label="thumbprint" />
-                                                            }
-                                                                .into_any(),
-                                                            None => view! { "—" }.into_any(),
-                                                        }}
-                                                    </td>
-                                                    <td>
-                                                        <CopyableId value=c.key_id.clone() label="key ID" />
-                                                    </td>
-                                                    <td>{c.usage.clone().unwrap_or_else(|| "—".into())}</td>
-                                                    <td>{c.r#type.clone().unwrap_or_else(|| "—".into())}</td>
-                                                    <td>
-                                                        {c
-                                                            .end_date_time
-                                                            .map(|d| d.date_naive().to_string())
-                                                            .unwrap_or_else(|| "—".into())}
-                                                    </td>
-                                                    <td>{status_badge(days)}</td>
-                                                    <td>
-                                                        {remove_button(removing_cert, pending_cert, c.key_id.clone())}
-                                                    </td>
-                                                </tr>
-                                            }
-                                        })
-                                        .collect_view()}
-                                </tbody>
-                            </table>
-                        }
-                            .into_any()
+                                }
+                                    .into_any()
+                            }
+                        />
                     }
                 }}
             </section>
@@ -963,6 +980,10 @@ pub fn CredentialsTab(
                 title="Certificate generated"
                 on_close=dismiss_gencert
                 wide=true
+                // Dismissing releases the deferred reload, which unmounts the
+                // reveal and the one-time private key with it — so a reflex
+                // Escape must not do it. Only Done closes this modal.
+                close_on_escape=false
             >
             {move || {
                 gencert_result
@@ -971,13 +992,9 @@ pub fn CredentialsTab(
                         let pk = r.private_key_pem.clone();
                         let copy_pk = move |_| {
                             let value = pk.clone();
+                            pk_copy.set(None);
                             leptos::task::spawn_local(async move {
-                                if let Some(win) = web_sys::window() {
-                                    let _ = JsFuture::from(
-                                            win.navigator().clipboard().write_text(&value),
-                                        )
-                                        .await;
-                                }
+                                pk_copy.set(Some(write_clipboard(&value).await));
                             });
                         };
                         let pfx = r.pfx_base64.clone();
@@ -1049,12 +1066,28 @@ pub fn CredentialsTab(
                                     .get()
                                     .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
                             }}
+                            {move || {
+                                (pk_copy.get() == Some(false))
+                                    .then(|| {
+                                        view! {
+                                            <Callout tone="warn" role="alert">
+                                                "Couldn't copy the private key. Select it above and copy it manually, or save the .pfx."
+                                            </Callout>
+                                        }
+                                    })
+                            }}
                             <div class="actions-row">
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                     on_click=Box::new(copy_pk)
                                 >
-                                    "Copy private key"
+                                    {move || {
+                                        if pk_copy.get() == Some(true) {
+                                            "Copied"
+                                        } else {
+                                            "Copy private key"
+                                        }
+                                    }}
                                 </Button>
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -1077,7 +1110,13 @@ pub fn CredentialsTab(
             <ModalShell
                 open=Signal::derive(move || rotate_open.get())
                 title="Rotate secret into Key Vault"
-                busy=Signal::derive(move || cmd_rotate.busy.get())
+                // `busy` only gates Escape here. While the "Rotate & remove"
+                // confirm is stacked on top, one Escape reaches both modals'
+                // window listeners; this one is registered first (it is built
+                // earlier in this view), sees the pending confirm and stays
+                // open, and the confirm's own listener then closes just the
+                // confirm. Relies on that declaration order.
+                busy=Signal::derive(move || cmd_rotate.busy.get() || pending_rotate_remove.get())
                 on_close=Callback::new(move |()| rotate_open.set(false))
             >
                 // Failures from this dialog's action land here, not only in the
@@ -1086,7 +1125,7 @@ pub fn CredentialsTab(
                 // reads as "the app silently did nothing".
                 {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
                 <Body1>
-                    "Mints a new client secret, stores it as a new version of the vault secret below, then optionally removes the existing secret(s). The value is written only to Key Vault — it is never shown here."
+                    "Mints a new client secret, stores it as a new version of the vault secret below, and, with Rotate & remove, deletes every existing client secret on the app. The value is written only to Key Vault — it is never shown here."
                 </Body1>
                 <Field label="Key Vault name">
                     <VaultPicker value=rotate_vault />
@@ -1112,18 +1151,30 @@ pub fn CredentialsTab(
                     >
                         "Rotate (keep old)"
                     </Button>
+                    // Removes EVERY existing secret, active ones included, so it
+                    // names the count and goes through a confirm (below) rather
+                    // than dispatching on one click. Disabled with nothing to
+                    // remove — "Rotate (keep old)" is the same action then.
                     <Button
                         class="button--danger"
                         appearance=Signal::derive(|| ButtonAppearance::Primary)
-                        on_click=Box::new(move |_| do_rotate(true))
-                        disabled=Signal::derive(move || cmd_rotate.busy.get())
+                        on_click=Box::new(move |_| {
+                            error.set(None);
+                            if rotate_inputs().is_some() {
+                                pending_rotate_remove.set(true);
+                            }
+                        })
+                        disabled=Signal::derive(move || {
+                            cmd_rotate.busy.get() || existing_count.get() == 0
+                        })
                     >
                         {move || {
                             if cmd_rotate.busy.get() {
                                 view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
                                     .into_any()
                             } else {
-                                view! { "Rotate & remove existing" }.into_any()
+                                format!("Rotate & remove {} existing", existing_count.get())
+                                    .into_any()
                             }
                         }}
                     </Button>
@@ -1174,6 +1225,27 @@ pub fn CredentialsTab(
                     remove_expired(());
                 })
                 on_close=Callback::new(move |()| pending_expired.set(false))
+            />
+            // Must stay AFTER the rotate `ModalShell`: see the Escape note on
+            // that modal's `busy`.
+            <ConfirmDialog
+                open=Signal::derive(move || pending_rotate_remove.get())
+                title="Remove every existing client secret?"
+                body="The new secret is created and stored in Key Vault first. Then every existing client secret on this application is removed, including ones that have not expired. Any caller still using one of them will start getting 401s immediately. This cannot be undone."
+                subject=Signal::derive(move || {
+                    format!(
+                        "{} \u{2014} {} existing secret(s)",
+                        app_name.get(),
+                        existing_count.get(),
+                    )
+                })
+                confirm_label="Rotate & remove"
+                busy=Signal::derive(move || cmd_rotate.busy.get())
+                on_confirm=Callback::new(move |()| {
+                    pending_rotate_remove.set(false);
+                    do_rotate(true);
+                })
+                on_close=Callback::new(move |()| pending_rotate_remove.set(false))
             />
         </div>
     }
@@ -1291,6 +1363,44 @@ mod tests {
                 d(TODAY),
             )
             .is_err()
+        );
+    }
+
+    /// The rotate and generate-certificate lifetimes are typed free text. They
+    /// used to be coerced — garbage became 180/365 days, an over-long value was
+    /// clamped to the cap — so the credential minted was not the one asked for
+    /// and nothing said so. Now anything but an in-range whole number is an
+    /// error the dialog shows, and nothing is dispatched.
+    #[test]
+    fn lifetime_inputs_are_validated_not_coerced() {
+        for (raw, want) in [("180", 180), (" 90 ", 90), ("1", 1), ("730", 730)] {
+            assert_eq!(
+                parse_days(raw, 1, MAX_SECRET_LIFETIME_DAYS),
+                Ok(want),
+                "{raw:?}"
+            );
+        }
+        assert_eq!(parse_days("1095", 1, MAX_CERT_VALIDITY_DAYS), Ok(1095));
+        for raw in [
+            "",
+            "   ",
+            "abc",
+            "0",
+            "731",
+            "3650",
+            "90 days",
+            "-5",
+            "1.5",
+            "99999999999",
+        ] {
+            assert!(
+                parse_days(raw, 1, MAX_SECRET_LIFETIME_DAYS).is_err(),
+                "{raw:?} must be rejected, not coerced"
+            );
+        }
+        assert_eq!(
+            parse_days("3650", 1, MAX_CERT_VALIDITY_DAYS),
+            Err("Enter a whole number of days between 1 and 1095.".to_string())
         );
     }
 }
