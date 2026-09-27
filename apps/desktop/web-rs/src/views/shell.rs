@@ -97,27 +97,15 @@ pub fn AppShell(children: Children) -> impl IntoView {
 
     // Re-mints the session's tokens in place (no sign-out) so a role activated
     // after sign-in — e.g. an "Exchange Administrator" PIM role — takes effect.
-    // `Session::refresh_token_in_place` tries the silent refresh first and, on a
+    // `Session::spawn_refresh_token` tries the silent refresh first and, on a
     // dead session, falls back to one interactive browser round trip — still no
-    // sign-out, so the cached lists + audit run survive. The in-flight guard prevents a
-    // double-click from racing two refreshes; `reauthing` flips the label while
-    // the browser flow is open.
-    let refreshing = RwSignal::new(false);
-    let reauthing = RwSignal::new(false);
-    let on_refresh_token = move |_| {
-        let session = session;
-        if refreshing.get() {
-            return;
-        }
-        if let Some(t) = tenant.get() {
-            refreshing.set(true);
-            leptos::task::spawn_local(async move {
-                // One implementation, shared with the 401 toast's action.
-                session.refresh_token_in_place(t, Some(reauthing)).await;
-                refreshing.set(false);
-            });
-        }
-    };
+    // sign-out, so the cached lists + audit run survive. Its in-flight guard
+    // lives on the session (shared with the 401 toast's action), so neither a
+    // double-click nor a toast can race a second refresh; `token_reauthing`
+    // flips the label while the browser flow is open.
+    let refreshing = session.token_refreshing;
+    let reauthing = session.token_reauthing;
+    let on_refresh_token = move |_| session.spawn_refresh_token();
 
     // Auto-update: the pending update (if any) + the changelog-splash open flag.
     // The launch check (once on mount) toasts a notification whose action opens

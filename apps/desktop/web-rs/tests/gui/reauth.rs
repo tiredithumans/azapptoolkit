@@ -125,3 +125,42 @@ async fn unauthorized_refresh_falls_back_to_reauth_on_a_dead_session() {
     assert_eq!(ts::call_count("refresh_session"), 1);
     assert_eq!(ts::call_count("sign_out"), 0, "never a sign-out");
 }
+
+/// The in-flight guard lives on the session, not on a trigger: two 401 toasts
+/// (e.g. from parallel loads) clicked together start ONE refresh — never two
+/// racing `refresh_session` calls (or, on a dead session, two browser flows).
+#[wasm_bindgen_test]
+async fn concurrent_refresh_token_actions_start_one_refresh() {
+    ts::reset();
+    ts::mock_ok("refresh_session", &());
+    let m = ts::mount_view(|| view! { <ToastHost /> });
+
+    for _ in 0..2 {
+        m.session
+            .report_command_error(&fixtures::ui_error("unauthorized", "unauthorized (401)"));
+    }
+    ts::wait_for(|| ts::query_all(".toast__action").len() == 2).await;
+    // Fire both toasts' actions, then the top bar's entry, in one synchronous
+    // turn — before the first refresh's task runs. (Read from the session, not
+    // the DOM: a click dismisses its toast and re-renders the stack, which
+    // would detach the other button and make a second DOM click a no-op.)
+    let actions: Vec<_> = m
+        .session
+        .toasts
+        .with_untracked(|list| list.iter().filter_map(|t| t.action.clone()).collect());
+    assert_eq!(actions.len(), 2);
+    for action in actions {
+        action();
+    }
+    m.session.spawn_refresh_token();
+    ts::wait_for(|| ts::body_contains("Token refreshed")).await;
+    assert_eq!(
+        ts::call_count("refresh_session"),
+        1,
+        "a second trigger while a refresh is in flight must be a no-op",
+    );
+    // ...and the guard releases, so the next refresh is not locked out.
+    ts::wait_for(|| !m.session.token_refreshing.get_untracked()).await;
+    m.session.spawn_refresh_token();
+    ts::wait_for(|| ts::call_count("refresh_session") == 2).await;
+}

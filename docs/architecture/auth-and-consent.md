@@ -117,9 +117,11 @@ which a sign-out/sign-in cycle would.
 
 - It takes the full `TenantContext`, not a bare tenant id, because `InvalidGrant` purges
   `known_tenants` — the front-end still holds the context in `active_tenant`.
-- Front-end wiring: `Session::refresh_token_in_place` tries silent `refresh_session` first, then
-  falls back to `reauthenticate` on those two codes. It is shared by the top-bar **Refresh token**
-  button (`shell.rs`, next to the tenant chip) and the 401 toast below.
+- Front-end wiring: `Session::spawn_refresh_token` tries silent `refresh_session` first, then
+  falls back to `reauthenticate` on those two codes. It is the one entry for the top-bar **Refresh
+  token** button (`shell.rs`, next to the tenant chip) and the 401 toast below, and its in-flight
+  guard (`Session.token_refreshing` / `token_reauthing`) lives on the session, so neither trigger
+  can race a second refresh or a second browser flow.
   `Session::report_recovery_action` is the one ordering of the recovery toasts — dead session
   (**Re-authenticate**) → rejected token (**Refresh token**) → missing consent (**Grant consent**) —
   used by both `report_command_error_for` (the central sink behind `run_toast_err`; anything else
@@ -128,7 +130,11 @@ which a sign-out/sign-in cycle would.
 - `unauthorized` (a client 401 — a revoked token, or a CAE claims challenge the silent re-mint
   couldn't satisfy) gets the **Refresh token** action but is deliberately NOT re-auth-fatal: one
   401 doesn't prove the session dead, so a fan-out keeps going. The Exchange/Key Vault/ARM 401
-  hints and `premium_feature_err` point at the same control, never at signing out.
+  hints and `premium_feature_err` point at the same control, never at signing out. The toast shows
+  that curated text (`UiError::unauthorized_guidance`, everything past the shared
+  `core::reauth::UNAUTHORIZED_STATUS` line) and falls back to a generic lead only for a bare 401,
+  because the hint's "if it persists" advice is all that separates a persistent 401 from a
+  refresh loop.
 - **Adding a new re-auth-fatal code → add it to `core::reauth::REAUTH_FATAL_CODES`, nothing
   else**; every predicate and client pass-through reads that slice.
 

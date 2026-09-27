@@ -684,10 +684,11 @@ impl AppState {
     /// up front, so a not-yet-consented Exchange scope surfaces as the typed
     /// [`AuthError::ConsentRequired`] before any Exchange work (a grant must not
     /// half-land), bound to the `exchange` feature the Exchange/Permissions
-    /// views' "Grant consent" button requests. The cached token is reused by the subsequent Exchange admin-API call, so the
-    /// happy path costs no extra round trip. Note a *consented-but-RBAC-blocked*
-    /// user still passes this (a token is issued) and instead gets a 403 from the
-    /// admin API. Non-CAE (like the Exchange adapter).
+    /// views' "Grant consent" button requests. The cached token is reused by the
+    /// subsequent Exchange admin-API call, so the happy path costs no extra
+    /// round trip. Note a *consented-but-RBAC-blocked* user still passes this (a
+    /// token is issued) and instead gets a 403 from the admin API. Non-CAE (like
+    /// the Exchange adapter).
     pub async fn ensure_exchange_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
         let scopes = self.auth.default_exchange_scopes();
         self.ensure_scoped_token(tenant_id, scopes, false).await

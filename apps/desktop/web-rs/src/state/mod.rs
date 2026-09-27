@@ -309,6 +309,15 @@ pub struct Session {
     // place. The Refresh-token control is the single "re-check my access" trigger —
     // there is no separate Re-check button.
     pub readiness_reload: RwSignal<u32>,
+    // In-flight flags of the one in-place token refresh
+    // (`Session::spawn_refresh_token`), shared by its two triggers — the top-bar
+    // "Refresh token" button and the 401 toast's action — so neither a
+    // double-click nor several 401 toasts can race concurrent refreshes (or,
+    // on a dead session, concurrent interactive re-auth browser flows).
+    // `token_reauthing` is held while that browser flow is open; the top bar
+    // relabels itself on both, whichever trigger started the refresh.
+    pub token_refreshing: RwSignal<bool>,
+    pub token_reauthing: RwSignal<bool>,
     // Last-viewed detail tab per resource type, so switching between items keeps
     // the admin's working tab (e.g. stay on Permissions across apps) instead of
     // snapping back to Overview. A deep-link via `pending_app_tab` overrides it.
@@ -361,6 +370,8 @@ pub fn provide_session() {
         enterprise_apps_reload: RwSignal::new(0),
         audit_reload: RwSignal::new(0),
         readiness_reload: RwSignal::new(0),
+        token_refreshing: RwSignal::new(false),
+        token_reauthing: RwSignal::new(false),
         toasts: RwSignal::new_local(Vec::new()),
         toast_seq: RwSignal::new(0),
     };

@@ -111,6 +111,34 @@ impl UiError {
         self.code == azapptoolkit_core::reauth::CONSENT_REQUIRED
     }
 
+    /// True for a rejected access token (`unauthorized`, a client 401), read
+    /// from the one literal in [`azapptoolkit_core::reauth::UNAUTHORIZED`].
+    ///
+    /// Not re-auth-fatal (one 401 does not prove the session is dead) and not
+    /// retryable as-is: the recovery is the in-place token refresh the top bar
+    /// and the 401 toast offer.
+    pub fn is_unauthorized(&self) -> bool {
+        self.code == azapptoolkit_core::reauth::UNAUTHORIZED
+    }
+
+    /// For a rejected token, the curated guidance its message carries beyond
+    /// the bare status line ([`azapptoolkit_core::reauth::UNAUTHORIZED_STATUS`])
+    /// — Exchange, Key Vault and ARM append what to check if a refresh doesn't
+    /// help; a Graph surface may replace the line entirely. `None` when the
+    /// message is only the status line (nothing to show but a generic lead), or
+    /// when this is not a rejected token at all.
+    pub fn unauthorized_guidance(&self) -> Option<&str> {
+        if !self.is_unauthorized() {
+            return None;
+        }
+        let msg = self.message.trim();
+        let rest = msg
+            .strip_prefix(azapptoolkit_core::reauth::UNAUTHORIZED_STATUS)
+            .unwrap_or(msg)
+            .trim();
+        (!rest.is_empty()).then_some(rest)
+    }
+
     /// (De)serialization error: fixed `serde` code, never retryable.
     pub fn serde(message: impl Into<String>) -> Self {
         UiError::new("serde", message, false)
@@ -303,6 +331,53 @@ mod backend_conv {
                     assert_eq!(ui.retryable, retryable, "retryable for token `{code}`");
                 }
             }
+        }
+
+        /// The front end's 401 toast shows a client's curated guidance (what to
+        /// check if a refresh doesn't help) and falls back to a generic lead
+        /// only for a bare status line. That split reads the shared
+        /// `UNAUTHORIZED_STATUS` prefix, so pin it for every client.
+        #[test]
+        fn a_401_keeps_its_curated_guidance_past_the_status_line() {
+            use azapptoolkit_core::reauth::{UNAUTHORIZED, UNAUTHORIZED_STATUS};
+
+            let graph = UiError::from(GraphError::Unauthorized);
+            assert_eq!(graph.code, UNAUTHORIZED);
+            assert_eq!(graph.message, UNAUTHORIZED_STATUS);
+            assert!(graph.is_unauthorized());
+            assert_eq!(graph.unauthorized_guidance(), None, "a bare 401");
+
+            for ui in [
+                UiError::from(ExchangeError::Unauthorized),
+                UiError::from(KeyVaultError::Unauthorized),
+                UiError::from(ArmError::Unauthorized),
+            ] {
+                assert_eq!(ui.code, UNAUTHORIZED);
+                assert!(
+                    ui.message.starts_with(UNAUTHORIZED_STATUS),
+                    "{}",
+                    ui.message
+                );
+                let guidance = ui.unauthorized_guidance().expect("a guided 401");
+                assert!(!guidance.starts_with(UNAUTHORIZED_STATUS), "{guidance}");
+                assert!(guidance.contains("if it persists"), "{guidance}");
+            }
+
+            // A Graph surface that replaced the status line entirely.
+            let curated = UiError::new(
+                UNAUTHORIZED,
+                "Your access token was rejected. Retry.",
+                false,
+            );
+            assert_eq!(
+                curated.unauthorized_guidance(),
+                Some("Your access token was rejected. Retry.")
+            );
+            // Not a 401 at all.
+            assert_eq!(
+                UiError::new("forbidden", "x", false).unauthorized_guidance(),
+                None
+            );
         }
     }
 }

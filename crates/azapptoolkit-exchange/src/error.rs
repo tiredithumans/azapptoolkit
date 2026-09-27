@@ -13,7 +13,7 @@ pub type Result<T> = std::result::Result<T, ExchangeError>;
 /// desktop layer still maps all four clients into one `UiError` shape.
 #[derive(Debug, Error)]
 pub enum ExchangeError {
-    #[error("unauthorized (401)")]
+    #[error("{}", azapptoolkit_core::reauth::UNAUTHORIZED_STATUS)]
     Unauthorized,
 
     /// `had_diagnostics` records whether the 403 response carried a non-empty
@@ -73,7 +73,7 @@ impl ExchangeError {
 
     pub fn ui_code(&self) -> &'static str {
         match self {
-            ExchangeError::Unauthorized => "unauthorized",
+            ExchangeError::Unauthorized => azapptoolkit_core::reauth::UNAUTHORIZED,
             ExchangeError::Forbidden { .. } => "forbidden",
             ExchangeError::NotFound(_) => "not_found",
             ExchangeError::Throttled { .. } => "throttled",

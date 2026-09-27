@@ -48,6 +48,19 @@ pub fn is_reauth_fatal(code: &str) -> bool {
 /// `UiError::is_consent_required`.
 pub const CONSENT_REQUIRED: &str = "consent_required";
 
+/// The wire code for a rejected access token — a client 401 (a revoked token,
+/// or a Continuous Access Evaluation claims challenge the silent re-mint
+/// couldn't satisfy). Deliberately NOT in [`REAUTH_FATAL_CODES`]: one 401 does
+/// not prove the session is dead. One literal, read by every client's
+/// `ui_code()` (`http_error_enum!`) and by `UiError::is_unauthorized`.
+pub const UNAUTHORIZED: &str = "unauthorized";
+
+/// The `Display` of every client's `Unauthorized` variant — the bare status
+/// line, which names nothing to do. A client whose 401 carries curated
+/// guidance (Exchange, Key Vault, ARM) appends it after this line, so the UI
+/// can tell a bare 401 from a guided one without matching on prose.
+pub const UNAUTHORIZED_STATUS: &str = "unauthorized (401)";
+
 /// Token classifications a client's `Token` arm passes through WITHOUT them
 /// meaning the session is dead — disjoint from [`REAUTH_FATAL_CODES`], so
 /// [`is_reauth_fatal`] never fires for them and a fan-out keeps going.

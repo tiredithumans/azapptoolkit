@@ -103,16 +103,11 @@ impl Session {
     /// expired/revoked or missing refresh token, surfaced as
     /// `refresh_missing`/`not_signed_in`), falls back to ONE interactive
     /// `reauthenticate` — still no sign-out, so the cached lists + audit run
-    /// survive. `reauthing`, when given, is held true while the browser flow is
-    /// open (the top bar flips its label on it).
+    /// survive. `token_reauthing` is held true while the browser flow is open.
     ///
-    /// The one implementation behind both the top-bar "Refresh token" button and
-    /// the 401 toast's action ([`Self::report_if_token_rejected`]).
-    pub async fn refresh_token_in_place(
-        self,
-        tenant: TenantContext,
-        reauthing: Option<RwSignal<bool>>,
-    ) {
+    /// Only [`Self::spawn_refresh_token`] calls this, after claiming the
+    /// in-flight flag.
+    async fn refresh_token_in_place(self, tenant: TenantContext) {
         let session = self;
         match crate::bindings::auth::refresh_session(&tenant.tenant_id).await {
             Ok(()) => {
@@ -128,9 +123,7 @@ impl Session {
                 // Silent re-mint can't fix a dead refresh token; re-auth
                 // interactively in place rather than dumping the user to the
                 // sign-in screen.
-                if let Some(r) = reauthing {
-                    r.set(true);
-                }
+                session.token_reauthing.set(true);
                 match crate::bindings::auth::reauthenticate(&tenant).await {
                     Ok(_) => {
                         session.bump_readiness_reload();
@@ -139,9 +132,7 @@ impl Session {
                     Err(e) => session
                         .toast_error(format!("Couldn't re-authenticate: {}", e.message), None),
                 };
-                if let Some(r) = reauthing {
-                    r.set(false);
-                }
+                session.token_reauthing.set(false);
             }
             Err(e) => {
                 session.toast_error(format!("Couldn't refresh token: {}", e.message), None);
@@ -149,14 +140,29 @@ impl Session {
         }
     }
 
-    /// Fire-and-forget [`Self::refresh_token_in_place`] for the active tenant —
-    /// the toast action's form (no in-flight label to drive).
+    /// Start the one in-place token refresh for the active tenant (see
+    /// [`Self::refresh_token_in_place`]) — the single entry behind both the
+    /// top-bar "Refresh token" button and the 401 toast's action
+    /// ([`Self::report_if_token_rejected`]).
+    ///
+    /// A no-op while one is already in flight: the flag lives on the session
+    /// (`token_refreshing`), not on either trigger, so a double-click, several
+    /// 401 toasts from parallel loads, or the top bar and a toast together
+    /// can't race concurrent refreshes — or, on a dead session, concurrent
+    /// interactive re-auth browser flows.
     pub fn spawn_refresh_token(&self) {
         let session = *self;
+        if session.token_refreshing.get_untracked() {
+            return;
+        }
         let Some(tenant) = session.active_tenant.get_untracked() else {
             return;
         };
-        leptos::task::spawn_local(session.refresh_token_in_place(tenant, None));
+        session.token_refreshing.set(true);
+        leptos::task::spawn_local(async move {
+            session.refresh_token_in_place(tenant).await;
+            session.token_refreshing.set(false);
+        });
     }
 
     /// When `e` is a rejected access token (`unauthorized` — a client 401: a
@@ -171,14 +177,25 @@ impl Session {
     /// operator still needs the lever — the bare "unauthorized (401)" names
     /// nothing to do — and the right lever is the same one the top bar offers,
     /// which itself falls back to re-authentication when the session IS dead.
+    ///
+    /// Unlike [`Self::report_consent_required`], the text is ours only for a
+    /// bare status line: Exchange, Key Vault and ARM append their own curated
+    /// guidance (`ui_hint`) — which already names "Refresh token" and says what
+    /// to check if the 401 persists — so that text is shown as-is
+    /// ([`azapptoolkit_dto::UiError::unauthorized_guidance`]). Dropping it
+    /// would turn a persistent 401 into a refresh loop with nothing to go on.
     pub fn report_if_token_rejected(&self, e: &azapptoolkit_dto::UiError) -> bool {
-        if e.code != "unauthorized" {
+        if !e.is_unauthorized() {
             return false;
         }
+        let message = e.unauthorized_guidance().map_or_else(
+            || "Your access token was rejected — refresh it, then retry the action.".to_string(),
+            str::to_string,
+        );
         let session = *self;
         self.push_toast(
             ToastKind::Error,
-            "Your access token was rejected — refresh it, then retry the action.",
+            message,
             Some("Refresh token".to_string()),
             Some(std::rc::Rc::new(move || session.spawn_refresh_token())),
         );
@@ -338,8 +355,43 @@ mod tests {
                 assert_eq!(t.action_label.as_deref(), Some("Refresh token"));
                 assert!(t.action.is_some(), "the refresh action is the whole point");
                 assert!(
-                    !t.message.to_lowercase().contains("sign out"),
+                    !t.message.contains("Sign out and back in"),
                     "signing out would drop every data cache: {}",
+                    t.message
+                );
+                assert!(
+                    !t.message.contains("unauthorized (401)"),
+                    "a bare status line names nothing to do: {}",
+                    t.message
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn a_rejected_token_keeps_the_clients_curated_guidance() {
+        // Exchange / Key Vault / ARM append a `ui_hint` to their 401 — the only
+        // advice for a 401 that survives a refresh. Replacing it with fixed text
+        // turned a persistent 401 into a refresh loop with nothing to go on.
+        let hinted = "unauthorized (401)\n\nYour Key Vault token was rejected. Use \
+                      \"Refresh token\" (next to Sign out), then retry; if it persists, \
+                      confirm the app has consented the vault.azure.net scope.";
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            session.report_command_error(&UiError::new("unauthorized", hinted, false));
+            session.toasts.with_untracked(|list| {
+                assert_eq!(list.len(), 1);
+                let t = &list[0];
+                assert_eq!(t.action_label.as_deref(), Some("Refresh token"));
+                assert!(
+                    t.message.contains("if it persists") && t.message.contains("vault.azure.net"),
+                    "the curated guidance must reach the toast: {}",
+                    t.message
+                );
+                assert!(
+                    !t.message.starts_with("unauthorized (401)"),
+                    "the bare status line adds nothing: {}",
                     t.message
                 );
             });

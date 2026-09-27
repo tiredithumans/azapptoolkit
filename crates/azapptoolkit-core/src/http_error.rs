@@ -69,7 +69,7 @@ macro_rules! http_error_enum {
         $(#[$enum_meta])*
         #[derive(Debug, ::thiserror::Error)]
         pub enum $name {
-            #[error("unauthorized (401)")]
+            #[error("{}", $crate::reauth::UNAUTHORIZED_STATUS)]
             Unauthorized,
 
             #[error("forbidden (403): {0}")]
@@ -126,7 +126,7 @@ macro_rules! http_error_enum {
             /// The stable wire code the front end branches on.
             pub fn ui_code(&self) -> &'static str {
                 match self {
-                    $name::Unauthorized => "unauthorized",
+                    $name::Unauthorized => $crate::reauth::UNAUTHORIZED,
                     $name::Forbidden(_) => "forbidden",
                     $name::NotFound(_) => "not_found",
                     $name::Throttled { .. } => "throttled",

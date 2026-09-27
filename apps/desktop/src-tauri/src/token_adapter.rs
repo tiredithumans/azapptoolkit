@@ -122,13 +122,13 @@ mod tests {
     use super::*;
     use azapptoolkit_graph::GraphError;
 
+    /// A constructor for one `AuthError` case and its boundary code.
+    type Case = (fn() -> AuthError, &'static str);
+
     /// Every constructible `AuthError` (the same cases as dto's
     /// `auth_error_maps_to_stable_code_and_retryable`) and the code it must
     /// carry across the `BearerProvider` boundary. `AuthError` isn't `Clone`,
     /// so each case is a constructor.
-    /// A constructor for one `AuthError` case and its boundary code.
-    type Case = (fn() -> AuthError, &'static str);
-
     fn cases() -> Vec<Case> {
         vec![
             (|| AuthError::NotSignedIn, "not_signed_in"),
