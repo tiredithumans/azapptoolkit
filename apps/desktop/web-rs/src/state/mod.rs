@@ -229,6 +229,13 @@ pub struct TenantScopedUi {
     // — which owns no rows — label failures the same way. Tenant-scoped by
     // nature: these ids belong to one tenant's directory.
     pub app_names: RwSignal<Arc<HashMap<String, String>>>,
+    // Scroll offset of the App Registrations / Enterprise lists. Those lists
+    // remount on every refetch (their `<Suspense>` bodies re-run after a
+    // delete, a "Fix" or Refresh), so the offset is carried here to survive
+    // that — and, being here, resets on a tenant switch by structure instead
+    // of scrolling the next tenant's list to the previous one's row.
+    pub apps_scroll_top: RwSignal<f64>,
+    pub enterprise_scroll_top: RwSignal<f64>,
 }
 
 impl TenantScopedUi {
@@ -260,6 +267,8 @@ impl TenantScopedUi {
             new_app_chooser_open: RwSignal::new(false),
             gallery_open: RwSignal::new(false),
             app_names: RwSignal::new(Arc::new(HashMap::new())),
+            apps_scroll_top: RwSignal::new(0.0),
+            enterprise_scroll_top: RwSignal::new(0.0),
         }
     }
 
@@ -296,6 +305,8 @@ impl TenantScopedUi {
         self.new_app_chooser_open.set(false);
         self.gallery_open.set(false);
         self.app_names.set(Arc::new(HashMap::new()));
+        self.apps_scroll_top.set(0.0);
+        self.enterprise_scroll_top.set(0.0);
     }
 }
 
@@ -508,6 +519,8 @@ mod tests {
                 "app-1".to_string(),
                 "App One".to_string(),
             )])));
+            ui.apps_scroll_top.set(5200.0);
+            ui.enterprise_scroll_top.set(5200.0);
 
             session.set_active_tenant(None);
 
@@ -540,6 +553,8 @@ mod tests {
             assert!(!ui.new_app_chooser_open.get_untracked());
             assert!(!ui.gallery_open.get_untracked());
             ui.app_names.with_untracked(|m| assert!(m.is_empty()));
+            assert_eq!(ui.apps_scroll_top.get_untracked(), 0.0);
+            assert_eq!(ui.enterprise_scroll_top.get_untracked(), 0.0);
             // And the Session-owned resets still happen alongside.
             assert_eq!(session.view.get_untracked(), ActiveView::Home);
         });

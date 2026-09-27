@@ -54,6 +54,52 @@ mod store {
     }
 }
 
+/// Position of the least recently focused item — what the cap evicts. The one
+/// definition of that rule, shared by `open_item` and the restore clamp.
+fn lru_position(list: &[OpenItem]) -> Option<usize> {
+    list.iter()
+        .enumerate()
+        .min_by_key(|(_, it)| it.focused_at)
+        .map(|(pos, _)| pos)
+}
+
+/// Make a decoded snapshot satisfy the invariants `open_item` maintains for the
+/// live set: one entry per `(kind, entity_id)` (the survivor keeps the higher
+/// `focused_at`, in the first occurrence's slot), one entry per `id` (the
+/// `<For>` key and `close_item`'s target), and at most `MAX_OPEN_ITEMS`
+/// entries, dropping the least recently focused. Entries are removed, never
+/// sorted: `Vec` order is the dock order `[`/`]` stepping walks. No toast —
+/// this repairs a foreign or corrupt snapshot, not an operator action.
+fn sanitize_restored(list: Vec<OpenItem>) -> Vec<OpenItem> {
+    let mut out: Vec<OpenItem> = Vec::with_capacity(list.len());
+    let mut ids = HashSet::new();
+    for item in list {
+        if let Some(kept) = out
+            .iter_mut()
+            .find(|it| it.kind == item.kind && it.entity_id == item.entity_id)
+        {
+            if item.focused_at > kept.focused_at {
+                let slot_id = kept.id;
+                *kept = OpenItem {
+                    id: slot_id,
+                    ..item
+                };
+            }
+            continue;
+        }
+        if !ids.insert(item.id) {
+            continue;
+        }
+        out.push(item);
+    }
+    while out.len() > MAX_OPEN_ITEMS
+        && let Some(pos) = lru_position(&out)
+    {
+        out.remove(pos);
+    }
+    out
+}
+
 impl Session {
     /// Open `entity_id` into the shared working set and focus it (1-up).
     /// Deduped by `(kind, entity_id)`: re-opening an already-open item just
@@ -85,11 +131,7 @@ impl Session {
                 focused_at: id,
             });
             if list.len() > MAX_OPEN_ITEMS
-                && let Some(pos) = list
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, it)| it.focused_at)
-                    .map(|(pos, _)| pos)
+                && let Some(pos) = lru_position(list)
             {
                 evicted = Some(list.remove(pos));
             }
@@ -218,12 +260,18 @@ impl Session {
     /// overlay does not. Launching straight into a detail pane over a list the
     /// operator has not seen yet contradicts the Home landing `set_active_tenant`
     /// just chose.
+    ///
+    /// The snapshot is not trusted to satisfy the in-memory model: it goes
+    /// through [`sanitize_restored`] first (deduped, capped), so a snapshot from
+    /// a build with a larger cap, or a hand-edited one, can't leave the dock
+    /// stuck over `MAX_OPEN_ITEMS` — `open_item` evicts only one per push.
     pub(super) fn restore_open_items(&self) {
         let Some(key) = self.workspace_key() else {
             return;
         };
         let Some(restored) = store::load(&key)
             .and_then(|raw| serde_json::from_str::<Vec<OpenItem>>(&raw).ok())
+            .map(sanitize_restored)
             .filter(|list| !list.is_empty())
         else {
             return;
@@ -269,5 +317,110 @@ impl Session {
             t.as_ref()
                 .map(|t| format!("azapptoolkit:workspace:{}", t.tenant_id))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Here rather than in `state::tests`: the snapshot `store` is private to
+    // this module, and these tests seed it with a snapshot no in-session write
+    // path could produce.
+    use super::*;
+
+    fn with_session<R>(f: impl FnOnce(Session) -> R) -> R {
+        Owner::new().with(|| {
+            provide_session();
+            f(use_session())
+        })
+    }
+
+    fn tenant(id: &str) -> TenantContext {
+        TenantContext {
+            tenant_id: id.to_string(),
+            account_oid: "00000000-0000-0000-0000-000000000001".to_string(),
+            username: None,
+            display_name: None,
+        }
+    }
+
+    fn item(id: u64, entity_id: &str, focused_at: u64) -> OpenItem {
+        OpenItem {
+            id,
+            kind: OpenItemKind::AppReg,
+            entity_id: entity_id.to_string(),
+            title: entity_id.to_string(),
+            focused_at,
+        }
+    }
+
+    fn park(tenant_id: &str, list: &[OpenItem]) {
+        let raw = serde_json::to_string(list).unwrap();
+        store::save(&format!("azapptoolkit:workspace:{tenant_id}"), &raw);
+    }
+
+    fn entities(session: Session) -> Vec<String> {
+        session
+            .open_items
+            .with_untracked(|l| l.iter().map(|it| it.entity_id.clone()).collect())
+    }
+
+    #[test]
+    fn restore_clamps_an_oversized_snapshot_to_the_cap() {
+        with_session(|session| {
+            // Nine items (a build with a larger cap, or a hand-edited
+            // snapshot); the least recently focused sits mid-dock.
+            let snapshot: Vec<OpenItem> = (0..9u64)
+                .map(|i| item(i, &format!("app-{i}"), if i == 4 { 0 } else { 10 + i }))
+                .collect();
+            park("clamp-test", &snapshot);
+
+            session.set_active_tenant(Some(tenant("clamp-test")));
+
+            let expected: Vec<String> = (0..9)
+                .filter(|i| *i != 4)
+                .map(|i| format!("app-{i}"))
+                .collect();
+            assert_eq!(
+                entities(session),
+                expected,
+                "clamped to MAX_OPEN_ITEMS by dropping the least recently focused, dock order kept"
+            );
+
+            // And the dock is no longer stuck over the cap: a fresh open
+            // evicts one and stays at the cap.
+            session.open_item(OpenItemKind::AppReg, "app-new", "New");
+            session
+                .open_items
+                .with_untracked(|l| assert_eq!(l.len(), MAX_OPEN_ITEMS));
+        });
+    }
+
+    #[test]
+    fn restore_dedupes_by_kind_and_entity_and_by_id() {
+        with_session(|session| {
+            park(
+                "dedupe-test",
+                &[
+                    item(1, "app-x", 3),
+                    item(2, "app-y", 4),
+                    item(5, "app-x", 7),
+                    // Same id as the first entry, different entity: a second
+                    // `<For>` row with one key, and `close_item` hitting both.
+                    item(1, "app-z", 9),
+                ],
+            );
+
+            session.set_active_tenant(Some(tenant("dedupe-test")));
+
+            session.open_items.with_untracked(|l| {
+                assert_eq!(l.len(), 2, "one entry per (kind, entity_id) and per id");
+                assert_eq!(l[0].entity_id, "app-x", "survivor keeps the first slot");
+                assert_eq!(l[0].focused_at, 7, "survivor is the more recently focused");
+                assert_eq!(l[1].entity_id, "app-y");
+                let mut ids: Vec<u64> = l.iter().map(|it| it.id).collect();
+                ids.dedup();
+                assert_eq!(ids.len(), 2, "ids stay unique");
+            });
+        });
     }
 }

@@ -322,7 +322,9 @@ pub fn ApplicationList() -> impl IntoView {
                             // Re-runs only on an actual refetch (tenant switch / reload
                             // bump): the filters are read inside `LoadedApps`' memos,
                             // not here, so typing or a chip click never tears the
-                            // loaded subtree down.
+                            // loaded subtree down. A refetch does remount it;
+                            // `tenant_ui.apps_scroll_top` carries the scroll position
+                            // across that.
                             Suspend::new(async move {
                                 match apps.await {
                                     Ok(items) => {
@@ -665,6 +667,7 @@ fn VirtualRows(
                 row_selector=".app-list__row"
                 key=|row: &ApplicationListRowDto| row.id.clone()
                 render_row=move |idx, row| view_row(idx, row, session, now).into_any()
+                scroll_offset=session.tenant_ui.apps_scroll_top
             />
         </Show>
     }

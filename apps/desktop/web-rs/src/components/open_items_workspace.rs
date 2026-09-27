@@ -1,7 +1,8 @@
 //! The workspace overlay: a detail "window" per open item (keep-alive), showing
 //! the 1–2 named in `Session::shown_items` — one full-width, or two side-by-side
 //! for compare. Mounted once by the shell, layered over the (now full-width)
-//! list. Each `OpenItem.kind` maps to the matching self-contained detail pane.
+//! list. Each `OpenItem.kind` maps to the matching self-contained detail pane,
+//! whose body mounts on the window's first show and then stays alive.
 
 use leptos::html;
 use leptos::prelude::*;
@@ -123,8 +124,11 @@ pub fn OpenItemsWorkspace() -> impl IntoView {
     });
 
     view! {
-        // Mounted whenever the working set is non-empty, so every open window
-        // survives chip switches and collapse/expand (no remount, no refetch).
+        // Mounted whenever the working set is non-empty. A window exists per
+        // item; its pane body mounts on first show and is then kept alive, so
+        // every opened window survives chip switches and collapse/expand (no
+        // remount, no refetch) — and a restored dock costs no Graph traffic
+        // until a chip is opened.
         <Show when=move || session.open_items.with(|l| !l.is_empty())>
             // `role="region"` + a label: a bare `aria-label` on a generic `div`
             // has no role to attach to, so it was never announced.
@@ -171,6 +175,22 @@ fn open_item_window(
             .unwrap_or_default()
     };
     let shown = move || session.shown_items.with(|s| s.contains(&id));
+    // The pane body mounts on first show, then stays alive (the `display`
+    // toggle below hides it). Seeded from `shown_items`, so an interactive open
+    // — `open_item` focuses before the `<For>` renders this window — mounts
+    // eagerly as before, while a restored chip (restore leaves `shown_items`
+    // empty) fetches nothing until the operator opens it. The same visited
+    // latch as `util::keep_alive`, which keys on one `active` signal and so
+    // can't be reused for membership in a `Vec`.
+    let mounted = RwSignal::new(session.shown_items.with_untracked(|s| s.contains(&id)));
+    Effect::new(move |_| {
+        if mounted.get_untracked() {
+            return; // latched: stop tracking
+        }
+        if shown() {
+            mounted.set(true);
+        }
+    });
     // This pane claims the workspace's focus request once its element exists and
     // it is the one on screen. Tracking `pane_ref` is what makes a pane that
     // mounts after the request still take focus (the same shape `use_focus_trap`
@@ -195,7 +215,8 @@ fn open_item_window(
     // The pane corrects the dock chip's label to the real name once its detail
     // loads — so opens that lacked a name (pairing jumps, deep-links) self-fix.
     let on_title = Callback::new(move |t: String| session.set_open_item_title(id, t));
-    let inner = match item.kind {
+    let kind = item.kind;
+    let body = move || match kind {
         OpenItemKind::AppReg => {
             let eid = entity_id.clone();
             view! {
@@ -269,7 +290,7 @@ fn open_item_window(
                     </button>
                 </div>
             </div>
-            {inner}
+            <Show when=move || mounted.get()>{body()}</Show>
         </div>
     }
 }

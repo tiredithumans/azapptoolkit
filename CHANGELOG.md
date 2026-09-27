@@ -32,6 +32,10 @@
 
 ### Fixed
 
+- **Deleting apps, removing expired credentials or Refresh no longer sends the App Registrations
+  and Enterprise Apps lists back to the top.** Any change that reloads the list used to drop you
+  back at the first row, so on a large tenant you lost your place. The list now returns to where
+  you were. A new search, filter or sort still starts at the top.
 - **Opening an app that's already open no longer changes which tab the next app opens on.** "Open"
   from the credential dashboard, a Security finding or a mailbox-scope row asks for a specific tab.
   If the app was already open, it came to the front on the tab you'd left it on, but the request
@@ -668,6 +672,11 @@
   permission granted or revoked outside the app (for example in the Entra portal) can take up to an
   hour to appear there, or until you clear Permissions in the Cache dialog. The Enterprise Apps
   Access tab and the permission tester still read assignments live.
+- **Items parked in the Open dock no longer load when you sign in.** Every parked app
+  registration, enterprise app and managed identity used to fetch its full details from Microsoft
+  Graph at launch, for panes you had not opened: up to eight apps' worth of requests competing with
+  Home's scans. A parked item now loads the first time you open its chip, and stays loaded after
+  that.
 
 - **The Cache dialog can clear each cache on its own.** Service principal, permissions, audit and
   list entries each get a Clear button in their row, so dropping a stale audit result no longer

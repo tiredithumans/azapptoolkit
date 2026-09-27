@@ -240,3 +240,56 @@ async fn refresh_refetches_only_after_the_cache_is_dropped() {
     assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
     assert_eq!(call.arg_str("kind").as_deref(), Some("apps"));
 }
+
+/// A reload (delete, remove-expired, "Fix", Refresh) remounts the loaded list
+/// body — its `<Suspense>` re-runs — and used to throw the operator back to the
+/// first row of a long list. The offset now lives on `tenant_ui` and is
+/// replayed into the fresh scroller; a search still snaps to the top.
+#[wasm_bindgen_test]
+async fn refetch_keeps_the_scroll_position() {
+    use wasm_bindgen::JsCast;
+
+    ts::reset();
+    let names: Vec<String> = (0..200).map(|i| format!("App {i:03}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    ts::mock_ok("list_applications_with_pairing", &fixtures::apps(&names));
+
+    // GUI tests load no `styles.css`: give the scroller a real viewport and the
+    // rows their absolute positioning (ROW_HEIGHT is 52px).
+    let m = ts::mount_view(|| {
+        view! {
+            <style>
+                {".app-list__scroller{height:260px;overflow:auto;position:relative}\
+                  .app-list__sizer{position:relative}\
+                  .app-list__row{position:absolute;left:0;width:100%}"}
+            </style>
+            <ApplicationList />
+        }
+    });
+    ts::wait_for(|| ts::text(COUNT) == "200 app registrations").await;
+
+    let scroller = || -> web_sys::HtmlElement {
+        ts::query(".app-list__scroller")
+            .expect("the list scroller")
+            .unchecked_into()
+    };
+    let el = scroller();
+    el.set_scroll_top(5200);
+    let _ = el.dispatch_event(&web_sys::Event::new("scroll").unwrap());
+    ts::wait_for(|| m.session.tenant_ui.apps_scroll_top.get_untracked() >= 5000.0).await;
+
+    m.session.bump_apps_reload();
+    ts::wait_for(|| ts::call_count("list_applications_with_pairing") >= 2).await;
+    // A new scroller element, landed back at the operator's row.
+    ts::wait_for(|| {
+        ts::query(".app-list__scroller")
+            .map(|el| el.unchecked_into::<web_sys::HtmlElement>().scroll_top() >= 5000)
+            .unwrap_or(false)
+            && ts::body_contains("App 100")
+    })
+    .await;
+
+    // A new row set within the instance still starts at the top.
+    ts::set_input_value(SEARCH, "App 1");
+    ts::wait_for(|| m.session.tenant_ui.apps_scroll_top.get_untracked() == 0.0).await;
+}

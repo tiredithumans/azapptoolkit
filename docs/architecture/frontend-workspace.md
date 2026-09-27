@@ -142,14 +142,20 @@ which adds it to ONE shared, cross-entity working set:
   snapshot's ids and stamps (so a new item can't reuse a restored id) and never repopulates
   `shown_items` — the dock comes back, the overlay doesn't. `OpenItemKind` variant names are a
   stored format: renaming one silently drops parked docks (an undecodable snapshot is discarded
-  whole). Never add an unkeyed snapshot or a second write path; pinned by
+  whole). Restore dedupes the snapshot by `(kind, entity_id)` and by id and clamps it to
+  `MAX_OPEN_ITEMS` by dropping the least recently focused (removing, never sorting, so dock order
+  holds), so a snapshot cannot violate the in-memory model (`sanitize_restored`, pinned by the
+  `state/open_items.rs` tests). Never add an unkeyed snapshot or a second write path; pinned by
   `restore_open_items_never_crosses_tenants`.
 - **Mounting** — `OpenItemsDock` (the chip strip) + `OpenItemsWorkspace` (the overlay, 1-up or
   `--two` side-by-side) are mounted **once in `shell.rs`** so the set is shared, cross-entity, and
   survives nav. Never mount them per-view — keep-alive would duplicate them.
-- **Keep-alive rendering** — the workspace mounts ALL open windows (keyed `<For>` over
-  `open_items`) and toggles visibility by `shown`; collapse is `style:display:none`, not unmount,
-  so pane state survives chip switches.
+- **Keep-alive rendering** — the workspace mounts a window shell per open item (keyed `<For>`
+  over `open_items`) and toggles visibility by `shown`; collapse is `style:display:none`, not
+  unmount, so pane state survives chip switches. The pane *body* mounts on the window's first show,
+  via a per-window latch seeded from `shown_items` (an interactive open is already shown, so it
+  mounts eagerly), and is then kept alive. A restored dock therefore fetches nothing for a chip
+  that has not been opened. Pinned by `restored_chips_fetch_nothing_until_opened` (`gui_1`).
 - **Pane chrome** — each pane's `workspace__pane-bar` shows the dock chip's `TypeChip` kind glyph
   plus the item's **live** title (read from the `open_items` signal, self-correcting like the
   chip), so a 2-up compare is legible; Full (`Icon::Maximize`) and close (`Icon::Close`) are icon

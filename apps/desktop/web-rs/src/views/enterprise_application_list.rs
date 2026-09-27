@@ -171,7 +171,9 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
                     <Suspense fallback=move || view! { <SkeletonList rows=8 /> }>
                         {move || {
                             // Re-runs only on an actual refetch; the filters are read
-                            // inside `LoadedEnterpriseApps`' memos, not here.
+                            // inside `LoadedEnterpriseApps`' memos, not here. A refetch
+                            // remounts the loaded body; `tenant_ui.enterprise_scroll_top`
+                            // carries the scroll position across it.
                             Suspend::new(async move {
                                 match sps.await {
                                     Ok(items) => {
@@ -357,6 +359,7 @@ fn VirtualRows(
                 row_selector=".app-list__row"
                 key=|sp: &EnterpriseApplicationDto| sp.id.clone()
                 render_row=move |idx, sp| view_row(idx, sp, session).into_any()
+                scroll_offset=session.tenant_ui.enterprise_scroll_top
             />
         </Show>
     }
