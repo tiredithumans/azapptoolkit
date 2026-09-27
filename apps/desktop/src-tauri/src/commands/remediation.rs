@@ -219,7 +219,9 @@ struct RedundantRemoval {
 /// - A broader permission that is itself **confined** (Exchange RBAC / a legacy
 ///   Application Access Policy) covers nothing org-wide, so it cannot justify
 ///   removing the narrower one. `broader_is_confined` is the same veto the
-///   scorer applies in `redundant_app_permissions`.
+///   scorer applies in `redundant_app_permissions`. A value whose every
+///   covering permission is vetoed lands in `skipped` too — granted or not,
+///   since a confined broader does not cover it.
 ///
 /// That last rule is why the veto is a parameter rather than the scorer's
 /// business alone. The scorer refuses to flag `Mail.Read` when the covering
@@ -253,13 +255,25 @@ fn plan_redundant_removals(
             .collect();
         let value_to_id: HashMap<&str, &str> = declared.iter().map(|(id, v)| (*v, *id)).collect();
         for (id, value) in &declared {
-            let broaders: Vec<&str> = subsuming_app_permissions(value)
+            let covering: Vec<&str> = subsuming_app_permissions(value)
                 .iter()
                 .copied()
                 .filter(|b| value_to_id.contains_key(*b))
+                .collect();
+            if covering.is_empty() {
+                // Not redundant at all — nothing to remove, nothing to report.
+                continue;
+            }
+            let broaders: Vec<&str> = covering
+                .into_iter()
                 .filter(|b| !broader_is_confined(&resource.resource_app_id, b))
                 .collect();
             if broaders.is_empty() {
+                // Every covering permission is confined, or its verdict is
+                // unknown (fail closed): the value is kept, and reported so —
+                // a silent drop reads as "nothing to remove" while the finding
+                // and the permission both remain.
+                skipped.push((*value).to_string());
                 continue;
             }
             let assignment_id = grants.get(*id).cloned();
@@ -303,9 +317,19 @@ pub async fn remediate_remove_redundant_permissions(
     tenant_id: String,
     object_id: String,
 ) -> Result<RedundantPermissionsOutcome, UiError> {
-    let client = state.graph_for(&tenant_id);
+    remediate_remove_redundant_permissions_core(&state, &tenant_id, &object_id).await
+}
+
+/// The body of [`remediate_remove_redundant_permissions`], over `&AppState` so
+/// the bulk path and the handler tests drive the same code.
+pub(crate) async fn remediate_remove_redundant_permissions_core(
+    state: &AppState,
+    tenant_id: &str,
+    object_id: &str,
+) -> Result<RedundantPermissionsOutcome, UiError> {
+    let client = state.graph_for(tenant_id);
     // Fail before any mutation if the live app can't be read.
-    let app = client.get_application(&object_id).await?;
+    let app = client.get_application(object_id).await?;
 
     // Resolve each declared resource's appRole id → value index (+ the resource
     // SP object id, which is what appRoleAssignments key their resource by). A
@@ -375,43 +399,40 @@ pub async fn remediate_remove_redundant_permissions(
     // removal, not permit it. Permitting it is how a Fix removes live,
     // uncovered mailbox access; skipping it costs the operator a re-run once
     // Exchange answers, and the value shows up in `skipped` saying so.
-    let mail_scopes: HashMap<String, MailPermissionScope> =
-        match exchange_client(&state, &tenant_id) {
-            Ok(exo) => {
-                // Every declared application permission its OWN resource maps
-                // to an Exchange role — Graph's mail family and the EWS scope on
-                // Office 365 Exchange Online — as the `(value, role)` pairs the
-                // resolver takes. The same resource-aware gate
-                // `broader_is_confined` applies below, so the two agree on what
-                // a verdict can exist for.
-                let scopable: Vec<(String, &'static str)> = app
-                    .required_resource_access
-                    .iter()
-                    .flat_map(|r| {
-                        role_indexes
-                            .get(&r.resource_app_id)
-                            .into_iter()
-                            .flat_map(move |ix| {
-                                r.resource_access
-                                    .iter()
-                                    .filter(|a| a.r#type == "Role")
-                                    .filter_map(move |a| ix.get(&a.id))
-                                    .filter_map(move |value| {
-                                        exchange_role_for_resource_permission(
-                                            &r.resource_app_id,
-                                            value,
-                                        )
+    let mail_scopes: HashMap<String, MailPermissionScope> = match exchange_client(state, tenant_id)
+    {
+        Ok(exo) => {
+            // Every declared application permission its OWN resource maps
+            // to an Exchange role — Graph's mail family and the EWS scope on
+            // Office 365 Exchange Online — as the `(value, role)` pairs the
+            // resolver takes. The same resource-aware gate
+            // `broader_is_confined` applies below, so the two agree on what
+            // a verdict can exist for.
+            let scopable: Vec<(String, &'static str)> = app
+                .required_resource_access
+                .iter()
+                .flat_map(|r| {
+                    role_indexes
+                        .get(&r.resource_app_id)
+                        .into_iter()
+                        .flat_map(move |ix| {
+                            r.resource_access
+                                .iter()
+                                .filter(|a| a.r#type == "Role")
+                                .filter_map(move |a| ix.get(&a.id))
+                                .filter_map(move |value| {
+                                    exchange_role_for_resource_permission(&r.resource_app_id, value)
                                         .map(|role| (value.clone(), role))
-                                    })
-                            })
-                    })
-                    .collect();
-                resolve_mail_scopes(&exo, &app.app_id, &scopable, &HashSet::new(), false)
-                    .await
-                    .unwrap_or_default()
-            }
-            Err(_) => HashMap::new(),
-        };
+                                })
+                        })
+                })
+                .collect();
+            resolve_mail_scopes(&exo, &app.app_id, &scopable, &HashSet::new(), false)
+                .await
+                .unwrap_or_default()
+        }
+        Err(_) => HashMap::new(),
+    };
     let broader_is_confined = |resource_app_id: &str, broader: &str| {
         if !is_scopable_exchange_resource_permission(Some(resource_app_id), broader) {
             return false;
@@ -473,7 +494,7 @@ pub async fn remediate_remove_redundant_permissions(
             required_resource_access: Some(next),
             ..Default::default()
         };
-        match client.update_application(&object_id, &patch).await {
+        match client.update_application(object_id, &patch).await {
             Ok(_) => {
                 manifest_patched = true;
                 outcome.removed = declarations_to_drop
@@ -493,7 +514,7 @@ pub async fn remediate_remove_redundant_permissions(
     // still mutated live state, so bust caches even on the error path (but never
     // when nothing changed).
     if grants_revoked || manifest_patched {
-        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
+        super::applications::invalidate_app_detail_state(&state.cache, tenant_id);
     }
     if let Some(e) = error {
         return Err(e);
@@ -659,5 +680,159 @@ mod tests {
         let granted = grants(GRAPH, &["Sites.FullControl.All", "Sites.Selected"]);
         let (plan, _) = plan_redundant_removals(&required, &idx, &granted, |_, _| false);
         assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn plan_reports_a_narrower_whose_only_cover_is_vetoed_as_skipped() {
+        // Mail.ReadWrite is confined (Exchange RBAC, or its verdict unknown):
+        // it covers no org-wide read, so Mail.Read stays — and says so.
+        let required = vec![declared(GRAPH, &["Mail.ReadWrite", "Mail.Read"])];
+        let idx = index(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
+        let granted = grants(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
+        let (plan, skipped) =
+            plan_redundant_removals(&required, &idx, &granted, |_, b| b == "Mail.ReadWrite");
+        assert!(plan.is_empty());
+        assert_eq!(skipped, vec!["Mail.Read".to_string()]);
+    }
+
+    #[test]
+    fn a_veto_never_plans_a_removal() {
+        let required = vec![declared(GRAPH, &["Mail.ReadWrite", "Mail.Read"])];
+        let idx = index(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
+
+        // Granted: the narrower grant is load-bearing once its cover is vetoed.
+        let granted = grants(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
+        let (plan, skipped) = plan_redundant_removals(&required, &idx, &granted, |_, _| true);
+        assert!(plan.is_empty());
+        assert_eq!(skipped, vec!["Mail.Read".to_string()]);
+
+        // Declaration-only: a confined broader covers nothing either, so the
+        // narrower declaration is not redundant and stays (fail closed).
+        let (plan, skipped) =
+            plan_redundant_removals(&required, &idx, &HashMap::new(), |_, _| true);
+        assert!(plan.is_empty());
+        assert_eq!(skipped, vec!["Mail.Read".to_string()]);
+    }
+
+    #[test]
+    fn the_veto_is_asked_about_the_resource_and_the_broader() {
+        let required = vec![declared(GRAPH, &["Mail.ReadWrite", "Mail.Read"])];
+        let idx = index(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
+        let granted = grants(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
+        let asked = std::cell::RefCell::new(Vec::<(String, String)>::new());
+        let _ = plan_redundant_removals(&required, &idx, &granted, |r, b| {
+            asked.borrow_mut().push((r.to_string(), b.to_string()));
+            false
+        });
+        assert_eq!(
+            asked.into_inner(),
+            vec![(GRAPH.to_string(), "Mail.ReadWrite".to_string())]
+        );
+    }
+
+    // ---------------- redundant-permissions handler ----------------
+
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const TENANT: &str = "tenant-1";
+    const OBJECT: &str = "obj-1";
+
+    async fn mock_get(
+        server: &MockServer,
+        at: &str,
+        filter: Option<&str>,
+        body: serde_json::Value,
+    ) {
+        let mut mock = Mock::given(method("GET")).and(path(at));
+        if let Some(f) = filter {
+            mock = mock.and(query_param("$filter", f));
+        }
+        mock.respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_non_exchange_admin_gets_the_vetoed_value_back_as_skipped() {
+        let server = MockServer::start().await;
+        mock_get(
+            &server,
+            &format!("/v1.0/applications/{OBJECT}"),
+            None,
+            serde_json::json!({
+                "id": OBJECT,
+                "appId": "app-1",
+                "displayName": "App One",
+                "requiredResourceAccess": [{
+                    "resourceAppId": GRAPH,
+                    "resourceAccess": [
+                        {"id": "id-Mail.ReadWrite", "type": "Role"},
+                        {"id": "id-Mail.Read", "type": "Role"}
+                    ]
+                }]
+            }),
+        )
+        .await;
+        mock_get(
+            &server,
+            "/v1.0/servicePrincipals",
+            Some(&format!("appId eq '{GRAPH}'")),
+            serde_json::json!({"value": [{
+                "id": "sp-graph",
+                "appId": GRAPH,
+                "displayName": "Microsoft Graph",
+                "appRoles": [
+                    {"id": "id-Mail.ReadWrite", "allowedMemberTypes": ["Application"],
+                     "displayName": "Read and write mail", "value": "Mail.ReadWrite"},
+                    {"id": "id-Mail.Read", "allowedMemberTypes": ["Application"],
+                     "displayName": "Read mail", "value": "Mail.Read"}
+                ]
+            }]}),
+        )
+        .await;
+        mock_get(
+            &server,
+            "/v1.0/servicePrincipals",
+            Some("appId eq 'app-1'"),
+            serde_json::json!({"value": [{"id": "sp-app", "appId": "app-1"}]}),
+        )
+        .await;
+        mock_get(
+            &server,
+            "/v1.0/servicePrincipals/sp-app/appRoleAssignments",
+            None,
+            serde_json::json!({"value": [
+                {"id": "a-rw", "principalId": "sp-app", "resourceId": "sp-graph",
+                 "appRoleId": "id-Mail.ReadWrite"},
+                {"id": "a-r", "principalId": "sp-app", "resourceId": "sp-graph",
+                 "appRoleId": "id-Mail.Read"}
+            ]}),
+        )
+        .await;
+        // POST $batch (the resource-SP prewarm) is left unmocked: it is
+        // best-effort and degrades to the per-resource GET above.
+
+        // `for_test` has no signed-in tenant context, so `exchange_client`
+        // fails — exactly an operator Exchange can't answer for. Every Graph
+        // mail verdict is then unknown, and unknown vetoes (fail closed).
+        let state = AppState::for_test(TENANT, &server.uri());
+        let outcome = remediate_remove_redundant_permissions_core(&state, TENANT, OBJECT)
+            .await
+            .expect("the reads are mocked");
+
+        assert!(outcome.removed.is_empty());
+        assert_eq!(
+            outcome.skipped,
+            vec!["Mail.Read".to_string()],
+            "a vetoed value must come back as skipped, not vanish"
+        );
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.method.as_str() != "DELETE" && r.method.as_str() != "PATCH"),
+            "a vetoed plan must mutate nothing"
+        );
     }
 }

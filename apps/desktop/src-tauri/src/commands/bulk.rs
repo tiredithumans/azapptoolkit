@@ -678,7 +678,7 @@ pub async fn bulk_create_applications(
 }
 
 /// Removes each selected app's *redundant* application permissions, reusing the
-/// single-app remediation core ([`remediation::remediate_remove_redundant_permissions`])
+/// single-app remediation core ([`remediation::remediate_remove_redundant_permissions_core`])
 /// so the live re-resolution + safety rules + per-app cache invalidation are
 /// identical to the one-click fix. Runs sequentially (each call is a multi-read
 /// manifest re-plan, and the selection is the admin's hand-picked set), polling
@@ -702,10 +702,8 @@ pub async fn bulk_remove_redundant_permissions(
             let state = state.clone();
             let tenant_id = tenant_id.clone();
             async move {
-                match super::remediation::remediate_remove_redundant_permissions(
-                    state,
-                    tenant_id,
-                    object_id.clone(),
+                match super::remediation::remediate_remove_redundant_permissions_core(
+                    &state, &tenant_id, &object_id,
                 )
                 .await
                 {

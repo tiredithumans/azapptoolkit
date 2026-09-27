@@ -114,12 +114,19 @@ fn resolve_one_permission(
     }
 }
 
+/// Resolves every declared permission (see [`resolve_one_permission`]) and
+/// reports whether the resolution is **degraded**: `true` when a declared
+/// resource's service principal couldn't be read. That resource's rows still
+/// come back (the ladder falls through to the catalog / raw GUID), but without
+/// the resource SP id they can't be joined to their runtime grants, so they read
+/// as "Not granted" whether or not they are — the caller must not cache or
+/// present such a result as authoritative.
 pub(super) async fn resolve_required_resource_access(
     client: &azapptoolkit_graph::GraphClient,
     declared: &[azapptoolkit_core::models::RequiredResourceAccess],
     app_role_assignments: &[azapptoolkit_core::models::AppRoleAssignment],
     oauth2_permission_grants: &[azapptoolkit_core::models::OAuth2PermissionGrant],
-) -> Vec<ResolvedPermission> {
+) -> (Vec<ResolvedPermission>, bool) {
     let catalog = PermissionsCatalog::bundled();
 
     // Resolve every distinct declared resource's SP up front and concurrently
@@ -135,13 +142,32 @@ pub(super) async fn resolve_required_resource_access(
             .filter(|id| seen.insert(id.clone()))
             .collect()
     };
-    let live_sps: HashMap<String, Option<ServicePrincipal>> =
-        futures::future::join_all(unique_resource_ids.into_iter().map(|id| async move {
-            let sp = client.resolve_resource_sp(&id).await.ok().flatten();
-            (id, sp)
-        }))
-        .await
+    let lookups = futures::future::join_all(unique_resource_ids.into_iter().map(|id| async move {
+        let sp = client.resolve_resource_sp(&id).await;
+        (id, sp)
+    }))
+    .await;
+    // `Ok(None)` — the resource SP is genuinely absent from the tenant — is an
+    // answer, not a degradation: nothing can be granted on a resource with no
+    // SP. Only an `Err` (throttling past the retry budget, a transient Graph
+    // failure) leaves the grant state unknown. The graph layer already caches
+    // only `Ok` (`resolve_resource_sp`); collapsing the two here is what let a
+    // throttled lookup be cached as "Not granted".
+    let mut degraded = false;
+    let live_sps: HashMap<String, Option<ServicePrincipal>> = lookups
         .into_iter()
+        .map(|(id, sp)| match sp {
+            Ok(sp) => (id, sp),
+            Err(e) => {
+                tracing::warn!(
+                    resource_app_id = %id,
+                    error = %e,
+                    "resource service principal unreadable; its permission rows can't be joined to grants"
+                );
+                degraded = true;
+                (id, None)
+            }
+        })
         .collect();
 
     let mut out = Vec::new();
@@ -194,5 +220,132 @@ pub(super) async fn resolve_required_resource_access(
         }
     }
 
-    out
+    (out, degraded)
+}
+
+#[cfg(test)]
+mod tests {
+    use azapptoolkit_core::cache::Cache;
+    use azapptoolkit_core::models::{AppRoleAssignment, RequiredResourceAccess, ResourceAccess};
+    use azapptoolkit_core::token::StaticTokenProvider;
+    use azapptoolkit_graph::GraphClient;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    // Resource appIds outside the bundled catalog, so the ladder reads the
+    // live SP (and the join depends on it).
+    const RES_A: &str = "11111111-aaaa-4aaa-8aaa-000000000001";
+    const RES_B: &str = "22222222-bbbb-4bbb-8bbb-000000000002";
+
+    fn client(server: &MockServer) -> GraphClient {
+        GraphClient::with_base_url(
+            "tenant-1".to_string(),
+            StaticTokenProvider::new("t"),
+            StaticTokenProvider::new("t"),
+            Cache::new(),
+            format!("{}/v1.0", server.uri()),
+        )
+    }
+
+    fn declared() -> Vec<RequiredResourceAccess> {
+        [(RES_A, "r1"), (RES_B, "r2")]
+            .into_iter()
+            .map(|(res, role)| RequiredResourceAccess {
+                resource_app_id: res.into(),
+                resource_access: vec![ResourceAccess {
+                    id: role.into(),
+                    r#type: "Role".into(),
+                }],
+            })
+            .collect()
+    }
+
+    fn assignment() -> Vec<AppRoleAssignment> {
+        vec![AppRoleAssignment {
+            id: "assign-1".into(),
+            principal_id: "sp-app".into(),
+            resource_id: "sp-a".into(),
+            app_role_id: "r1".into(),
+            ..Default::default()
+        }]
+    }
+
+    async fn mount_resource_a(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param("$filter", format!("appId eq '{RES_A}'")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{
+                    "id": "sp-a",
+                    "appId": RES_A,
+                    "displayName": "Resource A",
+                    "appRoles": [{
+                        "id": "r1",
+                        "allowedMemberTypes": ["Application"],
+                        "displayName": "Role one",
+                        "value": "A.Read.All"
+                    }]
+                }]
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn one_unreadable_resource_flags_the_resolution_but_keeps_its_rows() {
+        let server = MockServer::start().await;
+        mount_resource_a(&server).await;
+        // 403 is non-retryable, so the test doesn't wait out a backoff.
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param("$filter", format!("appId eq '{RES_B}'")))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden"))
+            .mount(&server)
+            .await;
+
+        let (rows, degraded) =
+            resolve_required_resource_access(&client(&server), &declared(), &assignment(), &[])
+                .await;
+
+        assert!(
+            degraded,
+            "an unreadable resource SP degrades the resolution"
+        );
+        let a = rows
+            .iter()
+            .find(|r| r.resource_app_id == RES_A)
+            .expect("A's row");
+        assert_eq!(a.runtime_assignment_id.as_deref(), Some("assign-1"));
+        let b = rows
+            .iter()
+            .find(|r| r.resource_app_id == RES_B)
+            .expect("B's row is kept");
+        assert!(b.runtime_assignment_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_absent_resource_sp_is_not_degraded() {
+        let server = MockServer::start().await;
+        mount_resource_a(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param("$filter", format!("appId eq '{RES_B}'")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
+            )
+            .mount(&server)
+            .await;
+
+        let (rows, degraded) =
+            resolve_required_resource_access(&client(&server), &declared(), &assignment(), &[])
+                .await;
+
+        assert!(
+            !degraded,
+            "a resource with no SP in the tenant is an answer"
+        );
+        assert_eq!(rows.len(), 2);
+    }
 }

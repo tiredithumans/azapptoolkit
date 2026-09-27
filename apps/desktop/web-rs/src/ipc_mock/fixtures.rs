@@ -226,6 +226,7 @@ pub fn application_detail(object_id: &str, app_id: &str, display_name: &str) -> 
         app_role_assignments: Vec::new(),
         oauth2_permission_grants: Vec::new(),
         resolved_permissions: Vec::new(),
+        resolution_degraded: false,
     }
 }
 

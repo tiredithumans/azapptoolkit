@@ -2,6 +2,38 @@
 
 ### Fixed
 
+- **"Migrate to RBAC for Applications" on the Permissions tab no longer reports success when the
+  legacy policy was kept.** When a grant can't be re-scoped, the migration keeps the app's
+  Application Access Policy, because that policy is the only thing still confining it. The Exchange
+  scoping section checked only for outright failures, so it showed "Migrated 1 policy(ies)" and hid
+  the report explaining what was kept. It now keeps the report on screen whenever an app needs
+  attention or the run left apps unreached, the same as the Security tab's Fix (which now also stays
+  open for a stopped run), and the success message counts apps and removed policies separately.
+
+- **Remove redundant permissions no longer reports "Removed 0" and hides the Fix when it couldn't
+  confirm the covering permission.** If the broader mail permission is scoped with Exchange RBAC, or
+  Exchange can't be checked (for example, you aren't an Exchange administrator), the narrower
+  permission is kept on purpose. It was left out of the result, so the Fix reported success and
+  disappeared while the finding and the permission stayed. The kept permission is now listed with
+  the reason, and the Fix stays on the row.
+
+- **Scoping mailbox access from the Security tab no longer hides Exchange's warnings.** For a
+  foreign enterprise app or a managed identity, warnings were dropped entirely; for an app
+  registration they were only counted. The most common one means the groups you asked for were not
+  applied, because the app already has a management scope with a different group set. Warnings are
+  now listed in the dialog, which stays open, and the Fix stays on the row.
+
+- **Admin consent that partly fails now says so.** "Grant admin consent" on the Permissions tab
+  reported success even when some grants failed. The failure count was shown only in a note that
+  disappeared as the tab reloaded. A partial consent now shows an error naming the failure, and a
+  least-privilege downgrade's outcome is shown the same way instead of vanishing.
+
+- **A throttled lookup no longer shows granted permissions as "Not granted" for an hour.** If
+  Microsoft Graph couldn't return a resource's service principal while an app's details were
+  loading, every permission on that resource read as not granted, and the result was cached for 60
+  minutes. Such a result is no longer cached, and the Permissions tab says the grants couldn't be
+  read and to refresh.
+
 - **The SSO tab no longer overwrites claims it could not read.** When the app had not yet been
   granted consent to read an enterprise app's claims-mapping policy, "Attributes & claims" showed an
   empty editor even if the app had custom claims. Clicking "Save claims" then detached the real

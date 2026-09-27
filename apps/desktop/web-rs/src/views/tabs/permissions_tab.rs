@@ -80,6 +80,37 @@ fn row_scope_kind(resource_app_id: Option<&str>, value: &str) -> Option<ScopeKin
         .then_some(ScopeKind::SharePointItem)
 }
 
+/// The admin-consent outcome as a toast message: `Ok` for a clean grant, `Err`
+/// when any grant failed — the backend collects per-grant failures into an
+/// `Ok(GrantResult)` rather than erroring, so a partial consent must not read as
+/// an unqualified success.
+fn consent_report(r: &GrantResult) -> Result<String, String> {
+    let created = r.role_assignments_created.len();
+    let upserted = r.scope_grants_upserted.len();
+    if let Some(first) = r.failures.first() {
+        let failed = r.failures.len();
+        let more = if failed > 1 {
+            format!(" (+{} more)", failed - 1)
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "Admin consent partly applied: {created} role assignment(s), {upserted} scope \
+             grant(s); {failed} failed — {}{more}",
+            first.message
+        ));
+    }
+    let skipped = r.role_assignments_skipped.len();
+    let skipped = if skipped > 0 {
+        format!(", {skipped} already granted/skipped")
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "Admin consent granted: {created} role assignment(s), {upserted} scope grant(s){skipped}."
+    ))
+}
+
 /// Runs the admin-consent grant for the app in `detail`, reporting via toasts.
 /// Pulled out of the component so a retryable-error toast can re-invoke it: on
 /// a retryable failure it builds an `Rc<dyn Fn()>` that calls back into this
@@ -90,7 +121,6 @@ fn run_grant(
     detail: Signal<Arc<ApplicationDetail>>,
     consenting: RwSignal<bool>,
     consent_error: RwSignal<Option<String>>,
-    consent_result: RwSignal<Option<GrantResult>>,
     on_changed: Callback<()>,
 ) {
     if consenting.get_untracked() {
@@ -98,7 +128,6 @@ fn run_grant(
     }
     consenting.set(true);
     consent_error.set(None);
-    consent_result.set(None);
     let tenant = session.active_tenant.get_untracked();
     let object_id = detail.with_untracked(|d| d.application.id.clone());
     leptos::task::spawn_local(async move {
@@ -108,26 +137,26 @@ fn run_grant(
         };
         match permissions::grant_admin_consent(&t.tenant_id, &object_id).await {
             Ok(r) => {
-                session.toast_success(format!(
-                    "Admin consent granted: {} role assignment(s), {} scope grant(s).",
-                    r.role_assignments_created.len(),
-                    r.scope_grants_upserted.len(),
-                ));
-                consent_result.set(Some(r));
+                // Report through the toast host before `on_changed`: the reload
+                // rebuilds this tab, so anything held in its signals is gone
+                // before it can be read (the credentials tab's precedent). A
+                // partial consent is an error toast naming the failure — it
+                // lingers until read.
+                match consent_report(&r) {
+                    Ok(msg) => {
+                        session.toast_success(msg);
+                    }
+                    Err(msg) => {
+                        session.toast_error(msg, None);
+                    }
+                }
                 on_changed.run(());
             }
             Err(e) => {
                 // Offer Retry only when the backend says the failure is transient.
                 let retry: Option<ToastAction> = e.retryable.then(|| {
                     Rc::new(move || {
-                        run_grant(
-                            session,
-                            detail,
-                            consenting,
-                            consent_error,
-                            consent_result,
-                            on_changed,
-                        )
+                        run_grant(session, detail, consenting, consent_error, on_changed)
                     }) as ToastAction
                 });
                 session.toast_error(e.message.clone(), retry);
@@ -179,7 +208,6 @@ pub fn PermissionsTab(
     let session = use_session();
     let consenting = RwSignal::new(false);
     let consent_error: RwSignal<Option<String>> = RwSignal::new(None);
-    let consent_result: RwSignal<Option<GrantResult>> = RwSignal::new(None);
     // The unified "Grant access" wizard — always reachable, so adding/scoping is
     // the obvious first move. `wizard_preseed` carries a permission selection when
     // a row's "Scope…" opens the wizard pre-selected; None opens a blank select step.
@@ -202,9 +230,6 @@ pub fn PermissionsTab(
     // tab — they share a single busy + error (`cmd.error` is the row-level error
     // surface, formerly `row_error`).
     let cmd = use_command();
-    // Outcome note for the per-row downgrade flow (reports inline rather than via
-    // a toast, since the success path keeps the chooser open).
-    let scope_note: RwSignal<Option<String>> = RwSignal::new(None);
 
     // Application/Delegated filter toggles. Both default on.
     let show_application = RwSignal::new(true);
@@ -260,16 +285,7 @@ pub fn PermissionsTab(
             scopes_loading,
         );
     };
-    let grant = move |_| {
-        run_grant(
-            session,
-            detail,
-            consenting,
-            consent_error,
-            consent_result,
-            on_changed,
-        )
-    };
+    let grant = move |_| run_grant(session, detail, consenting, consent_error, on_changed);
 
     // A row's "Test access…" seeds the Permission tester with THIS principal and
     // jumps to it. Offered only beside a badge that can't state its own reach
@@ -301,7 +317,6 @@ pub fn PermissionsTab(
         }
         let object_id = detail.with(|d| d.application.id.clone());
         cmd.error.set(None);
-        scope_note.set(None);
         pending_downgrade.set(Some(PendingDowngrade {
             object_id,
             resource_app_id,
@@ -338,7 +353,8 @@ pub fn PermissionsTab(
                 } else {
                     format!("{broad_value} was already gone — nothing to change.")
                 };
-                scope_note.set(Some(note));
+                // Toast before `on_changed`: the reload rebuilds this tab.
+                session.toast_success(note);
                 pending_downgrade.set(None);
                 on_changed.run(());
             },
@@ -535,6 +551,21 @@ pub fn PermissionsTab(
                     "Delegated"
                 </button>
             </div>
+            // A resource SP the backend couldn't read leaves that resource's
+            // granted rows reading "Not granted" (no SP id to join grants to).
+            // The backend doesn't cache such a detail; this says why the rows
+            // may be wrong and what clears it, before anyone acts on them.
+            {move || {
+                detail
+                    .with(|d| d.resolution_degraded)
+                    .then(|| {
+                        view! {
+                            <Callout tone="warn" role="status">
+                                "Some permission grants couldn't be read from Microsoft Graph (it may be throttling requests), so a permission below can show “Not granted” even though it is granted. Use Refresh to try again before granting or removing anything."
+                            </Callout>
+                        }
+                    })
+            }}
             // Shared banner (consent-and-retry handled internally) so the Scope
             // column's unavailable state matches the MI and enterprise panes.
             {move || {
@@ -756,27 +787,7 @@ pub fn PermissionsTab(
                 })
                 on_close=Callback::new(move |()| close_revoke())
             />
-            {move || {
-                scope_note.get().map(|m| view! { <Callout tone="ok" role="status">{m}</Callout> })
-            }}
             {move || consent_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
-            {move || {
-                consent_result
-                    .get()
-                    .map(|r| {
-                        view! {
-                            <Callout tone="ok" role="status">
-                                {format!(
-                                    "Created {} role assignment(s); {} scope grant(s); {} skipped; {} failure(s).",
-                                    r.role_assignments_created.len(),
-                                    r.scope_grants_upserted.len(),
-                                    r.role_assignments_skipped.len(),
-                                    r.failures.len(),
-                                )}
-                            </Callout>
-                        }
-                    })
-            }}
             {move || {
                 let has_mail = detail.with(|d| {
                     d.resolved_permissions.iter().any(|p| {
@@ -1098,6 +1109,44 @@ where
 mod tests {
     use super::*;
     use azapptoolkit_core::scoping::{MICROSOFT_GRAPH_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID};
+
+    fn grant_result(failures: Vec<permissions::GrantFailure>) -> GrantResult {
+        GrantResult {
+            client_service_principal_id: "sp-1".into(),
+            role_assignments_created: vec![Default::default(), Default::default()],
+            role_assignments_skipped: vec![],
+            scope_grants_upserted: vec![],
+            failures,
+        }
+    }
+
+    /// A partial consent is reported as an error naming the failure — the
+    /// backend returns it as `Ok` with `failures`, and the tab reloads right
+    /// after, so the toast is the only place the operator can read it.
+    #[test]
+    fn a_partial_consent_is_reported_as_an_error() {
+        let ok = consent_report(&grant_result(vec![])).expect("a clean grant");
+        assert!(
+            ok.contains("2 role assignment(s), 0 scope grant(s)"),
+            "{ok}"
+        );
+
+        let failure = permissions::GrantFailure {
+            resource_app_id: MICROSOFT_GRAPH_APP_ID.into(),
+            permission_id: None,
+            kind: "Role".into(),
+            message: "Insufficient privileges".into(),
+        };
+        let err = consent_report(&grant_result(vec![failure.clone()])).expect_err("partial");
+        assert!(err.contains("1 failed"), "{err}");
+        assert!(err.contains("Insufficient privileges"), "{err}");
+        assert!(!err.contains("more"), "{err}");
+
+        let err =
+            consent_report(&grant_result(vec![failure.clone(), failure])).expect_err("partial");
+        assert!(err.contains("2 failed"), "{err}");
+        assert!(err.contains("(+1 more)"), "{err}");
+    }
 
     /// The "Scope…" button's gate. It must appear exactly where the per-row
     /// conversion to `Sites.Selected` can actually be performed: offering it

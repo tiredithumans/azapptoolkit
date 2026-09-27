@@ -244,6 +244,7 @@ fn app_detail(a: &DemoApp) -> ApplicationDetail {
         app_role_assignments: Vec::new(),
         oauth2_permission_grants: Vec::new(),
         resolved_permissions: a.perms.clone(),
+        resolution_degraded: false,
     }
 }
 

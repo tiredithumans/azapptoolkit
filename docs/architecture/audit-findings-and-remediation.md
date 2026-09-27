@@ -230,7 +230,7 @@ Constraints baked into the table; keep them when extending it:
 
 The one-click fix (`RemediationKind::RemoveRedundantPermissions` →
 `commands::remediation::remediate_remove_redundant_permissions`) re-plans from a fresh manifest +
-live `appRoleAssignments` (`plan_redundant_removals`, pure + unit-tested), with two rules
+live `appRoleAssignments` (`plan_redundant_removals`, pure + unit-tested), with three rules
 **stricter than the scorer** (which flattens values across resources):
 
 - The covering broader permission must be declared on the **same resource** (Graph's
@@ -239,6 +239,10 @@ live `appRoleAssignments` (`plan_redundant_removals`, pure + unit-tested), with 
   if the broader grant has since been revoked or scoped away (Exchange RBAC strips the org-wide
   Entra grant), the value is reported `skipped`, never removed. An ungranted declaration is
   removable whenever the broader is declared — declarations authorize nothing.
+- The covering broader permission must be **confirmed org-wide** from live `mail_scopes`. A
+  `Scoped`/`Unknown` verdict, or Exchange being unreachable (including an operator who isn't an
+  Exchange admin), vetoes it and the value is reported `skipped` — fail closed, whereas the scorer
+  reads an empty `mail_scopes` as org-wide. The Fix stays on the row while anything is `skipped`.
 
 Per removal: revoke the narrower `appRoleAssignment` (when granted), then drop all affected
 declarations in **one** trailing `requiredResourceAccess` patch. A revocation error stops further

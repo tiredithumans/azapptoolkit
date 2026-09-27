@@ -15,6 +15,7 @@ use azapptoolkit_core::audit::{
     AuditPrincipalKind, RemediationAction, RemediationKind, RiskLevel, issue,
 };
 use azapptoolkit_dto::audit::{AuditCoverageGap, AuditProgress, AuditRunResult};
+use azapptoolkit_dto::exchange::ExchangeAccessResult;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::security_view::SecurityView;
 
@@ -175,6 +176,48 @@ async fn sp_mailbox_fix_routes_to_the_sp_only_command() {
             .and_then(|v| v.as_bool()),
         Some(true),
         "the org-wide grant is stripped so RBAC scoping is effective"
+    );
+}
+
+/// A grant Exchange answered with a warning did not necessarily do what was
+/// asked (the common one: an existing scope with a different group set, so the
+/// requested groups were NOT applied). The modal stays open with the notes and
+/// the row keeps its Fix, rather than a success toast reading a no-op as done.
+#[wasm_bindgen_test]
+async fn sp_mailbox_fix_keeps_a_warned_grant_open() {
+    let m = mount_security().await;
+    ts::mock_ok(
+        "grant_managed_identity_scoped_exchange_access",
+        &ExchangeAccessResult {
+            warnings: vec![
+                "A management scope already exists for this app with a different group set".into(),
+            ],
+            ..fixtures::exchange_access_result()
+        },
+    );
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("orgwide_mailbox".to_string()));
+    ts::wait_for(|| ts::body_contains("Scope 1 mailbox permission")).await;
+
+    click_button("Scope 1 mailbox permission to specific mailboxes");
+    ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
+    ts::set_textarea_value(".modal textarea", "Sales Team");
+    click_button("Scope access");
+    ts::wait_for(|| ts::body_contains("with a different group set")).await;
+
+    assert!(
+        ts::query(".modal").is_some(),
+        "a warned grant keeps the modal open"
+    );
+    assert!(
+        ts::body_contains("may not have been applied"),
+        "the warning is explained, not counted"
+    );
+    assert!(
+        ts::body_contains("Scope 1 mailbox permission to specific mailboxes"),
+        "the row keeps its Fix"
     );
 }
 

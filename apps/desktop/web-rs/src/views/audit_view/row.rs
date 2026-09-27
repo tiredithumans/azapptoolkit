@@ -8,6 +8,7 @@ use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::remediation;
+use crate::bindings::remediation::RedundantPermissionsOutcome;
 use crate::state::use_session;
 use crate::views::dialogs::add_owner::AddOwnerButton;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -344,10 +345,36 @@ fn DisableSignInAction(
         .into_any()
 }
 
+/// What the remove-redundant-permissions Fix reports, and whether it cleared the
+/// finding (`true` ⇒ the row's Fix can go).
+///
+/// Cleared only when nothing is `skipped`: a skipped value is still declared
+/// (and possibly granted) because its covering permission isn't confirmed
+/// org-wide — revoked, scoped via Exchange, or Exchange couldn't be checked — so
+/// the finding stands. Gating on a non-empty `removed` instead would hide the
+/// Fix while a skipped value remains, and keep it forever after an idempotent
+/// re-run that found nothing left to do.
+fn redundant_outcome_report(o: &RedundantPermissionsOutcome) -> (String, bool) {
+    let n = o.removed.len();
+    let mut msg = format!(
+        "Removed {n} redundant permission{}",
+        if n == 1 { "" } else { "s" }
+    );
+    if !o.skipped.is_empty() {
+        msg.push_str(&format!(
+            "; kept {} — its covering permission isn't confirmed org-wide (revoked, scoped \
+             via Exchange, or Exchange couldn't be checked)",
+            o.skipped.join(", ")
+        ));
+    }
+    msg.push_str(" — re-run the audit to refresh scores.");
+    (msg, o.skipped.is_empty())
+}
+
 /// The remove-redundant-permissions fix: a button gated by a confirm dialog
 /// that names the narrower permissions (the same string previewed in-row). The
 /// backend re-plans against the live manifest + grants, so the toast reports
-/// what was actually removed/skipped.
+/// what was actually removed/kept — see [`redundant_outcome_report`].
 #[component]
 fn RedundantPermsAction(
     object_id: String,
@@ -379,20 +406,17 @@ fn RedundantPermsAction(
             {
                 Ok(outcome) => {
                     open.set(false);
-                    let n = outcome.removed.len();
-                    let mut msg = format!(
-                        "Removed {n} redundant permission{}",
-                        if n == 1 { "" } else { "s" }
-                    );
-                    if !outcome.skipped.is_empty() {
-                        msg.push_str(&format!(
-                            "; skipped {} (covering grant no longer present)",
-                            outcome.skipped.join(", ")
-                        ));
+                    let (msg, fixed) = redundant_outcome_report(&outcome);
+                    if fixed {
+                        session.toast_success(msg);
+                        on_done.run(object_id);
+                    } else {
+                        // Something the Fix offered is still in place, so the
+                        // finding stands and the Fix stays on the row. An error
+                        // toast lingers until read (the credentials tab's
+                        // partial-failure precedent).
+                        session.toast_error(msg, None);
                     }
-                    msg.push_str(" — re-run the audit to refresh scores.");
-                    session.toast_success(&msg);
-                    on_done.run(object_id);
                 }
                 Err(e) => error.set(Some(e.message)),
             }
@@ -419,7 +443,7 @@ fn RedundantPermsAction(
             <ConfirmDialog
                 open=Signal::derive(move || open.get())
                 title="Remove redundant permissions?"
-                body="Removes these narrower permissions — a broader permission this app also holds already grants the same access, so its calls keep working. Each removal is re-checked against the live grants first; a permission whose covering grant has since been revoked or scoped is skipped. Re-run the audit afterward to refresh scores."
+                body="Removes these narrower permissions — a broader permission this app also holds already grants the same access, so its calls keep working. Each removal is re-checked against the live grants first; a permission whose covering grant has since been revoked or scoped, or can't be confirmed, is kept. Re-run the audit afterward to refresh scores."
                 subject=subject
                 confirm_label="Remove"
                 busy=Signal::derive(move || busy.get())
@@ -694,5 +718,33 @@ mod tests {
             ..blank()
         };
         assert_eq!(target_tab(&sp, Some(spec("ownership"))), "owners");
+    }
+
+    fn redundant(removed: &[&str], skipped: &[&str]) -> RedundantPermissionsOutcome {
+        RedundantPermissionsOutcome {
+            removed: removed.iter().map(|s| s.to_string()).collect(),
+            skipped: skipped.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// The Fix clears only when nothing it offered is still in place: an
+    /// all-vetoed run (nothing removed, the value kept) must keep the button and
+    /// say why, rather than toast "Removed 0" and vanish.
+    #[test]
+    fn the_redundant_fix_clears_only_when_nothing_was_kept() {
+        let (msg, fixed) = redundant_outcome_report(&redundant(&["Mail.Read"], &[]));
+        assert!(fixed);
+        assert!(msg.contains("Removed 1 redundant permission "), "{msg}");
+
+        let (msg, fixed) = redundant_outcome_report(&redundant(&[], &["Mail.Read"]));
+        assert!(!fixed, "an all-vetoed run leaves the finding standing");
+        assert!(msg.contains("kept Mail.Read"), "{msg}");
+        assert!(msg.contains("isn't confirmed org-wide"), "{msg}");
+
+        let (_, fixed) = redundant_outcome_report(&redundant(&["Mail.Read"], &["Mail.ReadBasic"]));
+        assert!(!fixed, "a kept value keeps the Fix");
+
+        let (_, fixed) = redundant_outcome_report(&redundant(&[], &[]));
+        assert!(fixed, "an idempotent re-run found nothing left to do");
     }
 }

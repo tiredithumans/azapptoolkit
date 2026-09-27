@@ -262,9 +262,104 @@ pub struct AapMigrationReport {
     pub unattempted: Vec<String>,
 }
 
+impl AapMigrationReport {
+    /// `true` only for a real run that finished and migrated every app it
+    /// touched — the one shape a surface may report with a success toast.
+    /// Everything else keeps the report on screen, because the report is the
+    /// only place that says what was kept or missed. Each conjunct is there for
+    /// a shape that arrives with `failures` empty:
+    ///
+    /// - `dry_run`: a plan, not a migration.
+    /// - `incomplete` / `unattempted`: a cancelled or dead-session run names the
+    ///   apps it never reached, without a failure for any of them. Both are
+    ///   read, so an unattempted tail alone is enough.
+    /// - item `status != "migrated"`: a `partial` item kept its legacy policy
+    ///   because a grant is still org-wide, and the backend reports that in the
+    ///   item's `warnings`, not in `failures` — a partial must never read as
+    ///   success (the `AapMigrationReportView` rule).
+    /// - empty `items`: a real run that migrated nothing has nothing to report
+    ///   as done.
+    ///
+    /// Both migrate surfaces (the Exchange scoping section and the Security
+    /// tab's migrate dialog) gate on this one predicate so they can't disagree.
+    pub fn is_clean(&self) -> bool {
+        !self.dry_run
+            && !self.incomplete
+            && self.failures.is_empty()
+            && self.unattempted.is_empty()
+            && !self.items.is_empty()
+            && self.items.iter().all(|i| i.status == "migrated")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn item(status: &str) -> AapMigrationItem {
+        AapMigrationItem {
+            app_id: "app-1".into(),
+            source_policy_identities: vec!["policy-1".into()],
+            scope_name: Some("app_scope_app-1".into()),
+            scope_filter: None,
+            managed_group_name: None,
+            members_copied: vec![],
+            members_unverified: vec![],
+            roles_assigned: vec![],
+            removed_entra_grants: vec![],
+            removed_policies: vec![],
+            retired_groups: vec![],
+            status: status.into(),
+            warnings: vec![],
+        }
+    }
+
+    fn report(items: Vec<AapMigrationItem>) -> AapMigrationReport {
+        AapMigrationReport {
+            dry_run: false,
+            items,
+            failures: vec![],
+            incomplete: false,
+            unattempted: vec![],
+        }
+    }
+
+    #[test]
+    fn is_clean_rejects_every_shape_that_is_not_a_finished_migration() {
+        assert!(report(vec![item("migrated")]).is_clean());
+
+        let dry = AapMigrationReport {
+            dry_run: true,
+            ..report(vec![item("migrated")])
+        };
+        assert!(!dry.is_clean(), "a dry run is a plan");
+
+        assert!(
+            !report(vec![item("migrated"), item("partial")]).is_clean(),
+            "a partial item kept its policy"
+        );
+
+        let stopped = AapMigrationReport {
+            incomplete: true,
+            ..report(vec![item("migrated")])
+        };
+        assert!(!stopped.is_clean(), "a stopped run is not finished");
+
+        let tail = AapMigrationReport {
+            unattempted: vec!["app-2".into()],
+            ..report(vec![item("migrated")])
+        };
+        assert!(!tail.incomplete);
+        assert!(!tail.is_clean(), "an unattempted tail is read on its own");
+
+        let failed = AapMigrationReport {
+            failures: vec!["app-3: boom".into()],
+            ..report(vec![item("migrated")])
+        };
+        assert!(!failed.is_clean());
+
+        assert!(!report(vec![]).is_clean(), "nothing migrated");
+    }
 
     #[test]
     fn scope_group_dto_round_trips() {

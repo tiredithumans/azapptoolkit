@@ -316,18 +316,25 @@ pub fn ExchangeScopingSection(
         let scope = (!scope.is_empty()).then_some(scope);
         mig_cmd.run(
             move |r: AapMigrationReport| {
-                // Dry run mutated nothing — show the plan inline. A clean
-                // execute reloads the caller (which rebuilds this section), so
-                // the summary rides a toast instead. A partial failure keeps
-                // the report inline (no reload) so the failure lines survive;
-                // Refresh picks up whatever did land. So does a stopped run
-                // (Stop migration, or a dead session): it did nothing, and a
-                // "Migrated 0 policy(ies)" success toast would read as done —
-                // the report's "This run stopped…" callout says what happened.
-                if dry_run || !r.failures.is_empty() || r.incomplete {
+                // Only a clean run (`AapMigrationReport::is_clean`, the same
+                // gate the Security tab's migrate dialog uses) toasts and
+                // reloads the caller — the reload rebuilds this section, so
+                // anything held here is gone. Every other shape keeps the
+                // report inline, because the report is the only place that
+                // says what happened: a dry run's plan; a `partial` item that
+                // kept its legacy policy because a grant is still org-wide
+                // (reported as a warning, not a failure); a failed app; and a
+                // stopped run (Stop migration, or a dead session) with its
+                // unattempted tail. Refresh picks up whatever did land.
+                if !r.is_clean() {
                     mig_result.set(Some(r));
                 } else {
-                    session.toast_success(format!("Migrated {} policy(ies).", r.items.len()));
+                    // One item per app; an app can fold several policies.
+                    let policies: usize = r.items.iter().map(|i| i.removed_policies.len()).sum();
+                    session.toast_success(format!(
+                        "Migrated {} app(s); removed {policies} legacy policy(ies).",
+                        r.items.len()
+                    ));
                     on_changed.run(());
                 }
             },

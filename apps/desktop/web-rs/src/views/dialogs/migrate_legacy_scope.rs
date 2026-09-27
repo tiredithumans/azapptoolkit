@@ -77,11 +77,10 @@ pub fn MigrateLegacyScopeButton(
                     Ok(r) => {
                         // A clean run is the only one that closes: `partial`
                         // means the fail-closed guards held something back, and
-                        // those notes are the point of the flow.
-                        let clean = !dry_run
-                            && r.failures.is_empty()
-                            && !r.items.is_empty()
-                            && r.items.iter().all(|i| i.status == "migrated");
+                        // those notes are the point of the flow. A stopped run
+                        // (cancelled, or the session died) stays open too, so
+                        // the apps it never reached stay named.
+                        let clean = r.is_clean();
                         if clean {
                             open.set(false);
                             session.toast_success(

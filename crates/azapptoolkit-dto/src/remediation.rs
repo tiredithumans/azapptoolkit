@@ -22,8 +22,12 @@ impl RemediationOutcome {
 /// Result of the remove-redundant-permissions remediation. `removed` lists the
 /// permission values actually removed (grant revoked when present, declaration
 /// dropped); `skipped` lists values the audit flagged but the live re-resolution
-/// found unsafe to remove (the covering broader grant is no longer present), so
-/// the UI can report an honest summary against a stale snapshot.
+/// found unsafe to remove, so the UI can report an honest summary against a
+/// stale snapshot: the covering broader grant is no longer present, or the
+/// covering broader permission is confined (Exchange RBAC / a legacy Application
+/// Access Policy) or its org-wide status couldn't be confirmed (Exchange
+/// unreachable, or you aren't an Exchange admin). A non-empty `skipped` means
+/// the finding still stands.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RedundantPermissionsOutcome {

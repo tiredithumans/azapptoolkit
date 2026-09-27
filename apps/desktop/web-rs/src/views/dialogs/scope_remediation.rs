@@ -9,8 +9,10 @@ use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize, Textarea};
 
 use azapptoolkit_core::audit::RemediationAction;
 
+use crate::bindings::remediation::ExchangeAccessResult;
 use crate::bindings::{auth, exchange, remediation, sharepoint};
 use crate::components::group_autocomplete::GroupAutocomplete;
+use crate::components::ui::Callout;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
@@ -58,6 +60,8 @@ pub fn ScopeMailboxButton(
     let open = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
+    // A grant that came back with warnings — shown in the modal until read.
+    let warned: RwSignal<Option<ExchangeAccessResult>> = RwSignal::new(None);
     let groups_text = RwSignal::new(String::new());
 
     let targets = action.targets.clone();
@@ -77,12 +81,13 @@ pub fn ScopeMailboxButton(
         };
         busy.set(true);
         error.set(None);
+        warned.set(None);
         let target = target.clone();
         let targets = targets.clone();
         leptos::task::spawn_local(async move {
-            // Both paths share the grant-before-strip Exchange scoping core;
-            // only the entry point differs (manifest-resolving wrapper vs the
-            // SP-only command). Unified to (removed grants, warnings) counts.
+            // Both paths share the grant-before-strip Exchange scoping core and
+            // return the same `ExchangeAccessResult`; only the entry point
+            // differs (manifest-resolving wrapper vs the SP-only command).
             let outcome = match &target {
                 ScopeFixTarget::AppReg { object_id } => {
                     remediation::remediate_scope_mailbox_access(
@@ -92,37 +97,40 @@ pub fn ScopeMailboxButton(
                         &groups,
                     )
                     .await
-                    .map(|res| (res.removed_entra_grants.len(), res.warnings.len()))
                 }
                 ScopeFixTarget::ServicePrincipal {
                     sp_object_id,
                     app_id,
                     display_name,
-                } => exchange::grant_managed_identity_scoped_exchange_access(
-                    &t.tenant_id,
-                    sp_object_id,
-                    app_id,
-                    display_name,
-                    &targets,
-                    &groups,
-                    true,
-                )
-                .await
-                .map(|res| (res.removed_entra_grants.len(), 0)),
+                } => {
+                    exchange::grant_managed_identity_scoped_exchange_access(
+                        &t.tenant_id,
+                        sp_object_id,
+                        app_id,
+                        display_name,
+                        &targets,
+                        &groups,
+                        true,
+                    )
+                    .await
+                }
             };
             match outcome {
-                Ok((removed, warnings)) => {
+                Ok(res) if res.warnings.is_empty() => {
                     open.set(false);
-                    let warn = if warnings == 0 {
-                        String::new()
-                    } else {
-                        format!(" ({warnings} warning(s))")
-                    };
                     session.toast_success(format!(
-                        "Scoped mailbox access — removed {removed} org-wide grant(s){warn}. Re-run the audit to refresh scores."
+                        "Scoped mailbox access — removed {} org-wide grant(s). Re-run the audit to refresh scores.",
+                        res.removed_entra_grants.len()
                     ));
                     on_done.run(target.row_id());
                 }
+                // A warned grant stays in the modal and keeps the row's Fix:
+                // the common warning ("a management scope already exists for
+                // this app with a different group set") means the groups just
+                // requested were NOT applied, so a success toast would read a
+                // no-op as done. Same rule as the Exchange scoping section's
+                // `grant_result`.
+                Ok(res) => warned.set(Some(res)),
                 Err(e) => error.set(Some(e.message)),
             }
             busy.set(false);
@@ -142,7 +150,10 @@ pub fn ScopeMailboxButton(
         <div class="audit-actions">
             <Button
                 appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                on_click=Box::new(move |_| open.set(true))
+                on_click=Box::new(move |_| {
+                    warned.set(None);
+                    open.set(true);
+                })
             >
                 {label}
             </Button>
@@ -165,6 +176,29 @@ pub fn ScopeMailboxButton(
                             value=groups_text
                             placeholder="Mail-enabled groups — one per line (name, address, or object id)"
                         />
+                        {move || {
+                            warned
+                                .get()
+                                .map(|r| {
+                                    let summary = format!(
+                                        "Scope “{}”: removed {} org-wide grant(s), but some of what you asked for may not have been applied — read the notes below.",
+                                        r.scope_name,
+                                        r.removed_entra_grants.len(),
+                                    );
+                                    view! {
+                                        <Callout tone="warn" role="status">
+                                            <Body1>{summary}</Body1>
+                                            <ul class="warnings">
+                                                {r
+                                                    .warnings
+                                                    .into_iter()
+                                                    .map(|w| view! { <li>{w}</li> })
+                                                    .collect_view()}
+                                            </ul>
+                                        </Callout>
+                                    }
+                                })
+                        }}
                         {move || {
                             error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
                         }}

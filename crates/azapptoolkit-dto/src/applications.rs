@@ -23,6 +23,13 @@ pub struct ApplicationDetail {
     /// flattened: one entry per `(resource, permission)` pair.
     #[serde(default)]
     pub resolved_permissions: Vec<ResolvedPermission>,
+    /// `true` when a declared resource's service principal couldn't be read
+    /// (throttling / a transient Graph error): that resource's rows carry no
+    /// runtime grant ids and read as "Not granted" whether or not they are.
+    /// Such a detail is never cached. `false` on payloads cached before the
+    /// field existed.
+    #[serde(default)]
+    pub resolution_degraded: bool,
 }
 
 /// Lean App Registrations list row, flattened to the scalars the list and the

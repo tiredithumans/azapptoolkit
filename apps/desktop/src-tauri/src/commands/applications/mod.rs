@@ -273,13 +273,14 @@ pub async fn get_application_detail(
         None => (Vec::new(), Vec::new()),
     };
 
-    let resolved_permissions = permissions_resolve::resolve_required_resource_access(
-        &client,
-        &application.required_resource_access,
-        &app_role_assignments,
-        &oauth2_permission_grants,
-    )
-    .await;
+    let (resolved_permissions, resolution_degraded) =
+        permissions_resolve::resolve_required_resource_access(
+            &client,
+            &application.required_resource_access,
+            &app_role_assignments,
+            &oauth2_permission_grants,
+        )
+        .await;
 
     let detail = ApplicationDetail {
         application,
@@ -288,8 +289,15 @@ pub async fn get_application_detail(
         app_role_assignments,
         oauth2_permission_grants,
         resolved_permissions,
+        resolution_degraded,
     };
-    state.cache.put(CacheKind::Lists, detail_key, &detail);
+    // A degraded run is never cached nor shown as all-clear (AGENTS.md): a
+    // resource SP that couldn't be read leaves its granted permissions reading
+    // "Not granted", and caching that would pin the wrong answer for the whole
+    // Lists TTL. The flag rides the payload so the tab can say so instead.
+    if !detail.resolution_degraded {
+        state.cache.put(CacheKind::Lists, detail_key, &detail);
+    }
     Ok(detail)
 }
 
