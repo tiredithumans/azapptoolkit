@@ -349,7 +349,9 @@ pub(crate) fn augment_with_object_id(mut err: UiError, object_id: &str) -> UiErr
 /// itself is a plain `Err` (nothing landed). After it, the first failing step
 /// (service principal, initial secret, a re-auth-fatal owner add) stops the
 /// run and comes back as `Some(error)` beside what did land; the caller busts
-/// the list tier on the `Ok` and then surfaces the error.
+/// the list tier on the `Ok` and then surfaces the error. A minted initial
+/// secret is never paired with an error: its value is returned only once, so
+/// an owner failure after it is reported through `failed_owner_ids` alone.
 pub(crate) async fn create_application_core(
     client: &azapptoolkit_graph::GraphClient,
     input: CreateApplicationInput,
@@ -408,10 +410,12 @@ pub(crate) async fn create_application_core_tagged(
 
     let mut added_owner_ids = Vec::with_capacity(input.initial_owner_ids.len());
     let mut failed_owner_ids = Vec::new();
+    // Set by an earlier step's error or by a dead session below.
+    let mut stopped = error.is_some();
     for owner in input.initial_owner_ids {
-        // After a stop (an earlier step's error, or a dead session below) the
-        // remaining owners are reported as failed without being attempted.
-        if error.is_some() {
+        // After a stop the remaining owners are reported as failed without
+        // being attempted.
+        if stopped {
             failed_owner_ids.push(owner);
             continue;
         }
@@ -421,10 +425,17 @@ pub(crate) async fn create_application_core_tagged(
                 tracing::warn!(%owner, ?err, "failed to add initial owner on create");
                 let e = UiError::from(err);
                 failed_owner_ids.push(owner);
-                // A dead session fails every remaining owner identically, and
-                // the caller must see the code to offer Re-authenticate.
+                // A dead session fails every remaining owner identically, so
+                // the loop stops, and the caller must see the code to offer
+                // Re-authenticate. The one exception: once a secret has been
+                // minted, the run must stay `Ok`, because an error would drop
+                // the only copy of its value. The failed owners are still
+                // listed, and the next command meets the dead session anyway.
                 if e.is_reauth_fatal() {
-                    error = Some(e);
+                    stopped = true;
+                    if initial_secret.is_none() {
+                        error = Some(e);
+                    }
                 }
             }
         }
@@ -601,7 +612,8 @@ mod handler_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::commands::test_support::{
-        dies_after, indexes_intact, mock_graph, mock_graph_rw, mock_state, seed_indexes_and_detail,
+        dies_after, indexes_intact, mock_graph, mock_graph_rw, mock_state,
+        mock_state_with_write_token, seed_indexes_and_detail,
     };
 
     const TENANT: &str = "t1";
@@ -760,6 +772,67 @@ mod handler_tests {
             count(&server, "POST", "/owners/$ref").await,
             0,
             "no owner add reached Graph after the session died"
+        );
+    }
+
+    /// Once the initial secret is minted, a dead session in the owner loop
+    /// must not turn the command into an `Err`: that would drop the only copy
+    /// of the secret value. The loop still stops and lists every owner as
+    /// failed, and the list tier is still busted.
+    #[tokio::test]
+    async fn a_dead_session_after_the_initial_secret_keeps_the_secret() {
+        // Two write bearers: the app POST and the addPassword get them, the
+        // first owner add dies.
+        let (server, state) = mock_state_with_write_token(TENANT, dies_after(2)).await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/applications"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "obj-new",
+                "appId": "app-new",
+                "displayName": "New",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/applications/obj-new/addPassword"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keyId": "k1",
+                "displayName": "initial",
+                "secretText": "s3cret",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/applications/obj-new/owners/$ref"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        seed_indexes_and_detail(&state, TENANT, "obj-1");
+
+        let res = create_application_in_state(
+            &state,
+            TENANT,
+            CreateApplicationInput {
+                display_name: "New".into(),
+                initial_secret_display_name: Some("initial".into()),
+                initial_owner_ids: vec!["u1".into(), "u2".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a minted secret keeps the command Ok");
+        let secret = res.initial_secret.expect("the secret value is returned");
+        assert_eq!(secret.secret_text.as_deref(), Some("s3cret"));
+        assert!(res.added_owner_ids.is_empty());
+        assert_eq!(res.failed_owner_ids, ["u1", "u2"]);
+        assert_eq!(
+            count(&server, "POST", "/owners/$ref").await,
+            0,
+            "no owner add reached Graph after the session died"
+        );
+        assert!(
+            !indexes_intact(&state, TENANT),
+            "the landed create still busts the list tier"
         );
     }
 }

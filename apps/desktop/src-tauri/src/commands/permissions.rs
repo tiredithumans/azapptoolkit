@@ -385,6 +385,10 @@ fn grant_failure_message(err: &azapptoolkit_graph::GraphError) -> String {
 /// earlier `?` did. Backend-only, never an IPC type.
 #[derive(Debug)]
 pub(crate) struct GrantRun {
+    /// Meaningful only when `error` is `None`. On a stopped run it is a
+    /// placeholder: its ids may be empty (an SP failure after the manifest
+    /// PATCH leaves `client_service_principal_id` as `""`), so a caller reads
+    /// the landed flags, never this, once `error` is `Some`.
     pub(crate) result: GrantResult,
     /// The app's `requiredResourceAccess` was PATCHed (single grant only).
     pub(crate) manifest_changed: bool,
