@@ -14,6 +14,7 @@ use parking_lot::Mutex;
 use azapptoolkit_arm::{ArmClient, LogAnalyticsClient};
 use azapptoolkit_auth::{EntraAuthService, TenantContext};
 use azapptoolkit_core::cache::Cache;
+use azapptoolkit_core::identity::canonical_tenant_id;
 use azapptoolkit_core::settings::UserSettings;
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_graph::GraphClient;
@@ -253,12 +254,15 @@ impl AppState {
             BUILD_CLIENT_ID,
             DEFAULT_CLIENT_ID,
         );
-        let tenant_id = resolve(
+        // Canonical (lowercase) so an env/`.env`-baked or pre-fix settings value
+        // typed in uppercase still equals the id token's `tid`, the cache keys
+        // and the remembered account's tenant.
+        let tenant_id = canonical_tenant_id(&resolve(
             "AZAPPTOOLKIT_TENANT_ID",
             settings.tenant_id.as_deref(),
             BUILD_TENANT_ID,
             DEFAULT_TENANT_ID,
-        );
+        ));
         if tenant_id == DEFAULT_TENANT_ID {
             tracing::warn!(
                 "AZAPPTOOLKIT_TENANT_ID is not set; sign-in will fail until configured (first-run screen)."

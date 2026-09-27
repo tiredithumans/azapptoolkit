@@ -35,7 +35,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
 
 use azapptoolkit_core::cloud::CloudEnvironment;
-use azapptoolkit_core::identity::{SignInOutcome, TenantContext};
+use azapptoolkit_core::identity::{SignInOutcome, TenantContext, canonical_tenant_id};
 
 use crate::error::{AuthError, Result};
 use crate::token_cache::{
@@ -90,11 +90,14 @@ pub struct EntraAuthService {
 }
 
 impl EntraAuthService {
-    pub fn new(client_id: impl Into<String>, tenant_id: impl Into<String>) -> Arc<Self> {
+    /// `tenant_id` is stored in its canonical (lowercase) spelling, the form
+    /// the id token's `tid` claim takes, so `sign_in`'s tid check and every
+    /// tenant-keyed map agree however the operator typed the GUID.
+    pub fn new(client_id: impl Into<String>, tenant_id: impl AsRef<str>) -> Arc<Self> {
         let cloud = CloudEnvironment::from_env();
         Arc::new(Self {
             client_id: client_id.into(),
-            tenant_id: tenant_id.into(),
+            tenant_id: canonical_tenant_id(tenant_id.as_ref()),
             auth_root: cloud.login_authority_root().to_string(),
             cloud,
             cache: TokenCache::new(),
@@ -577,7 +580,11 @@ impl EntraAuthService {
                     return Err(AuthError::RefreshTokenMissing(tenant.tenant_id.clone()));
                 }
                 // Deleted, already gone, or the keyring failed (ignored, as the
-                // purge always was): the session is dead either way.
+                // purge always was): the session is dead either way. One narrow
+                // window remains: a `reauthenticate` that stores a new token and
+                // re-registers the tenant after the delete above but before the
+                // two lines below would lose its cached tokens and registration
+                // (its keyring token survives, so launch restore still finds it).
                 self.cache.invalidate_tenant(&tenant.tenant_id);
                 self.known_tenants.lock().remove(&tenant.tenant_id);
                 return Err(AuthError::RefreshTokenMissing(tenant.tenant_id.clone()));
@@ -606,10 +613,14 @@ impl EntraAuthService {
     /// Ends `tenant`'s session: deletes the keyring refresh token, then drops
     /// the cached access tokens and the known-tenant entry.
     ///
-    /// All or nothing. The keyring delete is the one fallible step, so it goes
-    /// first: a failure leaves the session fully intact (the UI truthfully
-    /// says "still signed in" and Sign out can be retried), never half-cleared
-    /// with the refresh token surviving for the next launch to restore.
+    /// The keyring delete is the one fallible step, so it goes first: a failure
+    /// leaves the known-tenant entry and cached tokens intact (the UI
+    /// truthfully says "still signed in" and Sign out can be retried), never a
+    /// cleared session whose refresh token survives for the next launch to
+    /// restore. For a refresh token split across several keyring chunks
+    /// (Windows) a failure after the first chunk is gone still leaves the
+    /// in-memory session, but the stored token can no longer be loaded, so the
+    /// next launch does not restore it.
     pub async fn sign_out(&self, tenant: &TenantContext) -> Result<()> {
         delete_refresh_token_off_worker(&tenant.tenant_id, &tenant.account_oid).await?;
         self.cache.invalidate_tenant(&tenant.tenant_id);
@@ -794,7 +805,8 @@ mod tests {
         init_mock_keyring();
         EntraAuthService {
             client_id: "client".into(),
-            tenant_id: tenant.into(),
+            // The same canonicalisation `new` applies.
+            tenant_id: canonical_tenant_id(tenant),
             auth_root,
             cloud: CloudEnvironment::Commercial,
             cache: TokenCache::new(),
@@ -978,6 +990,29 @@ mod tests {
             "interactive-at"
         );
         assert_eq!(stored_token(tenant, oid).as_deref(), Some("rt-interactive"));
+    }
+
+    /// An operator-typed uppercase GUID signs in against Entra's lowercase
+    /// `tid`, and the session registers under the tid spelling.
+    #[tokio::test]
+    async fn sign_in_accepts_an_uppercase_configured_tenant() {
+        let server = MockServer::start().await;
+        let (tid, oid) = ("5a0e3c1d-9b7f-4e2a-8c6d-1f2e3d4c5b6a", "signin-upper-oid");
+        let (svc, nonce, _) = interactive_service(server.uri(), &tid.to_ascii_uppercase());
+        // The authority is built from the canonical (lowercase) tenant.
+        mount_interactive_token(&server, tid, tid, Some(oid), None, nonce).await;
+
+        let outcome = svc.sign_in().await.unwrap();
+
+        assert_eq!(outcome.tenant.tenant_id, tid);
+        assert!(svc.tenant_context(tid).is_some());
+        assert_eq!(stored_token(tid, oid).as_deref(), Some("rt-interactive"));
+    }
+
+    #[test]
+    fn new_stores_the_canonical_tenant() {
+        let svc = EntraAuthService::new("c", " 5A0E3C1D-9B7F-4E2A-8C6D-1F2E3D4C5B6A ");
+        assert_eq!(svc.tenant_id, "5a0e3c1d-9b7f-4e2a-8c6d-1f2e3d4c5b6a");
     }
 
     #[tokio::test]

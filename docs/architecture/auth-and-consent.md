@@ -122,9 +122,17 @@ which a sign-out/sign-in cycle would.
   the chunk-set lock. Refresh locks are per scope set, so a slow refresh can fail with the old token
   after `reauthenticate` stored a new one; that newer session is kept and the call returns
   `RefreshTokenMissing` without dropping the tenant, so the silent `refresh_session` retry recovers.
-- `sign_out` is all or nothing: the keyring delete (the one fallible step) runs first, and the token
-  cache and `known_tenants` are cleared only after it succeeds. Every keyring call in the service
+  A narrow window remains: a `reauthenticate` landing between the delete and the in-memory cleanup
+  loses its cached tokens and registration (its keyring token survives for launch restore).
+- `sign_out` deletes the keyring token (the one fallible step) first, and clears the token cache and
+  `known_tenants` only after it succeeds, so a failure never leaves a refresh token for the next
+  launch to restore. For a multi-chunk (Windows) token, a failure after the first chunk is gone keeps
+  the in-memory session but leaves the stored token unloadable. Every keyring call in the service
   runs on the blocking pool (pinned by a source scan in `service/mod.rs`).
+- The configured tenant id is canonicalised (`core::identity::canonical_tenant_id`: trimmed,
+  lowercase) wherever it enters (`EntraAuthService::new`, `AppState` resolution, `set_auth_config`),
+  because Entra issues `tid` lowercase and the tid check, cache keys and launch restore compare
+  verbatim.
 - Front-end wiring: `Session::spawn_refresh_token` tries silent `refresh_session` first, then
   falls back to `reauthenticate` on those two codes. It is the one entry for the top-bar **Refresh
   token** button (`shell.rs`, next to the tenant chip) and the 401 toast below, and its in-flight

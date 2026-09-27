@@ -4,6 +4,7 @@
 
 use tauri::{AppHandle, State};
 
+use azapptoolkit_core::identity::canonical_tenant_id;
 use azapptoolkit_core::settings::UserSettings;
 
 use crate::dto::UiError;
@@ -29,24 +30,7 @@ pub fn get_auth_config(state: State<'_, AppState>) -> AuthConfigStatus {
 /// once at startup.
 #[tauri::command]
 pub fn set_auth_config(client_id: String, tenant_id: String) -> Result<(), UiError> {
-    let client_id = client_id.trim().to_string();
-    let tenant_id = tenant_id.trim().to_string();
-
-    if !is_guid(&client_id) {
-        return Err(UiError::validation(
-            "invalid_client_id",
-            "Application (client) ID must be a GUID, e.g. 00000000-0000-0000-0000-000000000000.",
-        ));
-    }
-    // GUID only: the id token's `tid` claim is always the tenant GUID and
-    // `sign_in` compares it to this string verbatim (as does the launch-restore
-    // lookup), so a domain here could be saved but never signed in with.
-    if !is_guid(&tenant_id) {
-        return Err(UiError::validation(
-            "invalid_tenant_id",
-            "Directory (tenant) ID must be a GUID, e.g. 00000000-0000-0000-0000-000000000000 — copy it from the app registration's Overview page.",
-        ));
-    }
+    let (client_id, tenant_id) = validated_ids(&client_id, &tenant_id)?;
 
     let config_dir = crate::config_directory();
     // Through `mutate`, not `stored` + `save`: three commands read-modify-write
@@ -58,6 +42,33 @@ pub fn set_auth_config(client_id: String, tenant_id: String) -> Result<(), UiErr
     })
     .map_err(|e| UiError::io(format!("Could not write settings.json: {e}")))?;
     Ok(())
+}
+
+/// The IDs `set_auth_config` would save, or the validation error it returns.
+/// Split out so the rules are testable without writing `settings.json`.
+fn validated_ids(client_id: &str, tenant_id: &str) -> Result<(String, String), UiError> {
+    let client_id = client_id.trim().to_string();
+    // Lowercase, the spelling of the id token's `tid`: a GUID is
+    // case-insensitive, but the tid check and launch restore compare verbatim.
+    let tenant_id = canonical_tenant_id(tenant_id);
+
+    if !is_guid(&client_id) {
+        return Err(UiError::validation(
+            "invalid_client_id",
+            "Application (client) ID must be a GUID, e.g. 00000000-0000-0000-0000-000000000000.",
+        ));
+    }
+    // GUID only: the id token's `tid` claim is always the (lowercase) tenant
+    // GUID and `sign_in` compares it to this string verbatim (as does the
+    // launch-restore lookup), so a domain here could be saved but never signed
+    // in with.
+    if !is_guid(&tenant_id) {
+        return Err(UiError::validation(
+            "invalid_tenant_id",
+            "Directory (tenant) ID must be a GUID, e.g. 00000000-0000-0000-0000-000000000000 — copy it from the app registration's Overview page.",
+        ));
+    }
+    Ok((client_id, tenant_id))
 }
 
 /// Relaunches the app so `AppState::new` re-resolves the freshly-saved IDs.
@@ -76,10 +87,8 @@ mod tests {
     /// domain-configured install could never complete a sign-in.
     #[test]
     fn tenant_must_be_a_guid() {
-        // Rejected before `settings.json` is touched, so this never writes.
-        let save_with_tenant = |tenant: &str| {
-            set_auth_config("3fa85f64-5717-4562-b3fc-2c963f66afa6".into(), tenant.into())
-        };
+        let save_with_tenant =
+            |tenant: &str| validated_ids("3fa85f64-5717-4562-b3fc-2c963f66afa6", tenant);
         for rejected in [
             "contoso.onmicrosoft.com",
             "contoso.com",
@@ -90,5 +99,17 @@ mod tests {
             let err = save_with_tenant(rejected).expect_err(rejected);
             assert_eq!(err.code, "invalid_tenant_id", "{rejected}");
         }
+    }
+
+    /// An uppercase GUID is accepted but saved lowercase: Entra's `tid` is
+    /// lowercase and the sign-in and launch-restore checks compare verbatim.
+    #[test]
+    fn tenant_is_saved_in_the_lowercase_tid_spelling() {
+        let (_, tenant) = validated_ids(
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            " 3FA85F64-5717-4562-B3FC-2C963F66AFA6 ",
+        )
+        .unwrap();
+        assert_eq!(tenant, "3fa85f64-5717-4562-b3fc-2c963f66afa6");
     }
 }

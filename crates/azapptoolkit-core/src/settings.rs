@@ -361,7 +361,7 @@ mod tests {
         UserSettings::mutate(dir.path(), |s| {
             s.auto_update = false;
             s.client_id = Some("11111111-1111-1111-1111-111111111111".into());
-            s.tenant_id = Some("contoso.onmicrosoft.com".into());
+            s.tenant_id = Some("22222222-2222-2222-2222-222222222222".into());
         })
         .unwrap();
         // `stored` (not `load`) so an `AZAPPTOOLKIT_AUTO_UPDATE` in the test env
@@ -372,7 +372,10 @@ mod tests {
             loaded.client_id.as_deref(),
             Some("11111111-1111-1111-1111-111111111111")
         );
-        assert_eq!(loaded.tenant_id.as_deref(), Some("contoso.onmicrosoft.com"));
+        assert_eq!(
+            loaded.tenant_id.as_deref(),
+            Some("22222222-2222-2222-2222-222222222222")
+        );
     }
 
     #[test]
