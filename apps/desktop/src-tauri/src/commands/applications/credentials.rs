@@ -278,8 +278,20 @@ pub async fn remove_expired_passwords(
     tenant_id: String,
     object_id: String,
 ) -> Result<RemoveExpiredResult, UiError> {
-    let client = state.graph_for(&tenant_id);
-    let app = client.get_application(&object_id).await?;
+    remove_expired_passwords_core(&state, &tenant_id, &object_id).await
+}
+
+/// The body of [`remove_expired_passwords`], taking `&AppState` so the
+/// invalidation rule — bust the credential tier only when something was
+/// actually removed, never on the error path, and never the tenant-wide
+/// indexes — is reachable from a test (the [`add_password_core`] seam).
+pub(crate) async fn remove_expired_passwords_core(
+    state: &AppState,
+    tenant_id: &str,
+    object_id: &str,
+) -> Result<RemoveExpiredResult, UiError> {
+    let client = state.graph_for(tenant_id);
+    let app = client.get_application(object_id).await?;
     let now = chrono::Utc::now();
 
     let mut removed_key_ids = Vec::new();
@@ -288,7 +300,7 @@ pub async fn remove_expired_passwords(
         if !azapptoolkit_core::audit::is_expired(cred.end_date_time, now) {
             continue;
         }
-        match client.remove_password(&object_id, &cred.key_id).await {
+        match client.remove_password(object_id, &cred.key_id).await {
             Ok(()) => removed_key_ids.push(cred.key_id.clone()),
             Err(err) => failures.push(KeyFailure {
                 key_id: cred.key_id.clone(),
@@ -298,7 +310,7 @@ pub async fn remove_expired_passwords(
     }
 
     if !removed_key_ids.is_empty() {
-        invalidate_app_credentials(&state.cache, &tenant_id, &object_id);
+        invalidate_app_credentials(&state.cache, tenant_id, object_id);
     }
     Ok(RemoveExpiredResult {
         removed_key_ids,
@@ -309,12 +321,7 @@ pub async fn remove_expired_passwords(
 #[cfg(test)]
 mod password_window_tests {
     use super::{AddPasswordInput, resolve_password_window};
-
-    fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
-        chrono::DateTime::parse_from_rfc3339(s)
-            .unwrap()
-            .with_timezone(&chrono::Utc)
-    }
+    use crate::commands::test_support::{at, fixed_now};
 
     fn input(
         lifetime_days: Option<u32>,
@@ -329,21 +336,21 @@ mod password_window_tests {
         }
     }
 
-    const NOW: &str = "2026-01-01T00:00:00Z";
-
     #[test]
     fn preset_days_resolve_relative_to_now() {
-        let (start, end) = resolve_password_window(&input(Some(90), None, None), at(NOW)).unwrap();
+        let (start, end) =
+            resolve_password_window(&input(Some(90), None, None), fixed_now()).unwrap();
         assert!(start.is_none());
         assert_eq!(end, at("2026-04-01T00:00:00Z"));
     }
 
     #[test]
     fn defaults_to_180_days_and_clamps_to_cap() {
-        let (_, end) = resolve_password_window(&input(None, None, None), at(NOW)).unwrap();
-        assert_eq!(end, at(NOW) + chrono::Duration::days(180));
-        let (_, end) = resolve_password_window(&input(Some(9999), None, None), at(NOW)).unwrap();
-        assert_eq!(end, at(NOW) + chrono::Duration::days(730));
+        let (_, end) = resolve_password_window(&input(None, None, None), fixed_now()).unwrap();
+        assert_eq!(end, fixed_now() + chrono::Duration::days(180));
+        let (_, end) =
+            resolve_password_window(&input(Some(9999), None, None), fixed_now()).unwrap();
+        assert_eq!(end, fixed_now() + chrono::Duration::days(730));
     }
 
     #[test]
@@ -354,7 +361,7 @@ mod password_window_tests {
                 Some("2026-02-01T00:00:00Z"),
                 Some("2026-06-01T00:00:00Z"),
             ),
-            at(NOW),
+            fixed_now(),
         )
         .unwrap();
         assert_eq!(start, Some(at("2026-02-01T00:00:00Z")));
@@ -369,14 +376,17 @@ mod password_window_tests {
                 Some("2026-06-01T00:00:00Z"),
                 Some("2026-06-01T00:00:00Z"),
             ),
-            at(NOW),
+            fixed_now(),
         )
         .unwrap_err();
         assert!(err.contains("after the start"));
         // Without an explicit start, "now" anchors the window.
         assert!(
-            resolve_password_window(&input(None, None, Some("2025-12-31T00:00:00Z")), at(NOW))
-                .is_err()
+            resolve_password_window(
+                &input(None, None, Some("2025-12-31T00:00:00Z")),
+                fixed_now()
+            )
+            .is_err()
         );
     }
 
@@ -388,7 +398,7 @@ mod password_window_tests {
                 Some("2026-01-01T00:00:00Z"),
                 Some("2028-06-01T00:00:00Z"),
             ),
-            at(NOW),
+            fixed_now(),
         )
         .unwrap_err();
         assert!(err.contains("24 months"));
@@ -453,13 +463,11 @@ mod cert_tests {
 mod handler_tests {
     use super::*;
 
-    use azapptoolkit_core::cache::CacheKind;
-    use azapptoolkit_core::models::{Application, ServicePrincipal};
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, ResponseTemplate};
 
-    use crate::commands::applications::cache::{
-        app_detail_key, app_name_index_hit, app_name_index_store, sp_index_hit, sp_index_store,
+    use crate::commands::test_support::{
+        detail_cached, indexes_intact, mock_state, sample_app_json, seed_indexes_and_detail,
     };
 
     const TENANT: &str = "t1";
@@ -468,20 +476,11 @@ mod handler_tests {
     /// Seeds what a credential mutation must NOT drop (the two pinned
     /// tenant-wide indexes) alongside what it must drop (the app's detail row).
     fn seed(state: &AppState) {
-        sp_index_store(&state.cache, TENANT, vec![ServicePrincipal::default()]);
-        app_name_index_store(&state.cache, TENANT, vec![Application::default()]);
-        state.cache.put(
-            CacheKind::Lists,
-            app_detail_key(TENANT, OBJECT),
-            &serde_json::json!({"id": OBJECT}),
-        );
+        seed_indexes_and_detail(state, TENANT, OBJECT);
     }
 
-    fn detail_cached(state: &AppState) -> bool {
-        state
-            .cache
-            .get::<serde_json::Value>(CacheKind::Lists, &app_detail_key(TENANT, OBJECT))
-            .is_some()
+    fn detail_cached_here(state: &AppState) -> bool {
+        detail_cached(state, TENANT, OBJECT)
     }
 
     fn input() -> AddPasswordInput {
@@ -495,7 +494,7 @@ mod handler_tests {
 
     #[tokio::test]
     async fn a_successful_secret_add_busts_the_credential_tier_and_keeps_the_indexes() {
-        let server = MockServer::start().await;
+        let (server, state) = mock_state(TENANT).await;
         Mock::given(method("POST"))
             .and(path(format!("/v1.0/applications/{OBJECT}/addPassword")))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -506,7 +505,6 @@ mod handler_tests {
             .mount(&server)
             .await;
 
-        let state = AppState::for_test(TENANT, &server.uri());
         seed(&state);
 
         let cred = add_password_core(&state, TENANT, OBJECT, input())
@@ -515,32 +513,27 @@ mod handler_tests {
         assert_eq!(cred.key_id, "k1");
 
         assert!(
-            !detail_cached(&state),
+            !detail_cached_here(&state),
             "the app's detail row must be busted — it carries the credential list"
         );
         // The AGENTS.md rule a credential-only mutation exists to respect: the
         // tenant-wide indexes cost a full directory scan and are unaffected by
         // one app's secret.
         assert!(
-            sp_index_hit(&state.cache, TENANT).is_some(),
-            "the SP index must survive a credential-only mutation"
-        );
-        assert!(
-            app_name_index_hit(&state.cache, TENANT).is_some(),
-            "the app-registration index must survive a credential-only mutation"
+            indexes_intact(&state, TENANT),
+            "the SP and app-registration indexes must survive a credential-only mutation"
         );
     }
 
     #[tokio::test]
     async fn a_failed_secret_add_invalidates_nothing() {
-        let server = MockServer::start().await;
+        let (server, state) = mock_state(TENANT).await;
         Mock::given(method("POST"))
             .and(path(format!("/v1.0/applications/{OBJECT}/addPassword")))
             .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
             .mount(&server)
             .await;
 
-        let state = AppState::for_test(TENANT, &server.uri());
         seed(&state);
 
         let err = add_password_core(&state, TENANT, OBJECT, input())
@@ -551,18 +544,16 @@ mod handler_tests {
         // "Invalidate caches only on `Ok`" — on failure the cached data is still
         // accurate, and dropping it costs a re-fetch for nothing.
         assert!(
-            detail_cached(&state),
+            detail_cached_here(&state),
             "a failed mutation must leave the cached detail row alone"
         );
-        assert!(sp_index_hit(&state.cache, TENANT).is_some());
-        assert!(app_name_index_hit(&state.cache, TENANT).is_some());
+        assert!(indexes_intact(&state, TENANT));
     }
 
     #[tokio::test]
     async fn an_invalid_secret_window_never_reaches_graph() {
         // No mock mounted: any request would 404 and fail the test differently.
-        let server = MockServer::start().await;
-        let state = AppState::for_test(TENANT, &server.uri());
+        let (server, state) = mock_state(TENANT).await;
         seed(&state);
 
         // An explicit window past the 24-month cap is REJECTED (a bare
@@ -583,7 +574,7 @@ mod handler_tests {
         .expect_err("a window past the 24-month cap is rejected");
         assert_eq!(err.code, "invalid_secret_window");
         assert!(
-            detail_cached(&state),
+            detail_cached_here(&state),
             "a rejected input invalidates nothing"
         );
         assert!(
@@ -593,5 +584,143 @@ mod handler_tests {
                 .unwrap_or_default()
                 .is_empty()
         );
+    }
+
+    // ---- remove_expired_passwords_core ----
+    //
+    // An expired `endDateTime` must be past "now" by more than a whole day
+    // (`audit::is_expired`), so the fixtures use dates years away from the wall
+    // clock in either direction.
+
+    const EXPIRED: &str = "2020-01-01T00:00:00Z";
+    const LIVE: &str = "2999-01-01T00:00:00Z";
+
+    /// `sample_app_json()` carrying the given `(keyId, endDateTime)` secrets.
+    fn app_with_secrets(secrets: &[(&str, &str)]) -> serde_json::Value {
+        let mut app = sample_app_json();
+        app["passwordCredentials"] = secrets
+            .iter()
+            .map(|(key_id, end)| serde_json::json!({"keyId": key_id, "endDateTime": end}))
+            .collect();
+        app
+    }
+
+    async fn mount_app(server: &wiremock::MockServer, app: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(app))
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_remove(server: &wiremock::MockServer, key_id: &str, status: u16) {
+        Mock::given(method("POST"))
+            .and(path(format!("/v1.0/applications/{OBJECT}/removePassword")))
+            .and(body_partial_json(serde_json::json!({ "keyId": key_id })))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(server)
+            .await;
+    }
+
+    async fn removal_requests(server: &wiremock::MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.url.path().ends_with("/removePassword"))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn removing_an_expired_secret_busts_the_credential_tier_and_keeps_the_indexes() {
+        let (server, state) = mock_state(TENANT).await;
+        mount_app(
+            &server,
+            app_with_secrets(&[("old", EXPIRED), ("new", LIVE)]),
+        )
+        .await;
+        mount_remove(&server, "old", 204).await;
+        seed(&state);
+
+        let out = remove_expired_passwords_core(&state, TENANT, OBJECT)
+            .await
+            .expect("the mocked removal succeeds");
+        assert_eq!(out.removed_key_ids, ["old"], "only the expired secret goes");
+        assert!(out.failures.is_empty());
+        assert_eq!(
+            removal_requests(&server).await,
+            1,
+            "the live secret is never touched"
+        );
+
+        assert!(!detail_cached_here(&state), "the credential list changed");
+        assert!(
+            indexes_intact(&state, TENANT),
+            "a credential-only removal must keep both tenant-wide indexes"
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_expired_writes_nothing_and_busts_nothing() {
+        let (server, state) = mock_state(TENANT).await;
+        mount_app(&server, app_with_secrets(&[("new", LIVE)])).await;
+        seed(&state);
+
+        let out = remove_expired_passwords_core(&state, TENANT, OBJECT)
+            .await
+            .expect("a no-op run is a success");
+        assert!(out.removed_key_ids.is_empty());
+        assert!(out.failures.is_empty());
+        assert_eq!(removal_requests(&server).await, 0);
+        assert!(
+            detail_cached_here(&state),
+            "nothing changed, so the cached detail is still right"
+        );
+        assert!(indexes_intact(&state, TENANT));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_app_errs_and_busts_nothing() {
+        let (server, state) = mock_state(TENANT).await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(&server)
+            .await;
+        seed(&state);
+
+        let err = remove_expired_passwords_core(&state, TENANT, OBJECT)
+            .await
+            .expect_err("a 403 on the read must surface");
+        assert_eq!(err.code, "forbidden");
+        assert_eq!(removal_requests(&server).await, 0);
+        assert!(detail_cached_here(&state), "invalidate only on Ok");
+        assert!(indexes_intact(&state, TENANT));
+    }
+
+    #[tokio::test]
+    async fn a_partial_removal_busts_and_reports_the_failure() {
+        let (server, state) = mock_state(TENANT).await;
+        mount_app(
+            &server,
+            app_with_secrets(&[("gone-1", EXPIRED), ("gone-2", EXPIRED)]),
+        )
+        .await;
+        mount_remove(&server, "gone-1", 204).await;
+        mount_remove(&server, "gone-2", 403).await;
+        seed(&state);
+
+        let out = remove_expired_passwords_core(&state, TENANT, OBJECT)
+            .await
+            .expect("a per-secret failure is data, not an error");
+        assert_eq!(out.removed_key_ids, ["gone-1"]);
+        assert_eq!(out.failures.len(), 1);
+        assert_eq!(out.failures[0].key_id, "gone-2");
+        assert!(
+            !detail_cached_here(&state),
+            "one secret WAS removed, so the credential list changed"
+        );
+        assert!(indexes_intact(&state, TENANT));
     }
 }

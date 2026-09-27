@@ -1415,3 +1415,139 @@ mod tests {
         }
     }
 }
+
+/// Core-level partial-write tests: the grant cores take `&GraphClient`, so a
+/// mock Graph drives them as-is. Each pins what the core does TODAY when a
+/// later step fails after an earlier write already landed.
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+
+    use azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::commands::test_support::{mock_graph, sample_app_json};
+
+    /// `sample_app_json()` (obj-1 / app-1, nothing declared) and no SP for
+    /// app-1 yet — the state in which both cores must create one.
+    async fn mount_app_without_sp(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications/obj-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_app_json()))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param("$filter", "appId eq 'app-1'"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+            )
+            .mount(server)
+            .await;
+    }
+
+    async fn received(server: &MockServer, verb: &str, url_path: &str) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == verb && r.url.path() == url_path)
+            .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+            .collect()
+    }
+
+    // Pins today's Err-after-landed-write; write-path-atomicity (F001/F004)
+    // flips this to the `(outcome, Option<UiError>)` shape and updates this test.
+    #[tokio::test]
+    async fn grant_single_permission_core_errs_after_the_manifest_patch_landed_when_sp_creation_fails()
+     {
+        let server = MockServer::start().await;
+        mount_app_without_sp(&server).await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1.0/applications/obj-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/servicePrincipals"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(&server)
+            .await;
+        let client = mock_graph(&server);
+
+        let err = grant_single_permission_core(
+            &client,
+            "obj-1",
+            MICROSOFT_GRAPH_APP_ID,
+            "role-1",
+            PermissionKind::Application,
+        )
+        .await
+        .expect_err("today an SP-creation failure surfaces as a bare Err");
+        assert_eq!(err.code, "forbidden");
+
+        // ...even though the manifest write already landed: the declared
+        // permission is live in the tenant and the Err says nothing of it.
+        let patches = received(&server, "PATCH", "/v1.0/applications/obj-1").await;
+        assert_eq!(patches.len(), 1, "exactly one manifest PATCH was sent");
+        assert!(patches[0].contains("role-1"), "{}", patches[0]);
+        assert!(
+            patches[0].contains(MICROSOFT_GRAPH_APP_ID),
+            "{}",
+            patches[0]
+        );
+        assert_eq!(
+            received(&server, "POST", "/v1.0/servicePrincipals")
+                .await
+                .len(),
+            1
+        );
+    }
+
+    // Pins today's Err-after-landed-write; write-path-atomicity (F001/F004)
+    // flips this to the `(outcome, Option<UiError>)` shape and updates this test.
+    #[tokio::test]
+    async fn grant_admin_consent_core_errs_after_creating_the_client_sp_and_loses_sp_created() {
+        let server = MockServer::start().await;
+        mount_app_without_sp(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/servicePrincipals"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "sp-new",
+                "appId": "app-1",
+                "displayName": "Demo App",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals/sp-new/appRoleAssignments"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/oauth2PermissionGrants"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+            )
+            .mount(&server)
+            .await;
+        let client = mock_graph(&server);
+
+        let err = grant_admin_consent_core(&client, "obj-1")
+            .await
+            .expect_err("today a failed idempotency snapshot surfaces as a bare Err");
+        assert_eq!(err.code, "forbidden");
+        // The client SP now exists in the tenant, but `sp_created` rides the Ok
+        // arm only — so the command wrapper, seeing Err, busts nothing and the
+        // new Enterprise App row stays missing from the cached lists.
+        assert_eq!(
+            received(&server, "POST", "/v1.0/servicePrincipals")
+                .await
+                .len(),
+            1,
+            "the SP creation landed before the failure"
+        );
+    }
+}

@@ -64,7 +64,7 @@ use crate::commands::applications::{create_application_core_tagged, invalidate_a
 use crate::commands::dispatch::SessionDead;
 use crate::commands::managed_identity::{grant_managed_identity_roles_core, mi_subtype_label};
 use crate::commands::permissions::grant_admin_consent_core;
-use crate::commands::progress::emit_progress;
+use crate::commands::progress::{ProgressSink, emit_progress};
 use crate::dto::UiError;
 use crate::dto::applications::CreateApplicationInput;
 use crate::dto::backup::{
@@ -1357,15 +1357,15 @@ fn owner_label(p: &PrincipalRef) -> String {
         .unwrap_or_else(|| p.source_id.clone())
 }
 
-fn emit(app_handle: &AppHandle, done: usize, total: usize, current_app: Option<String>) {
-    let progress = BulkProgress {
+fn emit(progress: &impl ProgressSink, done: usize, total: usize, current_app: Option<String>) {
+    let payload = BulkProgress {
         done,
         total,
         current_app,
         cancelled: false,
         in_flight_cap: None,
     };
-    emit_progress(app_handle, "restore-progress", progress);
+    emit_progress(progress, "restore-progress", payload);
 }
 
 #[cfg(test)]

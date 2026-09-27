@@ -21,7 +21,7 @@ use azapptoolkit_core::models::Application;
 use azapptoolkit_graph::client::AppListQuery;
 
 use crate::commands::dispatch::{SessionDead, batch_or_serial, dispatch_capped};
-use crate::commands::progress::emit_progress;
+use crate::commands::progress::{ProgressSink, emit_progress};
 use crate::commands::throttle::FanOutMeter;
 use crate::dto::UiError;
 use crate::dto::applications::CreateApplicationInput;
@@ -35,24 +35,6 @@ use crate::dto::bulk::{
 use crate::state::{AppState, CancelToken};
 
 const CONCURRENCY: usize = 4;
-
-/// Where [`run_bulk_seq`] sends its progress events.
-///
-/// The driver took an `&AppHandle`, which made it untestable without a Tauri
-/// runtime — and `tauri`'s `test` feature (for `mock_app()`) breaks the Windows
-/// test binary with STATUS_ENTRYPOINT_NOT_FOUND, since enabling it alongside the
-/// WebView2 runtime mismatches an entrypoint at link time. The driver never
-/// needed a runtime, only a sink; this is the narrower dependency, and it lets
-/// the tests assert the progress sequence as well as the loop control.
-trait ProgressSink {
-    fn emit(&self, payload: BulkProgress);
-}
-
-impl<R: tauri::Runtime> ProgressSink for AppHandle<R> {
-    fn emit(&self, payload: BulkProgress) {
-        emit_progress(self, "bulk-progress", payload);
-    }
-}
 
 /// Lets [`run_bulk_seq`] ask an opaque outcome whether the run should stop.
 ///
@@ -1052,6 +1034,9 @@ pub async fn bulk_stage_sso_certificates(
 /// apply their own cache invalidation from the outcomes. The caller claims the
 /// token once, before its first await (pinned by `repo_invariants::cancel`),
 /// and passes it in.
+///
+/// Takes a [`ProgressSink`] rather than an `&AppHandle` so the loop runs in a
+/// test; see `progress::ProgressSink` for why that is the seam.
 async fn run_bulk_seq<S: ProgressSink, T, O, Fut>(
     progress: &S,
     cancel: &CancelToken,
@@ -1069,13 +1054,17 @@ where
         if cancel.is_cancelled() {
             break;
         }
-        progress.emit(BulkProgress {
-            done: i,
-            total,
-            current_app: Some(label(&item)),
-            cancelled: false,
-            in_flight_cap: None,
-        });
+        emit_progress(
+            progress,
+            "bulk-progress",
+            BulkProgress {
+                done: i,
+                total,
+                current_app: Some(label(&item)),
+                cancelled: false,
+                in_flight_cap: None,
+            },
+        );
         let outcome = per_item(item).await;
         // Stop the run when the SESSION died rather than this item. A dead
         // refresh token can't be re-minted silently, so every remaining item
@@ -1090,13 +1079,17 @@ where
             break;
         }
     }
-    progress.emit(BulkProgress {
-        done: outcomes.len(),
-        total,
-        current_app: None,
-        cancelled: cancel.is_cancelled(),
-        in_flight_cap: None,
-    });
+    emit_progress(
+        progress,
+        "bulk-progress",
+        BulkProgress {
+            done: outcomes.len(),
+            total,
+            current_app: None,
+            cancelled: cancel.is_cancelled(),
+            in_flight_cap: None,
+        },
+    );
     (outcomes, cancel.is_cancelled())
 }
 
@@ -1104,6 +1097,7 @@ where
 mod tests {
     use super::*;
     // Tests build their own runs; the commands only ever hold a token.
+    use crate::commands::test_support::Recorder;
     use crate::state::CancelFlag;
 
     fn err(code: &str) -> BulkError {
@@ -1121,26 +1115,12 @@ mod tests {
         }
     }
 
-    /// Records what the driver would have emitted over IPC.
-    #[derive(Default)]
-    struct Recorder(std::sync::Mutex<Vec<BulkProgress>>);
-
-    impl ProgressSink for Recorder {
-        fn emit(&self, payload: BulkProgress) {
-            self.0.lock().unwrap().push(payload);
-        }
-    }
-
-    impl Recorder {
-        /// `(done, current_app)` per event, in order.
-        fn events(&self) -> Vec<(usize, Option<String>)> {
-            self.0
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|p| (p.done, p.current_app.clone()))
-                .collect()
-        }
+    /// `(done, current_app)` per `bulk-progress` event, in order.
+    fn events(rec: &Recorder) -> Vec<(usize, Option<String>)> {
+        rec.payloads::<BulkProgress>("bulk-progress")
+            .into_iter()
+            .map(|p| (p.done, p.current_app))
+            .collect()
     }
 
     async fn drive_with(
@@ -1185,7 +1165,7 @@ mod tests {
         // shows what is happening, not what already happened), then a final
         // done == total with no current app.
         assert_eq!(
-            rec.events(),
+            events(&rec),
             vec![
                 (0, Some("a".into())),
                 (1, Some("b".into())),
@@ -1193,6 +1173,10 @@ mod tests {
                 (3, None),
             ]
         );
+        // The channel name lives in the driver now, not in a per-sink impl:
+        // every event it emits rides the one `bulk-progress` channel.
+        assert!(rec.names().iter().all(|n| *n == "bulk-progress"));
+        assert_eq!(rec.names().len(), 4);
     }
 
     #[tokio::test]
@@ -1209,8 +1193,8 @@ mod tests {
         assert!(cancelled);
         // Only the terminal event: it reports nothing processed, and the
         // cancellation.
-        assert_eq!(rec.events(), vec![(0, None)]);
-        assert!(rec.0.lock().unwrap()[0].cancelled);
+        assert_eq!(events(&rec), vec![(0, None)]);
+        assert!(rec.payloads::<BulkProgress>("bulk-progress")[0].cancelled);
     }
 
     #[tokio::test]
@@ -1245,10 +1229,15 @@ mod tests {
         );
         assert!(cancelled);
         assert_eq!(
-            rec.events(),
+            events(&rec),
             vec![(0, Some("a".into())), (1, Some("b".into())), (2, None)]
         );
-        assert!(rec.0.lock().unwrap().last().unwrap().cancelled);
+        assert!(
+            rec.payloads::<BulkProgress>("bulk-progress")
+                .last()
+                .unwrap()
+                .cancelled
+        );
     }
 
     #[tokio::test]
@@ -1300,7 +1289,7 @@ mod tests {
         // Not a user cancellation — the distinction drives different UI copy.
         assert!(!cancelled);
         assert_eq!(
-            rec.events().last(),
+            events(&rec).last(),
             Some(&(2, None)),
             "the terminal event reports how far the run got"
         );

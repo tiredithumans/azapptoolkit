@@ -520,3 +520,77 @@ mod export_tests {
         assert_eq!(back[0].paired_service_principal_id.as_deref(), Some("sp-1"));
     }
 }
+
+/// Core-level partial-write test: `create_application_core` takes
+/// `&GraphClient`, so a mock Graph drives it as-is.
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::commands::test_support::mock_graph;
+
+    // Pins today's Err-after-landed-write; write-path-atomicity (F001/F004)
+    // flips this to the `(outcome, Option<UiError>)` shape and updates this test.
+    #[tokio::test]
+    async fn create_application_core_errs_after_the_app_post_landed_when_sp_creation_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/applications"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "obj-new",
+                "appId": "app-new",
+                "displayName": "New",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param("$filter", "appId eq 'app-new'"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/servicePrincipals"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(&server)
+            .await;
+        let client = mock_graph(&server);
+
+        let err = create_application_core(
+            &client,
+            CreateApplicationInput {
+                display_name: "New".into(),
+                create_service_principal: true,
+                initial_secret_display_name: None,
+                initial_owner_ids: vec![],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("today an SP-creation failure surfaces as a bare Err");
+        assert_eq!(err.code, "forbidden");
+
+        let app_posts = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/v1.0/applications")
+            .count();
+        assert_eq!(app_posts, 1, "the app registration was created");
+        // Tripwire for the F004 gap: the error does not name the app it just
+        // created (no `augment_with_object_id`, as `sso` does), so the operator
+        // cannot find the half-made app from the message. write-path-atomicity
+        // makes the error carry `obj-new` and flips this assertion.
+        assert!(
+            !err.message.contains("obj-new"),
+            "the error now names the new app — update this pin: {}",
+            err.message
+        );
+    }
+}

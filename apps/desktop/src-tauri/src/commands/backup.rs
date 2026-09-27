@@ -30,7 +30,7 @@ use azapptoolkit_graph::{GraphClient, GraphError};
 
 use crate::commands::applications::{extract_auth_fields, indexes_cached};
 use crate::commands::dispatch::{SessionDead, batch_or_serial, dispatch_capped};
-use crate::commands::progress::emit_progress;
+use crate::commands::progress::{ProgressSink, emit_progress};
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
 use crate::dto::UiError;
 use crate::dto::backup::{
@@ -140,16 +140,13 @@ pub async fn backup_tenant(
             let throttle = throttle.clone();
             let session = session.clone();
             Some(tokio::spawn(async move {
-                let report = |count: usize| {
-                    emit(
-                        &app_handle,
-                        count,
-                        total,
-                        None,
-                        Some(throttle.current_limit()),
-                    );
+                let tick = BackupTicker {
+                    sink: &app_handle,
+                    done: &done,
+                    total,
+                    throttle: &throttle,
                 };
-                backup_app_chunk(&client, chunk, &sp_app_ids, &done, &report, &session).await
+                backup_app_chunk(&client, chunk, &sp_app_ids, &tick, &session).await
             }))
         },
         |joined| {
@@ -208,18 +205,13 @@ pub async fn backup_tenant(
             let throttle = throttle.clone();
             let session = session.clone();
             Some(tokio::spawn(async move {
-                backup_enterprise_chunk(
-                    &client,
-                    chunk,
-                    &tenant,
-                    &map,
-                    &app_handle,
-                    &done,
+                let tick = BackupTicker {
+                    sink: &app_handle,
+                    done: &done,
                     total,
-                    &throttle,
-                    &session,
-                )
-                .await
+                    throttle: &throttle,
+                };
+                backup_enterprise_chunk(&client, chunk, &tenant, &map, &tick, &session).await
             }))
         },
         |joined| {
@@ -242,17 +234,14 @@ pub async fn backup_tenant(
     // (source scopes don't exist in the destination) and the MI detail view
     // already surfaces it for DR planning. A per-MI read failure is recorded in
     // `skipped`; a dead session or a cancel aborts the backup (the `?`).
-    let report_mi = |count: usize, name: &str| {
-        emit(
-            &app_handle,
-            count,
-            total,
-            Some(name.to_string()),
-            Some(throttle.current_limit()),
-        );
+    let tick = BackupTicker {
+        sink: &app_handle,
+        done: &done,
+        total,
+        throttle: &throttle,
     };
     let (managed_identities, mut mi_skipped) =
-        backup_managed_identities(&client, &managed, &cancel, &done, &report_mi, &session).await?;
+        backup_managed_identities(&client, &managed, &cancel, &tick, &session).await?;
     skipped.append(&mut mi_skipped);
 
     Ok(TenantBackup {
@@ -359,16 +348,11 @@ fn note_graph_failures<'a, T: 'a>(
     }
 }
 
-async fn backup_app_chunk(
+async fn backup_app_chunk<S: ProgressSink>(
     client: &GraphClient,
     chunk: Vec<(String, String)>,
     sp_app_ids: &std::collections::HashSet<String>,
-    done: &Mutex<usize>,
-    // Called once per processed app with the new running total, so the chunk
-    // stays decoupled from the Tauri `AppHandle` (the caller closes over the
-    // handle + throttle to emit progress; tests pass a no-op). `+ Sync` so the
-    // reference can be held across the `.await`s in a `Send` future.
-    report: &(dyn Fn(usize) + Sync),
+    tick: &BackupTicker<'_, S>,
     session: &SessionDead,
 ) -> (Vec<AppRegistrationBackup>, Vec<SkippedObject>) {
     let object_ids: Vec<String> = chunk.iter().map(|(_, oid)| oid.clone()).collect();
@@ -438,12 +422,7 @@ async fn backup_app_chunk(
                 ));
             }
         }
-        let count = {
-            let mut d = done.lock().await;
-            *d += 1;
-            *d
-        };
-        report(count);
+        tick.advance(None).await;
     }
     (out, skipped)
 }
@@ -511,16 +490,12 @@ fn assemble_app_backup(
 /// captures the SP, without that part, and is recorded in `skipped` as a
 /// partial entry (see [`enterprise_entry`]); an SP that vanished between the
 /// index read and now is left out. Emits per-SP progress.
-#[allow(clippy::too_many_arguments)]
-async fn backup_enterprise_chunk(
+async fn backup_enterprise_chunk<S: ProgressSink>(
     client: &GraphClient,
     chunk: Vec<ServicePrincipal>,
     tenant_id: &str,
     app_obj_by_app_id: &HashMap<String, String>,
-    app_handle: &AppHandle,
-    done: &Mutex<usize>,
-    total: usize,
-    throttle: &ConcurrencyThrottle,
+    tick: &BackupTicker<'_, S>,
     session: &SessionDead,
 ) -> (Vec<EnterpriseAppBackup>, Vec<SkippedObject>) {
     let sp_ids: Vec<String> = chunk.iter().map(|sp| sp.id.clone()).collect();
@@ -570,18 +545,7 @@ async fn backup_enterprise_chunk(
         if let Some(b) = entry {
             out.push(b);
         }
-        let count = {
-            let mut d = done.lock().await;
-            *d += 1;
-            *d
-        };
-        emit(
-            app_handle,
-            count,
-            total,
-            Some(index_sp.display_name.clone()),
-            Some(throttle.current_limit()),
-        );
+        tick.advance(Some(index_sp.display_name.clone())).await;
     }
     (out, skipped)
 }
@@ -733,15 +697,11 @@ fn assemble_enterprise_backup(
 /// identities all hold nothing. A per-MI assignment read failure still captures
 /// the MI (so its redeploy runbook item exists) and records a `managedIdentity`
 /// skip, so the missing app-roles are never read as "holds none".
-async fn backup_managed_identities(
+async fn backup_managed_identities<S: ProgressSink>(
     client: &GraphClient,
     managed: &[ServicePrincipal],
     cancel: &CancelToken,
-    done: &Mutex<usize>,
-    // Called once per MI with the running total and the MI's display name, so
-    // the pass stays decoupled from the Tauri `AppHandle` (see
-    // `backup_app_chunk`'s `report`).
-    report: &(dyn Fn(usize, &str) + Sync),
+    tick: &BackupTicker<'_, S>,
     session: &SessionDead,
 ) -> Result<(Vec<ManagedIdentityBackup>, Vec<SkippedObject>), UiError> {
     if cancel.is_cancelled() {
@@ -809,12 +769,7 @@ async fn backup_managed_identities(
             held_app_roles,
             ..Default::default()
         });
-        let count = {
-            let mut d = done.lock().await;
-            *d += 1;
-            *d
-        };
-        report(count, &sp.display_name);
+        tick.advance(Some(sp.display_name.clone())).await;
     }
     // A resource-SP resolve can latch the session too.
     if session.is_dead() {
@@ -1005,8 +960,38 @@ fn principal_ref_from_dir(o: &DirectoryObject) -> PrincipalRef {
     }
 }
 
+/// Advances the backup's shared running count by one processed object and
+/// emits the matching `backup-progress` event, carrying the live adaptive cap.
+///
+/// One per spawned chunk (and one for the MI pass), all sharing `done`. The
+/// passes take this instead of an `&AppHandle` so they run in a test with a
+/// `Recorder` sink — see `progress::ProgressSink` for why that is the seam.
+struct BackupTicker<'a, S> {
+    sink: &'a S,
+    done: &'a Mutex<usize>,
+    total: usize,
+    throttle: &'a ConcurrencyThrottle,
+}
+
+impl<S: ProgressSink> BackupTicker<'_, S> {
+    async fn advance(&self, current_app: Option<String>) {
+        let count = {
+            let mut d = self.done.lock().await;
+            *d += 1;
+            *d
+        };
+        emit(
+            self.sink,
+            count,
+            self.total,
+            current_app,
+            Some(self.throttle.current_limit()),
+        );
+    }
+}
+
 fn emit(
-    app_handle: &AppHandle,
+    sink: &impl ProgressSink,
     done: usize,
     total: usize,
     current_app: Option<String>,
@@ -1019,12 +1004,32 @@ fn emit(
         cancelled: false,
         in_flight_cap,
     };
-    emit_progress(app_handle, "backup-progress", progress);
+    emit_progress(sink, "backup-progress", progress);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::test_support::{
+        Recorder, dead_token, mock_graph, mock_graph_with, sample_app_json,
+    };
+    use azapptoolkit_core::cache::Cache;
+
+    /// A ticker that records into `rec`; the events carry `throttle`'s cap, so
+    /// a test can assert it.
+    fn ticker<'a>(
+        rec: &'a Recorder,
+        done: &'a Mutex<usize>,
+        throttle: &'a ConcurrencyThrottle,
+        total: usize,
+    ) -> BackupTicker<'a, Recorder> {
+        BackupTicker {
+            sink: rec,
+            done,
+            total,
+            throttle,
+        }
+    }
 
     #[test]
     fn user_assigned_arm_id_extracts_resource_id() {
@@ -1078,8 +1083,6 @@ mod tests {
     // way the graph crate tests its client.
     #[tokio::test]
     async fn backup_app_chunk_degrades_to_per_app_reads_and_skips_failures() {
-        use azapptoolkit_core::cache::Cache;
-        use azapptoolkit_core::token::StaticTokenProvider;
         use std::collections::HashSet;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1089,28 +1092,21 @@ mod tests {
         // Every `$batch` POST 503s — forcing the per-object fallback for both the
         // app-config and the federated-credential reads.
         Mock::given(method("POST"))
-            .and(path("/$batch"))
+            .and(path("/v1.0/$batch"))
             .respond_with(ResponseTemplate::new(503))
             .mount(&server)
             .await;
 
         // obj-1 resolves via the fallback GETs.
-        let app_json = serde_json::json!({
-            "id": "obj-1",
-            "appId": "app-1",
-            "displayName": "Demo App",
-            "signInAudience": "AzureADMyOrg",
-            "passwordCredentials": [],
-            "keyCredentials": [],
-            "requiredResourceAccess": []
-        });
         Mock::given(method("GET"))
-            .and(path("/applications/obj-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(app_json))
+            .and(path("/v1.0/applications/obj-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_app_json()))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/applications/obj-1/federatedIdentityCredentials"))
+            .and(path(
+                "/v1.0/applications/obj-1/federatedIdentityCredentials",
+            ))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
             )
@@ -1119,26 +1115,21 @@ mod tests {
 
         // obj-2's per-object read fails (500): it must be skipped, not abort the run.
         Mock::given(method("GET"))
-            .and(path("/applications/obj-2"))
+            .and(path("/v1.0/applications/obj-2"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/applications/obj-2/federatedIdentityCredentials"))
+            .and(path(
+                "/v1.0/applications/obj-2/federatedIdentityCredentials",
+            ))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
             )
             .mount(&server)
             .await;
 
-        let token = StaticTokenProvider::new("tok");
-        let client = GraphClient::with_base_url(
-            "tenant-test",
-            token.clone(),
-            token,
-            Cache::new(),
-            server.uri(),
-        );
+        let client = mock_graph(&server);
 
         let done = Mutex::new(0usize);
         let chunk = vec![
@@ -1147,12 +1138,13 @@ mod tests {
         ];
         let sp_app_ids = HashSet::new();
 
-        // No-op progress callback — the degrade logic under test doesn't depend on
-        // it, and this keeps the test free of a Tauri AppHandle / mock runtime.
-        let report = |_count: usize| {};
+        // A recording sink stands in for the Tauri AppHandle, so the progress
+        // this pass emits is asserted too.
+        let rec = Recorder::default();
+        let throttle = ConcurrencyThrottle::new(4);
+        let tick = ticker(&rec, &done, &throttle, 2);
         let session = SessionDead::new();
-        let (out, skipped) =
-            backup_app_chunk(&client, chunk, &sp_app_ids, &done, &report, &session).await;
+        let (out, skipped) = backup_app_chunk(&client, chunk, &sp_app_ids, &tick, &session).await;
 
         // The run never fails: obj-1 is recovered via the per-object fallback, and
         // obj-2's failed read is skipped rather than aborting the chunk.
@@ -1173,41 +1165,19 @@ mod tests {
         );
         // Progress still advances for every object in the chunk, including the skip.
         assert_eq!(*done.lock().await, 2);
+        // ...one `backup-progress` event per object, each carrying the live cap.
+        // The app pass names no current app.
+        let events = rec.payloads::<BulkProgress>("backup-progress");
+        assert_eq!(events.iter().map(|e| e.done).collect::<Vec<_>>(), [1, 2]);
+        assert!(events.iter().all(|e| e.total == 2
+            && e.current_app.is_none()
+            && e.in_flight_cap == Some(4)
+            && !e.cancelled));
         // A transient failure is a per-object skip, never the end of the session.
         assert!(
             !session.is_dead(),
             "a transient 500 must not latch the session"
         );
-    }
-
-    /// A token provider whose refresh token is gone: every read fails with the
-    /// re-auth-fatal code before any request is sent.
-    struct DeadSession;
-    #[async_trait::async_trait]
-    impl azapptoolkit_core::token::BearerProvider for DeadSession {
-        async fn bearer(&self) -> Result<String, azapptoolkit_core::token::TokenError> {
-            Err(azapptoolkit_core::token::TokenError::new(
-                "refresh_missing",
-                "gone",
-            ))
-        }
-    }
-
-    fn graph_over(server: &wiremock::MockServer, dead: bool) -> GraphClient {
-        use azapptoolkit_core::cache::Cache;
-        use azapptoolkit_core::token::{BearerProvider, StaticTokenProvider};
-        let token: Arc<dyn BearerProvider> = if dead {
-            Arc::new(DeadSession)
-        } else {
-            StaticTokenProvider::new("tok")
-        };
-        GraphClient::with_base_url(
-            "tenant-test",
-            token.clone(),
-            token,
-            Cache::new(),
-            server.uri(),
-        )
     }
 
     fn mi(id: &str, name: &str) -> ServicePrincipal {
@@ -1226,16 +1196,17 @@ mod tests {
     async fn a_reauth_fatal_read_latches_the_backup_session() {
         // Never answered: the token fails before any request is sent.
         let server = wiremock::MockServer::start().await;
-        let client = graph_over(&server, true);
+        let client = mock_graph_with(&server, dead_token(), Cache::new());
         let done = Mutex::new(0usize);
-        let report = |_count: usize| {};
+        let rec = Recorder::default();
+        let throttle = ConcurrencyThrottle::new(4);
+        let tick = ticker(&rec, &done, &throttle, 1);
         let session = SessionDead::new();
         let (out, _skipped) = backup_app_chunk(
             &client,
             vec![("app-1".to_string(), "obj-1".to_string())],
             &std::collections::HashSet::new(),
-            &done,
-            &report,
+            &tick,
             &session,
         )
         .await;
@@ -1255,33 +1226,34 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/$batch"))
+            .and(path("/v1.0/$batch"))
             .respond_with(ResponseTemplate::new(503))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/servicePrincipals/mi-1/appRoleAssignments"))
+            .and(path("/v1.0/servicePrincipals/mi-1/appRoleAssignments"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/servicePrincipals/mi-2/appRoleAssignments"))
+            .and(path("/v1.0/servicePrincipals/mi-2/appRoleAssignments"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
             )
             .mount(&server)
             .await;
-        let client = graph_over(&server, false);
+        let client = mock_graph(&server);
 
         let managed = vec![mi("mi-1", "mi-one"), mi("mi-2", "mi-two")];
         let cancel = crate::state::CancelFlag::new().claim();
         let done = Mutex::new(0usize);
-        let report = |_count: usize, _name: &str| {};
+        let rec = Recorder::default();
+        let throttle = ConcurrencyThrottle::new(4);
+        let tick = ticker(&rec, &done, &throttle, 2);
         let session = SessionDead::new();
-        let (out, skipped) =
-            backup_managed_identities(&client, &managed, &cancel, &done, &report, &session)
-                .await
-                .expect("a transient per-MI failure must not fail the backup");
+        let (out, skipped) = backup_managed_identities(&client, &managed, &cancel, &tick, &session)
+            .await
+            .expect("a transient per-MI failure must not fail the backup");
 
         // Both MIs are captured — the unreadable one still needs its runbook item.
         assert_eq!(out.len(), 2);
@@ -1298,18 +1270,31 @@ mod tests {
         assert!(!skipped[0].reason.is_empty());
         assert!(!session.is_dead(), "a transient 500 must not latch");
         assert_eq!(*done.lock().await, 2);
+        // One event per MI, in input order, naming the MI — the unreadable one
+        // included, since it is still captured.
+        let events = rec.payloads::<BulkProgress>("backup-progress");
+        assert_eq!(
+            events
+                .iter()
+                .map(|e| (e.done, e.current_app.as_deref()))
+                .collect::<Vec<_>>(),
+            [(1, Some("mi-one")), (2, Some("mi-two"))]
+        );
+        assert!(events.iter().all(|e| e.in_flight_cap == Some(4)));
     }
 
     #[tokio::test]
     async fn backup_managed_identities_aborts_on_a_dead_session() {
         let server = wiremock::MockServer::start().await;
-        let client = graph_over(&server, true);
+        let client = mock_graph_with(&server, dead_token(), Cache::new());
         let managed = vec![mi("mi-1", "mi-one"), mi("mi-2", "mi-two")];
         let cancel = crate::state::CancelFlag::new().claim();
         let done = Mutex::new(0usize);
-        let report = |_count: usize, _name: &str| {};
+        let rec = Recorder::default();
+        let throttle = ConcurrencyThrottle::new(4);
+        let tick = ticker(&rec, &done, &throttle, 2);
         let session = SessionDead::new();
-        let err = backup_managed_identities(&client, &managed, &cancel, &done, &report, &session)
+        let err = backup_managed_identities(&client, &managed, &cancel, &tick, &session)
             .await
             .expect_err("a dead session must stop the backup, not save empty MIs");
         assert_eq!(err.code, "refresh_missing");

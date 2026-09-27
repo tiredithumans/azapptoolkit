@@ -36,3 +36,6 @@ pub mod sso;
 pub(crate) mod throttle;
 pub mod updater;
 pub mod usage;
+
+#[cfg(test)]
+pub(crate) mod test_support;
