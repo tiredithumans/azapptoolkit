@@ -26,6 +26,23 @@ else
   warn "rustup not found — ensure rustfmt, clippy, and the wasm32-unknown-unknown target are installed some other way"
 fi
 
+# rustc cannot link without a system C toolchain, and the cargo installs below
+# are the first thing that needs one — so probe before them. Non-fatal, like
+# the package checks: this names the remedy instead of an opaque linker error.
+info "Checking for a C toolchain (linker)"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  if xcode-select -p >/dev/null 2>&1; then
+    ok "Xcode Command Line Tools ($(xcode-select -p))"
+  else
+    warn "Xcode Command Line Tools not found — install with: xcode-select --install"
+  fi
+elif need_cmd cc || need_cmd gcc || need_cmd clang; then
+  ok "C compiler present ($(command -v cc || command -v gcc || command -v clang))"
+else
+  warn "No C compiler/linker (cc/gcc/clang) found — Rust cannot link without one."
+  warn "  Debian/Ubuntu: sudo apt-get install -y build-essential   (other distros: gcc or clang)"
+fi
+
 if [[ "$(uname -s)" == "Linux" ]]; then
   info "Checking Linux system packages required by Tauri"
   LINUX_PKGS=(libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev)
@@ -128,12 +145,17 @@ else
   warn "No WebDriver — 'just web-itest' will LOUD-SKIP, leaving the frontend unproven locally."
 fi
 
-info "cargo check --workspace"
-cargo check --workspace
-ok "Rust workspace compiles"
+# Smoke test through the same recipes CI and `just verify` use, so the flags
+# never drift. `just check` first: it drops the placeholder web-rs/dist that
+# Tauri's generate_context! needs on a fresh clone (dist/ is gitignored) and
+# fails fast on a Rust error; `just web-build` (trunk build --locked) then
+# replaces the placeholder with the real bundle.
+info "Type-check both trees (just check)"
+just check
+ok "Rust workspace + frontend type-check"
 
-info "Frontend build (apps/desktop/web-rs)"
-( cd apps/desktop/web-rs && trunk build )
+info "Frontend build (just web-build)"
+just web-build
 ok "Frontend builds"
 
 cat <<'EOF'

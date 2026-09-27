@@ -27,7 +27,8 @@ The Rust-side tooling reduces to **two manual steps** — `just setup` provision
 System dependencies that no `cargo`/`rustup` command can install — `just setup` detects and warns about
 these, but you provide them via your OS package manager:
 
-- A C toolchain: MSVC on Windows, Xcode CLT on macOS, gcc/clang on Linux
+- A C toolchain: MSVC on Windows, Xcode CLT on macOS, gcc/clang on Linux (`just setup` checks
+  `cc`/`gcc`/`clang`, `xcode-select -p`, or the MSVC build tools via `vswhere`)
 - On Linux: `libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libssl-dev`
 - On Windows, for MSI packaging: WiX Toolset 3.11+ (the NSIS target needs no manual prereq — Tauri
   downloads its toolchain on first build)
@@ -35,7 +36,7 @@ these, but you provide them via your OS package manager:
 ## Quick setup
 
 With `just` installed, the `setup` recipe installs the Tauri CLI and trunk if missing, adds the wasm
-target + rustfmt/clippy, checks OS build deps, and runs a compile + frontend-build smoke test. It is
+target + rustfmt/clippy, checks OS build deps, and runs `just check` + `just web-build` as a smoke test. It is
 idempotent (safe to rerun after pulling) and picks the right `[unix]`/`[windows]` variant automatically:
 
 ```bash
@@ -87,7 +88,7 @@ Run every CI gate, in CI order, with one command:
 ```bash
 just verify        # the core gates + the browser GUI tests when Chrome + chromedriver are present
 just verify-ui     # same, browser tests mandatory
-just verify-full   # full CI parity: adds the dependency audit/deny gates (needs network)
+just verify-full   # full CI parity: adds the audit/deny gates (needs network) + the shard-size ceiling (loud-skipped on Windows; CI runs it on Linux)
 ```
 
 `just --list` names every individual gate (`fmt-check`, `clippy`, `test`, `web-fmt-check`,
@@ -95,7 +96,7 @@ just verify-full   # full CI parity: adds the dependency audit/deny gates (needs
 what each one runs. For the inner loop while iterating:
 
 ```bash
-just check                        # type-check both trees, no build, no tests
+just check                        # type-check both trees (incl. the GUI test harness), no build, no tests
 just test-crate azapptoolkit-core # one crate's tests (append `-- <filter>` to narrow)
 ```
 

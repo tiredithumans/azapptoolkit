@@ -32,11 +32,21 @@ permissions:
 
 jobs:
   # Detect whether anything that affects a build/test/lint actually changed.
-  # Docs-only changes (Markdown, docs/, LICENSE, .claude/) set code=false, which
-  # the downstream jobs use to skip their work WITHOUT skipping the job — so every
-  # required status check still reports (a path-filtered *workflow* would instead
-  # leave required checks pending forever and block the merge). Non-PR/push events
-  # (schedule, manual dispatch) always report code=true so audit/deny still run.
+  # Docs-only changes (Markdown, docs/, LICENSE, .claude/) set code=false, EXCEPT
+  # the files a repo_invariants test reads via `include_str!` (AGENTS.md,
+  # CHANGELOG.md, README.md, docs/architecture/caching-and-search.md and
+  # .claude/hooks/), which count as code — a change to one can break `just test`
+  # (pinned by docs_only_ci_detector_runs_the_tests_that_pin_docs). Every required
+  # status check must still report on code=false (a path-filtered *workflow*
+  # would instead leave required checks pending forever and block the merge), so
+  # the downstream jobs skip in one of two ways:
+  #   - single-instance jobs (web, actionlint, audit, deny) skip at job level: a
+  #     skipped job reports its required check as satisfied;
+  #   - the `rust` MATRIX job cannot: a job-level skip never expands the matrix,
+  #     so the per-OS required checks "Rust workspace (<os>)" would never report.
+  #     It runs on every OS and skips per step instead.
+  # Non-PR/push events (schedule, manual dispatch) always report code=true so
+  # audit/deny still run.
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
@@ -72,6 +82,8 @@ jobs:
               while IFS= read -r f; do
                 if [ -z "$f" ]; then continue; fi
                 case "$f" in
+                  # Pinned by a repo_invariants test (include_str!): a change can break `just test`.
+                  AGENTS.md|CHANGELOG.md|README.md|docs/architecture/caching-and-search.md|.claude/hooks/*) code=true ;;
                   *.md|docs/*|LICENSE|LICENSE.*|.claude/*) : ;;  # docs / non-build
                   *) code=true ;;                               # anything else → build
                 esac
@@ -95,9 +107,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
+      # Docs-only change: skip every step below (checkout included) but let the
+      # job succeed, so the required "Rust workspace (...)" contexts still report.
+      # Unlike the other jobs this is a matrix, so it cannot skip at job level
+      # (see the `changes` job comment).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Docs-only change: skip every build/test step below but let the job
-      # succeed, so the required "Rust workspace (...)" contexts still report.
+        if: needs.changes.outputs.code == 'true'
       - name: Skip notice (docs-only change)
         if: needs.changes.outputs.code != 'true'
         run: echo "Docs-only change — backend build/test skipped."
@@ -202,10 +217,10 @@ jobs:
   scan:
     name: secrets + hooks
     # Deliberately NOT gated on `changes.outputs.code`. A docs-only change can
-    # still commit a key, and the hook scripts themselves live under `.claude/`,
-    # which the change detector classifies as docs — so gating this the way the
-    # compile jobs are gated would switch it off for exactly the diffs it most
-    # needs to read. Cheap enough (seconds, no toolchain) to always run.
+    # still commit a key, and most of `.claude/` and all Markdown are classified
+    # as docs by the change detector — so gating this the way the compile jobs
+    # are gated would switch it off for exactly the diffs it most needs to read.
+    # Cheap enough (seconds, no toolchain) to always run.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

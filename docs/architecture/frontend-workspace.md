@@ -230,7 +230,8 @@ Tests are `tests/gui/<view>.rs` **modules**, grouped into shard binaries
 
 **Why shards.** One merged binary exceeds what headless Chrome will instantiate.
 `just web-itest-size` enforces the per-shard wasm ceiling and prints how to
-split when a shard grows past it. It runs in CI and in `just verify-full`.
+split when a shard grows past it. It runs in CI and in `just verify-full`
+(Unix; the Windows variant loud-skips).
 
 **Grouping rule.** Group modules by the **view subtree they mount**, not by
 count — the linker keeps only referenced views, so a shard's size tracks the

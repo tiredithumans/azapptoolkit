@@ -138,10 +138,12 @@ web-itest-auto:
 # a flaky browser and sends you looking in the wrong place. Measured, it is one
 # line of output naming the shard.
 #
-# Unix/CI only (bash shebang, like `setup`): this is a size gate on the Linux CI
-# runner, not something a Windows dev box needs to reproduce.
+# Unix/CI only (bash shebang): this is a size gate on the Linux CI runner, not
+# something a Windows dev box needs to reproduce. The `[windows]` twin below
+# loud-skips it so `verify-full` still completes there.
 
 # Enforce the per-shard wasm ceiling headless Chrome can instantiate (CI/Unix).
+[unix]
 [working-directory('apps/desktop/web-rs')]
 web-itest-size:
     #!/usr/bin/env bash
@@ -184,6 +186,15 @@ web-itest-size:
       exit 1
     fi
 
+# On Windows the shard ceiling stays a CI/Unix gate (bash recipe), so
+# `verify-full` still completes — loudly, never silently.
+[windows]
+web-itest-size:
+    @echo ""
+    @echo "  !! SKIPPED: web-itest-size — the shard-size ceiling runs in CI (Linux) only."
+    @echo "  !! A GUI test shard grown past the ceiling will fail CI, not this run."
+    @echo ""
+
 # --- Housekeeping ------------------------------------------------------------
 
 # Delete every cargo build artifact to reclaim disk. There are TWO independent
@@ -192,7 +203,7 @@ web-itest-size:
 # `web-rs/target/` is by far the larger of the two. `--manifest-path` cleans it
 # without a chdir, keeping the recipe one plain `cargo` call per tree (works
 # under both sh and PowerShell). The next build recompiles from scratch. The
-# committed dist/ stub is left alone (verify recreates it via _stub-frontend-dist).
+# dist/ placeholder (gitignored; `_stub-frontend-dist` recreates it) is left alone.
 
 # cargo clean BOTH build trees (root workspace + the excluded web-rs).
 clean:
@@ -243,12 +254,17 @@ test: _stub-frontend-dist
 # The inner loop while iterating: type-check BOTH trees (the root workspace incl.
 # every test target, and the wasm frontend) with no codegen and no tests. Not a
 # CI gate — `verify` is — but it catches the compile error `verify` would take
-# minutes to reach, and it keeps skills off hand-typed `cargo`.
+# minutes to reach, and it keeps skills off hand-typed `cargo`. The wasm tree is
+# checked with `--all-targets --features test-support`, the configuration
+# `web-clippy` gates, so src/test_support, src/ipc_mock and the gui_N shards are
+# type-checked too. Trade-off (the same one `web-clippy` makes): the shipped
+# feature set's `cfg(not(feature = "test-support"))` paths are not re-checked
+# here; `web-build` in `verify` covers them.
 
 # Type-check both trees (no codegen, no tests) — the fast inner loop.
 check: _stub-frontend-dist
     cargo check --locked --workspace --all-targets
-    cargo check --locked --manifest-path apps/desktop/web-rs/Cargo.toml --target wasm32-unknown-unknown
+    cargo check --locked --manifest-path apps/desktop/web-rs/Cargo.toml --target wasm32-unknown-unknown --all-targets --features test-support
 
 # One crate's tests, e.g. `just test-crate azapptoolkit-core` or
 # `just test-crate desktop -- repo_invariants` (args after `--` go to cargo test).
@@ -295,15 +311,16 @@ _verify-core: fmt-check clippy test web-fmt-check web-clippy web-test web-build
 # Run the core CI gates locally, in order. Run this before declaring a change
 # done. The browser GUI tests run too WHEN this box can (see `web-itest-auto`)
 # and announce loudly when they cannot. Still not the whole of CI: the
-# dependency audit/deny gates are covered by `verify-full`; actionlint stays
-# CI-side unless installed locally.
+# dependency audit/deny gates and the per-shard wasm ceiling (`web-itest-size`,
+# a full wasm test build when web-itest did not just run) are covered by
+# `verify-full`; actionlint stays CI-side unless installed locally.
 
 # The CI gates in CI order + the browser tests when this box can run them. Run before "done".
 verify: _verify-core web-itest-auto
     @echo ""
-    @echo "verify OK — NOT run (needs network): audit, web-audit, deny, web-deny."
+    @echo "verify OK — NOT run: audit, web-audit, deny, web-deny (need network) and web-itest-size (shard-size ceiling)."
     @echo "  just verify-ui    = verify with the GUI tests REQUIRED (fails without a browser)"
-    @echo "  just verify-full  = full CI parity (adds the dependency audit/deny gates)"
+    @echo "  just verify-full  = full CI parity (adds the audit/deny gates + the shard-size ceiling)"
     @echo "If web-itest reported SKIPPED above, frontend behavior is still unproven:"
     @echo "renaming a CSS class, aria-label, or on-screen text a GUI test references"
     @echo "passes verify and fails CI."
@@ -423,9 +440,10 @@ icon:
 # here once, which doubled this file and made `just --list` unreadable; `just
 # setup` stays the single entry point). Each verifies the Rust toolchain, adds
 # the wasm target + rustfmt/clippy, installs the Tauri CLI, trunk and wasm-pack
-# if missing, checks OS-specific build deps + the browser-test prerequisites,
-# then runs a compile + frontend-build smoke test. Run `cargo install just` (or
-# your package manager) first, then `just setup`.
+# if missing, checks OS-specific build deps (incl. a C toolchain) + the
+# browser-test prerequisites, then runs `just check` + `just web-build` as a
+# smoke test. Run `cargo install just` (or your package manager) first, then
+# `just setup`.
 
 # One-time, idempotent developer bootstrap (toolchain, targets, CLIs, browser test deps).
 [unix]

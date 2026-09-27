@@ -450,6 +450,149 @@ fn verify_full_runs_every_gate_ci_runs() {
     );
 }
 
+/// The CI change detector must not classify as docs a file a test here pins.
+///
+/// ci.yml's `changes` job skips `just test` when a diff is docs-only (`*.md`,
+/// `docs/`, `.claude/`, …) — yet AGENTS.md, CHANGELOG.md, README.md, an
+/// architecture doc and the commit hook are all `include_str!`d by these tests.
+/// A PR touching only one of them merged green with the test that pins it
+/// skipped, and the failure surfaced on the next unrelated code PR (or, for the
+/// CHANGELOG header, at release time). The detector therefore carries an
+/// exceptions arm ahead of its docs arm.
+///
+/// Derived, not listed: every `include_str!` under `tests/` is resolved, and each
+/// path the docs arm would match must also be matched by the exceptions arm. So
+/// a new test that pins another doc fails here until the detector learns it.
+#[test]
+fn docs_only_ci_detector_runs_the_tests_that_pin_docs() {
+    use std::path::{Path, PathBuf};
+
+    let ci = include_str!("../../../../../.github/workflows/ci.yml");
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo = manifest
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root resolves");
+
+    /// A `case` arm's patterns: the text before `)`, split on `|`.
+    fn arm_patterns(line: &str) -> Vec<&str> {
+        line.trim()
+            .split_once(')')
+            .map(|(pats, _)| pats.split('|').map(str::trim).collect())
+            .unwrap_or_default()
+    }
+    /// The subset of shell `case` globbing the detector uses: a leading `*` is a
+    /// suffix match, a trailing `*` a prefix match (`*` crosses `/` in `case`),
+    /// anything else exact.
+    fn glob(pattern: &str, path: &str) -> bool {
+        if let Some(suffix) = pattern.strip_prefix('*') {
+            path.ends_with(suffix)
+        } else if let Some(prefix) = pattern.strip_suffix('*') {
+            path.starts_with(prefix)
+        } else {
+            path == pattern
+        }
+    }
+
+    // The exceptions arm (`… ) code=true ;;`, not the `*)` catch-all) and the
+    // docs arm (`… ) : ;;`).
+    let exceptions = ci
+        .lines()
+        .map(str::trim)
+        .find(|l| l.ends_with(") code=true ;;") && !l.starts_with("*)"))
+        .map(arm_patterns)
+        .unwrap_or_default();
+    let docs = ci
+        .lines()
+        .map(str::trim)
+        .find(|l| l.contains(") : ;;"))
+        .map(arm_patterns)
+        .unwrap_or_default();
+    assert!(
+        !exceptions.is_empty(),
+        "ci.yml's change detector has no exceptions arm (`<paths>) code=true ;;` ahead of the \
+         docs arm) — the rule below would pass vacuously"
+    );
+    assert!(
+        !docs.is_empty(),
+        "ci.yml's change detector docs arm (`<globs>) : ;;`) not found — did the detector move?"
+    );
+
+    // Every `.rs` under tests/, recursively (same walk as `sources.rs`).
+    let mut sources: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![manifest.join("tests")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                sources.push(path);
+            }
+        }
+    }
+
+    let needle = concat!("include_str", "!(");
+    let mut pinned_docs: Vec<String> = Vec::new();
+    for file in &sources {
+        let src = std::fs::read_to_string(file).expect("test source is readable");
+        // Comments may mention the macro; only code pins a file.
+        let code: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut rest = code.as_str();
+        while let Some(at) = rest.find(needle) {
+            rest = rest[at + needle.len()..].trim_start();
+            let Some(lit) = rest.strip_prefix('"') else {
+                continue;
+            };
+            let Some(end) = lit.find('"') else {
+                break;
+            };
+            let target = file
+                .parent()
+                .expect("a source file has a parent")
+                .join(&lit[..end]);
+            rest = &lit[end + 1..];
+            let Ok(abs) = target.canonicalize() else {
+                continue;
+            };
+            let Ok(rel) = abs.strip_prefix(&repo) else {
+                continue;
+            };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if docs.iter().any(|p| glob(p, &rel)) && !pinned_docs.contains(&rel) {
+                pinned_docs.push(rel);
+            }
+        }
+    }
+    pinned_docs.sort();
+    assert!(
+        // AGENTS.md, CHANGELOG.md, README.md, caching-and-search.md and the
+        // commit hook today. Far fewer means the scan stopped seeing the pins.
+        pinned_docs.len() >= 4,
+        "found only {pinned_docs:?} docs-classified file(s) pinned by `include_str!` under tests/ \
+         — the scan is broken, and this rule would pass vacuously"
+    );
+
+    let unguarded: Vec<&String> = pinned_docs
+        .iter()
+        .filter(|path| !exceptions.iter().any(|p| glob(p, path)))
+        .collect();
+    assert!(
+        unguarded.is_empty(),
+        "these files are `include_str!`d by a test yet ci.yml's change detector classifies them \
+         as docs, so a PR touching only them skips `just test`: {unguarded:?}\n\
+         Add each to the detector's exceptions arm (`… ) code=true ;;`, ahead of the docs arm) \
+         in .github/workflows/ci.yml."
+    );
+}
+
 /// The documented opt-out and the MSI / .deb / .rpm formats are honoured only
 /// if both updater commands ask `update_gate` BEFORE they touch the updater
 /// plugin — `app.updater()` is the first step towards the release endpoint.
