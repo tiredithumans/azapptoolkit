@@ -125,16 +125,26 @@ deploys it (needs Settings → Pages → Source = "GitHub Actions"). The `demo` 
 - **Boot** — fixtures are pre-loaded from `demo/mod.rs`; a demo tenant is seeded so the
   config/sign-in gates fall through to the shell (`lib.rs`); a read-only banner renders
   (`shell.rs`, `.demo-banner`).
-- **Unregistered commands** (every mutation + any unfixtured read) degrade to a friendly
-  `demo_unsupported` error via `ipc_mock::Unmocked::DemoFriendly`.
+- **Unregistered commands** (every mutation) degrade to a friendly `demo_unsupported` error via
+  `ipc_mock::Unmocked::DemoFriendly`. A *read* must not rely on that: every read-shaped
+  `invoke_result` (`list_`/`get_`/`search_`/`check_`/`find_`/`probe_`/`current_`) is either
+  fixtured or listed, with its reason, in `DEMO_READS_LEFT_UNFIXTURED` — and every fixture must name
+  a command some binding still invokes. `web-rs/tests/demo_fixture_coverage.rs` enforces both over
+  comment-stripped source, walking all of `src/`.
+- **One catalog, many surfaces** — the audit run, the credential-expiry and SSO-certificate boards,
+  the site sweep and the mailbox lookup are built from (or re-keyed onto) the demo's own
+  app/enterprise catalogs, so every "Open" lands on the object it names; credential and certificate
+  expiries are offsets from today (`fixtures::days_from_now`), never fixed dates that age into the
+  past. `demo::tests` pins both; `just web-test` runs them natively with `--features demo`, which is
+  also the demo's only compile gate before `pages.yml`.
 - **Args-aware detail fixtures** — `get_application_detail` / `get_enterprise_application_detail`
   / `get_mail_permission_scopes` are registered with `ipc_mock::mock_each` (the handler reads the
   call's camelCase args → returns a per-id fixture) so the detail pane switches per selection. A
   plain `mock_ok` returns one payload for every id — the wrong-detail bug to avoid. Ids are
   synthetic-but-realistic GUIDs from `fixtures::guid(seed)`.
 - **Footgun: infallible invokes panic without a fixture.** The infallible `invoke()` reads
-  (`get_cached_audit` / `get_cached_audit_summary` / `cache_stats` / `export_audit_csv` /
-  `get_auth_config`) and the
+  (`get_cached_audit` / `get_cached_audit_summary` / `cache_stats` / `get_auth_config` /
+  `get_tenant_defaults`) and the
   `()`-returning ones (`invalidate_list_cache` — fired by every list Refresh — `clear_cache`,
   `cancel_*`, …) must be registered in `demo::register_fixtures`, or they **panic** on the
   rejected-promise fallback. Adding a new infallible `invoke()`/`invoke::<()>` reachable in the

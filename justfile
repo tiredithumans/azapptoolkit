@@ -295,10 +295,15 @@ web-clippy:
 # the committed web-rs Cargo.lock (this gate runs before web-build, so it pins the
 # frontend lockfile that Trunk's build then reuses).
 
+# The second line runs the Pages demo's own consistency tests (`src/demo/`,
+# compiled only under the `demo` feature). Nothing else builds that feature
+# except pages.yml, so this is also the demo's only compile gate before deploy.
+
 # Run the frontend unit tests on the host target (CI gate).
 [working-directory('apps/desktop/web-rs')]
 web-test:
     cargo test --locked
+    cargo test --locked --features demo --lib demo::
 
 # The machine-independent gates, shared by `verify` / `verify-ui` /
 # `verify-full` so the browser suite is named exactly once per entry point and

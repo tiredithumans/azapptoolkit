@@ -1,4 +1,5 @@
-//! Auth IPC bindings: `sign_in`, `sign_out`, `current_tenants`.
+//! Auth IPC bindings: sign-in, session restore/refresh, sign-out, re-auth and
+//! scope consent.
 //!
 //! Tauri's invoke layer expects camelCase keys for command args (the macro
 //! converts them to the snake_case Rust parameter names), so the `Args`

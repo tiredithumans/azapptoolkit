@@ -113,11 +113,21 @@ async fn a_staged_replacement_surfaces_entras_activation_deadline() {
     ts::reset();
     // Staged phase: the ACTIVE certificate's expiry is the deadline, because
     // Entra promotes the staged one on its own once it passes.
-    let _m = mount(&fixtures::signing_cert_rollover("sp-demo", "app-demo"));
+    // The fixture dates its certificates relative to today, so the expected
+    // day is read from the payload rather than pinned: the assertion is that
+    // THIS rollover's deadline is the one on screen.
+    let roll = fixtures::signing_cert_rollover("sp-demo", "app-demo");
+    let day = roll
+        .auto_promote_deadline
+        .as_deref()
+        .and_then(|d| d.split('T').next())
+        .expect("the staged fixture carries an activation deadline")
+        .to_string();
+    let _m = mount(&roll);
 
     ts::wait_for(|| ts::body_contains("Activate staged certificate")).await;
     assert!(
-        ts::body_contains("2027-04-30"),
+        ts::body_contains(&format!("active certificate expires on {day}")),
         "the active certificate's expiry is the activation deadline and must be \
          on screen; body was: {}",
         ts::body_text()
