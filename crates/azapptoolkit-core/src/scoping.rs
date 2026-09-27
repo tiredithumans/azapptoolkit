@@ -63,17 +63,33 @@ pub fn resource_label(resource_app_id: &str) -> &str {
     }
 }
 
-/// The Exchange application role for a **Microsoft Graph** mail/calendar/contacts
-/// application permission. This set is exactly the Graph permission list
-/// Application Access Policies supported, so an AAP migration can always map
-/// what a policy was confining.
+/// The Exchange application role for a **Microsoft Graph** mailbox application
+/// permission — every Graph permission RBAC for Applications exposes a
+/// dedicated role for, which is the set the Grant-access wizard, the audit's
+/// `ScopeMailboxAccess` fix and the Permissions-tab Scope column can actually
+/// confine.
 ///
 /// Source: <https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac>
-/// ("Supported Application Roles") ∩
-/// <https://learn.microsoft.com/en-us/exchange/permissions-exo/application-access-policies>
-/// ("Supported permissions"). The full RBAC role list is larger (mailbox
-/// folders/items, SMTP, MailTips, and the composite full-access roles); those
-/// were never AAP-scopable, so they are deliberately absent here.
+/// ("Supported Application Roles"). The role string is what
+/// `New-ManagementRoleAssignment -Role` receives, so a misspelling here is a
+/// runtime Exchange error, not a compile error — the table test
+/// `newer_rbac_roles_map_to_their_exact_exchange_role_names` pins each one.
+///
+/// Deliberately absent:
+/// - `SMTP.SendAsApp` — Learn lists its protocol as "MS Graph", but the appRole
+///   lives on **Office 365 Exchange Online**, not Microsoft Graph, and it backs a
+///   live protocol (SMTP client submission). Mapping it here would make
+///   [`is_unscopable_legacy_exchange_permission`] call it out for removal.
+/// - the composite roles (`Application Mail Full Access`, `Application Exchange
+///   Full Access`) — they carry no permission name of their own; a row granting
+///   one is matched through `GrantedPermissions` by the verdict layer's
+///   `row_grants_permission`.
+///
+/// This used to be exactly the eleven values an Application Access Policy could
+/// confine, so that an AAP migration could always map what a policy governed.
+/// That parity concern is now carried by [`is_aap_confinable_permission`], the
+/// strict subset the migration targets; widening *this* map only widens what
+/// the toolkit can offer to scope, never what a migration will strip.
 fn graph_mail_role(value: &str) -> Option<&'static str> {
     let role = match value {
         "Mail.Read" => "Application Mail.Read",
@@ -86,9 +102,62 @@ fn graph_mail_role(value: &str) -> Option<&'static str> {
         "Calendars.ReadWrite" => "Application Calendars.ReadWrite",
         "Contacts.Read" => "Application Contacts.Read",
         "Contacts.ReadWrite" => "Application Contacts.ReadWrite",
+        // The RBAC-only roles: scopable under RBAC for Applications, never
+        // governed by an Application Access Policy.
+        "MailboxFolder.Read.All" => "Application MailboxFolder.Read",
+        "MailboxFolder.ReadWrite.All" => "Application MailboxFolder.ReadWrite",
+        "MailboxItem.Read.All" => "Application MailboxItem.Read",
+        "MailboxItem.ReadWrite.All" => "Application MailboxItem.ReadWrite",
+        "MailboxItem.Export.All" => "Application MailboxItem.Export",
+        "MailboxItem.ImportExport.All" => "Application MailboxItem.ImportExport",
+        "MailboxConfigItem.Read" => "Application MailboxConfigItem.Read",
+        "MailboxConfigItem.ReadWrite" => "Application MailboxConfigItem.ReadWrite",
+        "MailTips.ReadBasic.All" => "Application MailTips.ReadBasic.All",
+        "Mail-Advanced.ReadWrite.All" => "Application Mail-Advanced.ReadWrite.All",
         _ => return None,
     };
     Some(role)
+}
+
+/// The Microsoft Graph application permissions a legacy **Application Access
+/// Policy** could confine — the "Supported permissions" list at
+/// <https://learn.microsoft.com/en-us/exchange/permissions-exo/application-access-policies>.
+/// Private: callers go through the resource-aware
+/// [`is_aap_confinable_permission`].
+const AAP_CONFINABLE_GRAPH_PERMISSIONS: &[&str] = &[
+    "Mail.Read",
+    "Mail.ReadBasic",
+    "Mail.ReadBasic.All",
+    "Mail.ReadWrite",
+    "Mail.Send",
+    "MailboxSettings.Read",
+    "MailboxSettings.ReadWrite",
+    "Calendars.Read",
+    "Calendars.ReadWrite",
+    "Contacts.Read",
+    "Contacts.ReadWrite",
+];
+
+/// True when `value` on `resource_app_id` is a permission a legacy Application
+/// Access Policy **governed** — the eleven Microsoft Graph values above plus the
+/// EWS [`EWS_FULL_ACCESS_AS_APP`] scope on Office 365 Exchange Online. A strict
+/// subset of [`is_scopable_exchange_resource_permission`] by construction.
+///
+/// This is the AAP-migration parity gate. The migration replaces a policy with a
+/// scoped role assignment and then **strips the org-wide Entra grant**; an app
+/// may also hold a grant RBAC can scope but no policy ever confined
+/// (`MailboxItem.*`, `Mail-Advanced.*`, …). That grant is org-wide today and
+/// stays org-wide after the policy is gone — so scoping-and-stripping it as
+/// part of the migration would silently *narrow* live access, which the
+/// migration's fail-closed contract forbids. Resource-aware on purpose: the
+/// legacy resource's own `Mail.Read` was never confinable by anything.
+pub fn is_aap_confinable_permission(resource_app_id: &str, value: &str) -> bool {
+    let aap_named = match resource_app_id {
+        MICROSOFT_GRAPH_APP_ID => AAP_CONFINABLE_GRAPH_PERMISSIONS.contains(&value),
+        OFFICE365_EXCHANGE_ONLINE_APP_ID => value == EWS_FULL_ACCESS_AS_APP,
+        _ => false,
+    };
+    aap_named && exchange_role_for_resource_permission(resource_app_id, value).is_some()
 }
 
 /// The Exchange application role that grants the same capability as the
@@ -181,26 +250,39 @@ pub fn is_blanket_mailbox_grant(value: &str) -> bool {
 /// resolve the resource still reports reach rather than silently dropping it.
 pub fn is_mailbox_reaching_permission(resource_app_id: Option<&str>, value: &str) -> bool {
     /// Name-shaped mailbox reach, for the arms with no authoritative resource
-    /// mapping to consult.
+    /// mapping to consult — and, on Graph, for a *future* family this build's
+    /// [`graph_mail_role`] table doesn't know yet.
     ///
-    /// Covers all four families [`graph_mail_role`] maps — `Mail.*`,
-    /// `MailboxSettings.*`, `Calendars.*`, `Contacts.*`. A narrower `Mail.` /
-    /// `MailboxSettings.`-only test used to drop Graph `Calendars.*` and
-    /// `Contacts.*` grants out of the mailbox advisory entirely: this function
-    /// decides advisory membership, and the org-wide / scopable / unscopable
-    /// split happens only among its hits, so an org-wide calendar or contacts
-    /// grant that RBAC for Applications *can* confine produced neither a
-    /// finding nor a `ScopeMailboxAccess` fix.
+    /// Covers every family the table maps — `Mail.*`, `Mail-*`, `Mailbox*`
+    /// (`MailboxSettings.` / `MailboxFolder.` / `MailboxItem.` /
+    /// `MailboxConfigItem.`), `MailTips.*`, `Calendars.*`, `Contacts.*`. This
+    /// function decides advisory membership, and the org-wide / scopable /
+    /// unscopable split happens only among its hits, so a family missing here
+    /// vanishes from the audit entirely. It has happened twice: a `Mail.` /
+    /// `MailboxSettings.`-only test dropped Graph `Calendars.*` and `Contacts.*`
+    /// out of the mailbox advisory, and the `MailboxSettings.`-only spelling
+    /// then let `MailboxItem.ReadWrite.All` and `Mail-Advanced.ReadWrite.All` —
+    /// read, write and delete every item in every mailbox — fall through the
+    /// very fallback that existed to catch an unknown family. `Mailbox` is
+    /// deliberately unterminated so the next `Mailbox*` family lands here too.
     fn mailbox_named(value: &str) -> bool {
-        ["Mail.", "MailboxSettings.", "Calendars.", "Contacts."]
-            .iter()
-            .any(|prefix| value.starts_with(prefix))
+        [
+            "Mail.",
+            "Mail-",
+            "Mailbox",
+            "MailTips.",
+            "Calendars.",
+            "Contacts.",
+        ]
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
     }
     match resource_app_id {
         // Authoritative on Graph — every value with an RBAC role reaches
         // mailboxes — plus the name-shaped test, so a Graph permission this
         // build's `graph_mail_role` table doesn't know yet still reports reach
-        // rather than vanishing from the advisory.
+        // rather than vanishing from the advisory (it lands in the
+        // unconfinable bucket, without a fix, until the table learns it).
         Some(MICROSOFT_GRAPH_APP_ID) => graph_mail_role(value).is_some() || mailbox_named(value),
         Some(OFFICE365_EXCHANGE_ONLINE_APP_ID) => {
             is_blanket_mailbox_grant(value)
@@ -656,6 +738,150 @@ mod tests {
     }
 
     #[test]
+    fn smtp_send_as_app_is_mapped_on_neither_resource() {
+        // Learn's "Supported Application Roles" table files `Application
+        // SMTP.SendAsApp` under protocol "MS Graph", but the appRole is on
+        // Office 365 Exchange Online and backs live SMTP client submission.
+        // Mapping it on Graph would be a role no Graph grant can carry; mapping
+        // it on the legacy resource would make
+        // `is_unscopable_legacy_exchange_permission` tell an operator to remove
+        // it (see `unscopable_legacy_exchange_spares_the_live_protocol_roles`).
+        for resource in [MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID] {
+            assert_eq!(
+                exchange_role_for_resource_permission(resource, "SMTP.SendAsApp"),
+                None,
+                "SMTP.SendAsApp must stay unmapped on {resource}"
+            );
+        }
+    }
+
+    /// The ten RBAC-only roles, as `New-ManagementRoleAssignment -Role` must
+    /// receive them. Source: Microsoft Learn, "Role Based Access Control for
+    /// Applications in Exchange Online" → "Supported Application Roles"
+    /// (<https://learn.microsoft.com/exchange/permissions-exo/application-rbac#supported-application-roles>).
+    /// A misspelt role here is a runtime Exchange error on the Scope fix, not a
+    /// compile error, so the exact strings are pinned.
+    const NEWER_RBAC_ROLES: &[(&str, &str)] = &[
+        ("MailboxFolder.Read.All", "Application MailboxFolder.Read"),
+        (
+            "MailboxFolder.ReadWrite.All",
+            "Application MailboxFolder.ReadWrite",
+        ),
+        ("MailboxItem.Read.All", "Application MailboxItem.Read"),
+        (
+            "MailboxItem.ReadWrite.All",
+            "Application MailboxItem.ReadWrite",
+        ),
+        ("MailboxItem.Export.All", "Application MailboxItem.Export"),
+        (
+            "MailboxItem.ImportExport.All",
+            "Application MailboxItem.ImportExport",
+        ),
+        (
+            "MailboxConfigItem.Read",
+            "Application MailboxConfigItem.Read",
+        ),
+        (
+            "MailboxConfigItem.ReadWrite",
+            "Application MailboxConfigItem.ReadWrite",
+        ),
+        (
+            "MailTips.ReadBasic.All",
+            "Application MailTips.ReadBasic.All",
+        ),
+        (
+            "Mail-Advanced.ReadWrite.All",
+            "Application Mail-Advanced.ReadWrite.All",
+        ),
+    ];
+
+    #[test]
+    fn newer_rbac_roles_map_to_their_exact_exchange_role_names() {
+        for (value, role) in NEWER_RBAC_ROLES {
+            assert_eq!(
+                exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, value),
+                Some(*role),
+                "{value} must map to the Exchange role Learn documents for it"
+            );
+            // Graph only — the legacy resource exposes none of these.
+            assert_eq!(
+                exchange_role_for_resource_permission(OFFICE365_EXCHANGE_ONLINE_APP_ID, value),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn name_shaped_fallback_sees_the_newer_mailbox_families() {
+        // The fallback exists for a Graph family this build's table doesn't
+        // know, and for an unresolved resource. Its old prefixes (`Mail.`,
+        // `MailboxSettings.`) could not match `MailboxItem.*` or
+        // `Mail-Advanced.*`, so the case it was written for fell through it.
+        let unknown = Some("11111111-2222-3333-4444-555555555555");
+        for value in [
+            "MailboxItem.ReadWrite.All",
+            "Mail-Advanced.ReadWrite.All",
+            "MailboxFolder.Read.All",
+            "MailboxConfigItem.Read",
+            "MailTips.ReadBasic.All",
+        ] {
+            for resource in [None, unknown] {
+                assert!(
+                    is_mailbox_reaching_permission(resource, value),
+                    "{value} on {resource:?} must report mailbox reach by name"
+                );
+            }
+        }
+        for resource in [None, unknown] {
+            assert!(!is_mailbox_reaching_permission(
+                resource,
+                "Directory.Read.All"
+            ));
+        }
+    }
+
+    #[test]
+    fn aap_confinable_is_a_strict_subset_of_scopable() {
+        // The migration strips the org-wide grant of every target it scopes. A
+        // grant RBAC can confine but a policy never governed is org-wide today
+        // and must stay that way through a migration — so the migration gate
+        // is the eleven AAP-era Graph values plus the EWS scope, nothing more.
+        let graph = Some(MICROSOFT_GRAPH_APP_ID);
+        for (value, _) in NEWER_RBAC_ROLES {
+            assert!(
+                is_scopable_exchange_resource_permission(graph, value),
+                "{value} is RBAC-scopable"
+            );
+            assert!(
+                !is_aap_confinable_permission(MICROSOFT_GRAPH_APP_ID, value),
+                "{value} was never governed by an Application Access Policy"
+            );
+        }
+        for value in AAP_CONFINABLE_GRAPH_PERMISSIONS {
+            assert!(is_scopable_exchange_resource_permission(graph, value));
+            assert!(is_aap_confinable_permission(MICROSOFT_GRAPH_APP_ID, value));
+            // Resource-aware: the legacy resource's namesake was never
+            // confinable by anything.
+            assert!(!is_aap_confinable_permission(
+                OFFICE365_EXCHANGE_ONLINE_APP_ID,
+                value
+            ));
+        }
+        assert!(is_aap_confinable_permission(
+            OFFICE365_EXCHANGE_ONLINE_APP_ID,
+            EWS_FULL_ACCESS_AS_APP
+        ));
+        assert!(!is_aap_confinable_permission(
+            MICROSOFT_GRAPH_APP_ID,
+            EWS_FULL_ACCESS_AS_APP
+        ));
+        assert!(!is_aap_confinable_permission(
+            "11111111-2222-3333-4444-555555555555",
+            "Mail.Read"
+        ));
+    }
+
+    #[test]
     fn only_ews_full_access_is_a_blanket_grant() {
         // A blanket grant vetoes every per-permission scope verdict, so the set
         // must stay exactly the permission that really reaches all mailboxes.
@@ -726,6 +952,12 @@ mod tests {
         // `ScopeMailboxAccess` fix, while the identically named grant on the
         // LEGACY resource was classified in. Org-wide calendar and contacts
         // access across every mailbox simply did not appear in the audit.
+        //
+        // The second block is the RBAC-only roles from Learn's "Supported
+        // Application Roles" table
+        // (https://learn.microsoft.com/exchange/permissions-exo/application-rbac#supported-application-roles):
+        // unmapped until now, so `MailboxItem.ReadWrite.All` — read, write and
+        // delete every item in every mailbox — was neither a finding nor a fix.
         let graph = Some(MICROSOFT_GRAPH_APP_ID);
         for value in [
             "Mail.Read",
@@ -739,6 +971,16 @@ mod tests {
             "Calendars.ReadWrite",
             "Contacts.Read",
             "Contacts.ReadWrite",
+            "MailboxFolder.Read.All",
+            "MailboxFolder.ReadWrite.All",
+            "MailboxItem.Read.All",
+            "MailboxItem.ReadWrite.All",
+            "MailboxItem.Export.All",
+            "MailboxItem.ImportExport.All",
+            "MailboxConfigItem.Read",
+            "MailboxConfigItem.ReadWrite",
+            "MailTips.ReadBasic.All",
+            "Mail-Advanced.ReadWrite.All",
         ] {
             assert!(
                 graph_mail_role(value).is_some(),

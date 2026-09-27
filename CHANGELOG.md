@@ -2,6 +2,28 @@
 
 ### Fixed
 
+- **The audit now sees the newer mailbox permissions Exchange RBAC can scope — `MailboxItem.*`,
+  `MailboxFolder.*`, `MailboxConfigItem.*`, `MailTips.ReadBasic.All` and
+  `Mail-Advanced.ReadWrite.All`.** An org-wide Microsoft Graph grant of `MailboxItem.ReadWrite.All`
+  or `Mail-Advanced.ReadWrite.All` — read, write and delete every item in every mailbox — raised no
+  mailbox finding, offered no Scope fix and scored zero, because the advisory's name test only knew
+  `Mail.`/`MailboxSettings.`/`Calendars.`/`Contacts.` and the risk tables listed none of them. They
+  now enter the "Organization-wide mailbox access" finding with the one-click Scope fix, appear in
+  the Grant-access wizard and the Permissions-tab Scope column, and the write and export variants
+  score high (`MailboxItem.ReadWrite.All`, `MailboxItem.Export.All`, `MailboxItem.ImportExport.All`,
+  `MailboxFolder.ReadWrite.All`, `Mail-Advanced.ReadWrite.All`) with the read variants medium
+  (`MailboxItem.Read.All`, `MailboxFolder.Read.All`); `MailboxConfigItem.*` and
+  `MailTips.ReadBasic.All` are advisory only. The legacy Application Access Policy migration
+  deliberately still targets only the permissions a policy could confine, so it never narrows a
+  grant the policy never governed. **This shifts risk ranking** for any app holding these grants.
+- **The EWS `full_access_as_app` scope finally gets a mailbox-scope verdict.** The resolver
+  re-derived every permission's Exchange role against Microsoft Graph, which has no such permission,
+  so the row was dropped before the probe: the Permissions tab showed "Unknown" forever for an app
+  declaring only the EWS scope (after paying the Exchange round trip), and the audit scored a
+  correctly RBAC-scoped `Application EWS.AccessAsApp` grant at full org-wide weight. The resolver now
+  carries the role its resource-aware callers already computed, so the row reads Org-wide or Scoped
+  like any Graph row and a scoped EWS grant earns the reduced scoped weight. **Affects audit scores
+  and the Scope column.**
 - **Long-running scans keep backing off for as long as Microsoft Graph keeps throttling them.**
   The adaptive concurrency cap behind the security audit, bulk actions, the site sweep and the DR
   backup was meant to halve on every burst of 429s until a single request at a time was left, then

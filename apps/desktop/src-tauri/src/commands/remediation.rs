@@ -13,7 +13,7 @@ use azapptoolkit_core::audit::{
 };
 use azapptoolkit_core::models::{Application, RequiredResourceAccess};
 use azapptoolkit_core::scoping::{
-    MICROSOFT_GRAPH_APP_ID, is_scopable_exchange_resource_permission,
+    exchange_role_for_resource_permission, is_scopable_exchange_resource_permission,
 };
 
 use crate::commands::applications::{invalidate_app_credentials, invalidate_app_lists};
@@ -378,23 +378,35 @@ pub async fn remediate_remove_redundant_permissions(
     let mail_scopes: HashMap<String, MailPermissionScope> =
         match exchange_client(&state, &tenant_id) {
             Ok(exo) => {
-                let graph_mail: Vec<String> = app
+                // Every declared application permission its OWN resource maps
+                // to an Exchange role — Graph's mail family and the EWS scope on
+                // Office 365 Exchange Online — as the `(value, role)` pairs the
+                // resolver takes. The same resource-aware gate
+                // `broader_is_confined` applies below, so the two agree on what
+                // a verdict can exist for.
+                let scopable: Vec<(String, &'static str)> = app
                     .required_resource_access
                     .iter()
-                    .filter(|r| r.resource_app_id == MICROSOFT_GRAPH_APP_ID)
                     .flat_map(|r| {
                         role_indexes
                             .get(&r.resource_app_id)
                             .into_iter()
-                            .flat_map(|ix| {
+                            .flat_map(move |ix| {
                                 r.resource_access
                                     .iter()
                                     .filter(|a| a.r#type == "Role")
-                                    .filter_map(|a| ix.get(&a.id).cloned())
+                                    .filter_map(move |a| ix.get(&a.id))
+                                    .filter_map(move |value| {
+                                        exchange_role_for_resource_permission(
+                                            &r.resource_app_id,
+                                            value,
+                                        )
+                                        .map(|role| (value.clone(), role))
+                                    })
                             })
                     })
                     .collect();
-                resolve_mail_scopes(&exo, &app.app_id, &graph_mail, &HashSet::new(), false)
+                resolve_mail_scopes(&exo, &app.app_id, &scopable, &HashSet::new(), false)
                     .await
                     .unwrap_or_default()
             }

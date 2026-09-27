@@ -997,6 +997,124 @@ fn ews_full_access_as_app_is_high_risk_org_wide_mailbox_reach() {
 }
 
 #[test]
+fn an_rbac_scoped_ews_grant_earns_the_reduced_weight() {
+    // The consumer half of the EWS fix: once the resolver keys a verdict under
+    // `full_access_as_app` (see `the_ews_scope_is_resolved_not_short_circuited`
+    // in the command layer), `scope_mechanism` — which already passes the
+    // resource gate for (Office 365 Exchange Online, full_access_as_app) —
+    // must find it and apply the scoped weight. It scored full org-wide weight
+    // before because the key never arrived.
+    let mut mail_scopes = HashMap::new();
+    mail_scopes.insert(crate::scoping::EWS_FULL_ACCESS_AS_APP.to_string(), scoped());
+    let perms = AppPermissions {
+        app_role_grants: vec![ResourcePermission::exchange_online(
+            crate::scoping::EWS_FULL_ACCESS_AS_APP,
+        )],
+        mail_scopes,
+        ..Default::default()
+    };
+    let item = score_application(&base_app(), Some(true), &perms, now());
+    assert_eq!(item.risk_score, PTS_SCOPED_HIGH_RISK_MAIL);
+    assert!(
+        item.issues
+            .iter()
+            .any(|i| i.contains(issue::SCOPED_VIA_RBAC)),
+        "a scoped EWS grant is the healthy RBAC verdict: {:?}",
+        item.issues
+    );
+    assert!(
+        !item
+            .remediations
+            .iter()
+            .any(|r| r.kind == RemediationKind::ScopeMailboxAccess),
+        "already scoped — nothing to fix"
+    );
+}
+
+#[test]
+fn newer_rbac_scopable_mailbox_grants_are_scored_and_offered_the_scope_fix() {
+    // The risk tables mirror `Constants.ps1:104-130`; every entry here is
+    // net-new, from Learn's RBAC-for-Applications "Supported Application
+    // Roles" table
+    // (https://learn.microsoft.com/exchange/permissions-exo/application-rbac#supported-application-roles).
+    // Before: an org-wide `Mail-Advanced.ReadWrite.All` — create, read, update
+    // and delete every email in every mailbox, non-draft bodies included —
+    // scored ZERO and raised no finding, because the advisory's name test knew
+    // only `Mail.`/`MailboxSettings.`/`Calendars.`/`Contacts.` and no risk
+    // table listed it. Write/export variants are high like `Mail.ReadWrite`,
+    // read variants medium like `Mail.Read`.
+    let cases: &[(&str, u32)] = &[
+        ("MailboxItem.ReadWrite.All", PTS_HIGH_RISK_APP_PERM),
+        ("MailboxItem.Export.All", PTS_HIGH_RISK_APP_PERM),
+        ("MailboxItem.ImportExport.All", PTS_HIGH_RISK_APP_PERM),
+        ("MailboxFolder.ReadWrite.All", PTS_HIGH_RISK_APP_PERM),
+        ("Mail-Advanced.ReadWrite.All", PTS_HIGH_RISK_APP_PERM),
+        ("MailboxItem.Read.All", PTS_MEDIUM_RISK_APP_PERM),
+        ("MailboxFolder.Read.All", PTS_MEDIUM_RISK_APP_PERM),
+        // Advisory only, deliberately: UserConfiguration objects are not
+        // mailbox content, so the grant enters the org-wide finding (and gets
+        // the fix) but carries no weight.
+        ("MailboxConfigItem.Read", 0),
+    ];
+    for (value, points) in cases {
+        let perms = AppPermissions {
+            app_role_grants: vec![ResourcePermission::graph(*value)],
+            ..Default::default()
+        };
+        let item = score_application(&base_app(), Some(true), &perms, now());
+        assert_eq!(item.risk_score, *points, "{value} weight");
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with(issue::ORG_WIDE_MAILBOX)),
+            "{value} must raise the org-wide mailbox finding: {:?}",
+            item.issues
+        );
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::UNCONFINABLE_MAILBOX)),
+            "{value} IS confinable — RBAC exposes a role for it: {:?}",
+            item.issues
+        );
+        let fix = item
+            .remediations
+            .iter()
+            .find(|r| r.kind == RemediationKind::ScopeMailboxAccess)
+            .unwrap_or_else(|| panic!("{value} must offer the ScopeMailboxAccess fix"));
+        assert_eq!(fix.targets, vec![*value]);
+    }
+}
+
+#[test]
+fn newer_rbac_scopable_mailbox_grants_earn_the_reduced_scoped_weight() {
+    // Once confined, the newer roles take the same scoped path as `Mail.Send`.
+    let mut mail_scopes = HashMap::new();
+    mail_scopes.insert("MailboxItem.ReadWrite.All".to_string(), scoped());
+    let perms = AppPermissions {
+        app_role_grants: vec![ResourcePermission::graph("MailboxItem.ReadWrite.All")],
+        mail_scopes,
+        ..Default::default()
+    };
+    let item = score_application(&base_app(), Some(true), &perms, now());
+    assert_eq!(item.risk_score, PTS_SCOPED_HIGH_RISK_MAIL);
+    assert!(
+        item.issues
+            .iter()
+            .any(|i| i.contains(issue::SCOPED_VIA_RBAC)),
+        "{:?}",
+        item.issues
+    );
+    assert!(
+        !item
+            .remediations
+            .iter()
+            .any(|r| r.kind == RemediationKind::ScopeMailboxAccess)
+    );
+}
+
+#[test]
 fn a_scoped_graph_mail_verdict_never_covers_its_legacy_exchange_namesake() {
     // Both Microsoft Graph and the legacy Office 365 Exchange Online resource
     // expose a `Mail.Read`. Only Graph's is confinable by RBAC for

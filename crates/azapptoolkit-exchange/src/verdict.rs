@@ -26,6 +26,13 @@ use crate::error::ExchangeError;
 use crate::models::{ExoApplicationAccessPolicy, ExoAuthorizationResult};
 use crate::roles::is_blanket_mailbox_grant;
 
+/// True when a `Test-ServicePrincipalAuthorization` row is *not* confined to a
+/// recipient scope — i.e. the grant reaches every mailbox in the tenant. The
+/// `ScopeType` enum returned by EXO uses values like `OrganizationConfig` /
+/// `NotApplicable` for org-wide; a custom management scope reports its name in
+/// `AllowedResourceScope` with a `*RecipientScope` type. We treat an empty /
+/// "Not Applicable" `AllowedResourceScope` as org-wide too, and default to
+/// org-wide (the conservative, never-under-report choice) when unsure.
 pub fn is_org_wide_auth_row(r: &ExoAuthorizationResult) -> bool {
     let allowed = r.allowed_resource_scope.as_deref().unwrap_or("").trim();
     if allowed.is_empty() || allowed.eq_ignore_ascii_case("Not Applicable") {

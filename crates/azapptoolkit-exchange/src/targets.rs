@@ -23,7 +23,8 @@ use azapptoolkit_core::models::{AppRoleAssignment, Application};
 use crate::models::ExoRoleAssignment;
 
 use crate::roles::{
-    MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID, exchange_role_for_resource_permission,
+    MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
+    exchange_role_for_resource_permission, is_aap_confinable_permission,
 };
 
 /// One resource's appRole index: its service-principal object id (what an
@@ -202,8 +203,17 @@ pub fn targets_from_declared(
 }
 
 /// Targets derived from the app's *granted* Entra app-role assignments, across
-/// **every** mailbox-bearing resource. Used during migration, where the app
-/// already holds org-wide grants.
+/// **every** mailbox-bearing resource. Used during the Application Access
+/// Policy migration, where the app already holds org-wide grants.
+///
+/// The migration's targets are **only what a policy could have been
+/// confining** ([`is_aap_confinable_permission`]), not everything RBAC can
+/// scope. A grant RBAC can scope but an AAP never governed (`MailboxItem.*`,
+/// `Mail-Advanced.*`, …) is already org-wide today; the migration would assign
+/// it a scoped role and then strip its org-wide grant, silently *narrowing*
+/// live access — the one thing the fail-closed migration must never do. Such
+/// grants stay untouched here and are surfaced by the audit's org-wide mailbox
+/// finding, where the operator chooses to scope them explicitly.
 pub fn targets_from_grants(
     assignments: &[AppRoleAssignment],
     resources: &[ResourceRoles],
@@ -212,6 +222,7 @@ pub fn targets_from_grants(
     for a in assignments {
         if let Some((resource_app_id, resource_sp_id, value)) =
             resolve_grant(resources, &a.resource_id, &a.app_role_id)
+            && is_aap_confinable_permission(resource_app_id, value)
             && let Some(t) = exchange_target(
                 resource_app_id,
                 resource_sp_id,

@@ -36,7 +36,15 @@ fn mailbox_resources() -> Vec<ResourceRoles> {
         ResourceRoles {
             app_id: MICROSOFT_GRAPH_APP_ID,
             sp_object_id: "graph-sp".to_string(),
-            role_value_by_id: index(&["Mail.Read", "Mail.Send", "User.Read.All"]),
+            // `MailboxItem.ReadWrite.All` is RBAC-scopable but was never
+            // governed by an Application Access Policy — the migration-parity
+            // case below.
+            role_value_by_id: index(&[
+                "Mail.Read",
+                "Mail.Send",
+                "User.Read.All",
+                "MailboxItem.ReadWrite.All",
+            ]),
         },
         ResourceRoles {
             app_id: OFFICE365_EXCHANGE_ONLINE_APP_ID,
@@ -130,11 +138,32 @@ fn granted_targets_span_both_resources_and_keep_resources_apart() {
         grant("exo-sp", &format!("exo-role-{EWS_FULL_ACCESS_AS_APP}")),
         grant("exo-sp", "exo-role-Mail.Read"), // not RBAC-scopable
         grant("other-sp", "role-Mail.Read"),   // unrelated resource
+        // RBAC-scopable, but no Application Access Policy ever governed it:
+        // it is org-wide today and must stay org-wide through a migration,
+        // which would otherwise scope it and strip its grant — a silent
+        // narrowing of live access.
+        grant("graph-sp", "role-MailboxItem.ReadWrite.All"),
     ];
     let targets = targets_from_grants(&assignments, &mailbox_resources());
     assert_eq!(values(&targets), ["Mail.Send", EWS_FULL_ACCESS_AS_APP]);
     assert_eq!(targets[0].resource_sp_object_id, "graph-sp");
     assert_eq!(targets[1].resource_sp_object_id, "exo-sp");
+
+    // The same permission IS a target on the Grant-access / Scope-fix path,
+    // which derives from what the operator asked to scope, not from a policy.
+    let app = Application {
+        required_resource_access: vec![declared(
+            MICROSOFT_GRAPH_APP_ID,
+            &["role-MailboxItem.ReadWrite.All"],
+        )],
+        ..Default::default()
+    };
+    let declared_targets = targets_from_declared(&app, &mailbox_resources());
+    assert_eq!(values(&declared_targets), ["MailboxItem.ReadWrite.All"]);
+    assert_eq!(
+        declared_targets[0].exchange_role,
+        "Application MailboxItem.ReadWrite"
+    );
 }
 
 #[test]
@@ -198,10 +227,13 @@ fn rbac_scope() -> MailPermissionScope {
 
 #[tokio::test]
 async fn audit_cached_scopes_skip_probe_and_cache_for_nonmail_perms() {
-    // A non-mail permission set must short-circuit before any Exchange call
-    // (the base points nowhere) AND leave no cache entry — otherwise the
-    // audit would create a useless entry per non-mail app, bloating the
-    // cache it's meant to reuse.
+    // An app with no scopable mail permission must short-circuit before any
+    // Exchange call (the base points nowhere) AND leave no cache entry —
+    // otherwise the audit would create a useless entry per non-mail app,
+    // bloating the cache it's meant to reuse. The resolver now takes
+    // `(value, role)` pairs the caller's resource-aware gate produced, so a
+    // non-mail value can no longer even be passed: the empty slice IS that
+    // app's vetted set.
     use azapptoolkit_core::token::StaticTokenProvider;
     let cache = Cache::new();
     let exo = ExchangeClient::with_base_url(
@@ -210,16 +242,10 @@ async fn audit_cached_scopes_skip_probe_and_cache_for_nonmail_perms() {
         "admin@contoso.com",
         "http://127.0.0.1:9".to_string(),
     );
-    let out = resolve_mail_scopes_audit_cached(
-        &cache,
-        "tenant-1",
-        &exo,
-        "app-1",
-        &["User.Read.All".to_string()],
-        &HashSet::new(),
-    )
-    .await
-    .unwrap();
+    let out =
+        resolve_mail_scopes_audit_cached(&cache, "tenant-1", &exo, "app-1", &[], &HashSet::new())
+            .await
+            .unwrap();
     assert!(out.is_empty());
     // The whole audit discriminator for this app is absent (empty perm set).
     let key = mail_scopes_key("tenant-1", "audit|app-1|");
@@ -228,6 +254,103 @@ async fn audit_cached_scopes_skip_probe_and_cache_for_nonmail_perms() {
             .get::<HashMap<String, MailPermissionScope>>(CacheKind::Lists, &key)
             .is_none()
     );
+}
+
+/// A `Test-ServicePrincipalAuthorization` mock that answers every cmdlet POST
+/// with one scoped row for `role`, and the client pointed at it.
+async fn exo_answering_one_scoped_row(
+    role: &str,
+    granted: &str,
+) -> (wiremock::MockServer, ExchangeClient) {
+    use azapptoolkit_core::token::StaticTokenProvider;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "RoleName": role,
+                "GrantedPermissions": granted,
+                "AllowedResourceScope": "app_scope_app-1",
+                "ScopeType": "CustomRecipientScope",
+                "InScope": "Not Run"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let exo = ExchangeClient::with_base_url(
+        StaticTokenProvider::new("t"),
+        "tenant-1",
+        "admin@contoso.com",
+        server.uri(),
+    );
+    (server, exo)
+}
+
+#[tokio::test]
+async fn the_ews_scope_is_resolved_not_short_circuited() {
+    // The join the two halves lacked: `declared_targets_span_graph_and_the_
+    // legacy_ews_scope` proves the EWS `full_access_as_app` target reaches the
+    // resolver, and this proves the resolver PROBES for it and keys a verdict
+    // under it. The resolver used to re-derive the role against Microsoft
+    // Graph, which has no such permission, so an EWS-only set returned
+    // `Ok(empty)` with zero requests — the Permissions tab showed `Unknown`
+    // forever and the audit scored a correctly scoped EWS grant org-wide.
+    // `enrich = false` keeps the AAP / Get-ManagementScope calls out of it.
+    let (server, exo) =
+        exo_answering_one_scoped_row("Application EWS.AccessAsApp", "EWS.AccessAsApp").await;
+    let out = resolve_mail_scopes(
+        &exo,
+        "app-1",
+        &[(
+            EWS_FULL_ACCESS_AS_APP.to_string(),
+            "Application EWS.AccessAsApp",
+        )],
+        &HashSet::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            out.get(EWS_FULL_ACCESS_AS_APP),
+            Some(MailPermissionScope::Scoped {
+                mechanism: ScopeMechanism::Rbac,
+                scope_name: Some(name),
+                ..
+            }) if name == "app_scope_app-1"
+        ),
+        "the EWS row must carry the probe's verdict: {out:?}"
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "exactly one Test-ServicePrincipalAuthorization probe was attempted"
+    );
+}
+
+#[tokio::test]
+async fn a_graph_mail_row_resolves_through_the_same_path() {
+    // Positive control for the test above: a Graph row takes the identical
+    // path, so the EWS fix did not special-case one resource.
+    let (server, exo) = exo_answering_one_scoped_row("Application Mail.Read", "Mail.Read").await;
+    let out = resolve_mail_scopes(
+        &exo,
+        "app-1",
+        &[("Mail.Read".to_string(), "Application Mail.Read")],
+        &HashSet::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        out.get("Mail.Read"),
+        Some(MailPermissionScope::Scoped {
+            mechanism: ScopeMechanism::Rbac,
+            ..
+        })
+    ));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
 #[test]

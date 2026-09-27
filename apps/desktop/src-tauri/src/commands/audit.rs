@@ -28,7 +28,7 @@ use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
 use azapptoolkit_core::scoping::{
     EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
-    is_scopable_exchange_resource_permission,
+    exchange_role_for_resource_permission, is_scopable_exchange_resource_permission,
 };
 use azapptoolkit_exchange::{ExchangeClient, ExchangeError};
 use azapptoolkit_graph::GraphClient;
@@ -1520,7 +1520,20 @@ async fn score_one(
     } else {
         ctx.exo.as_deref()
     };
-    let declared_values = perms.app_role_values();
+    // The Exchange-scopable declared grants with the role each one's OWN
+    // resource maps it to: Microsoft Graph's mail family and the EWS
+    // `full_access_as_app` scope on Office 365 Exchange Online. Carrying the
+    // role from here is what lets the resolver see the EWS row — re-deriving
+    // it against Graph dropped that row, so a correctly RBAC-scoped EWS grant
+    // scored at full org-wide weight.
+    let scopable: Vec<(String, &'static str)> = perms
+        .app_role_grants
+        .iter()
+        .filter_map(|g| {
+            exchange_role_for_resource_permission(g.resource_app_id.as_deref()?, &g.value)
+                .map(|role| (g.value.clone(), role))
+        })
+        .collect();
     if let Some(exo) = exo {
         // Reconcile a scoped RBAC verdict against an un-stripped org-wide Entra
         // grant — `Test-ServicePrincipalAuthorization` can't see Entra grants, so
@@ -1528,11 +1541,7 @@ async fn score_one(
         // mailbox. Only worth the extra read when the app declares a scopable mail
         // permission and its SP resolved.
         let orgwide = match &sp {
-            Some(sp)
-                if perms.app_role_grants.iter().any(|g| {
-                    is_scopable_exchange_resource_permission(g.resource_app_id.as_deref(), &g.value)
-                }) =>
-            {
+            Some(sp) if !scopable.is_empty() => {
                 // One tenant-wide read (above) replaces the former per-app
                 // appRoleAssignments GET; a map miss ⇒ empty set, same as before.
                 ctx.orgwide_mail_by_sp
@@ -1555,7 +1564,7 @@ async fn score_one(
             &ctx.tenant_id,
             exo,
             &app.app_id,
-            &declared_values,
+            &scopable,
             &orgwide,
         )
         .await

@@ -123,6 +123,24 @@ pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
     "Contacts.ReadWrite",
     // Tenant-wide write over OneNote content, matching `Files.ReadWrite.All`.
     "Notes.ReadWrite.All",
+    // Net-new (not in the PowerShell `Constants.ps1:104-115` source): the
+    // newer Microsoft Graph mailbox permissions that RBAC for Applications
+    // exposes a scoped role for (Learn, "Supported Application Roles"). Each
+    // of these reaches every mailbox in the tenant and scored ZERO because no
+    // risk table named them. Tenant-wide write/delete of every mailbox item
+    // (`MailboxItem.ReadWrite.All`, `MailboxFolder.ReadWrite.All`) is at least
+    // `Mail.ReadWrite`; `Mail-Advanced.ReadWrite.All` additionally edits the
+    // contents of non-draft messages (Microsoft's own description); Export and
+    // ImportExport are the bulk-exfiltration primitives backup vendors request.
+    // `MailboxConfigItem.*` (UserConfiguration objects) and
+    // `MailTips.ReadBasic.All` (MailTips metadata, no message content) are
+    // deliberately in NEITHER table: they reach mailboxes, so they enter the
+    // org-wide mailbox advisory, but they do not read or write mailbox content.
+    "MailboxItem.ReadWrite.All",
+    "MailboxItem.Export.All",
+    "MailboxItem.ImportExport.All",
+    "MailboxFolder.ReadWrite.All",
+    "Mail-Advanced.ReadWrite.All",
     crate::scoping::EWS_FULL_ACCESS_AS_APP,
 ];
 
@@ -154,6 +172,11 @@ pub const MEDIUM_RISK_APP_PERMISSIONS: &[&str] = &[
     // above, weighted like `Mail.Read` rather than their write counterparts.
     "Chat.Read.All",
     "Calendars.Read",
+    // Net-new — the read halves of the newer RBAC-scopable mailbox families
+    // (see the high list), weighted like `Mail.Read` per the read/write split
+    // `Constants.ps1:123-130` uses for every other family.
+    "MailboxItem.Read.All",
+    "MailboxFolder.Read.All",
 ];
 
 /// High-risk delegated permissions (by scope `value`). Ported from
@@ -600,8 +623,11 @@ mod tests {
     /// Directory/Application/Sites names that `scoping.rs` has no opinion on.
     #[test]
     fn mailbox_family_risk_entries_agree_with_the_scoping_role_map() {
+        // `Mail` unterminated on purpose: it has to see `Mailbox*` and `Mail-*`
+        // as well as `Mail.*`, or the newer RBAC-scopable entries are invisible
+        // to this typo guard.
         let mailbox_family = |v: &str| {
-            v.starts_with("Mail.") || v.starts_with("Calendar") || v.starts_with("Contacts.")
+            v.starts_with("Mail") || v.starts_with("Calendar") || v.starts_with("Contacts.")
         };
         let mut unmapped: Vec<&str> = Vec::new();
         let mut checked = 0usize;

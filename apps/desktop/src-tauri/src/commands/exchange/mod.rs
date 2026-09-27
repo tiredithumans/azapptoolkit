@@ -29,11 +29,6 @@ use azapptoolkit_exchange::targets::{
     plan_role_assignments, policies_safe_to_remove, require_scopable_targets, rewritable_scope_dns,
     scope_groups_in_filter, targets_from_declared, targets_from_grants, targets_safe_to_strip,
 };
-// These three flows resolve roles for permission sets a resource-aware gate has
-// already proven scopable — and only Microsoft Graph's mail permissions ever
-// are, which is what that proof establishes. So they name the resource instead
-// of asking the value-only form to guess it.
-use azapptoolkit_exchange::MICROSOFT_GRAPH_APP_ID;
 // The pure mailbox-scope decisions now live in the crate, where they are
 // unit-testable without a Tauri `State`. This file keeps the I/O around them.
 use azapptoolkit_exchange::verdict::{
