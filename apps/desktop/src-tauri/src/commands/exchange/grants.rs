@@ -5,43 +5,115 @@
 
 use super::*;
 
-/// Removes the org-wide Entra app-role assignments for `targets` from the
-/// service principal, so the scoped Exchange grant is not unioned away.
-/// Returns the permission values actually removed; appends any failures to
-/// `warnings`.
+/// Whether assignment `a` is the org-wide Entra grant target `t` names.
 ///
 /// Each target names its own resource service principal, so a grant is matched
 /// on `(resource, appRole)` — never on the appRole id alone, which two resources
 /// can legitimately share.
+fn grants_target(a: &AppRoleAssignment, t: &ExchangeTarget) -> bool {
+    a.resource_id == t.resource_sp_object_id && a.app_role_id == t.app_role_id
+}
+
+/// The permission value `a` grants when it is the org-wide grant of one of
+/// `targets`, `None` when it is not one to strip.
+fn unscoped_grant_value(targets: &[ExchangeTarget], a: &AppRoleAssignment) -> Option<String> {
+    targets
+        .iter()
+        .find(|t| grants_target(a, t))
+        .map(|t| t.graph_value.clone())
+}
+
+/// What [`remove_unscoped_grants`] did, and what it left org-wide.
+pub(super) struct UnscopedStrip {
+    /// Values whose org-wide Entra grant was removed.
+    pub(super) removed: Vec<String>,
+    /// Target values the principal STILL holds org-wide after the strip (its
+    /// scoped role failed to land, or the removal failed), read from the live
+    /// assignments — never from the targets alone, which may be declared but
+    /// never granted. `None` when the assignments could not be read at all.
+    pub(super) still_orgwide: Option<Vec<String>>,
+}
+
+/// Removes the org-wide Entra app-role assignments for the targets in `scoped`
+/// whose scoped Exchange role landed, so the scoped grant is not unioned away.
+/// Appends any failures to `warnings`.
+///
+/// The strand guard lives here: `scoped` is `assign_scoped_roles`' per-target
+/// outcome, and only a target whose scoped role is in place is stripped
+/// (`targets_safe_to_strip`) — a failed assignment keeps its broad grant, so
+/// the principal is never left with neither. The removal loop itself is the
+/// shared `graph_roles::strip_app_role_grants`, also used by the SharePoint
+/// `Sites.Selected` conversion.
 pub(super) async fn remove_unscoped_grants(
     client: &GraphClient,
     sp_id: &str,
-    targets: &[ExchangeTarget],
+    scoped: &[(ExchangeTarget, bool)],
     warnings: &mut Vec<String>,
-) -> Vec<String> {
+) -> UnscopedStrip {
+    let safe = targets_safe_to_strip(scoped.to_vec());
     let assignments = match client.list_app_role_assignments(sp_id).await {
         Ok(a) => a,
         Err(err) => {
-            warnings.push(format!("could not list Entra app-role assignments: {err}"));
-            return Vec::new();
+            warnings.push(format!(
+                "could not list Entra app-role assignments, so no org-wide grant was removed \
+                 and scoping may NOT be effective: {err}"
+            ));
+            return UnscopedStrip {
+                removed: Vec::new(),
+                still_orgwide: None,
+            };
         }
     };
-    let mut removed = Vec::new();
+    let removed = strip_app_role_grants(
+        client,
+        sp_id,
+        &assignments,
+        |a| unscoped_grant_value(&safe, a),
+        warnings,
+    )
+    .await;
+    let still_orgwide = still_held_orgwide(scoped.iter().map(|(t, _)| t), &assignments, &removed);
+    UnscopedStrip {
+        removed,
+        still_orgwide: Some(still_orgwide),
+    }
+}
+
+/// The values of `targets` the principal still holds org-wide: some live
+/// assignment grants the target (matched on `(resource, appRole)`) and its
+/// removal is not in `removed`. A target the app only DECLARES — the wizard
+/// declares each permission before scoping it — has no assignment and is not
+/// listed, so it is never reported as reaching every mailbox. Deduplicated, in
+/// target order.
+pub(super) fn still_held_orgwide<'a>(
+    targets: impl IntoIterator<Item = &'a ExchangeTarget>,
+    assignments: &[AppRoleAssignment],
+    removed: &[String],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
     for t in targets {
-        let found = assignments
-            .iter()
-            .find(|a| a.resource_id == t.resource_sp_object_id && a.app_role_id == t.app_role_id);
-        if let Some(a) = found {
-            match client.remove_app_role_assignment(sp_id, &a.id).await {
-                Ok(()) => removed.push(t.graph_value.clone()),
-                Err(err) => warnings.push(format!(
-                    "failed to remove unscoped grant {}: {err}",
-                    t.graph_value
-                )),
-            }
+        let held = assignments.iter().any(|a| grants_target(a, t));
+        if held && !removed.contains(&t.graph_value) && !out.contains(&t.graph_value) {
+            out.push(t.graph_value.clone());
         }
     }
-    removed
+    out
+}
+
+/// "{a, b} still granted organization-wide in Microsoft Entra ID" — the one
+/// phrasing of what an unstripped grant means, shared by the scoped grant and
+/// the legacy-policy migration so the two callers of the Exchange core say it
+/// the same way.
+pub(super) fn still_granted_orgwide(kept: &[&str]) -> String {
+    format!(
+        "{} still granted organization-wide in Microsoft Entra ID",
+        kept.join(", ")
+    )
+}
+
+/// "it" for one permission, "them" for several.
+pub(super) fn it_or_them(n: usize) -> &'static str {
+    if n == 1 { "it" } else { "them" }
 }
 
 /// Inputs to [`apply_exchange_mailbox_scope`], grouped so each is named at the
@@ -280,13 +352,23 @@ pub(super) async fn apply_exchange_mailbox_scope(
         assign_scoped_roles(exo, app_id, &scope_name, targets, &mut warnings).await?;
 
     let removed_entra_grants = if remove_unscoped {
-        remove_unscoped_grants(
-            graph,
-            sp_object_id,
-            &targets_safe_to_strip(scoped),
-            &mut warnings,
-        )
-        .await
+        let strip = remove_unscoped_grants(graph, sp_object_id, &scoped, &mut warnings).await;
+        // The per-item lines above say what failed; this says what it MEANS,
+        // once — the same consequence `migrate_one` states when it keeps a
+        // legacy policy. Built from the live assignments, so a permission the
+        // app only declares is never reported as reaching every mailbox.
+        if let Some(kept) = strip.still_orgwide.filter(|k| !k.is_empty()) {
+            let kept: Vec<&str> = kept.iter().map(String::as_str).collect();
+            warnings.push(format!(
+                "Scoping is NOT effective for {}: {}, and Exchange RBAC adds to that grant \
+                 rather than replacing it, so the app still reaches every mailbox with {}. \
+                 Re-run once the problems above are fixed.",
+                kept.join(", "),
+                still_granted_orgwide(&kept),
+                it_or_them(kept.len())
+            ));
+        }
+        strip.removed
     } else {
         warnings.push(
             "unscoped Entra grants were left in place; scoping is NOT effective until they are removed".into(),
@@ -333,11 +415,12 @@ pub async fn grant_exchange_mailbox_access(
     let exo = exchange_client_checked(&state, &tenant_id).await?;
 
     let app = graph.get_application(&object_id).await?;
-    // The list caches are busted unconditionally on success below (line ~450),
-    // so the `created` flag isn't needed here.
-    let (entra_sp, _created) = graph.ensure_service_principal(&app.app_id).await?;
     let resources = mailbox_resource_roles(&graph).await?;
 
+    // Validate BEFORE creating anything: the targets need only the manifest and
+    // the resource indexes, and `ensure_service_principal` below is a directory
+    // write (it adds an enterprise app when the app has none). Creating it first
+    // meant a "nothing to scope" refusal still left a new enterprise app behind.
     let targets = filter_targets_by_value(
         targets_from_declared(&app, &resources),
         permissions.as_deref(),
@@ -351,7 +434,11 @@ pub async fn grant_exchange_mailbox_access(
         )
     })?;
 
-    apply_exchange_mailbox_scope(ApplyExchangeMailboxScopeParams {
+    // `invalidate_app_lists` runs in `apply_exchange_mailbox_scope` on success;
+    // `sp_created` covers the case where the scope step then fails.
+    let (entra_sp, sp_created) = graph.ensure_service_principal(&app.app_id).await?;
+
+    let result = apply_exchange_mailbox_scope(ApplyExchangeMailboxScopeParams {
         state: &state,
         graph: &graph,
         exo: &exo,
@@ -364,7 +451,15 @@ pub async fn grant_exchange_mailbox_access(
         remove_unscoped: remove_unscoped_entra_grants,
         warnings,
     })
-    .await
+    .await;
+    // Not a failed write being invalidated: the SP POST above LANDED, even when
+    // the scope step then refused (no_scope_group, scope_group_mismatch, an
+    // Exchange error). That is a brand-new Enterprise App row the cached lists
+    // must show — the `invalidate_after_grant` / `GrantRun.sp_created` precedent.
+    if sp_created && result.is_err() {
+        invalidate_app_lists(&state.cache, &tenant_id);
+    }
+    result
 }
 
 /// Scopes a **managed identity's** mailbox access to one or more groups via

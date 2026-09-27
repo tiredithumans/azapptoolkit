@@ -445,6 +445,61 @@ fn org_wide_strip_keeps_nothing_when_all_assignments_fail() {
     assert!(targets_safe_to_strip(scoped).is_empty());
 }
 
+/// A target on its own appRole, keyed `role-<value>` like [`mailbox_resources`].
+fn graph_target(value: &str) -> ExchangeTarget {
+    ExchangeTarget {
+        graph_value: value.to_string(),
+        exchange_role: "Application Mail.Read",
+        app_role_id: format!("role-{value}"),
+        resource_sp_object_id: "graph-sp".to_string(),
+    }
+}
+
+#[test]
+fn a_declared_but_never_granted_permission_is_not_reported_org_wide() {
+    // The wizard declares each permission before scoping it, so a target is
+    // routinely declared but NOT held. Only a live assignment is org-wide reach:
+    // "targets minus removed" would name Mail.Send on every wizard run.
+    let targets = [graph_target("Mail.Read"), graph_target("Mail.Send")];
+    let assignments = [grant("graph-sp", "role-Mail.Read")];
+    assert_eq!(
+        still_held_orgwide(&targets, &assignments, &[]),
+        ["Mail.Read"]
+    );
+    assert!(still_held_orgwide(&targets, &assignments, &["Mail.Read".to_string()]).is_empty());
+}
+
+#[test]
+fn still_org_wide_matches_on_resource_and_role() {
+    // Graph's appRole id assigned on Exchange Online's resource is not the
+    // Graph grant the target names.
+    let targets = [graph_target("Mail.Read")];
+    let assignments = [grant("exo-sp", "role-Mail.Read")];
+    assert!(still_held_orgwide(&targets, &assignments, &[]).is_empty());
+}
+
+#[test]
+fn still_org_wide_names_a_permission_once() {
+    // Two targets can carry one value (several values map to one role, or a
+    // caller repeats it); the note names it once.
+    let targets = [graph_target("Mail.Read"), graph_target("Mail.Read")];
+    let assignments = [grant("graph-sp", "role-Mail.Read")];
+    assert_eq!(
+        still_held_orgwide(&targets, &assignments, &[]),
+        ["Mail.Read"]
+    );
+}
+
+#[test]
+fn the_not_effective_note_names_every_permission() {
+    let note = still_granted_orgwide(&["Mail.Read", "Mail.Send"]);
+    assert!(note.contains("Mail.Read"), "{note}");
+    assert!(note.contains("Mail.Send"), "{note}");
+    assert!(note.contains("organization-wide"), "{note}");
+    assert_eq!(it_or_them(1), "it");
+    assert_eq!(it_or_them(2), "them");
+}
+
 #[test]
 fn group_dns_in_filter_extracts_the_dn_set() {
     // Round-trips what `member_of_group_filter` produces, set-wise.

@@ -92,6 +92,14 @@ pub async fn migrate_application_access_policies(
     // against the tenant to find out which apps are still on legacy policies —
     // the same "a partial run is never presented as a complete one" rule the
     // flag exists for, applied to the apps rather than to the run.
+    let ctx = MigrationContext {
+        graph: &graph,
+        exo: &exo,
+        resources: &resources,
+        scope_override: scope_override.as_deref(),
+        tenant_defaults: &tenant_defaults,
+        dry_run,
+    };
     let mut remaining = batches.into_iter();
     let mut unattempted: Vec<String> = Vec::new();
     while let Some((policy_app_id, batch)) = remaining.next() {
@@ -104,18 +112,7 @@ pub async fn migrate_application_access_policies(
             unattempted.extend(remaining.map(|(id, _)| id));
             break;
         }
-        match migrate_one(
-            &graph,
-            &exo,
-            &policy_app_id,
-            &batch,
-            &resources,
-            scope_override.as_deref(),
-            &tenant_defaults,
-            dry_run,
-        )
-        .await
-        {
+        match migrate_one(ctx, &policy_app_id, &batch).await {
             Ok(item) => items.push(item),
             Err(err) => {
                 // `note_code` keeps `UiError::is_reauth_fatal` the single
@@ -158,17 +155,32 @@ pub fn cancel_aap_migration(state: State<'_, AppState>) {
     state.migration_cancel.cancel();
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What stays the same for every application in one migration run, grouped so
+/// each per-app [`migrate_one`] call names only what varies (the app and its
+/// policies) — the same reasoning as `ApplyExchangeMailboxScopeParams`.
+#[derive(Clone, Copy)]
+pub(super) struct MigrationContext<'a> {
+    graph: &'a GraphClient,
+    exo: &'a ExchangeClient,
+    resources: &'a [ResourceRoles],
+    scope_override: Option<&'a str>,
+    tenant_defaults: &'a TenantDefaults,
+    dry_run: bool,
+}
+
 pub(super) async fn migrate_one(
-    graph: &GraphClient,
-    exo: &ExchangeClient,
+    ctx: MigrationContext<'_>,
     app_id: &str,
     policies: &[ExoApplicationAccessPolicy],
-    resources: &[ResourceRoles],
-    scope_override: Option<&str>,
-    tenant_defaults: &TenantDefaults,
-    dry_run: bool,
 ) -> Result<AapMigrationItem, UiError> {
+    let MigrationContext {
+        graph,
+        exo,
+        resources,
+        scope_override,
+        tenant_defaults,
+        dry_run,
+    } = ctx;
     let identities: Vec<String> = policies.iter().filter_map(|p| p.identity.clone()).collect();
     let mut warnings = Vec::new();
 
@@ -362,13 +374,11 @@ pub(super) async fn migrate_one(
 
     // 4. remove the unscoped Entra grants so scoping is effective — but only for
     //    permissions whose scoped role actually landed (never strand the app).
-    let removed_entra_grants = remove_unscoped_grants(
-        graph,
-        &entra_sp.id,
-        &targets_safe_to_strip(scoped),
-        &mut warnings,
-    )
-    .await;
+    //    `still_orgwide` is deliberately not consulted: whether the policies go
+    //    stays `policies_safe_to_remove`'s decision, below.
+    let removed_entra_grants = remove_unscoped_grants(graph, &entra_sp.id, &scoped, &mut warnings)
+        .await
+        .removed;
 
     // 5. remove the legacy policies — ONLY once nothing they were constraining is
     //    still granted org-wide (see `policies_safe_to_remove`).
@@ -402,11 +412,11 @@ pub(super) async fn migrate_one(
             );
         } else {
             warnings.push(format!(
-                "KEPT the legacy policy: {} still granted organization-wide in Microsoft Entra \
-                 ID. The policy is the only thing confining {} today, so removing it would give \
-                 this app access to every mailbox. Re-run once the grant(s) are scoped.",
-                kept.join(", "),
-                if kept.len() == 1 { "it" } else { "them" }
+                "KEPT the legacy policy: {}. The policy is the only thing confining {} today, so \
+                 removing it would give this app access to every mailbox. Re-run once the \
+                 grant(s) are scoped.",
+                still_granted_orgwide(&kept),
+                it_or_them(kept.len())
             ));
         }
         status = "partial";

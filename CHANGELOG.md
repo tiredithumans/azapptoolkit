@@ -48,6 +48,16 @@
 
 ### Fixed
 
+- **Scoping mailbox access now tells you when a permission still reaches every mailbox.** If an
+  Exchange role couldn't be assigned or an org-wide grant couldn't be removed, the result listed each
+  failure but not what it meant. A single note now names the permissions that are still granted
+  organization-wide in Entra ID, where scoping has no effect yet, as the legacy-policy migration
+  already did. A permission the app only declares, with no org-wide grant, isn't listed.
+- **Scoping mailbox access for an app with nothing to scope no longer creates its enterprise app.**
+  The toolkit created the app's service principal before checking that the app declared any
+  mailbox permission it could scope, so a refused request still added an enterprise application,
+  and App Registrations and Enterprise Apps didn't show it until their caches expired. It now checks
+  first, and a new enterprise app created before a later failure refreshes both lists.
 - **Uploading a certificate now refuses a private key and shows which certificate went up.** The
   upload dialog sent whatever you pasted to Microsoft Graph after checking only that it was base64,
   so a PEM file that also held the private key sent the key along, and Graph's rejection didn't say

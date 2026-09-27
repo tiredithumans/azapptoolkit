@@ -16,6 +16,7 @@ use tauri::State;
 
 use azapptoolkit_core::audit::{MailPermissionScope, ScopeMechanism};
 use azapptoolkit_core::cache::{Cache, CacheKind};
+use azapptoolkit_core::models::AppRoleAssignment;
 use azapptoolkit_core::scoping::exchange_role_for_resource_permission;
 use azapptoolkit_core::scoping::is_scopable_exchange_resource_permission;
 use azapptoolkit_exchange::models::ExoGroupMember;
@@ -45,7 +46,7 @@ use azapptoolkit_graph::GraphClient;
 use crate::commands::applications::{invalidate_app_detail_state, invalidate_app_lists};
 use crate::commands::dispatch::SessionDead;
 use crate::commands::graph_roles::{
-    ResourceRoles, mailbox_resource_roles, resolve_grant, resolve_value,
+    ResourceRoles, mailbox_resource_roles, resolve_grant, resolve_value, strip_app_role_grants,
 };
 use crate::dto::UiError;
 use crate::dto::exchange::PrincipalPermission;

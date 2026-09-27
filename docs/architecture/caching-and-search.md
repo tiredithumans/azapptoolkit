@@ -318,7 +318,9 @@ Related: `ensure_service_principal` returns `(ServicePrincipal, bool)` where the
 **created**. First-grant paths (`grant_single_permission`, `grant_admin_consent[_core]`, the bulk
 grant) call `invalidate_app_lists` only when an SP was newly created; otherwise the cheaper
 detail + audit bust suffices. `GrantRun.sp_created` survives a later failure in the same run, so
-an SP created just before a refused grant still busts the list tier.
+an SP created just before a refused grant still busts the list tier. `grant_exchange_mailbox_access`
+does the same when `apply_exchange_mailbox_scope` refuses after its SP was created (the core busts
+the list tier itself on success).
 
 ## Batched Graph fan-out + the adaptive throttle
 

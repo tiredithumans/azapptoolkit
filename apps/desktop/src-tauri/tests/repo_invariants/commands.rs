@@ -370,3 +370,81 @@ fn the_not_found_scanner_reads_the_shapes_the_tree_uses() {
     assert!(offenders.is_empty(), "{offenders:?}");
     assert_eq!(seen, 1, "a non-literal resource is not counted");
 }
+
+/// The org-wide strip and the Selected declare-then-grant each have ONE home.
+///
+/// The Exchange core and the SharePoint `Sites.Selected` conversion each carried
+/// their own strip loop, and the two SharePoint Selected paths each carried
+/// their own declare → idempotency check → assign block. Four copies of two
+/// small algorithms drift independently: a fix to what a failed strip reports,
+/// or to the declared-before-assigned order, had to be made in each. They now
+/// route through `graph_roles::strip_app_role_grants` and
+/// `sharepoint::declare_and_grant_graph_role`.
+///
+/// Scoped to these two areas: `permissions.rs`, `remediation.rs` and
+/// `managed_identity.rs` revoke single grants for their own reasons.
+#[test]
+fn the_org_wide_strip_and_the_selected_grant_have_one_home() {
+    let modules = super::sources::command_modules();
+    let mut offenders = Vec::new();
+    let mut strip_home = false;
+    let mut sharepoint_grants = None;
+    for (name, src) in &modules {
+        let src = src.replace("\r\n", "\n");
+        if name == "commands/graph_roles.rs" {
+            strip_home = src.contains(".remove_app_role_assignment(");
+        }
+        let scoping_plane =
+            name == "commands/sharepoint.rs" || name.starts_with("commands/exchange/");
+        if scoping_plane && src.contains(".remove_app_role_assignment(") {
+            offenders.push(format!(
+                "{name}: strips a grant itself instead of through graph_roles::strip_app_role_grants"
+            ));
+        }
+        if name == "commands/sharepoint.rs" {
+            sharepoint_grants = Some(src.matches(".grant_app_role(").count());
+        }
+    }
+    assert!(
+        strip_home,
+        "commands/graph_roles.rs no longer calls `.remove_app_role_assignment(` — the shared strip \
+         moved, and this rule would pass vacuously"
+    );
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+    assert_eq!(
+        sharepoint_grants,
+        Some(1),
+        "commands/sharepoint.rs must assign a Graph appRole in exactly one place \
+         (declare_and_grant_graph_role), so both Selected paths declare before they assign"
+    );
+}
+
+/// `grant_exchange_mailbox_access` validates the request before it creates the
+/// app's service principal.
+///
+/// `ensure_service_principal` is a directory write — it adds an enterprise app
+/// when the app has none — and it used to run before `require_scopable_targets`,
+/// so a "nothing to scope" refusal still left a new enterprise app behind that
+/// the cached lists did not show. The targets need only the manifest and the
+/// resource indexes, so the check can always come first.
+#[test]
+fn the_mailbox_grant_validates_before_it_creates_a_service_principal() {
+    let commands = super::sources::commands();
+    let cmd = commands
+        .iter()
+        .find(|c| c.name == "grant_exchange_mailbox_access")
+        .expect("grant_exchange_mailbox_access is a command");
+    let body = cmd.body.replace("\r\n", "\n");
+    let check = body
+        .find("require_scopable_targets(")
+        .expect("the command validates its targets");
+    // The method-call form, so a comment naming it cannot satisfy the rule.
+    let create = body
+        .find(".ensure_service_principal(")
+        .expect("the command ensures the Entra service principal");
+    assert!(
+        check < create,
+        "grant_exchange_mailbox_access creates the service principal before it checks there is \
+         anything to scope"
+    );
+}

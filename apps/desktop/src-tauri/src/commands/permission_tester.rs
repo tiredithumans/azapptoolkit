@@ -656,18 +656,20 @@ pub async fn find_mailbox_reachers(
             let prewarmed = sp_meta_by_principal.get(&principal_id).cloned();
             let app_reg_index = app_reg_index.clone();
             Some(tokio::spawn(async move {
-                let outcome = probe_candidate(
-                    &client,
-                    exo.as_deref(),
-                    policies.as_deref().map(Vec::as_slice),
-                    &mailbox,
+                let ctx = ProbeContext {
+                    client: &client,
+                    exo: exo.as_deref(),
+                    policies: policies.as_deref().map(Vec::as_slice),
+                    mailbox: &mailbox,
+                    app_reg_index: &app_reg_index,
+                };
+                let candidate = ProbeCandidate {
                     principal_id,
                     display_name,
-                    held,
+                    held_permissions: held,
                     prewarmed,
-                    &app_reg_index,
-                )
-                .await;
+                };
+                let outcome = probe_candidate(&ctx, candidate).await;
                 let mut guard = done.lock().await;
                 *guard += 1;
                 let progress = MailboxProbeProgress {
@@ -784,14 +786,6 @@ fn merge_exchange_candidates(
     }
 }
 
-/// Probes one candidate principal against the mailbox — the same two-layer
-/// union as [`test_mailbox_access`], with the candidate's held Entra grants
-/// already known and the AAP list pre-fetched. Infallible by design — every
-/// failure path lands in a verdict (`unknown` at worst) so one bad candidate
-/// can't abort the whole probe.
-// Each argument is an independent piece of probe context (clients, the mailbox,
-// the candidate's identity/grants, and the batch-prewarmed appId); bundling them
-// into a struct would only add ceremony at the single call site.
 /// One candidate's row, plus whether the failure that produced it was
 /// re-auth-fatal. The flag rides back on the value because the probe runs in a
 /// spawned task: the error type itself doesn't survive that boundary, and a
@@ -802,18 +796,49 @@ struct ProbeOutcome {
     session_dead: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn probe_candidate(
-    client: &azapptoolkit_graph::GraphClient,
-    exo: Option<&ExchangeClient>,
-    policies: Option<&[ExoApplicationAccessPolicy]>,
-    mailbox: &str,
+/// What stays the same for every candidate in one mailbox-reach sweep, grouped
+/// so each [`probe_candidate`] call names only the candidate — the same
+/// transposition reasoning as `exchange::ApplyExchangeMailboxScopeParams`.
+struct ProbeContext<'a> {
+    client: &'a GraphClient,
+    exo: Option<&'a ExchangeClient>,
+    /// The tenant's AAP list, pre-fetched once for the sweep.
+    policies: Option<&'a [ExoApplicationAccessPolicy]>,
+    mailbox: &'a str,
+    /// appId -> app registration object id, for the row's Open routing.
+    app_reg_index: &'a HashMap<String, String>,
+}
+
+/// The one principal a [`probe_candidate`] call is about.
+struct ProbeCandidate {
     principal_id: String,
     display_name: Option<String>,
+    /// The candidate's held Entra grants, already known from the index.
     held_permissions: Vec<String>,
+    /// The batch-prewarmed `(appId, servicePrincipalType)`, when the prewarm
+    /// covered this principal.
     prewarmed: Option<(String, Option<String>)>,
-    app_reg_index: &HashMap<String, String>,
-) -> ProbeOutcome {
+}
+
+/// Probes one candidate principal against the mailbox — the same two-layer
+/// union as [`test_mailbox_access`], with the candidate's held Entra grants
+/// already known and the AAP list pre-fetched. Infallible by design — every
+/// failure path lands in a verdict (`unknown` at worst) so one bad candidate
+/// can't abort the whole probe.
+async fn probe_candidate(ctx: &ProbeContext<'_>, candidate: ProbeCandidate) -> ProbeOutcome {
+    let ProbeContext {
+        client,
+        exo,
+        policies,
+        mailbox,
+        app_reg_index,
+    } = *ctx;
+    let ProbeCandidate {
+        principal_id,
+        display_name,
+        held_permissions,
+        prewarmed,
+    } = candidate;
     // The Exchange cmdlets and the UI's deep links want the appId (and the
     // servicePrincipalType drives the row's Open routing), not the SP object id
     // the assignment row carries. Use the batch-prewarmed pair when we have it;

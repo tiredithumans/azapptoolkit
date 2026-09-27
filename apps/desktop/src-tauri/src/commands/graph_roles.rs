@@ -70,6 +70,58 @@ pub(crate) async fn graph_role_index(
     Ok((sp.id, map))
 }
 
+/// The Microsoft Graph appRole id for permission `value` — the reverse scan of
+/// [`graph_role_index`]'s `id -> value` map. A value Graph does not expose is a
+/// typed `role_not_found` naming it, so both SharePoint Selected apply paths
+/// refuse identically.
+pub(crate) fn graph_role_id(
+    role_value_by_id: &HashMap<String, String>,
+    value: &str,
+) -> Result<String, UiError> {
+    role_value_by_id
+        .iter()
+        .find(|(_, v)| v.as_str() == value)
+        .map(|(id, _)| id.clone())
+        .ok_or_else(|| {
+            UiError::not_found(
+                "role",
+                format!("{value} application role not found on Microsoft Graph"),
+            )
+        })
+}
+
+/// Removes from service principal `sp_id` every assignment in `assignments`
+/// that `select` names, returning the permission values actually removed and
+/// pushing one warning per failed removal. `select` returns the value an
+/// assignment grants when it should go, `None` to keep it: the caller decides
+/// WHICH grants are org-wide (Exchange: its `(resource, appRole)` targets whose
+/// scoped role landed; SharePoint: any org-wide `Sites.*` on Graph), and this
+/// owns the loop and the failure wording.
+///
+/// The one home of the org-wide strip for both scoping planes, so a fix to how
+/// a strip reports (or what it does on failure) lands on both at once. Callers
+/// run it only AFTER the scoped replacement landed, so a failure here leaves the
+/// principal with its broad grant, never with nothing.
+pub(crate) async fn strip_app_role_grants(
+    client: &GraphClient,
+    sp_id: &str,
+    assignments: &[AppRoleAssignment],
+    select: impl Fn(&AppRoleAssignment) -> Option<String>,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    let mut removed = Vec::new();
+    for a in assignments {
+        let Some(value) = select(a) else {
+            continue;
+        };
+        match client.remove_app_role_assignment(sp_id, &a.id).await {
+            Ok(()) => removed.push(value),
+            Err(err) => warnings.push(format!("failed to remove org-wide grant {value}: {err}")),
+        }
+    }
+    removed
+}
+
 // `ResourceRoles` and the two resolvers now live in `azapptoolkit-exchange`
 // (crate `targets` module) — they are pure, State-free domain logic and had no
 // business only being reachable through a Tauri command. Re-exported here so
@@ -246,6 +298,92 @@ mod tests {
         }];
         let out = map_app_role_grants(&resources(), assignments);
         assert_eq!(out[0].app_role_value, None);
+    }
+
+    #[test]
+    fn graph_role_id_finds_the_value_and_names_it_when_missing() {
+        let index: HashMap<String, String> = [
+            ("role-selected".to_string(), "Sites.Selected".to_string()),
+            ("role-read".to_string(), "Sites.Read.All".to_string()),
+        ]
+        .into();
+        assert_eq!(
+            graph_role_id(&index, "Sites.Selected").expect("declared on Graph"),
+            "role-selected"
+        );
+        let err = graph_role_id(&index, "Lists.SelectedOperations.Selected")
+            .expect_err("Graph does not expose it here");
+        assert_eq!(err.code, "role_not_found");
+        assert!(
+            err.message.contains("Lists.SelectedOperations.Selected"),
+            "the refusal names the missing value: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn strip_removes_only_selected_grants_and_warns_per_failure() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1.0/servicePrincipals/sp1/appRoleAssignments/a1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // A 4xx, not a 5xx: the retry policy would back off on a 5xx.
+        Mock::given(method("DELETE"))
+            .and(path("/v1.0/servicePrincipals/sp1/appRoleAssignments/a2"))
+            .respond_with(ResponseTemplate::new(400))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1.0/servicePrincipals/sp1/appRoleAssignments/a3"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = crate::commands::test_support::mock_graph(&server);
+        let assignment = |id: &str, role: &str| AppRoleAssignment {
+            id: id.into(),
+            resource_id: "graph-sp".into(),
+            app_role_id: role.into(),
+            ..Default::default()
+        };
+        let assignments = vec![
+            assignment("a1", "role-mail-read"),
+            assignment("a2", "role-mail-send"),
+            assignment("a3", "role-sites-selected"),
+        ];
+        let mut warnings = Vec::new();
+        let removed = strip_app_role_grants(
+            &client,
+            "sp1",
+            &assignments,
+            |a| match a.app_role_id.as_str() {
+                "role-mail-read" => Some("Mail.Read".to_string()),
+                "role-mail-send" => Some("Mail.Send".to_string()),
+                _ => None,
+            },
+            &mut warnings,
+        )
+        .await;
+
+        assert_eq!(removed, vec!["Mail.Read".to_string()]);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one warning per failed removal: {warnings:?}"
+        );
+        assert!(
+            warnings[0].starts_with("failed to remove org-wide grant Mail.Send"),
+            "the warning names the grant left in place: {}",
+            warnings[0]
+        );
     }
 
     #[test]

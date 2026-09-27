@@ -185,6 +185,14 @@ assignment → strip org-wide Entra grant → `invalidate_app_lists`) lives in
 The MI grant form opens an inline scope panel for a scopable permission; non-scopable ones grant
 org-wide as before.
 
+`remove_unscoped_grants` strips only targets whose scoped role landed, through the shared
+`graph_roles::strip_app_role_grants`, and reports what is still held org-wide from the **live
+assignments**, never from the targets (the wizard declares a permission before scoping it, so a
+target is routinely declared but not held); the core names those permissions in one "Scoping is NOT
+effective" warning, phrased by the same `still_granted_orgwide` the AAP migration's KEPT note uses.
+`grant_exchange_mailbox_access` validates its targets before `ensure_service_principal`, and a
+newly created SP busts the list tier even when the scope step then fails.
+
 ### Toolkit-managed scope group (default `app_scope_group_<app_id>`)
 
 The recommended scope source is a **toolkit-managed mail-enabled security group**, named by

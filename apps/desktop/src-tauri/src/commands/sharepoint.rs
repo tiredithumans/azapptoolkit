@@ -7,13 +7,14 @@
 //! app strategy is a future phase. Each command resolves the site from its URL
 //! first, since the UI works in terms of the browser site URL.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{
-    ResolvedSharePointResource, SelectedPermission, Site, SitePermission,
+    AppRoleAssignment, ResolvedSharePointResource, SelectedPermission, Site, SitePermission,
 };
 use azapptoolkit_core::scoping::{
     MICROSOFT_GRAPH_APP_ID, SP_SITES_SELECTED, SelectedScopeLevel, is_sharepoint_orgwide,
@@ -24,7 +25,7 @@ use crate::commands::applications::{invalidate_app_detail_state, invalidate_app_
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
 use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
 use crate::commands::graph_err::forbidden_remediation;
-use crate::commands::graph_roles::graph_role_index;
+use crate::commands::graph_roles::{graph_role_id, graph_role_index, strip_app_role_grants};
 use crate::commands::permissions::declare_resource_access;
 use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
@@ -88,6 +89,89 @@ async fn declare_graph_role(
     // doesn't declare what it was just given.
     invalidate_app_detail_state(cache, tenant_id);
     Ok(true)
+}
+
+/// The principal a Selected grant is for. Named fields because three adjacent
+/// `&str` ids transpose easily (the `ApplyExchangeMailboxScopeParams`
+/// reasoning in `exchange/grants.rs`).
+struct GraphRolePrincipal<'a> {
+    tenant_id: &'a str,
+    /// The app registration to declare on; `None` for an SP-only principal.
+    object_id: Option<&'a str>,
+    sp_object_id: &'a str,
+}
+
+/// What [`declare_and_grant_graph_role`] changed.
+struct GraphRoleGrant {
+    declared_permission: bool,
+    granted_role_added: bool,
+}
+
+/// Declares Microsoft Graph application permission `value` on the app
+/// registration ([`declare_graph_role`]), THEN assigns it to the principal's
+/// service principal unless `existing` already holds it — declared before
+/// assigned, and idempotent. Shared by both Selected apply paths
+/// (`convert_site_access_to_selected` and `grant_selected_item_access`).
+///
+/// Declared first for the reason the ordinary grant path declares first: the
+/// manifest should never promise less than what is assigned. The wizard's
+/// picker is the full live catalog, so this is usually a permission the app has
+/// never declared — and an assignment with no declaration does not appear in
+/// the Permissions tab at all. Without the assigned appRole in the token, the
+/// per-resource permissions the callers grant next give nothing at all.
+async fn declare_and_grant_graph_role(
+    client: &azapptoolkit_graph::GraphClient,
+    cache: &Cache,
+    principal: &GraphRolePrincipal<'_>,
+    graph_sp_id: &str,
+    role_value_by_id: &HashMap<String, String>,
+    existing: &[AppRoleAssignment],
+    value: &str,
+) -> Result<GraphRoleGrant, UiError> {
+    let role_id = graph_role_id(role_value_by_id, value)?;
+    let declared_permission = declare_graph_role(
+        client,
+        cache,
+        principal.tenant_id,
+        principal.object_id,
+        &role_id,
+    )
+    .await?;
+    let already_held = existing
+        .iter()
+        .any(|a| a.resource_id == graph_sp_id && a.app_role_id == role_id);
+    let mut granted_role_added = false;
+    if !already_held {
+        client
+            .grant_app_role(principal.sp_object_id, graph_sp_id, &role_id)
+            .await
+            .map_err(|err| {
+                UiError::validation("grant_failed", format!("failed to grant {value}: {err}"))
+            })?;
+        granted_role_added = true;
+    }
+    Ok(GraphRoleGrant {
+        declared_permission,
+        granted_role_added,
+    })
+}
+
+/// The value assignment `a` grants when it is an org-wide `Sites.*` grant on
+/// Microsoft Graph — the one the `Sites.Selected` conversion strips — and
+/// `None` for anything else (another resource, a role the index does not know,
+/// or a Selected scope, which is the confinement itself).
+fn orgwide_sites_value(
+    graph_sp_id: &str,
+    role_value_by_id: &HashMap<String, String>,
+    a: &AppRoleAssignment,
+) -> Option<String> {
+    if a.resource_id != graph_sp_id {
+        return None;
+    }
+    role_value_by_id
+        .get(&a.app_role_id)
+        .filter(|value| is_sharepoint_orgwide(value))
+        .cloned()
 }
 
 /// The distinct resources in a pasted target list, in the order given.
@@ -288,54 +372,31 @@ pub async fn convert_site_access_to_selected(
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
     let (graph_sp_id, role_value_by_id) = graph_role_index(&client).await?;
 
-    // Reverse-lookup the Sites.Selected appRole id so we can grant it.
-    let sites_selected_id = role_value_by_id
-        .iter()
-        .find(|(_, value)| value.as_str() == SP_SITES_SELECTED)
-        .map(|(id, _)| id.clone())
-        .ok_or_else(|| {
-            UiError::not_found(
-                "role",
-                "Sites.Selected application role not found on Microsoft Graph",
-            )
-        })?;
-
     let mut warnings = Vec::new();
 
     // Snapshot the current assignments once: drives both the idempotency check
     // for the Sites.Selected grant and the org-wide-removal scan below.
     let existing = client.list_app_role_assignments(&sp_object_id).await?;
 
-    // 0. Declare Sites.Selected on the app registration, so the grant below is
-    //    visible in the Permissions tab. Ordered first for the same reason the
-    //    ordinary grant path declares first: the manifest should never promise
-    //    less than what is assigned.
-    let declared_permission = declare_graph_role(
+    // 0-1. Declare Sites.Selected on the app registration (so the grant is
+    //      visible in the Permissions tab), then grant it (idempotent).
+    let GraphRoleGrant {
+        declared_permission,
+        granted_role_added,
+    } = declare_and_grant_graph_role(
         &client,
         &state.cache,
-        &tenant_id,
-        object_id.as_deref(),
-        &sites_selected_id,
+        &GraphRolePrincipal {
+            tenant_id: &tenant_id,
+            object_id: object_id.as_deref(),
+            sp_object_id: &sp_object_id,
+        },
+        &graph_sp_id,
+        &role_value_by_id,
+        &existing,
+        SP_SITES_SELECTED,
     )
     .await?;
-
-    // 1. Grant Sites.Selected (idempotent).
-    let already_selected = existing
-        .iter()
-        .any(|a| a.resource_id == graph_sp_id && a.app_role_id == sites_selected_id);
-    let mut granted_role_added = false;
-    if !already_selected {
-        client
-            .grant_app_role(&sp_object_id, &graph_sp_id, &sites_selected_id)
-            .await
-            .map_err(|err| {
-                UiError::validation(
-                    "grant_failed",
-                    format!("failed to grant Sites.Selected: {err}"),
-                )
-            })?;
-        granted_role_added = true;
-    }
 
     // 2. Grant the scoped per-site access (before removing the broad grant).
     let roles = vec![role];
@@ -365,26 +426,14 @@ pub async fn convert_site_access_to_selected(
     //    but only if some site access actually landed.
     let mut removed_orgwide_grants = Vec::new();
     if should_remove_orgwide(remove_orgwide, !sites_granted.is_empty()) {
-        for a in &existing {
-            if a.resource_id != graph_sp_id {
-                continue;
-            }
-            let Some(value) = role_value_by_id.get(&a.app_role_id) else {
-                continue;
-            };
-            if !is_sharepoint_orgwide(value) {
-                continue;
-            }
-            match client
-                .remove_app_role_assignment(&sp_object_id, &a.id)
-                .await
-            {
-                Ok(()) => removed_orgwide_grants.push(value.clone()),
-                Err(err) => {
-                    warnings.push(format!("failed to remove org-wide grant {value}: {err}"))
-                }
-            }
-        }
+        removed_orgwide_grants = strip_app_role_grants(
+            &client,
+            &sp_object_id,
+            &existing,
+            |a| orgwide_sites_value(&graph_sp_id, &role_value_by_id, a),
+            &mut warnings,
+        )
+        .await;
     } else if remove_orgwide {
         warnings.push(
             "no site access was granted, so the org-wide Sites.* grant was left in place".into(),
@@ -512,51 +561,32 @@ pub async fn grant_selected_item_access(
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
     let (graph_sp_id, role_value_by_id) = graph_role_index(&client).await?;
 
-    let role_id = role_value_by_id
-        .iter()
-        .find(|(_, value)| value.as_str() == permission_value)
-        .map(|(id, _)| id.clone())
-        .ok_or_else(|| {
-            UiError::not_found(
-                "role",
-                format!("{permission_value} application role not found on Microsoft Graph"),
-            )
-        })?;
-
     let mut warnings = Vec::new();
 
-    // 0. Declare the Selected permission on the app registration. The picker is
-    //    the full live catalog, so this is usually a permission the app has
-    //    never declared — and an assignment with no declaration doesn't appear
-    //    in the Permissions tab at all.
-    let declared_permission = declare_graph_role(
+    // Read the assignments BEFORE the manifest PATCH, so a failed read aborts
+    // with nothing mutated.
+    let existing = client.list_app_role_assignments(&sp_object_id).await?;
+
+    // 0-1. Declare the Selected permission on the app registration, then grant
+    //      the appRole (idempotent) — without it in the token, the per-resource
+    //      permissions below grant nothing at all.
+    let GraphRoleGrant {
+        declared_permission,
+        granted_role_added,
+    } = declare_and_grant_graph_role(
         &client,
         &state.cache,
-        &tenant_id,
-        object_id.as_deref(),
-        &role_id,
+        &GraphRolePrincipal {
+            tenant_id: &tenant_id,
+            object_id: object_id.as_deref(),
+            sp_object_id: &sp_object_id,
+        },
+        &graph_sp_id,
+        &role_value_by_id,
+        &existing,
+        &permission_value,
     )
     .await?;
-
-    // 1. Grant the Selected appRole (idempotent) — without it in the token, the
-    //    per-resource permissions below grant nothing at all.
-    let existing = client.list_app_role_assignments(&sp_object_id).await?;
-    let already_held = existing
-        .iter()
-        .any(|a| a.resource_id == graph_sp_id && a.app_role_id == role_id);
-    let mut granted_role_added = false;
-    if !already_held {
-        client
-            .grant_app_role(&sp_object_id, &graph_sp_id, &role_id)
-            .await
-            .map_err(|err| {
-                UiError::validation(
-                    "grant_failed",
-                    format!("failed to grant {permission_value}: {err}"),
-                )
-            })?;
-        granted_role_added = true;
-    }
 
     // 2. Grant per resource. A target that fails to resolve, sits at the wrong
     //    level, or is rejected by SharePoint is reported and skipped — one bad
@@ -1434,5 +1464,85 @@ mod tests {
         for v in ["Sites.Selected", "Sites.Read.All", "Files.Read.All"] {
             assert!(level(v).is_none(), "{v} must not route to the item grant");
         }
+    }
+
+    #[test]
+    fn orgwide_strip_selects_only_orgwide_sites_roles_on_graph() {
+        let index: HashMap<String, String> = [
+            ("role-read-all".to_string(), "Sites.Read.All".to_string()),
+            ("role-selected".to_string(), "Sites.Selected".to_string()),
+        ]
+        .into();
+        let on = |resource: &str, role: &str| AppRoleAssignment {
+            id: "a".into(),
+            resource_id: resource.into(),
+            app_role_id: role.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            orgwide_sites_value("graph-sp", &index, &on("graph-sp", "role-read-all")).as_deref(),
+            Some("Sites.Read.All")
+        );
+        // Sites.Selected IS the confinement — never stripped by the conversion.
+        assert_eq!(
+            orgwide_sites_value("graph-sp", &index, &on("graph-sp", "role-selected")),
+            None
+        );
+        // Graph's role id on another resource is not Graph's grant.
+        assert_eq!(
+            orgwide_sites_value("graph-sp", &index, &on("spo-sp", "role-read-all")),
+            None
+        );
+        // A role the Graph index does not know is left alone.
+        assert_eq!(
+            orgwide_sites_value("graph-sp", &index, &on("graph-sp", "role-unknown")),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_selected_role_is_neither_regranted_nor_declared_for_an_sp_only_principal() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/appRoleAssignments$"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(path_regex(r"^/v1\.0/applications"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = crate::commands::test_support::mock_graph(&server);
+        let index: HashMap<String, String> =
+            [("role-selected".to_string(), "Sites.Selected".to_string())].into();
+        let existing = vec![AppRoleAssignment {
+            id: "a1".into(),
+            resource_id: "graph-sp".into(),
+            app_role_id: "role-selected".into(),
+            ..Default::default()
+        }];
+        let out = declare_and_grant_graph_role(
+            &client,
+            &Cache::new(),
+            &GraphRolePrincipal {
+                tenant_id: "t1",
+                object_id: None,
+                sp_object_id: "sp1",
+            },
+            "graph-sp",
+            &index,
+            &existing,
+            SP_SITES_SELECTED,
+        )
+        .await
+        .expect("nothing to do is success");
+        assert!(!out.declared_permission);
+        assert!(!out.granted_role_added);
     }
 }
