@@ -64,9 +64,14 @@ the apps that can touch it. Invariants:
   (`CacheKind::Audit`, 60-minute TTL) so revisiting the view rehydrates without re-scanning.
 
 **Mailboxes tab (`find_mailbox_reachers`).** Candidates come from two sources, merged by SP
-object id: ONE paged Graph call — `appRoleAssignedTo` on the Microsoft Graph resource SP is the
-whole tenant's principal → Graph-app-role matrix — filtered to service principals holding a
-mail-scopable application permission; **plus the Exchange SP store** (`Get-ServicePrincipal`),
+object id: the paged `appRoleAssignedTo` on **both** mailbox-bearing resource SPs
+(`mailbox_resource_roles`: Microsoft Graph, plus Office 365 Exchange Online when the tenant has it,
+so an app whose only grant is the EWS `full_access_as_app` scope appears — as org-wide) — together
+the whole tenant's principal → mailbox-app-role matrix — filtered by the pure `mailbox_candidates`
+to service principals holding a mail-scopable application permission, each grant resolved against
+its own resource and gated with the resource-carrying `is_scopable_exchange_resource_permission`
+(the retired Outlook REST `Mail.*` roles on Exchange Online do not count); **plus the Exchange SP
+store** (`Get-ServicePrincipal`),
 the only place a principal granted access *solely* through Exchange RBAC (no Entra grant) is
 visible — those enter with empty `held_permissions` and their verdict can only come from the RBAC
 layer. Each candidate is then evaluated with the **same two-layer union the Permission tester
@@ -75,8 +80,12 @@ streams as `mailbox-probe-progress`). Degradation follows the audit's never-unde
 when Exchange is unavailable, a candidate's held org-wide Graph mail grant reaches every mailbox
 via Graph anyway — the row reads `org_wide` with the legacy-AAP caveat, never a silent "no
 access" (the Exchange-only candidate source is necessarily absent then; the
-`exchange_available = false` summary flags the partial coverage). Results are mailbox-specific
-and not cached.
+`exchange_available = false` summary flags the partial coverage). `exchange_available` follows a
+**pre-acquired Exchange.Manage token** (`ensure_exchange_token`), not just a buildable client — a
+missing consent or admin right used to leave it `true`. When Exchange answered but its SP store
+couldn't be listed, `exchange_sp_store_read = false` says the RBAC-only principals are missing.
+Both caveats are appended to the panel's summary sentence, which the CSV/JSON export ships
+verbatim. Results are mailbox-specific and not cached.
 
 ## Permission tester (`commands::permission_tester`)
 
@@ -94,7 +103,11 @@ restricts the other):
    Access Policy, evaluated live via `ExchangeClient::test_application_access_policy`
    (`Test-ApplicationAccessPolicy`; the call is made only when a policy actually names the app). A
    `RestrictAccess` grant reads `scoped`; an unreadable AAP gate degrades to org-wide *with a
-   caveat* (never under-reported).
+   caveat* (never under-reported). `orgwide_mailbox_grant` returns `Result`: an app with **no
+   service principal** holds nothing (`NotHeld`), but a failed SP lookup, role index or
+   assignment read is `EntraReach::Unreadable`, scored `unknown` — never `NotHeld`, which would
+   let a transient Graph failure answer a definite "No access" with a sentence claiming no grant
+   exists.
 2. **Exchange RBAC layer** (`RbacReach`) — `Test-ServicePrincipalAuthorization -Resource`,
    **honoring the per-row `InScope` flag**: the cmdlet returns one row per role assignment whether
    or not the mailbox is covered, so a row with `InScope = false` means "permission held but NOT
@@ -107,6 +120,22 @@ restricts the other):
 layer decided — including the headline finding "scoped RBAC + un-stripped org-wide Entra grant ⇒
 the scope is ineffective, remove the Entra permission" (the same union `reconcile_orgwide_grant`
 catches in the Scope-column resolver).
+
+**The SharePoint verdict is the pure `site_verdict(held, hit, label)`** — `held` is `None` when
+`sharepoint_grants_held` failed to read the app's assignments (an absent SP is `Some` of the empty
+default), `hit` the nearest permission entry on the target or an ancestor:
+
+| held | entry | verdict |
+|---|---|---|
+| org-wide `Sites.*` | any | `org_wide` (the chain walk is skipped) |
+| unreadable | none | `unknown` — never the "holds no organization-wide grant" sentence |
+| readable (or no SP) | none | `no_access` |
+| unreadable | found | `unknown` |
+| Selected scope reaching the entry's level | found | `scoped` |
+| no such scope | found | `no_access`, naming the scope to grant (`required_scope_for`) |
+
+A re-auth-fatal read error on either tester returns the error (the dead-session re-auth path)
+instead of an `unknown` verdict.
 
 Both commands are keyed on the principal's **appId** and resolve the SP via
 `get_service_principal_by_app_id`, so they work for **any** service-principal type — the picker

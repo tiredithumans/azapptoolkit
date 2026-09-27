@@ -27,8 +27,10 @@ use super::{verdict_badge, verdict_tooltip};
 /// A free function rather than prose built inline, because the export ships it
 /// verbatim: an `unknown` verdict means an Exchange RBAC check could not be
 /// evaluated, and an Exchange outage leaves every verdict deriving from the
-/// Entra grants alone. Both caveats are stated on screen, and a file that
-/// dropped either would read as an audited all-clear.
+/// Entra grants alone. An unread Exchange SP store means apps granted access
+/// only through Exchange RBAC were never candidates at all. Every caveat is
+/// stated on screen, and a file that dropped one would read as an audited
+/// all-clear.
 fn summary_line(r: &MailboxReachersResult) -> String {
     let reachers = r
         .rows
@@ -52,7 +54,11 @@ fn summary_line(r: &MailboxReachersResult) -> String {
     }
     if !r.exchange_available {
         summary.push_str(
-            " — Exchange was unavailable, so verdicts derive from the Entra grants alone (org-wide unless scoped; never under-reported)",
+            " — Exchange was unavailable, so verdicts derive from the Entra grants alone (org-wide unless scoped; never under-reported); apps granted access only through Exchange RBAC could not be listed",
+        );
+    } else if !r.exchange_sp_store_read {
+        summary.push_str(
+            " — Exchange's service-principal list couldn't be read, so apps granted access only through Exchange RBAC may be missing",
         );
     }
     if r.cancelled {
@@ -405,5 +411,47 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
             }
                 .into_any()
         }}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(exchange_available: bool, exchange_sp_store_read: bool) -> MailboxReachersResult {
+        MailboxReachersResult {
+            tenant_id: "t".into(),
+            mailbox: "shared@contoso.com".into(),
+            total_candidates: 0,
+            rows: Vec::new(),
+            exchange_available,
+            exchange_sp_store_read,
+            cancelled: false,
+        }
+    }
+
+    // The caveat travels with the export verbatim, so a probe that could not
+    // enumerate the RBAC-only principals must say so in this one sentence.
+    #[test]
+    fn summary_flags_unavailable_exchange() {
+        let s = summary_line(&result(false, false));
+        assert!(s.contains("Exchange was unavailable"));
+        assert!(s.contains("only through Exchange RBAC could not be listed"));
+        // One caveat, not two stacked versions of the same gap.
+        assert!(!s.contains("service-principal list"));
+    }
+
+    #[test]
+    fn summary_flags_an_unread_exchange_sp_store() {
+        let s = summary_line(&result(true, false));
+        assert!(s.contains("Exchange's service-principal list couldn't be read"));
+        assert!(s.contains("may be missing"));
+        assert!(!s.contains("Exchange was unavailable"));
+    }
+
+    #[test]
+    fn a_fully_covered_probe_has_no_coverage_caveat() {
+        let s = summary_line(&result(true, true));
+        assert_eq!(s, "0 of 0 candidate apps can reach “shared@contoso.com”");
     }
 }

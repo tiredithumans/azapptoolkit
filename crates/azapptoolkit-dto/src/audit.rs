@@ -71,7 +71,32 @@ pub struct AuditRunResult {
     /// none had ever been run when the truth was that this session had not.
     #[serde(default)]
     pub completed_at: Option<String>,
+    /// `false` when some mail permission could not be checked against
+    /// Exchange mailbox scoping this run — no Exchange client, the legacy
+    /// Application Access Policy list unreadable, or an app left unprobed
+    /// (the Exchange breaker tripped or its probe failed). Those permissions
+    /// were scored at org-wide weight, so some "Org-wide mailbox access"
+    /// findings may already be confined to specific mailboxes by Exchange RBAC
+    /// or an AAP.
+    ///
+    /// Deliberately NOT a [`Self::degraded`] gap: the degrade over-reports and
+    /// never under-reports, so the run stays cacheable — the same call as the
+    /// sign-in report precedent ([`Self::sign_in_report_available`]). It still
+    /// has to be *said*, on the org-wide mailbox group and in every export
+    /// ([`MAILBOX_SCOPING_UNRESOLVED`]). Defaults to `true` so a run cached
+    /// before the field existed reads as it was presented then.
+    #[serde(default = "default_true")]
+    pub mailbox_scoping_resolved: bool,
 }
+
+fn default_true() -> bool {
+    true
+}
+
+/// The one sentence the export's coverage notes and the workbench's org-wide
+/// mailbox Callout both use when [`AuditRunResult::mailbox_scoping_resolved`]
+/// is `false` — defined once so the file and the screen can't drift apart.
+pub const MAILBOX_SCOPING_UNRESOLVED: &str = "Mailbox scoping could not be resolved for this run — some applications listed with org-wide mailbox access may already be confined to specific mailboxes through Exchange RBAC or an application access policy. Sign in as an Exchange administrator and re-run to refine.";
 
 /// One run's coverage caveats, minus its items — what an export needs in order
 /// to say what the scan did *not* cover.
@@ -88,7 +113,7 @@ pub struct AuditRunResult {
 /// A separate struct rather than the whole [`AuditRunResult`] so the
 /// by-reference export path keeps its property that the multi-MB item vector
 /// never round-trips the IPC bridge.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditExportCoverage {
     /// Principals the run SET OUT to score — the denominator a partial run
     /// needs (the numerator is the exported item count).
@@ -99,6 +124,26 @@ pub struct AuditExportCoverage {
     pub sign_in_report_available: bool,
     /// RFC3339 UTC, from [`AuditRunResult::completed_at`].
     pub completed_at: Option<String>,
+    /// From [`AuditRunResult::mailbox_scoping_resolved`]; a caveat, not a
+    /// completeness gap — [`Self::is_complete`] deliberately ignores it.
+    #[serde(default = "default_true")]
+    pub mailbox_scoping_resolved: bool,
+}
+
+/// A clean run's coverage: nothing cancelled, truncated or degraded, and
+/// mailbox scoping resolved — so `Default` still means "no caveats".
+impl Default for AuditExportCoverage {
+    fn default() -> Self {
+        Self {
+            total_apps: 0,
+            cancelled: false,
+            truncated: false,
+            degraded: Vec::new(),
+            sign_in_report_available: false,
+            completed_at: None,
+            mailbox_scoping_resolved: true,
+        }
+    }
 }
 
 impl AuditRunResult {
@@ -112,6 +157,7 @@ impl AuditRunResult {
             degraded: self.degraded.clone(),
             sign_in_report_available: self.sign_in_report_available,
             completed_at: self.completed_at.clone(),
+            mailbox_scoping_resolved: self.mailbox_scoping_resolved,
         }
     }
 }
@@ -266,6 +312,7 @@ mod tests {
             truncated: false,
             degraded: Vec::new(),
             completed_at: Some("2026-09-02T10:00:00+00:00".into()),
+            mailbox_scoping_resolved: true,
         }
     }
 
@@ -278,8 +325,10 @@ mod tests {
         r.cancelled = true;
         r.truncated = true;
         r.degraded = vec![AuditCoverageGap::PerPrincipalScoring];
+        r.mailbox_scoping_resolved = false;
 
         let c = r.coverage();
+        assert!(!c.mailbox_scoping_resolved);
         assert_eq!(c.total_apps, 12);
         assert!(c.cancelled);
         assert!(c.truncated);
@@ -303,6 +352,13 @@ mod tests {
             mutate(&mut c);
             assert!(!c.is_complete(), "{c:?} must not read as a complete scan");
         }
+        // Unresolved mailbox scoping is a caveat, not a gap: the degrade
+        // over-reports, so the run stays complete (and cacheable).
+        let mut c = run().coverage();
+        c.mailbox_scoping_resolved = false;
+        assert!(c.is_complete());
+        // `Default` is a clean run's coverage.
+        assert!(AuditExportCoverage::default().mailbox_scoping_resolved);
     }
 
     /// `completed_at` is additive: a run cached (or exported) by a build from
@@ -313,5 +369,7 @@ mod tests {
         let json = r#"{"tenant_id":"t1","total_apps":0,"items":[],"cancelled":false}"#;
         let back: AuditRunResult = serde_json::from_str(json).expect("pre-field run");
         assert_eq!(back.completed_at, None);
+        // A run cached before the flag existed reads as it was shown then.
+        assert!(back.mailbox_scoping_resolved);
     }
 }

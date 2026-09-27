@@ -69,7 +69,8 @@ fn issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
             x.starts_with(issue::MULTITENANT_AUDIENCE) || x.starts_with(issue::UNVERIFIED_PUBLISHER)
         },
         // Effective mailbox scoping findings. Scoping is resolved on every run, but
-        // degrades to org-wide when the signed-in user lacks Exchange-admin rights.
+        // degrades to org-wide when the signed-in user lacks Exchange-admin rights —
+        // the run's `mailbox_scoping_resolved` flag says so, and the group shows it.
         "orgwide_mailbox" => |x| x.starts_with(issue::ORG_WIDE_MAILBOX),
         // Load-bearing asymmetry: `SCOPED_VIA_RBAC` is embedded MID-issue
         // ("Mail.Read scoped via Exchange RBAC…"), not a prefix like its siblings,

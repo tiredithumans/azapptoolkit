@@ -16,6 +16,7 @@ use azapptoolkit_core::audit::AuditPrincipalKind;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
 
+use crate::bindings::audit::MAILBOX_SCOPING_UNRESOLVED;
 use crate::components::bulk_action_bar::BulkActionBar;
 use crate::components::select_all_bar::SelectAllBar;
 use crate::components::ui::{Callout, ShowMore};
@@ -363,6 +364,11 @@ fn finding_group_view(
                                     "The sign-in activity report wasn't available for this run, so unused detection carries no signal — grant consent above and re-run."
                                 </Callout>
                             }
+                        })}
+                    // The same sentence the export's coverage notes carry.
+                    {(key == "orgwide_mailbox" && !ctrl.mailbox_scoping_resolved.get())
+                        .then(|| {
+                            view! { <Callout tone="warn">{MAILBOX_SCOPING_UNRESOLVED}</Callout> }
                         })}
                     {has_bulk
                         .then(|| {

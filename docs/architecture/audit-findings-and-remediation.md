@@ -20,6 +20,18 @@ advisory. An **empty** map (the default) means scoping wasn't resolved — every
 scores at its full org-wide weight, i.e. byte-for-byte the pre-scope behavior, so the non-mail
 rules keep PowerShell parity.
 
+**Unresolved scoping is said, not hidden (`mailbox_scoping_resolved`).** The degrade below never
+under-reports, but it leaves apps Exchange already confines listed under "Org-wide mailbox
+access" with a Scope fix that needs the same Exchange access. So the run records
+`AuditRunResult.mailbox_scoping_resolved = false` when there was no Exchange client, the legacy
+AAP read failed (`prefetch_legacy_access_policies` reports it), or any app declaring a scopable
+mail permission went unprobed (the breaker was open or its probe failed — `ScoreCtx`'s
+`mail_scoping_unresolved`). It is **not** a `degraded` gap: the fallback over-reports, so the run
+is still cached (the sign-in-report precedent) and `is_complete()` ignores it — but the flag rides
+the cache entry (`CachedAuditRun`), the export coverage and every export format, and the one
+sentence `dto::audit::MAILBOX_SCOPING_UNRESOLVED` is shared by the export's coverage notes and the
+Callout on the org-wide mailbox group.
+
 **Bulk vs. detail resolution.** `run_audit` resolves the map on **every** run (best-effort — it
 degrades to the empty-map org-wide scoring when the signed-in user lacks Exchange-admin rights, so
 no toggle is needed). The resolver (`commands::exchange::resolve_mail_scopes`, authoritative via

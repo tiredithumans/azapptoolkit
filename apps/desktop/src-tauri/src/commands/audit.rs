@@ -43,7 +43,10 @@ use crate::commands::graph_roles::graph_role_index;
 use crate::commands::progress::emit_progress;
 use crate::commands::throttle::FanOutMeter;
 use crate::dto::UiError;
-use crate::dto::audit::{AuditCoverageGap, AuditExportCoverage, AuditProgress, AuditRunResult};
+use crate::dto::audit::{
+    AuditCoverageGap, AuditExportCoverage, AuditProgress, AuditRunResult,
+    MAILBOX_SCOPING_UNRESOLVED,
+};
 use crate::state::AppState;
 use azapptoolkit_exchange::verdict::{aap_verdict_for, apply_legacy_policy_verdict};
 
@@ -102,6 +105,16 @@ struct CachedAuditRun {
     /// RFC3339 UTC.
     completed_at: String,
     items: Vec<AuditItem>,
+    /// [`AuditRunResult::mailbox_scoping_resolved`] — stored with the items
+    /// because an unresolved run is still cacheable (it over-reports, never
+    /// under-reports), so a cache hit and its export must still carry the
+    /// caveat. Defaults to `true` for an entry written before the field.
+    #[serde(default = "default_true")]
+    mailbox_scoping_resolved: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Whether a finished run may be written to the audit cache.
@@ -252,6 +265,7 @@ pub async fn run_audit(
     let (apps, truncated) = apps?;
     let (admin_consent_clients, delegated_scopes_by_client) = consent_grants;
     let (sign_in_available, sign_in_consent_required, sign_in_map) = sign_in;
+    let (legacy_policies, legacy_read_failed) = legacy_policies;
     // Third way a run can be partial, alongside `cancelled` and `truncated`:
     // the scan reached every app, but with part of the analysis switched off
     // because a tenant-wide read failed. Collected here so the result can say
@@ -319,6 +333,7 @@ pub async fn run_audit(
         orgwide_mail_by_sp,
         legacy_policies,
         exo_tripped,
+        mail_scoping_unresolved: AtomicBool::new(false),
         sign_in_available,
         sign_in_map,
     });
@@ -450,6 +465,14 @@ pub async fn run_audit(
     }
 
     let cancelled = cancelled_before_all_dispatched || cancel.is_cancelled();
+    // Whether every mail permission was actually checked against Exchange
+    // mailbox scoping. Not a `degraded` gap — the fallback is org-wide weight,
+    // which over-reports — but the operator has to be told, because the
+    // "Org-wide mailbox access" group then includes apps Exchange may already
+    // confine, each offering a Scope fix that needs the same Exchange access.
+    let mailbox_scoping_resolved = ctx.exo.is_some()
+        && !legacy_read_failed
+        && !ctx.mail_scoping_unresolved.load(Ordering::Acquire);
     items.sort_by_key(|i| std::cmp::Reverse(i.risk_score));
     // One summary line per run, like the site sweep's `site sweep complete`:
     // "it took 40 minutes / stopped at 60% / found less than yesterday" is
@@ -461,6 +484,7 @@ pub async fn run_audit(
         truncated,
         cancelled,
         degraded = ?degraded,
+        mailbox_scoping_resolved,
         cached = run_is_cacheable(cancelled, truncated, &degraded),
         elapsed_secs = started.elapsed().as_secs(),
         "audit complete",
@@ -473,6 +497,7 @@ pub async fn run_audit(
     let run = CachedAuditRun {
         completed_at: Utc::now().to_rfc3339(),
         items,
+        mailbox_scoping_resolved,
     };
     if run_is_cacheable(cancelled, truncated, &degraded) {
         state
@@ -482,6 +507,7 @@ pub async fn run_audit(
     let CachedAuditRun {
         completed_at,
         items,
+        mailbox_scoping_resolved,
     } = run;
 
     Ok(AuditRunResult {
@@ -499,6 +525,7 @@ pub async fn run_audit(
         truncated,
         degraded,
         completed_at: Some(completed_at),
+        mailbox_scoping_resolved,
     })
 }
 
@@ -534,7 +561,11 @@ pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option
     state.auth.tenant_context(&tenant_id)?;
     let key = audit_cache_key(&tenant_id);
     let run: CachedAuditRun = state.cache.get(CacheKind::Audit, &key)?;
-    let items = run.items;
+    let CachedAuditRun {
+        completed_at,
+        items,
+        mailbox_scoping_resolved,
+    } = run;
     // Report availability is reconstructed from the cached items (every item
     // carries the run's `sign_in_report_available`); a cached run never re-prompts
     // for consent, so `sign_in_consent_required` is false on a cache hit.
@@ -554,7 +585,10 @@ pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option
         // The stamp the RUN wrote, not this read: a cache hit is what the
         // dashboard shows after a relaunch-free hour, and "scanned just now"
         // about an hour-old scan is the false claim this field exists to stop.
-        completed_at: Some(run.completed_at),
+        completed_at: Some(completed_at),
+        // Cached WITH the items: an unresolved run is cacheable, and its
+        // caveat must survive the round trip.
+        mailbox_scoping_resolved,
     })
 }
 
@@ -632,6 +666,8 @@ fn cached_run_coverage(run: &CachedAuditRun) -> AuditExportCoverage {
         degraded: Vec::new(),
         sign_in_report_available: run.items.iter().any(|i| i.sign_in_report_available),
         completed_at: Some(run.completed_at.clone()),
+        // The one caveat a cacheable run can still carry.
+        mailbox_scoping_resolved: run.mailbox_scoping_resolved,
     }
 }
 
@@ -675,6 +711,9 @@ fn coverage_sentences(scored: usize, coverage: &AuditExportCoverage) -> Vec<Stri
                 .to_string(),
         );
     }
+    if !coverage.mailbox_scoping_resolved {
+        out.push(MAILBOX_SCOPING_UNRESOLVED.to_string());
+    }
     out
 }
 
@@ -710,6 +749,7 @@ fn audit_to_json(items: &[AuditItem], coverage: &AuditExportCoverage) -> Result<
         truncated: bool,
         degraded: &'a [AuditCoverageGap],
         sign_in_report_available: bool,
+        mailbox_scoping_resolved: bool,
         /// The caveat sentences, so a consumer that renders the file doesn't
         /// have to re-derive the prose from the flags above.
         coverage_notes: Vec<String>,
@@ -725,6 +765,7 @@ fn audit_to_json(items: &[AuditItem], coverage: &AuditExportCoverage) -> Result<
         truncated: coverage.truncated,
         degraded: &coverage.degraded,
         sign_in_report_available: coverage.sign_in_report_available,
+        mailbox_scoping_resolved: coverage.mailbox_scoping_resolved,
         coverage_notes: coverage_sentences(items.len(), coverage),
         items,
     };
@@ -909,6 +950,11 @@ struct ScoreCtx {
     /// Exchange circuit breaker — flipped once an auth failure recurs, skipping
     /// the doomed cmdlet probes for the rest of the run.
     exo_tripped: Arc<AtomicBool>,
+    /// Set when an app declaring a scopable mail permission was scored without
+    /// a mailbox-scope answer (no Exchange client, an open breaker, or a failed
+    /// probe) — it then scored at org-wide weight. Feeds
+    /// `AuditRunResult::mailbox_scoping_resolved`.
+    mail_scoping_unresolved: AtomicBool,
     sign_in_available: bool,
     sign_in_map: Arc<HashMap<String, Option<DateTime<Utc>>>>,
 }
@@ -1100,12 +1146,16 @@ async fn prefetch_ews_full_access_grants(
 /// Best-effort: no Exchange client, no Exchange-admin rights, or a failed read
 /// all yield an empty map — every mail permission then scores at its full
 /// org-wide weight, the same never-under-report degradation the rest of the
-/// Exchange path takes.
+/// Exchange path takes. The `bool` is `true` only when a client existed and the
+/// read FAILED: an app confined only by a policy then reads org-wide, which
+/// the run reports as unresolved mailbox scoping.
 async fn prefetch_legacy_access_policies(
     exo: Option<&ExchangeClient>,
-) -> HashMap<String, MailPermissionScope> {
+) -> (HashMap<String, MailPermissionScope>, bool) {
     let mut out = HashMap::new();
-    let Some(exo) = exo else { return out };
+    let Some(exo) = exo else {
+        return (out, false);
+    };
     let policies = match exo.get_application_access_policies().await {
         Ok(policies) => policies,
         Err(err) => {
@@ -1113,7 +1163,7 @@ async fn prefetch_legacy_access_policies(
                 code = err.ui_code(),
                 "audit: legacy Application Access Policy read failed; legacy-scoping findings unavailable"
             );
-            return out;
+            return (out, true);
         }
     };
     for app_id in policies.iter().filter_map(|p| p.app_id.clone()) {
@@ -1124,7 +1174,7 @@ async fn prefetch_legacy_access_policies(
             out.insert(app_id, verdict);
         }
     }
-    out
+    (out, false)
 }
 
 /// The org-wide-granted mailbox permissions `score_one` reconciles against a
@@ -1616,6 +1666,9 @@ async fn score_one(
         {
             Ok(scopes) => scopes,
             Err(err) => {
+                // Unconditionally, before the breaker test: any failed probe
+                // left this app's mail permissions at org-wide weight.
+                ctx.mail_scoping_unresolved.store(true, Ordering::Release);
                 if matches!(
                     err,
                     ExchangeError::Unauthorized | ExchangeError::Forbidden { .. }
@@ -1629,6 +1682,10 @@ async fn score_one(
                 HashMap::new()
             }
         };
+    } else if !scopable.is_empty() {
+        // No Exchange client, or the breaker is open: a scopable mail
+        // permission scores at org-wide weight without being checked.
+        ctx.mail_scoping_unresolved.store(true, Ordering::Release);
     }
 
     // Fold in the run's tenant-wide legacy-policy verdict. Outside the Exchange
@@ -1896,6 +1953,7 @@ mod tests {
             degraded: Vec::new(),
             sign_in_report_available: true,
             completed_at: Some("2026-09-02T09:00:00+00:00".to_string()),
+            mailbox_scoping_resolved: true,
         }
     }
 
@@ -1998,6 +2056,46 @@ mod tests {
         assert!(json.contains("permissionResolution"));
     }
 
+    /// Unresolved mailbox scoping is a caveat, not a gap: the run is complete
+    /// and cacheable, yet every export has to carry the sentence the org-wide
+    /// mailbox group shows, or an over-reported finding reads as confirmed.
+    #[test]
+    fn an_unresolved_mailbox_scoping_run_says_so_in_every_export() {
+        let items = vec![sample("App A")];
+        let coverage = AuditExportCoverage {
+            mailbox_scoping_resolved: false,
+            ..complete(1)
+        };
+        assert!(coverage.is_complete());
+
+        let csv = export_audit_csv(items.clone(), &coverage);
+        assert!(
+            csv.contains(&format!("# {MAILBOX_SCOPING_UNRESOLVED}")),
+            "csv preamble missing the caveat:\n{csv}"
+        );
+
+        let json = audit_to_json(&items, &coverage).expect("serialize");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["mailbox_scoping_resolved"], serde_json::json!(false));
+        assert!(
+            v["coverage_notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n == MAILBOX_SCOPING_UNRESOLVED)
+        );
+
+        let html = audit_to_html(&items, &coverage);
+        assert!(html.contains(&html_escape(MAILBOX_SCOPING_UNRESOLVED)));
+
+        // Still cacheable: it is not one of the three completeness flags.
+        assert!(run_is_cacheable(false, false, &[]));
+
+        // …and a resolved run carries none of it.
+        let clean = audit_to_json(&items, &complete(1)).expect("serialize");
+        assert!(!clean.contains(MAILBOX_SCOPING_UNRESOLVED));
+    }
+
     /// The positive case must stay boring: a complete run's export carries the
     /// counts and the run time, and none of the caveat prose.
     #[test]
@@ -2085,6 +2183,7 @@ mod tests {
             orgwide_mail_by_sp: Arc::default(),
             legacy_policies: Arc::default(),
             exo_tripped: Arc::new(AtomicBool::new(false)),
+            mail_scoping_unresolved: AtomicBool::new(false),
             sign_in_available: false,
             sign_in_map: Arc::default(),
         }
@@ -2160,6 +2259,56 @@ mod tests {
             .await
             .expect("an app with no SP scores normally");
         assert_eq!(item.service_principal_enabled, None);
+        // No mail permission, so nothing was left unprobed.
+        assert!(!ctx.mail_scoping_unresolved.load(Ordering::Acquire));
+    }
+
+    // A scopable mail permission scored with no Exchange client is left at
+    // org-wide weight unchecked — the run must say its scoping is unresolved.
+    #[tokio::test]
+    async fn an_unprobed_mail_permission_marks_scoping_unresolved() {
+        use wiremock::matchers::{method, path, query_param};
+        let server = wiremock::MockServer::start().await;
+        mock_sp_lookup(
+            &server,
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
+        )
+        .await;
+        wiremock::Mock::given(method("GET"))
+            .and(path("/servicePrincipals"))
+            .and(query_param(
+                "$filter",
+                format!("appId eq '{MICROSOFT_GRAPH_APP_ID}'"),
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": [{
+                        "id": "graph-sp",
+                        "appId": MICROSOFT_GRAPH_APP_ID,
+                        "appRoles": [{"id": "role-mail-read", "value": "Mail.Read"}],
+                    }]
+                })),
+            )
+            .mount(&server)
+            .await;
+        let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+        let app = Application {
+            required_resource_access: vec![RequiredResourceAccess {
+                resource_app_id: MICROSOFT_GRAPH_APP_ID.to_string(),
+                resource_access: vec![azapptoolkit_core::models::ResourceAccess {
+                    id: "role-mail-read".into(),
+                    r#type: "Role".into(),
+                }],
+            }],
+            ..bare_app()
+        };
+
+        score_one(&ctx, &app, None).await.expect("scores");
+        assert!(
+            !ctx.resolver.had_unresolved(),
+            "the Graph index must resolve, or the flag proves nothing"
+        );
+        assert!(ctx.mail_scoping_unresolved.load(Ordering::Acquire));
     }
 
     #[tokio::test]

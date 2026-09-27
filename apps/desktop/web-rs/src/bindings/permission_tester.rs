@@ -25,7 +25,9 @@ struct ReachersArgs<'a> {
 }
 
 /// The mailbox reverse lookup: every service principal holding a mail-scopable
-/// Graph application permission, probed against `mailbox` (long-running;
+/// application permission on either mailbox resource (Microsoft Graph, or the
+/// EWS `full_access_as_app` scope on Office 365 Exchange Online), plus the
+/// principals in Exchange's SP store, probed against `mailbox` (long-running;
 /// progress arrives via the `mailbox-probe-progress` event stream).
 pub async fn find_mailbox_reachers(
     tenant_id: &str,

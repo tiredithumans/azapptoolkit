@@ -7,7 +7,9 @@ use serde::Serialize;
 use tauri_sys::core::{invoke, invoke_result};
 
 use crate::bindings::TenantArg;
-pub use azapptoolkit_dto::audit::{AuditExportCoverage, AuditProgress, AuditRunResult};
+pub use azapptoolkit_dto::audit::{
+    AuditExportCoverage, AuditProgress, AuditRunResult, MAILBOX_SCOPING_UNRESOLVED,
+};
 
 /// Runs a full security audit. Exchange mailbox-scoping is resolved as part of
 /// every run (best-effort — it degrades to unscoped scoring when the signed-in

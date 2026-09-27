@@ -47,6 +47,10 @@ pub(crate) struct AuditController {
     /// pane — a full-tenant HashMap per reader per render.
     pub names: Memo<Arc<HashMap<String, String>>>,
     pub report_available: Memo<bool>,
+    /// `false` when the run couldn't check some mail permission against
+    /// Exchange mailbox scoping — the org-wide mailbox group then says its
+    /// findings may already be confined. `true` with no run (nothing to caveat).
+    pub mailbox_scoping_resolved: Memo<bool>,
     /// When a row's remediation succeeds, drops **that one kind** from the
     /// item so its "Fix" button is gone for good (the audit cache is already
     /// busted server-side; scores refresh on the next manual re-run). Only that
@@ -97,6 +101,9 @@ impl AuditController {
         });
         let report_available = Memo::new(move |_| {
             result.with(|r| r.as_ref().is_some_and(|r| r.sign_in_report_available))
+        });
+        let mailbox_scoping_resolved = Memo::new(move |_| {
+            result.with(|r| r.as_ref().is_none_or(|r| r.mailbox_scoping_resolved))
         });
 
         let on_remediated = Callback::new(move |(object_id, kind): (String, RemediationKind)| {
@@ -153,6 +160,7 @@ impl AuditController {
             total_items,
             names,
             report_available,
+            mailbox_scoping_resolved,
             on_remediated,
             on_bulk_done,
         };

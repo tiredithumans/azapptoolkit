@@ -228,6 +228,32 @@
   run that finished first switched off the other's back-off for the rest of its life; a finishing
   run now detaches only its own tracker, and the survivor keeps adapting.
 
+- **The permission tester no longer reports "No access" when it couldn't read the app's grants.**
+  If Microsoft Graph failed while the tester was reading an app's app-role assignments, a mailbox
+  check could answer "No access" and state that no organization-wide mailbox permission was granted,
+  and a SharePoint check could state that the app held no organization-wide SharePoint grant — even
+  for an app holding `Mail.Read` or `Sites.Read.All` tenant-wide. Both now answer "Couldn't
+  determine" and say the assignments couldn't be read. An app with no service principal in the
+  tenant is still reported as having no access.
+
+- **"Who can reach this mailbox?" now finds apps holding EWS `full_access_as_app`.** The Resource
+  Access Mailboxes tab looked for candidates only among Microsoft Graph grants, so an app whose only
+  mailbox grant was the legacy Exchange Web Services full-access permission, which reaches every
+  mailbox, was missing from the list or shown as "No access". Those apps are now listed as
+  organization-wide, matching the permission tester and the security audit.
+
+- **The Mailboxes tab now says when Exchange couldn't be used.** It reported Exchange as available
+  whenever you were signed in, even without Exchange consent, so its "verdicts derive from the Entra
+  grants alone" note never appeared. It now checks the Exchange sign-in first, and also says when
+  Exchange's service-principal list couldn't be read, because apps granted access only through
+  Exchange RBAC are then missing. Both notes are included in CSV and JSON exports.
+
+- **The security audit now says when it couldn't check mailbox scoping.** When Exchange couldn't be
+  queried, every mail permission is scored as organization-wide so risk is never under-reported, but
+  nothing said so: apps already confined through Exchange RBAC were listed under "Org-wide mailbox
+  access" with a Scope fix that needs the same Exchange access. That group now shows a note, and
+  CSV, JSON and HTML exports carry the same sentence. The run is still cached.
+
 ## [0.30.2] - 2026-09-25
 
 ### Changed

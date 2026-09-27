@@ -49,6 +49,7 @@ fn cached_run() -> AuditRunResult {
         truncated: false,
         degraded: Vec::new(),
         completed_at: None,
+        mailbox_scoping_resolved: true,
     }
 }
 

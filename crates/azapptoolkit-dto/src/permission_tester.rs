@@ -65,8 +65,9 @@ pub struct MailboxReacherRow {
     pub app_id: String,
     pub principal_id: String,
     pub display_name: Option<String>,
-    /// Mail-scopable Graph application permissions the principal holds (the
-    /// Entra side). Empty for a candidate discovered only via Exchange's SP
+    /// Mail-scopable application permissions the principal holds on Microsoft
+    /// Graph, or the EWS `full_access_as_app` scope on Office 365 Exchange
+    /// Online (the Entra side). Empty for a candidate discovered only via Exchange's SP
     /// store — its access, if any, comes solely from Exchange RBAC.
     pub held_permissions: Vec<String>,
     /// Same machine-stable verdicts as [`PermissionTestResult::verdict`]:
@@ -91,7 +92,8 @@ pub struct MailboxReacherRow {
 }
 
 /// Result of probing every candidate against one mailbox. `exchange_available`
-/// is `false` when the Exchange client couldn't be built at all — verdicts then
+/// is `false` when the Exchange client couldn't be built or its Exchange.Manage
+/// token couldn't be acquired (no consent, no admin rights) — verdicts then
 /// derive from the Entra grants alone (org-wide unless scoped, the audit's
 /// never-under-report posture) and the UI should say so.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,5 +104,11 @@ pub struct MailboxReachersResult {
     pub total_candidates: usize,
     pub rows: Vec<MailboxReacherRow>,
     pub exchange_available: bool,
+    /// Exchange's SP store was listed — the only source of principals granted
+    /// access solely through Exchange RBAC; `false` ⇒ those principals are
+    /// absent from `rows`. `#[serde(default)]` so an older payload reads as
+    /// "not read" rather than as complete coverage.
+    #[serde(default)]
+    pub exchange_sp_store_read: bool,
     pub cancelled: bool,
 }

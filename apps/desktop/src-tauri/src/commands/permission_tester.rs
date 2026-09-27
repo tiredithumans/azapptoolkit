@@ -30,7 +30,9 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_core::audit::{AuditPrincipalKind, MailPermissionScope};
-use azapptoolkit_core::models::{ResolvedSharePointResource, SelectedPermission};
+use azapptoolkit_core::models::{
+    AppRoleAssignment, ResolvedSharePointResource, SelectedPermission,
+};
 use azapptoolkit_core::scoping::{
     MICROSOFT_GRAPH_APP_ID, SelectedScopeLevel, is_scopable_exchange_resource_permission,
     is_sharepoint_orgwide, selected_scope_accepts, selected_scope_level_for,
@@ -39,13 +41,16 @@ use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_exchange::models::{
     ExoApplicationAccessPolicy, ExoAuthorizationResult, ExoServicePrincipal,
 };
+use azapptoolkit_graph::GraphClient;
 
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
 use azapptoolkit_exchange::verdict::{aap_verdict_for, is_org_wide_auth_row};
 
 use crate::commands::exchange::exchange_client;
 use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
-use crate::commands::graph_roles::{graph_role_index, mailbox_resource_roles, resolve_grant};
+use crate::commands::graph_roles::{
+    ResourceRoles, graph_role_index, mailbox_resource_roles, resolve_grant,
+};
 use crate::commands::progress::emit_progress;
 use crate::dto::UiError;
 use crate::dto::permission_tester::{
@@ -58,22 +63,23 @@ use crate::state::AppState;
 /// mailbox directly through Graph with no Exchange RBAC involvement —
 /// `Test-ServicePrincipalAuthorization` deliberately excludes them — and only
 /// a legacy Application Access Policy can constrain them. Returns the matching
-/// permission values, or `None` when the SP holds no such grant or can't be
-/// resolved. Mirrors path 1 of [`test_site_access`] (org-wide `Sites.*`).
-async fn orgwide_mailbox_grant(
-    state: &AppState,
-    tenant_id: &str,
-    app_id: &str,
-) -> Option<Vec<String>> {
-    let client = state.graph_for(tenant_id);
-    let sp = client
-        .get_service_principal_by_app_id(app_id)
-        .await
-        .ok()??;
+/// permission values; empty when the SP holds no such grant, or when the app has
+/// no service principal in this tenant at all (it then holds nothing).
+///
+/// `Err` when the SP lookup, the mailbox role index or the assignment list
+/// couldn't be read. That is never "holds none": the caller reports it as
+/// [`EntraReach::Unreadable`] (an `unknown` verdict). Folding the error into an
+/// empty list let a transient Graph failure answer a definite "No access" for
+/// an app holding `Mail.Read` tenant-wide. Mirrors path 1 of
+/// [`test_site_access`] (org-wide `Sites.*`).
+async fn orgwide_mailbox_grant(client: &GraphClient, app_id: &str) -> Result<Vec<String>, UiError> {
+    let Some(sp) = client.get_service_principal_by_app_id(app_id).await? else {
+        return Ok(Vec::new());
+    };
     // Across BOTH mailbox-bearing resources: reading Microsoft Graph alone missed
     // an org-wide EWS `full_access_as_app` grant, which reaches every mailbox.
-    let resources = mailbox_resource_roles(&client).await.ok()?;
-    let assignments = client.list_app_role_assignments(&sp.id).await.ok()?;
+    let resources = mailbox_resource_roles(client).await?;
+    let assignments = client.list_app_role_assignments(&sp.id).await?;
     let mut perms: Vec<String> = assignments
         .iter()
         // Resource-aware: `resolve_grant` knows which of the two mailbox
@@ -89,7 +95,7 @@ async fn orgwide_mailbox_grant(
         .collect();
     perms.sort();
     perms.dedup();
-    (!perms.is_empty()).then_some(perms)
+    Ok(perms)
 }
 
 /// Exchange-RBAC-layer outcome for one (principal, mailbox) pair, derived
@@ -190,6 +196,9 @@ enum EntraReach {
     Unverified(Vec<String>),
     /// No org-wide Graph mailbox grant in Entra ID.
     NotHeld,
+    /// The SP's app-role assignments couldn't be read — whether an org-wide
+    /// grant is held is unknown (never `NotHeld`).
+    Unreadable,
 }
 
 /// Evaluates the Entra layer for `perms` (already-confirmed org-wide grants).
@@ -247,6 +256,7 @@ fn synthesize(mailbox: &str, entra: &EntraReach, rbac: &RbacReach) -> Permission
     let entra_level = match entra {
         EntraReach::OrgWide(_) | EntraReach::Unverified(_) => 3,
         EntraReach::ScopedByAap { .. } => 2,
+        EntraReach::Unreadable => 1,
         EntraReach::DeniedByAap | EntraReach::NotHeld => 0,
     };
     let rbac_level = match rbac {
@@ -298,6 +308,10 @@ fn synthesize(mailbox: &str, entra: &EntraReach, rbac: &RbacReach) -> Permission
         )),
         EntraReach::NotHeld => parts.push(
             "No organization-wide Graph mailbox permission is granted in Entra ID.".into(),
+        ),
+        EntraReach::Unreadable => parts.push(
+            "The app's Entra ID app-role assignments couldn't be read, so whether it holds an organization-wide Graph mailbox permission is unknown."
+                .into(),
         ),
     }
     match rbac {
@@ -368,27 +382,29 @@ pub async fn test_mailbox_access(
     mailbox: String,
 ) -> Result<PermissionTestResult, UiError> {
     let mailbox = mailbox.trim().to_string();
+    let graph = state.graph_for(&tenant_id);
     let exo = match exchange_client(&state, &tenant_id) {
         Ok(exo) => exo,
         Err(err) => {
             // No Exchange client at all: an org-wide Entra grant still answers
             // on its own (with the AAP caveat); otherwise nothing can be said.
-            return Ok(
-                match orgwide_mailbox_grant(&state, &tenant_id, &app_id).await {
-                    Some(perms) => synthesize(
-                        &mailbox,
-                        &EntraReach::Unverified(perms),
-                        &RbacReach::Indeterminate,
+            return match orgwide_mailbox_grant(&graph, &app_id).await {
+                Ok(perms) if !perms.is_empty() => Ok(synthesize(
+                    &mailbox,
+                    &EntraReach::Unverified(perms),
+                    &RbacReach::Indeterminate,
+                )),
+                // A dead session re-authenticates in place rather than
+                // reading as an inconclusive test.
+                Err(graph_err) if graph_err.is_reauth_fatal() => Err(graph_err),
+                _ => Ok(PermissionTestResult::unknown(
+                    &mailbox,
+                    format!(
+                        "Couldn't reach Exchange to test access ({}). Exchange administrator rights are required.",
+                        err.code
                     ),
-                    None => PermissionTestResult::unknown(
-                        &mailbox,
-                        format!(
-                            "Couldn't reach Exchange to test access ({}). Exchange administrator rights are required.",
-                            err.code
-                        ),
-                    ),
-                },
-            );
+                )),
+            };
         }
     };
 
@@ -400,14 +416,21 @@ pub async fn test_mailbox_access(
     )
     .await;
 
-    let entra = match orgwide_mailbox_grant(&state, &tenant_id, &app_id).await {
-        Some(perms) => {
+    let entra = match orgwide_mailbox_grant(&graph, &app_id).await {
+        Ok(perms) if !perms.is_empty() => {
             // The AAP list is read only when an Entra grant exists for it to
             // constrain.
             let policies = exo.get_application_access_policies().await.ok();
             entra_reach(&exo, &app_id, &mailbox, perms, policies.as_deref()).await
         }
-        None => EntraReach::NotHeld,
+        Ok(_) => EntraReach::NotHeld,
+        // A dead session re-authenticates in place (never an "unknown" verdict
+        // indistinguishable from a genuine one).
+        Err(err) if err.is_reauth_fatal() => return Err(err),
+        Err(err) => {
+            tracing::info!(code = %err.code, "mailbox test: Entra grants unreadable");
+            EntraReach::Unreadable
+        }
     };
 
     Ok(synthesize(&mailbox, &entra, &rbac))
@@ -419,10 +442,12 @@ const PROBE_CONCURRENCY: usize = 4;
 
 /// The mailbox reverse lookup: which applications can reach `mailbox`?
 ///
-/// Candidates come from two sources, merged by SP object id: ONE paged Graph
-/// call — `appRoleAssignedTo` on the Microsoft Graph resource SP is the whole
-/// tenant's principal → Graph-app-role matrix — filtered to principals holding
-/// a mail-scopable application permission; plus the Exchange SP store
+/// Candidates come from two sources, merged by SP object id: the paged
+/// `appRoleAssignedTo` on each mailbox-bearing resource SP (Microsoft Graph,
+/// and Office 365 Exchange Online for the EWS `full_access_as_app` scope) —
+/// together the whole tenant's principal → mailbox-app-role matrix — filtered
+/// to principals holding a mail-scopable application permission
+/// ([`mailbox_candidates`]); plus the Exchange SP store
 /// (`Get-ServicePrincipal`), which is the only place a principal granted
 /// access *solely* through Exchange RBAC (no Entra grant) is visible. Each
 /// candidate is then evaluated with the same two-layer union
@@ -435,8 +460,11 @@ const PROBE_CONCURRENCY: usize = 4;
 /// is unavailable, a candidate's held org-wide Graph mail grant reaches every
 /// mailbox via Graph anyway, so it reads `org_wide` with the legacy-AAP
 /// caveat; it never silently drops to "no access". The Exchange-only
-/// candidate source is necessarily absent in that degraded mode — the UI's
-/// `exchange_available = false` summary already flags the partial coverage.
+/// candidate source is necessarily absent in that degraded mode — including
+/// when the Exchange.Manage token can't be acquired — and the UI's
+/// `exchange_available = false` summary flags the partial coverage;
+/// `exchange_sp_store_read = false` flags the same gap when Exchange answered
+/// but its SP store couldn't be listed.
 ///
 /// Long-running: emits `mailbox-probe-progress` and polls its own
 /// `AppState.mailbox_probe_cancel` token, stopped only by
@@ -464,37 +492,37 @@ pub async fn find_mailbox_reachers(
     }
 
     let client = state.graph_for(&tenant_id);
-    let (graph_sp_id, role_value_by_id) = graph_role_index(&client).await?;
-    let assigned = client.list_app_role_assigned_to(&graph_sp_id).await?;
-
+    // BOTH mailbox-bearing resources: Microsoft Graph is required, Office 365
+    // Exchange Online is omitted when the tenant has no such SP (an ordinary
+    // empty set). Reading Graph alone missed an app whose only mailbox grant is
+    // the EWS `full_access_as_app` scope — the strongest one there is.
+    let resources = mailbox_resource_roles(&client).await?;
+    let mut assigned = Vec::new();
+    for resource in &resources {
+        assigned.extend(
+            client
+                .list_app_role_assigned_to(&resource.sp_object_id)
+                .await?,
+        );
+    }
     // principal id → (display name, held mail-scopable values).
-    let mut candidates: HashMap<String, (Option<String>, Vec<String>)> = HashMap::new();
-    for a in assigned {
-        if a.principal_type.as_deref() != Some("ServicePrincipal") {
-            continue;
-        }
-        let Some(value) = role_value_by_id.get(&a.app_role_id) else {
-            continue;
-        };
-        // `role_value_by_id` is built from the Microsoft Graph SP's appRoles
-        // (see `graph_role_index`), so the resource is known here — name it
-        // rather than letting a value-only test stand in for it.
-        if !is_scopable_exchange_resource_permission(Some(MICROSOFT_GRAPH_APP_ID), value) {
-            continue;
-        }
-        let entry = candidates
-            .entry(a.principal_id.clone())
-            .or_insert_with(|| (a.principal_display_name.clone(), Vec::new()));
-        entry.1.push(value.clone());
-    }
-    for (_, values) in candidates.values_mut() {
-        values.sort();
-        values.dedup();
-    }
+    let mut candidates = mailbox_candidates(&resources, assigned);
 
     // Best-effort Exchange client; without it every verdict derives from the
-    // Entra grants (org-wide reach — never under-reported).
-    let exo = exchange_client(&state, &tenant_id).ok();
+    // Entra grants (org-wide reach — never under-reported). `exchange_client`
+    // only checks the session and the UPN, so without this pre-acquire a
+    // missing Exchange.Manage consent still read as `exchange_available`.
+    let exo = match state.ensure_exchange_token(&tenant_id).await {
+        Ok(()) => exchange_client(&state, &tenant_id).ok(),
+        Err(err) => {
+            let ui = UiError::from(err);
+            if ui.is_reauth_fatal() {
+                return Err(ui);
+            }
+            tracing::info!(code = %ui.code, "mailbox probe: Exchange token unavailable");
+            None
+        }
+    };
     let exchange_available = exo.is_some();
     // One AAP read serves every candidate's Entra-layer gate; best-effort
     // (`None` = unverifiable, those candidates keep the caveated org-wide
@@ -511,10 +539,15 @@ pub async fn find_mailbox_reachers(
     // An app granted access *only* through Exchange RBAC holds no Graph
     // app-role assignment, so the appRoleAssignedTo sweep above can't see it —
     // these probe with empty held permissions (Entra layer = not held).
-    // Best-effort: an unreadable list leaves the Graph-derived candidates.
+    // Best-effort: an unreadable list leaves the Graph-derived candidates, and
+    // `exchange_sp_store_read` tells the summary those principals are missing.
+    let mut exchange_sp_store_read = false;
     if let Some(exo) = exo.as_deref() {
         match exo.list_service_principals().await {
-            Ok(sps) => merge_exchange_candidates(&mut candidates, sps),
+            Ok(sps) => {
+                exchange_sp_store_read = true;
+                merge_exchange_candidates(&mut candidates, sps);
+            }
             Err(err) => {
                 tracing::info!(
                     code = err.ui_code(),
@@ -677,6 +710,7 @@ pub async fn find_mailbox_reachers(
         total_candidates: total,
         rows,
         exchange_available,
+        exchange_sp_store_read,
         cancelled,
     })
 }
@@ -686,6 +720,45 @@ pub async fn find_mailbox_reachers(
 #[tauri::command]
 pub fn cancel_mailbox_probe(state: State<'_, AppState>) {
     state.mailbox_probe_cancel.cancel();
+}
+
+/// The reverse lookup's Entra-derived candidates: every service principal holding
+/// a mail-scopable application permission on either mailbox resource, keyed by
+/// SP object id → (display name, held values, sorted and deduped). `assigned`
+/// is the `appRoleAssignedTo` rows of every resource in `resources`.
+///
+/// Each grant is resolved against the resource it was made on and gated with
+/// the resource-carrying test, so Microsoft Graph's mail family and the EWS
+/// `full_access_as_app` scope count while Office 365 Exchange Online's retired
+/// Outlook REST `Mail.*` roles (which nothing can scope) do not.
+fn mailbox_candidates(
+    resources: &[ResourceRoles],
+    assigned: Vec<AppRoleAssignment>,
+) -> HashMap<String, (Option<String>, Vec<String>)> {
+    let mut candidates: HashMap<String, (Option<String>, Vec<String>)> = HashMap::new();
+    for a in assigned {
+        if a.principal_type.as_deref() != Some("ServicePrincipal") {
+            continue;
+        }
+        let Some((resource, _, value)) = resolve_grant(resources, &a.resource_id, &a.app_role_id)
+        else {
+            continue;
+        };
+        if !is_scopable_exchange_resource_permission(Some(resource), value) {
+            continue;
+        }
+        let value = value.to_string();
+        candidates
+            .entry(a.principal_id)
+            .or_insert_with(|| (a.principal_display_name, Vec::new()))
+            .1
+            .push(value);
+    }
+    for (_, values) in candidates.values_mut() {
+        values.sort();
+        values.dedup();
+    }
+    candidates
 }
 
 /// Folds the Exchange-registered service principals into the candidate map
@@ -862,9 +935,11 @@ fn classify_reacher(
 ///
 /// Both halves matter: an org-wide `Sites.*` reaches every resource on its own,
 /// while a Selected scope grants nothing by itself — it only lets a *permission
-/// entry* on a resource take effect. `None` from [`sharepoint_grants_held`]
+/// entry* on a resource take effect. An `Err` from [`sharepoint_grants_held`]
 /// means the assignments couldn't be read, which is never the same as "holds
-/// none".
+/// none" — [`site_verdict`] takes it as `None` and answers `unknown`. The
+/// `Default` (nothing held) is what an app with no service principal gets.
+#[derive(Default)]
 struct HeldSharePointGrants {
     /// Org-wide `Sites.*` values (everything but `Sites.Selected`).
     orgwide: Vec<String>,
@@ -887,18 +962,19 @@ impl HeldSharePointGrants {
 }
 
 /// Reads `app_id`'s granted Microsoft Graph app-roles and classifies the
-/// SharePoint ones. `None` when the principal or its assignments can't be read —
-/// the caller must then report `unknown` rather than "no access".
+/// SharePoint ones. An app with no service principal in the tenant holds
+/// nothing (`Ok` of the empty default). `Err` when the SP lookup, the Graph role
+/// index or the assignment list can't be read — the caller must then report
+/// `unknown` rather than "no access".
 async fn sharepoint_grants_held(
-    client: &azapptoolkit_graph::GraphClient,
+    client: &GraphClient,
     app_id: &str,
-) -> Option<HeldSharePointGrants> {
-    let sp = client
-        .get_service_principal_by_app_id(app_id)
-        .await
-        .ok()??;
-    let (_, role_value_by_id) = graph_role_index(client).await.ok()?;
-    let assignments = client.list_app_role_assignments(&sp.id).await.ok()?;
+) -> Result<HeldSharePointGrants, UiError> {
+    let Some(sp) = client.get_service_principal_by_app_id(app_id).await? else {
+        return Ok(HeldSharePointGrants::default());
+    };
+    let (_, role_value_by_id) = graph_role_index(client).await?;
+    let assignments = client.list_app_role_assignments(&sp.id).await?;
 
     let mut orgwide = Vec::new();
     let mut selected = Vec::new();
@@ -914,7 +990,7 @@ async fn sharepoint_grants_held(
     }
     orgwide.sort();
     orgwide.dedup();
-    Some(HeldSharePointGrants { orgwide, selected })
+    Ok(HeldSharePointGrants { orgwide, selected })
 }
 
 /// One permission entry naming the tested app, and the securable it sits on.
@@ -1072,7 +1148,16 @@ pub async fn test_site_access(
 
     // Read the principal's grants once — both paths below need them, and a
     // failure here must not be read as "holds nothing".
-    let held = sharepoint_grants_held(&client, &app_id).await;
+    let held = match sharepoint_grants_held(&client, &app_id).await {
+        Ok(h) => Some(h),
+        // A dead session re-authenticates in place rather than reading as an
+        // inconclusive test.
+        Err(e) if e.is_reauth_fatal() => return Err(e),
+        Err(e) => {
+            tracing::info!(code = %e.code, "site test: app-role assignments unreadable");
+            None
+        }
+    };
 
     let resolved = client
         .resolve_sharepoint_resource(&site_url)
@@ -1080,11 +1165,38 @@ pub async fn test_site_access(
         .map_err(sharepoint_test_err)?;
     let label = resolved.display_path.clone();
 
+    // Path 1 (org-wide) needs no entry at all, so the chain walk is skipped.
+    let hit = if held.as_ref().is_some_and(|h| !h.orgwide.is_empty()) {
+        None
+    } else {
+        find_entry_in_chain(&client, &resolved, &app_id).await?
+    };
+    Ok(site_verdict(held.as_ref(), hit, label))
+}
+
+/// Folds the three SharePoint access paths into one verdict. `held` is `None`
+/// when the app's app-role assignments couldn't be read — that is never "holds
+/// none", so every branch that would lean on it answers `unknown`. `hit` is the
+/// nearest permission entry naming the app on the target or an ancestor.
+///
+/// | held                | hit    | verdict                                  |
+/// |---------------------|--------|------------------------------------------|
+/// | org-wide `Sites.*`  | any    | `org_wide`                               |
+/// | unreadable          | none   | `unknown`                                |
+/// | readable            | none   | `no_access`                              |
+/// | unreadable          | entry  | `unknown`                                |
+/// | matching scope      | entry  | `scoped`                                 |
+/// | no matching scope   | entry  | `no_access`, naming the scope it needs   |
+fn site_verdict(
+    held: Option<&HeldSharePointGrants>,
+    hit: Option<EntryHit>,
+    label: String,
+) -> PermissionTestResult {
     // Path 1: org-wide, which needs no entry at all.
-    if let Some(h) = &held
+    if let Some(h) = held
         && !h.orgwide.is_empty()
     {
-        return Ok(PermissionTestResult {
+        return PermissionTestResult {
             has_access: true,
             verdict: "org_wide".into(),
             roles: h.orgwide.clone(),
@@ -1092,20 +1204,31 @@ pub async fn test_site_access(
                 "The app holds an organization-wide SharePoint permission and can access “{label}” (and every other site, library and file in the tenant)."
             )),
             resource_label: label,
-        });
+        };
     }
 
     // Path 2: a permission entry on the target or an ancestor.
-    let Some(hit) = find_entry_in_chain(&client, &resolved, &app_id).await? else {
-        return Ok(PermissionTestResult {
-            has_access: false,
-            verdict: "no_access".into(),
-            roles: Vec::new(),
-            detail: Some(format!(
-                "No permission entry names this app on “{label}” or anything above it, and it holds no organization-wide SharePoint grant."
-            )),
-            resource_label: label,
-        });
+    let Some(hit) = hit else {
+        return match held {
+            None => PermissionTestResult {
+                has_access: false,
+                verdict: "unknown".into(),
+                roles: Vec::new(),
+                detail: Some(format!(
+                    "No permission entry names this app on “{label}” or anything above it, but its app-role assignments couldn't be read, so whether it holds an organization-wide SharePoint grant is unknown."
+                )),
+                resource_label: label,
+            },
+            Some(_) => PermissionTestResult {
+                has_access: false,
+                verdict: "no_access".into(),
+                roles: Vec::new(),
+                detail: Some(format!(
+                    "No permission entry names this app on “{label}” or anything above it, and it holds no organization-wide SharePoint grant."
+                )),
+                resource_label: label,
+            },
+        };
     };
 
     let inherited = hit.where_label != label;
@@ -1117,7 +1240,7 @@ pub async fn test_site_access(
 
     // Path 3: the entry only bites if the token can carry a scope for its level.
     let Some(held) = held else {
-        return Ok(PermissionTestResult {
+        return PermissionTestResult {
             has_access: false,
             verdict: "unknown".into(),
             roles: hit.roles,
@@ -1125,11 +1248,11 @@ pub async fn test_site_access(
                 "“{label}” grants this app access{via}, but its app-role assignments couldn't be read, so whether it holds the matching Selected scope is unknown."
             )),
             resource_label: label,
-        });
+        };
     };
 
     match held.scope_for_level(hit.level) {
-        Some(scope) => Ok(PermissionTestResult {
+        Some(scope) => PermissionTestResult {
             has_access: true,
             verdict: "scoped".into(),
             roles: hit.roles,
@@ -1137,8 +1260,8 @@ pub async fn test_site_access(
                 "The app is granted access to “{label}” specifically{via}, and holds {scope} — the Selected model's grant and scope halves are both in place."
             )),
             resource_label: label,
-        }),
-        None => Ok(PermissionTestResult {
+        },
+        None => PermissionTestResult {
             has_access: false,
             verdict: "no_access".into(),
             roles: hit.roles,
@@ -1148,7 +1271,7 @@ pub async fn test_site_access(
                 required_scope_for(hit.level),
             )),
             resource_label: label,
-        }),
+        },
     }
 }
 
@@ -1238,6 +1361,10 @@ fn mailbox_reachers_to_csv(rows: &[MailboxReacherRow], summary: &str) -> String 
 mod tests {
     use super::*;
     use crate::commands::export::csv_columns;
+    use azapptoolkit_core::cache::Cache;
+    use azapptoolkit_core::models::{SiteIdentity, SiteIdentitySet};
+    use azapptoolkit_core::scoping::{EWS_FULL_ACCESS_AS_APP, OFFICE365_EXCHANGE_ONLINE_APP_ID};
+    use azapptoolkit_core::token::{BearerProvider, StaticTokenProvider};
 
     fn reacher(name: &str, verdict: &str) -> MailboxReacherRow {
         MailboxReacherRow {
@@ -1517,27 +1644,370 @@ mod tests {
     // with empty held permissions; Graph-derived entries are never clobbered.
     #[test]
     fn merge_exchange_candidates_adds_new_and_keeps_graph_entries() {
-        let mut candidates: HashMap<String, (Option<String>, Vec<String>)> = HashMap::from([(
-            "obj-1".to_string(),
+        let mut candidates: HashMap<String, (Option<String>, Vec<String>)> = HashMap::from([
             (
-                Some("From Graph".to_string()),
-                vec!["Mail.Read".to_string()],
+                "obj-1".to_string(),
+                (
+                    Some("From Graph".to_string()),
+                    vec!["Mail.Read".to_string()],
+                ),
             ),
-        )]);
+            // An EWS-only holder found on the Office 365 Exchange Online SP.
+            (
+                "obj-ews".to_string(),
+                (
+                    Some("EWS app".to_string()),
+                    vec![EWS_FULL_ACCESS_AS_APP.to_string()],
+                ),
+            ),
+        ]);
         merge_exchange_candidates(
             &mut candidates,
             vec![
                 exo_sp(Some("obj-1"), "From Exchange"),
                 exo_sp(Some("obj-2"), "RBAC only"),
+                exo_sp(Some("obj-ews"), "EWS app (Exchange)"),
                 exo_sp(None, "No object id"),
             ],
         );
-        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates.len(), 3);
         let kept = &candidates["obj-1"];
         assert_eq!(kept.0.as_deref(), Some("From Graph"));
         assert_eq!(kept.1, vec!["Mail.Read".to_string()]);
+        // The EWS grant survives the merge — an Exchange-store duplicate must
+        // not reset it to "holds nothing" (which would probe as `no_access`).
+        let ews = &candidates["obj-ews"];
+        assert_eq!(ews.0.as_deref(), Some("EWS app"));
+        assert_eq!(ews.1, vec![EWS_FULL_ACCESS_AS_APP.to_string()]);
         let added = &candidates["obj-2"];
         assert_eq!(added.0.as_deref(), Some("RBAC only"));
         assert!(added.1.is_empty());
+    }
+
+    // ── Candidate discovery across BOTH mailbox resources ─────────────────
+
+    fn mailbox_resources() -> Vec<ResourceRoles> {
+        vec![
+            ResourceRoles {
+                app_id: MICROSOFT_GRAPH_APP_ID,
+                sp_object_id: "graph-sp".to_string(),
+                role_value_by_id: [
+                    ("role-mail-read".to_string(), "Mail.Read".to_string()),
+                    ("role-user".to_string(), "User.Read.All".to_string()),
+                ]
+                .into(),
+            },
+            ResourceRoles {
+                app_id: OFFICE365_EXCHANGE_ONLINE_APP_ID,
+                sp_object_id: "exo-sp".to_string(),
+                role_value_by_id: [
+                    ("role-ews".to_string(), EWS_FULL_ACCESS_AS_APP.to_string()),
+                    // The retired Outlook REST role, which nothing can scope.
+                    ("role-exo-mail".to_string(), "Mail.Read".to_string()),
+                ]
+                .into(),
+            },
+        ]
+    }
+
+    fn assigned(principal: &str, kind: &str, resource: &str, role: &str) -> AppRoleAssignment {
+        AppRoleAssignment {
+            id: format!("{principal}-{role}"),
+            principal_id: principal.into(),
+            resource_id: resource.into(),
+            app_role_id: role.into(),
+            principal_display_name: Some(format!("{principal} name")),
+            principal_type: Some(kind.into()),
+            ..Default::default()
+        }
+    }
+
+    // An app whose only mailbox grant is `full_access_as_app` reaches every
+    // mailbox over EWS; the Graph-only sweep never listed it.
+    #[test]
+    fn mailbox_candidates_include_an_ews_only_holder() {
+        let sp = "ServicePrincipal";
+        let candidates = mailbox_candidates(
+            &mailbox_resources(),
+            vec![
+                assigned("sp-1", sp, "graph-sp", "role-mail-read"),
+                assigned("sp-2", sp, "exo-sp", "role-ews"),
+                assigned("sp-3", sp, "exo-sp", "role-exo-mail"),
+                assigned("sp-4", sp, "graph-sp", "role-user"),
+                assigned("user-1", "User", "graph-sp", "role-mail-read"),
+                assigned("sp-5", sp, "exo-sp", "role-ews"),
+                assigned("sp-5", sp, "graph-sp", "role-mail-read"),
+                assigned("sp-5", sp, "exo-sp", "role-ews"),
+            ],
+        );
+        assert_eq!(candidates["sp-1"].1, vec!["Mail.Read".to_string()]);
+        assert_eq!(candidates["sp-1"].0.as_deref(), Some("sp-1 name"));
+        assert_eq!(
+            candidates["sp-2"].1,
+            vec![EWS_FULL_ACCESS_AS_APP.to_string()]
+        );
+        // Sorted and deduped across both resources.
+        assert_eq!(
+            candidates["sp-5"].1,
+            vec!["Mail.Read".to_string(), EWS_FULL_ACCESS_AS_APP.to_string()]
+        );
+        // The retired Outlook REST role, a non-mail role and a user are out.
+        assert!(!candidates.contains_key("sp-3"));
+        assert!(!candidates.contains_key("sp-4"));
+        assert!(!candidates.contains_key("user-1"));
+        assert_eq!(candidates.len(), 3);
+    }
+
+    // ── A failed Entra read is `unknown`, never "No access" ───────────────
+
+    #[test]
+    fn an_unreadable_entra_grant_is_unknown_not_no_access() {
+        let result = synthesize(
+            "a@x.com",
+            &EntraReach::Unreadable,
+            &RbacReach::None {
+                had_assignments: false,
+            },
+        );
+        assert_eq!(result.verdict, "unknown");
+        assert!(!result.has_access);
+        let detail = result.detail.unwrap();
+        assert!(detail.contains("couldn't be read"));
+        assert!(!detail.contains("No organization-wide Graph mailbox permission is granted"));
+    }
+
+    #[test]
+    fn an_rbac_scope_still_decides_when_entra_is_unreadable() {
+        let scoped = synthesize(
+            "a@x.com",
+            &EntraReach::Unreadable,
+            &RbacReach::Scoped(vec!["Application Mail.Read".into()]),
+        );
+        assert_eq!(scoped.verdict, "scoped");
+        assert!(scoped.has_access);
+        let org = synthesize(
+            "a@x.com",
+            &EntraReach::Unreadable,
+            &RbacReach::OrgWide(vec!["Application Mail.Read".into()]),
+        );
+        assert_eq!(org.verdict, "org_wide");
+    }
+
+    fn graph_over(server: &wiremock::MockServer) -> GraphClient {
+        let token: Arc<dyn BearerProvider> = StaticTokenProvider::new("tok");
+        GraphClient::with_base_url(
+            "tenant-test",
+            token.clone(),
+            token,
+            Cache::new(),
+            server.uri(),
+        )
+    }
+
+    async fn mock_sp_lookup(server: &wiremock::MockServer, response: wiremock::ResponseTemplate) {
+        use wiremock::matchers::{method, path, query_param};
+        wiremock::Mock::given(method("GET"))
+            .and(path("/servicePrincipals"))
+            .and(query_param("$filter", "appId eq 'app-1'"))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    // The fixture the tri-state exists for: a Graph read error must come back
+    // as an error (→ `EntraReach::Unreadable`), not as an empty grant list.
+    #[tokio::test]
+    async fn a_failed_sp_lookup_is_an_unreadable_mailbox_grant() {
+        let server = wiremock::MockServer::start().await;
+        // `Retry-After: 0` keeps the retry budget from sleeping out its backoff.
+        mock_sp_lookup(
+            &server,
+            wiremock::ResponseTemplate::new(503).insert_header("Retry-After", "0"),
+        )
+        .await;
+        let client = graph_over(&server);
+        assert!(orgwide_mailbox_grant(&client, "app-1").await.is_err());
+        assert!(sharepoint_grants_held(&client, "app-1").await.is_err());
+    }
+
+    // An app with no service principal in the tenant genuinely holds nothing.
+    #[tokio::test]
+    async fn an_absent_sp_holds_no_grant() {
+        let server = wiremock::MockServer::start().await;
+        mock_sp_lookup(
+            &server,
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
+        )
+        .await;
+        let client = graph_over(&server);
+        assert_eq!(
+            orgwide_mailbox_grant(&client, "app-1").await.unwrap(),
+            Vec::<String>::new()
+        );
+        let held = sharepoint_grants_held(&client, "app-1").await.unwrap();
+        assert!(held.orgwide.is_empty() && held.selected.is_empty());
+    }
+
+    // ── The SharePoint verdict table ──────────────────────────────────────
+
+    fn held(orgwide: &[&str], selected: &[(&str, SelectedScopeLevel)]) -> HeldSharePointGrants {
+        HeldSharePointGrants {
+            orgwide: orgwide.iter().map(|s| s.to_string()).collect(),
+            selected: selected.iter().map(|(v, l)| (v.to_string(), *l)).collect(),
+        }
+    }
+
+    fn hit(level: SelectedScopeLevel, where_label: &str) -> EntryHit {
+        EntryHit {
+            level,
+            where_label: where_label.into(),
+            roles: vec!["read".into()],
+        }
+    }
+
+    const LABEL: &str = "Contoso / Docs / plan.docx";
+
+    #[test]
+    fn site_verdict_org_wide_wins_over_any_entry() {
+        let h = held(&["Sites.Read.All"], &[]);
+        let r = site_verdict(
+            Some(&h),
+            Some(hit(SelectedScopeLevel::Site, "Contoso")),
+            LABEL.into(),
+        );
+        assert_eq!(r.verdict, "org_wide");
+        assert!(r.has_access);
+        assert_eq!(r.roles, vec!["Sites.Read.All".to_string()]);
+    }
+
+    // The F055 regression: no entry and unreadable grants is NOT "no access".
+    #[test]
+    fn site_verdict_no_entry_and_unreadable_grants_is_unknown() {
+        let r = site_verdict(None, None, LABEL.into());
+        assert_eq!(r.verdict, "unknown");
+        assert!(!r.has_access);
+        let detail = r.detail.unwrap();
+        assert!(detail.contains("couldn't be read"));
+        assert!(!detail.contains("holds no organization-wide SharePoint grant"));
+    }
+
+    // Also what an app with no service principal gets (the empty default).
+    #[test]
+    fn site_verdict_no_entry_and_no_grants_is_no_access() {
+        let r = site_verdict(Some(&HeldSharePointGrants::default()), None, LABEL.into());
+        assert_eq!(r.verdict, "no_access");
+        assert!(!r.has_access);
+        assert!(
+            r.detail
+                .unwrap()
+                .contains("holds no organization-wide SharePoint grant")
+        );
+    }
+
+    #[test]
+    fn site_verdict_entry_with_unreadable_grants_is_unknown() {
+        let r = site_verdict(
+            None,
+            Some(hit(SelectedScopeLevel::File, LABEL)),
+            LABEL.into(),
+        );
+        assert_eq!(r.verdict, "unknown");
+        assert!(!r.has_access);
+        assert_eq!(r.roles, vec!["read".to_string()]);
+        assert!(
+            r.detail
+                .unwrap()
+                .contains("matching Selected scope is unknown")
+        );
+    }
+
+    #[test]
+    fn site_verdict_entry_with_matching_scope_is_scoped() {
+        let h = held(&[], &[("Sites.Selected", SelectedScopeLevel::Site)]);
+        let r = site_verdict(
+            Some(&h),
+            Some(hit(SelectedScopeLevel::Site, "Contoso")),
+            LABEL.into(),
+        );
+        assert_eq!(r.verdict, "scoped");
+        assert!(r.has_access);
+        let detail = r.detail.unwrap();
+        assert!(detail.contains("inherited from “Contoso”"));
+        assert!(detail.contains("Sites.Selected"));
+    }
+
+    #[test]
+    fn site_verdict_entry_without_scope_names_the_required_scope() {
+        let h = held(&[], &[("Sites.Selected", SelectedScopeLevel::Site)]);
+        let r = site_verdict(
+            Some(&h),
+            Some(hit(SelectedScopeLevel::File, LABEL)),
+            LABEL.into(),
+        );
+        assert_eq!(r.verdict, "no_access");
+        assert!(!r.has_access);
+        let detail = r.detail.unwrap();
+        assert!(detail.contains("Files.SelectedOperations.Selected"));
+        assert!(detail.contains("a file"));
+        // An entry on the target itself is not "inherited".
+        assert!(!detail.contains("inherited from"));
+    }
+
+    fn selected_perm(app_id: Option<&str>, roles: &[&str]) -> SelectedPermission {
+        SelectedPermission {
+            id: "perm".into(),
+            roles: roles.iter().map(|s| s.to_string()).collect(),
+            granted_to_v2: Some(SiteIdentitySet {
+                application: app_id.map(|id| SiteIdentity {
+                    id: Some(id.into()),
+                    display_name: None,
+                }),
+            }),
+            granted_to: None,
+        }
+    }
+
+    #[test]
+    fn roles_for_app_matches_case_insensitively_and_dedupes() {
+        let perms = vec![
+            selected_perm(Some("AAAA-BBBB"), &["write", "read"]),
+            selected_perm(Some("aaaa-bbbb"), &["read"]),
+            // A user sharing entry has no `application` and is never a match.
+            selected_perm(None, &["owner"]),
+            selected_perm(Some("other-app"), &["fullcontrol"]),
+        ];
+        assert_eq!(
+            roles_for_app(&perms, "aaaa-bbbb"),
+            Some(vec!["read".to_string(), "write".to_string()])
+        );
+        assert_eq!(roles_for_app(&perms, "missing-app"), None);
+        assert_eq!(
+            roles_for_app(&[selected_perm(None, &["owner"])], "aaaa-bbbb"),
+            None
+        );
+    }
+
+    // Wiring only — the asymmetry itself is pinned in core `scoping` tests.
+    #[test]
+    fn scope_for_level_wires_the_list_item_file_asymmetry() {
+        let list_items = held(
+            &[],
+            &[(
+                "ListItems.SelectedOperations.Selected",
+                SelectedScopeLevel::ListItem,
+            )],
+        );
+        assert_eq!(
+            list_items.scope_for_level(SelectedScopeLevel::File),
+            Some("ListItems.SelectedOperations.Selected")
+        );
+        let files = held(
+            &[],
+            &[(
+                "Files.SelectedOperations.Selected",
+                SelectedScopeLevel::File,
+            )],
+        );
+        assert_eq!(files.scope_for_level(SelectedScopeLevel::ListItem), None);
     }
 }

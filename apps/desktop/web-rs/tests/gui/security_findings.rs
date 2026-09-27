@@ -112,6 +112,7 @@ fn cached_run() -> AuditRunResult {
         truncated: false,
         degraded: Vec::new(),
         completed_at: None,
+        mailbox_scoping_resolved: true,
     }
 }
 
@@ -288,6 +289,31 @@ fn findings_headers() -> Vec<String> {
         .collect()
 }
 
+// A run that couldn't check mail permissions against Exchange scored them all
+// org-wide: the group has to say its findings may already be confined, with
+// the same sentence the export carries.
+#[wasm_bindgen_test]
+async fn org_wide_mailbox_group_says_when_scoping_was_unresolved() {
+    ts::reset();
+    let run = AuditRunResult {
+        mailbox_scoping_resolved: false,
+        ..cached_run()
+    };
+    ts::mock_ok("get_cached_audit", &run);
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Missing or single owner")).await;
+    // Collapsed, the caveat stays with the group it qualifies.
+    assert!(!ts::body_contains("Mailbox scoping could not be resolved"));
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("orgwide_mailbox".to_string()));
+    ts::wait_for(|| ts::body_contains("Mailbox scoping could not be resolved")).await;
+    assert!(ts::body_contains(
+        azapptoolkit_dto::audit::MAILBOX_SCOPING_UNRESOLVED
+    ));
+}
+
 #[wasm_bindgen_test]
 async fn fix_all_selects_only_application_rows() {
     let m = mount_security().await;
@@ -296,6 +322,8 @@ async fn fix_all_selects_only_application_rows() {
         .audit_expanded_group
         .set(Some("orgwide_mailbox".to_string()));
     ts::wait_for(|| ts::body_contains("Fix all 1")).await;
+    // A run that resolved mailbox scoping carries no scoping caveat.
+    assert!(!ts::body_contains("Mailbox scoping could not be resolved"));
     // The group holds 2 principals (app + SP) but only the app registration is
     // bulk-eligible — Fix all must seed exactly it.
     click_button("Fix all 1");

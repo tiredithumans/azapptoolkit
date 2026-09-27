@@ -675,6 +675,8 @@ pub fn audit_run_result() -> AuditRunResult {
         // plausible "Scanned 12 min ago" forever instead of aging into
         // "Scanned 400 days ago" the year after it was written.
         completed_at: Some((Utc::now() - chrono::Duration::minutes(12)).to_rfc3339()),
+        // Fully covered, like the rest of the demo run.
+        mailbox_scoping_resolved: true,
     }
 }
 
