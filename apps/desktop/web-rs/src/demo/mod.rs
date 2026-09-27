@@ -30,9 +30,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use azapptoolkit_core::audit::{MailPermissionScope, RiskLevel, ScopeMechanism};
+use azapptoolkit_core::audit::{
+    AuditPrincipalKind, MailPermissionScope, RiskLevel, ScopeMechanism,
+};
 use azapptoolkit_core::identity::TenantContext;
-use azapptoolkit_core::models::{Application, KeyCredential, PasswordCredential};
+use azapptoolkit_core::models::{Application, DirectoryObject, KeyCredential, PasswordCredential};
 use azapptoolkit_core::scoping::{
     OFFICE365_SHAREPOINT_ONLINE_APP_ID, exchange_role_for_resource_permission,
 };
@@ -44,13 +46,17 @@ use azapptoolkit_dto::credentials::CredentialRowDto;
 use azapptoolkit_dto::enterprise_application::{
     EnterpriseApplicationDetail, EnterpriseApplicationDto,
 };
-use azapptoolkit_dto::exchange::{ExchangeRoleAssignmentDto, MailScopeEntry};
-use azapptoolkit_dto::managed_identity::MiSubtype;
+use azapptoolkit_dto::exchange::{
+    ExchangeRoleAssignmentDto, ExchangeScopeGroupDto, MailScopeEntry,
+};
+use azapptoolkit_dto::managed_identity::{AppRoleGrantDto, MiSubtype};
 use azapptoolkit_dto::permission_tester::MailboxReachersResult;
 use azapptoolkit_dto::permissions::{PermissionKind, ResolvedPermission};
 use azapptoolkit_dto::search::GlobalSearchResults;
 use azapptoolkit_dto::sharepoint::{AppSiteAccessDto, SitePermissionDto, SiteSweepResult};
-use azapptoolkit_dto::sso::SsoCertificateRowDto;
+use azapptoolkit_dto::sso::{
+    RolloverPhase, SigningCertRolloverDto, SsoCertificateRowDto, SsoConfigDto, SsoSummary,
+};
 use chrono::{DateTime, Utc};
 
 use crate::ipc_mock::{self, Unmocked, fixtures as f, mock_each, mock_ok};
@@ -387,6 +393,35 @@ fn enterprise_apps() -> Vec<EnterpriseApplicationDto> {
         .collect()
 }
 
+/// The sample directory users who own things in the demo.
+fn demo_owners() -> Vec<DirectoryObject> {
+    vec![
+        f::directory_object(
+            "owner:alex",
+            "Alex Johnson",
+            "alex.johnson@contoso.onmicrosoft.com",
+        ),
+        f::directory_object(
+            "owner:sam",
+            "Sam Patel",
+            "sam.patel@contoso.onmicrosoft.com",
+        ),
+    ]
+}
+
+/// An app registration's owners, agreeing with what the audit says about them:
+/// Adventure Works API has none, Tailspin Reporting has exactly one, and every
+/// other app has two (so no ownership finding applies to it).
+fn owners_of(name: &str) -> Vec<DirectoryObject> {
+    let mut owners = demo_owners();
+    owners.truncate(match name {
+        "Adventure Works API" => 0,
+        "Tailspin Reporting" => 1,
+        _ => owners.len(),
+    });
+    owners
+}
+
 fn app_detail(a: &DemoApp) -> ApplicationDetail {
     ApplicationDetail {
         application: Application {
@@ -405,7 +440,7 @@ fn app_detail(a: &DemoApp) -> ApplicationDetail {
             ..Default::default()
         },
         service_principal: None,
-        owners: Vec::new(),
+        owners: owners_of(a.name),
         app_role_assignments: Vec::new(),
         oauth2_permission_grants: Vec::new(),
         resolved_permissions: a.perms.clone(),
@@ -452,6 +487,61 @@ fn audit_run(apps: &[DemoApp]) -> AuditRunResult {
     run
 }
 
+/// The Microsoft Graph grants each SP-only audit row cites, keyed by the
+/// service principal the finding opens: its remediation targets are the
+/// permissions the finding names (e.g. "Fourth Coffee Connector"'s org-wide
+/// `Mail.Read`), so its Permissions tab must show them.
+fn sp_only_held_grants(run: &AuditRunResult) -> HashMap<String, Vec<AppRoleGrantDto>> {
+    run.items
+        .iter()
+        .filter(|i| i.principal_kind == AuditPrincipalKind::ServicePrincipal)
+        .map(|i| {
+            let mut values: Vec<&str> = i
+                .remediations
+                .iter()
+                .flat_map(|r| r.targets.iter().map(String::as_str))
+                .collect();
+            values.sort_unstable();
+            values.dedup();
+            (
+                i.object_id.clone(),
+                values.into_iter().map(f::held_grant).collect(),
+            )
+        })
+        .collect()
+}
+
+/// `list_held_app_role_grants` for one principal (enterprise app or managed
+/// identity): the audit-cited grants for an SP-only audit row, otherwise one of
+/// a few representative sets picked per id — so different principals show
+/// different grants, stably across reloads. One set holds the legacy EWS
+/// `full_access_as_app` scope on Office 365 Exchange Online: it's the broadest
+/// mailbox grant there is, it's Exchange-RBAC-scopable, and a surviving one
+/// defeats every other mailbox scope — so the demo shows the org-wide callout
+/// naming it, which is the flow an operator migrating off Application Access
+/// Policies actually walks.
+fn held_grants_for(
+    sp_only: &HashMap<String, Vec<AppRoleGrantDto>>,
+    id: &str,
+) -> Vec<AppRoleGrantDto> {
+    if let Some(grants) = sp_only.get(id) {
+        return grants.clone();
+    }
+    let variants: [Vec<AppRoleGrantDto>; 3] = [
+        vec![
+            f::held_grant("User.Read.All"),
+            f::held_grant("Group.Read.All"),
+        ],
+        vec![f::held_grant("Mail.Send"), f::held_grant("Files.Read.All")],
+        vec![
+            f::held_grant("Directory.Read.All"),
+            f::held_exchange_grant("full_access_as_app"),
+        ],
+    ];
+    let pick = variant_index(id, variants.len());
+    variants.into_iter().nth(pick).unwrap_or_default()
+}
+
 /// The credential-expiry board, derived from the catalog exactly as the
 /// backend's `commands::credentials::credential_rows` derives it from the
 /// tenant: `summarize_credentials` per app, sorted soonest-first with no-expiry
@@ -483,14 +573,98 @@ fn credential_rows(apps: &[DemoApp], now: DateTime<Utc>) -> Vec<CredentialRowDto
     rows
 }
 
-/// The SSO certificate board, re-keyed onto [`ENTERPRISE_APPS`] ids.
-fn sso_rows() -> Vec<SsoCertificateRowDto> {
-    let mut rows = f::sso_certificate_rows();
-    for r in &mut rows {
-        r.service_principal_id = obj_id(&r.display_name);
-        r.app_id = app_id(&r.display_name);
+/// One SAML app on the SSO certificate board, with the two payloads its SSO
+/// tab reads. The row is projected from the rollover exactly as the backend's
+/// `list_sso_certificate_expirations` projects it from `build_rollover`, so the
+/// board and the tab a row opens cannot disagree on the certificate, its
+/// expiry, whether a replacement is staged, or the phase.
+struct SsoBoardEntry {
+    row: SsoCertificateRowDto,
+    config: SsoConfigDto,
+    rollover: SigningCertRolloverDto,
+}
+
+/// The rollover state behind one board row: its active certificate (the row's
+/// thumbprint and expiry) plus, only when the row says one is staged, the
+/// fixture's staged replacement. The phase follows from that certificate set
+/// by the backend's rule — staged if a replacement is staged, otherwise steady.
+fn sso_rollover(row: &SsoCertificateRowDto) -> SigningCertRolloverDto {
+    let mut roll = f::signing_cert_rollover(&row.service_principal_id, &row.app_id);
+    let thumbprint = row.thumbprint.clone().unwrap_or_default();
+    for cert in roll.certs.iter_mut().filter(|c| c.is_active) {
+        cert.thumbprint = thumbprint.clone();
+        cert.display_name = Some(format!("CN={}", row.display_name));
+        cert.end_date_time = row.end_date_time.clone();
+        cert.days_to_expiry = row.days_to_expiry;
     }
-    rows
+    roll.active_thumbprint = row.thumbprint.clone();
+    roll.federation_metadata_url = roll
+        .federation_metadata_url
+        .replace("appid=app-demo", &format!("appid={}", row.app_id));
+    if row.has_staged_replacement {
+        roll.phase = RolloverPhase::Staged;
+        roll.auto_promote_deadline = row.end_date_time.clone();
+    } else {
+        roll.certs.retain(|c| c.is_active);
+        roll.staged_thumbprint = None;
+        roll.phase = RolloverPhase::Steady;
+        roll.auto_promote_deadline = None;
+    }
+    roll
+}
+
+/// The SSO tab's read for one board row: its certificate and expiry, the
+/// row's notification recipients (none when the row says nobody is notified),
+/// and the rollover above.
+fn sso_config(row: &SsoCertificateRowDto, rollover: &SigningCertRolloverDto) -> SsoConfigDto {
+    let mut cfg = f::sso_config(&row.service_principal_id, &row.app_id);
+    let expiry_day = row
+        .end_date_time
+        .as_deref()
+        .and_then(|d| d.split('T').next())
+        .map(str::to_string);
+    cfg.signing_cert_thumbprint = row.thumbprint.clone();
+    cfg.signing_cert_expiry = expiry_day.clone();
+    if !row.notification_emails_configured {
+        cfg.notification_emails.clear();
+    }
+    if let Some(SsoSummary::Saml(summary)) = &mut cfg.summary {
+        summary.signing_cert_thumbprint = row.thumbprint.clone();
+        summary.signing_cert_expiry = expiry_day;
+        summary.federation_metadata_url = rollover.federation_metadata_url.clone();
+    }
+    cfg.rollover = Some(rollover.clone());
+    cfg
+}
+
+/// The SSO certificate board, re-keyed onto [`ENTERPRISE_APPS`] ids, with the
+/// SSO tab payloads of every row.
+fn sso_board() -> Vec<SsoBoardEntry> {
+    f::sso_certificate_rows()
+        .into_iter()
+        .map(|mut row| {
+            row.service_principal_id = obj_id(&row.display_name);
+            row.app_id = app_id(&row.display_name);
+            let rollover = sso_rollover(&row);
+            // Re-project the row from the rollover, as the backend does: the
+            // fixture hand-sets "Contoso Payroll" to `Unconfigured`, which no
+            // service principal with a live nominated certificate can be.
+            row.phase = rollover.phase;
+            row.has_staged_replacement = rollover.staged_thumbprint.is_some();
+            let config = sso_config(&row, &rollover);
+            SsoBoardEntry {
+                row,
+                config,
+                rollover,
+            }
+        })
+        .collect()
+}
+
+/// The board rows alone (what `list_sso_certificate_expirations` answers).
+#[cfg(test)]
+fn sso_rows() -> Vec<SsoCertificateRowDto> {
+    sso_board().into_iter().map(|e| e.row).collect()
 }
 
 /// Holds Microsoft Graph's `Sites.Selected` as an Application permission — the
@@ -570,20 +744,64 @@ fn exchange_role_assignments(a: &DemoApp) -> Vec<ExchangeRoleAssignmentDto> {
         .collect()
 }
 
+/// The members of each demo mailbox scope's group, by scope name: what the
+/// Exchange scope-group panel lists, and the only mailboxes a scoped app
+/// reaches in the mailbox lookup.
+fn scope_group_members(scope_name: &str) -> &'static [&'static str] {
+    match scope_name {
+        "Finance Mailboxes" => &["Finance", "Accounts Payable"],
+        "Travel Desk" => &["Travel"],
+        "Coho Mail Recipients" => &["Coho Orders"],
+        _ => &[],
+    }
+}
+
+/// The group a scoped mail entry confines to, as the scope-group panel shows
+/// it (member addresses come from the fixture's single definition).
+fn scope_group(group_name: &str, scope_name: &str) -> ExchangeScopeGroupDto {
+    f::exchange_scope_group(group_name, true, scope_group_members(scope_name))
+}
+
+/// Whether `mailbox` is a member of the scope a scoped mail entry names.
+fn scope_covers(scope_name: &str, mailbox: &str) -> bool {
+    let wanted = mailbox.trim();
+    scope_group("", scope_name).members.iter().any(|m| {
+        m.primary_smtp_address
+            .as_deref()
+            .is_some_and(|a| a.eq_ignore_ascii_case(wanted))
+    })
+}
+
 /// The mailbox reverse lookup against `mailbox`: every catalog app holding a
-/// confinable mail permission, `scoped` when a scope entry confines it.
+/// confinable mail permission — `org_wide` when nothing confines it, `scoped`
+/// when a scope entry confines it to a group `mailbox` belongs to, and
+/// `no_access` when the scope leaves `mailbox` out. Ordered like the backend:
+/// highest reach first, then by name.
 fn mailbox_reachers(apps: &[DemoApp], mailbox: &str) -> MailboxReachersResult {
-    let rows: Vec<_> = apps
+    let mut rows: Vec<_> = apps
         .iter()
         .filter_map(|a| {
             let held = scopable_mail_perms(a);
             if held.is_empty() {
                 return None;
             }
-            let scoped = a
+            let scopes: Vec<&str> = a
                 .mail_scopes
                 .iter()
-                .any(|m| matches!(m.scope, MailPermissionScope::Scoped { .. }));
+                .filter_map(|m| match &m.scope {
+                    MailPermissionScope::Scoped { scope_name, .. } => {
+                        Some(scope_name.as_deref().unwrap_or_default())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let verdict = if scopes.is_empty() {
+                "org_wide"
+            } else if scopes.iter().any(|s| scope_covers(s, mailbox)) {
+                "scoped"
+            } else {
+                "no_access"
+            };
             // Exchange names a role only for an RBAC assignment; a legacy
             // policy confines without one.
             let roles: Vec<Option<String>> = exchange_role_assignments(a)
@@ -596,11 +814,22 @@ fn mailbox_reachers(apps: &[DemoApp], mailbox: &str) -> MailboxReachersResult {
                 &obj_id(a.name),
                 a.name,
                 &held,
-                if scoped { "scoped" } else { "org_wide" },
+                verdict,
                 &roles,
             ))
         })
         .collect();
+    let rank = |v: &str| match v {
+        "org_wide" => 0,
+        "scoped" => 1,
+        "unknown" => 2,
+        _ => 3,
+    };
+    rows.sort_by(|a, b| {
+        rank(&a.verdict)
+            .cmp(&rank(&b.verdict))
+            .then_with(|| a.display_name.cmp(&b.display_name))
+    });
     MailboxReachersResult {
         tenant_id: DEMO_TENANT_ID.to_string(),
         mailbox: mailbox.to_string(),
@@ -751,18 +980,27 @@ fn register_fixtures() {
             .unwrap_or_default()
     });
     let defaults = f::tenant_defaults();
-    let rbac_scoped_apps: HashSet<String> = apps
+    // The group each RBAC-scoped app's scope confines it to — the same members
+    // the mailbox lookup below tests an address against.
+    let rbac_scope_by_app: HashMap<String, String> = apps
         .iter()
-        .filter(|a| !exchange_role_assignments(a).is_empty())
-        .map(|a| app_id(a.name))
+        .filter_map(|a| {
+            a.mail_scopes.iter().find_map(|m| match &m.scope {
+                MailPermissionScope::Scoped {
+                    scope_name: Some(scope),
+                    mechanism: ScopeMechanism::Rbac,
+                    ..
+                } => Some((app_id(a.name), scope.clone())),
+                _ => None,
+            })
+        })
         .collect();
     mock_each("list_exchange_scope_group", move |args| {
         let app = arg(args, "appId");
         let group = defaults.group_name_for(app);
-        if rbac_scoped_apps.contains(app) {
-            f::exchange_scope_group(&group, true, &["Finance Team", "Accounts Payable"])
-        } else {
-            f::exchange_scope_group(&group, false, &[])
+        match rbac_scope_by_app.get(app) {
+            Some(scope) => scope_group(&group, scope),
+            None => f::exchange_scope_group(&group, false, &[]),
         }
     });
     // Mail scoping for a principal with no manifest (enterprise apps, managed
@@ -875,18 +1113,7 @@ fn register_fixtures() {
         },
     );
 
-    let owners = vec![
-        f::directory_object(
-            "owner:alex",
-            "Alex Johnson",
-            "alex.johnson@contoso.onmicrosoft.com",
-        ),
-        f::directory_object(
-            "owner:sam",
-            "Sam Patel",
-            "sam.patel@contoso.onmicrosoft.com",
-        ),
-    ];
+    let owners = demo_owners();
     let sp_app_ids: HashMap<String, String> = enterprise
         .iter()
         .map(|e| (e.id.clone(), e.app_id.clone()))
@@ -945,27 +1172,45 @@ fn register_fixtures() {
     // fixture also carries "Details for the application owner" — the values
     // the whole SSO flow exists to produce, and the home of the "Copy all
     // details" action — and the rollover panel's initial (staged) state.
-    // Args-aware so the payload names the SP that was opened.
+    // Args-aware so the payload names the SP that was opened — and, for the
+    // SSO board's apps, carries that row's own certificate, expiry, rollover
+    // phase and recipients, so "Open" on the 15-day row does not land on a
+    // healthy staged certificate. Any other SP shows the staged fixture, the
+    // phase worth showing a visitor.
+    // The Security tab's SSO certificate board — the whole point of the demo is
+    // showing an operator what "expiring, nothing staged, nobody notified"
+    // looks like before it happens to them.
+    let board = sso_board();
+    mock_ok(
+        "list_sso_certificate_expirations",
+        &board.iter().map(|e| e.row.clone()).collect::<Vec<_>>(),
+    );
+    let sso_by_sp: HashMap<String, (SsoConfigDto, SigningCertRolloverDto)> = board
+        .into_iter()
+        .map(|e| (e.row.service_principal_id, (e.config, e.rollover)))
+        .collect();
+    let rollover_by_sp = sso_by_sp.clone();
     let sso_app_ids = sp_app_ids.clone();
     mock_each("get_sso_config", move |args| {
         let id = arg(args, "servicePrincipalId");
-        f::sso_config(id, sso_app_ids.get(id).map_or(id, String::as_str))
+        sso_by_sp.get(id).map_or_else(
+            || f::sso_config(id, sso_app_ids.get(id).map_or(id, String::as_str)),
+            |(config, _)| config.clone(),
+        )
     });
     // The rollover panel re-reads after its own buttons (stage, activate, …),
-    // so it needs the same treatment — and the staged phase is the one worth
-    // showing a visitor.
+    // so it needs the same treatment.
     mock_each("get_signing_cert_rollover", move |args| {
         let id = arg(args, "servicePrincipalId");
-        f::signing_cert_rollover(id, sp_app_ids.get(id).map_or(id, String::as_str))
+        rollover_by_sp.get(id).map_or_else(
+            || f::signing_cert_rollover(id, sp_app_ids.get(id).map_or(id, String::as_str)),
+            |(_, rollover)| rollover.clone(),
+        )
     });
     // The metadata probe is an explicit button, but mocking it lets a visitor
     // actually press it and see what "Entra publishes 2 signing keys" looks
     // like — the whole point of the staged flow.
     mock_ok("probe_federation_metadata", &f::metadata_probe());
-    // The Security tab's SSO certificate board — the whole point of the demo is
-    // showing an operator what "expiring, nothing staged, nobody notified"
-    // looks like before it happens to them.
-    mock_ok("list_sso_certificate_expirations", &sso_rows());
     mock_ok(
         "get_enterprise_app_provisioning",
         &vec![f::provisioning_job(
@@ -976,27 +1221,11 @@ fn register_fixtures() {
     );
 
     // Held app-role grants — the Permissions/"granted" tab on BOTH enterprise apps
-    // and managed identities (shared command). Varied per id so different
-    // principals show different grants. One variant holds the legacy EWS
-    // `full_access_as_app` scope on Office 365 Exchange Online: it's the broadest
-    // mailbox grant there is, it's Exchange-RBAC-scopable, and a surviving one
-    // defeats every other mailbox scope — so the demo shows the org-wide callout
-    // naming it, which is the flow an operator migrating off Application Access
-    // Policies actually walks.
-    let held_variants: Vec<Vec<_>> = vec![
-        vec![
-            f::held_grant("User.Read.All"),
-            f::held_grant("Group.Read.All"),
-        ],
-        vec![f::held_grant("Mail.Send"), f::held_grant("Files.Read.All")],
-        vec![
-            f::held_grant("Directory.Read.All"),
-            f::held_exchange_grant("full_access_as_app"),
-        ],
-    ];
+    // and managed identities (shared command), varied per id; the audit's
+    // SP-only rows hold exactly what their finding cites ([`held_grants_for`]).
+    let sp_only_grants = sp_only_held_grants(&audit_run(&apps));
     mock_each("list_held_app_role_grants", move |args| {
-        let id = arg(args, "servicePrincipalId");
-        held_variants[variant_index(id, held_variants.len())].clone()
+        held_grants_for(&sp_only_grants, arg(args, "servicePrincipalId"))
     });
 
     // ---- Managed Identities ----
@@ -1192,7 +1421,7 @@ fn register_fixtures() {
 mod tests {
     use super::*;
     use azapptoolkit_core::audit::{
-        AuditPrincipalKind, CredentialStatus, EXPIRY_WARNING_DAYS, ListCredentialStatus,
+        CredentialStatus, EXPIRY_WARNING_DAYS, ListCredentialStatus, issue,
     };
 
     fn enterprise_ids() -> HashSet<String> {
@@ -1218,6 +1447,36 @@ mod tests {
             };
             assert!(known, "audit row `{}` opens nothing", item.application_name);
         }
+
+        // An SP-only finding opens the enterprise app, whose Permissions tab
+        // must hold every permission the finding's Fix targets.
+        let run = audit_run(&apps);
+        let sp_only = sp_only_held_grants(&run);
+        let mut sp_only_rows = 0;
+        for item in &run.items {
+            if item.principal_kind != AuditPrincipalKind::ServicePrincipal {
+                continue;
+            }
+            sp_only_rows += 1;
+            let held: Vec<Option<String>> = held_grants_for(&sp_only, &item.object_id)
+                .into_iter()
+                .map(|g| g.app_role_value)
+                .collect();
+            let targets: Vec<&String> = item.remediations.iter().flat_map(|r| &r.targets).collect();
+            assert!(
+                !targets.is_empty(),
+                "`{}` cites nothing",
+                item.application_name
+            );
+            for target in targets {
+                assert!(
+                    held.contains(&Some(target.clone())),
+                    "`{}` cites {target}, which its Permissions tab doesn't hold: {held:?}",
+                    item.application_name
+                );
+            }
+        }
+        assert!(sp_only_rows > 0, "the audit has no SP-only row to check");
 
         for row in credential_rows(&apps, Utc::now()) {
             let detail = details.get(&row.app_object_id).unwrap_or_else(|| {
@@ -1317,16 +1576,61 @@ mod tests {
         }
     }
 
+    /// The list badge (`ListCredentialStatus::classify`, an inventory lens) and
+    /// the credential board (`summarize_credentials`, the per-credential lens
+    /// the Credentials tab shares) are two backend projections; over the same
+    /// credentials they must tell one story.
     #[test]
-    fn list_badges_match_the_credentials_tab() {
+    fn list_badges_match_the_credential_board() {
         let now = Utc::now();
-        for a in catalog() {
+        let apps = catalog();
+        let board = credential_rows(&apps, now);
+        for a in &apps {
+            let id = obj_id(a.name);
+            let statuses: Vec<CredentialStatus> = board
+                .iter()
+                .filter(|r| r.app_object_id == id && r.days_to_expiry.is_some())
+                .map(|r| r.status)
+                .collect();
+            let expected = if statuses.is_empty() {
+                ListCredentialStatus::None
+            } else if statuses.contains(&CredentialStatus::Active) {
+                ListCredentialStatus::Active
+            } else if statuses.contains(&CredentialStatus::ExpiringSoon) {
+                ListCredentialStatus::Expiring
+            } else {
+                ListCredentialStatus::Expired
+            };
             assert_eq!(
-                list_row(&a, now).credential_status,
-                ListCredentialStatus::classify(&a.secrets, &a.certs, now),
-                "`{}`'s list badge disagrees with its credentials",
+                list_row(a, now).credential_status,
+                expected,
+                "`{}`'s list badge disagrees with its credentials ({statuses:?})",
                 a.name
             );
+        }
+    }
+
+    /// The ownership findings describe the Owners tab they open.
+    #[test]
+    fn ownership_findings_match_the_owners_tab() {
+        let apps = catalog();
+        for item in audit_run(&apps).items {
+            let Some(a) = apps.iter().find(|a| a.name == item.application_name) else {
+                continue;
+            };
+            let owners = app_detail(a).owners.len();
+            let says = |marker: &str| item.issues.iter().any(|i| i.starts_with(marker));
+            if says(issue::NO_OWNERS) {
+                assert_eq!(owners, 0, "{}", a.name);
+            } else if says(issue::SINGLE_OWNER) {
+                assert_eq!(owners, 1, "{}", a.name);
+            } else {
+                assert!(
+                    owners >= 2,
+                    "`{}` has {owners} owner(s) but no finding",
+                    a.name
+                );
+            }
         }
     }
 
@@ -1350,6 +1654,64 @@ mod tests {
             ),
             "the board is sorted soonest-first"
         );
+    }
+
+    /// Each SSO board row opens an SSO tab and rollover panel describing the
+    /// same certificate: thumbprint, expiry, staged replacement, phase and
+    /// notification recipients all agree.
+    #[test]
+    fn sso_rows_agree_with_the_tab_they_open() {
+        let board = sso_board();
+        assert!(!board.is_empty());
+        for SsoBoardEntry {
+            row,
+            config,
+            rollover,
+        } in board
+        {
+            let name = &row.display_name;
+            let day = row
+                .end_date_time
+                .as_deref()
+                .and_then(|d| d.split('T').next())
+                .map(str::to_string);
+            assert_eq!(config.service_principal_id, row.service_principal_id);
+            assert_eq!(config.signing_cert_expiry, day, "{name}: SSO tab expiry");
+            assert_eq!(config.signing_cert_thumbprint, row.thumbprint, "{name}");
+            let Some(SsoSummary::Saml(summary)) = &config.summary else {
+                panic!("{name}: no owner summary");
+            };
+            assert_eq!(summary.signing_cert_expiry, day, "{name}: owner summary");
+            assert_eq!(
+                config.notification_emails.is_empty(),
+                !row.notification_emails_configured,
+                "{name}: notification recipients"
+            );
+            assert_eq!(rollover.phase, row.phase, "{name}: rollover phase");
+            assert_eq!(
+                rollover.staged_thumbprint.is_some(),
+                row.has_staged_replacement,
+                "{name}: staged replacement"
+            );
+            assert_eq!(rollover.active_thumbprint, row.thumbprint, "{name}");
+            let active = rollover
+                .certs
+                .iter()
+                .find(|c| c.is_active)
+                .expect("an active certificate");
+            assert_eq!(
+                active.end_date_time, row.end_date_time,
+                "{name}: active cert"
+            );
+            assert_eq!(active.days_to_expiry, row.days_to_expiry, "{name}");
+            assert_eq!(
+                rollover.auto_promote_deadline.is_some(),
+                row.phase == RolloverPhase::Staged,
+                "{name}: a deadline exists only with a staged replacement"
+            );
+            let tab_rollover = config.rollover.as_ref().expect("the SSO read carries it");
+            assert_eq!(tab_rollover.phase, rollover.phase, "{name}");
+        }
     }
 
     #[test]
@@ -1393,23 +1755,61 @@ mod tests {
     }
 
     /// The mailbox answers go through the resource-aware gate: the Office 365
-    /// Exchange Online `Mail.Read` holder is not a reacher, the scoped apps are
-    /// `scoped`, and only RBAC (not the legacy policy) implies role assignments.
+    /// Exchange Online `Mail.Read` holder is not a reacher, a scoped app reaches
+    /// only its scope's members, and only RBAC (not the legacy policy) implies
+    /// role assignments.
     #[test]
     fn mailbox_answers_carry_the_resource() {
         let apps = catalog();
-        let reachers = mailbox_reachers(&apps, "x@contoso.com");
-        let verdict = |name: &str| {
-            reachers
+        let verdict = |mailbox: &str, name: &str| {
+            mailbox_reachers(&apps, mailbox)
                 .rows
-                .iter()
+                .into_iter()
                 .find(|r| r.display_name.as_deref() == Some(name))
-                .map(|r| r.verdict.clone())
+                .map(|r| r.verdict)
         };
-        assert_eq!(verdict("Lamna Mail Reader"), None);
-        assert_eq!(verdict("Contoso CRM").as_deref(), Some("scoped"));
-        assert_eq!(verdict("Coho Winery Mailer").as_deref(), Some("scoped"));
-        assert_eq!(verdict("Fabrikam Mail Sync").as_deref(), Some("org_wide"));
+        let finance = "finance@contoso.com";
+        assert_eq!(verdict(finance, "Lamna Mail Reader"), None);
+        assert_eq!(
+            verdict(finance, "Fabrikam Mail Sync").as_deref(),
+            Some("org_wide")
+        );
+        assert_eq!(verdict(finance, "Contoso CRM").as_deref(), Some("scoped"));
+        // Scoped elsewhere: confined away from finance@, onto their own group.
+        assert_eq!(
+            verdict(finance, "Margie's Travel Portal").as_deref(),
+            Some("no_access")
+        );
+        assert_eq!(
+            verdict(finance, "Coho Winery Mailer").as_deref(),
+            Some("no_access")
+        );
+        let travel = "Travel@Contoso.com";
+        assert_eq!(
+            verdict(travel, "Margie's Travel Portal").as_deref(),
+            Some("scoped")
+        );
+        assert_eq!(verdict(travel, "Contoso CRM").as_deref(), Some("no_access"));
+        assert_eq!(
+            verdict("coho.orders@contoso.com", "Coho Winery Mailer").as_deref(),
+            Some("scoped")
+        );
+
+        // Highest reach first, as the backend orders them.
+        let order: Vec<String> = mailbox_reachers(&apps, finance)
+            .rows
+            .into_iter()
+            .map(|r| r.verdict)
+            .collect();
+        let rank = |v: &str| {
+            ["org_wide", "scoped", "no_access"]
+                .iter()
+                .position(|x| *x == v)
+        };
+        assert!(
+            order.windows(2).all(|w| rank(&w[0]) <= rank(&w[1])),
+            "{order:?}"
+        );
 
         let by_name = |name: &str| apps.iter().find(|a| a.name == name).expect(name);
         assert_eq!(exchange_role_assignments(by_name("Contoso CRM")).len(), 1);

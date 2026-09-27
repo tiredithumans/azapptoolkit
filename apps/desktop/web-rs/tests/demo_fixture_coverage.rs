@@ -53,6 +53,9 @@ const READ_PREFIXES: &[&str] = &[
     "list_", "get_", "search_", "check_", "find_", "probe_", "current_",
 ];
 
+/// The upstream path the IPC wrapper calls through; see [`invoked_commands`].
+const UPSTREAM_INVOKE: &str = "tauri_sys::core::";
+
 fn is_ident(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -226,10 +229,13 @@ fn skip_generics(s: &str) -> Option<&str> {
 /// Commands named by calls to `name` (`invoke` or `invoke_result`) in `src`,
 /// plus the call sites whose first argument is not a string literal.
 ///
-/// A call is the bare identifier (not a path segment like
-/// `tauri_sys::core::invoke_result`, not the tail of a longer identifier), an
-/// optional turbofish, then `(`. A definition (`fn invoke_result<T…>`) or an
-/// import (`use …::invoke;`) is not followed by `(`/`::<` and is skipped.
+/// A call is the identifier (not the tail of a longer identifier) — bare or
+/// path-qualified (`ipc::invoke(…)`, `super::ipc::invoke_result(…)` are calls
+/// like any other) — an optional turbofish, then `(`. A definition
+/// (`fn invoke_result<T…>`) or an import (`use …::invoke;`) is not followed by
+/// `(`/`::<` and is skipped. The one path skipped is [`UPSTREAM_INVOKE`]: the
+/// wrapper in `bindings/ipc.rs` forwarding its variable to tauri-sys is not a
+/// command invoke (the same exemption `repo_invariants/ipc.rs` makes by path).
 fn invoked_commands(src: &str, name: &str) -> (BTreeSet<String>, Vec<String>) {
     let mut commands = BTreeSet::new();
     let mut non_literal = Vec::new();
@@ -237,11 +243,8 @@ fn invoked_commands(src: &str, name: &str) -> (BTreeSet<String>, Vec<String>) {
     while let Some(rel) = src[from..].find(name) {
         let start = from + rel;
         from = start + name.len();
-        if src[..start]
-            .chars()
-            .next_back()
-            .is_some_and(|p| is_ident(p) || p == ':')
-        {
+        let before = &src[..start];
+        if before.chars().next_back().is_some_and(is_ident) || before.ends_with(UPSTREAM_INVOKE) {
             continue;
         }
         let mut rest = src[from..].trim_start();
@@ -514,6 +517,31 @@ fn the_scan_skips_definitions_imports_and_paths() {
 }
 
 #[test]
+fn the_scan_counts_path_qualified_calls() {
+    // A binding that reaches the wrapper through a path is still a command
+    // invoke; missing it would let a panicking infallible call past every scan.
+    let src = r#"
+        pub async fn a() { super::ipc::invoke::<()>("qualified", ()).await }
+        pub async fn b() -> Y { ipc::invoke("short_path", ()).await }
+        pub async fn c() -> Result<X, UiError> {
+            crate::bindings::ipc::invoke_result("qualified_fallible", ()).await
+        }
+        pub async fn d() { ipc::invoke(name, ()).await }
+    "#;
+    let (got, non_literal) = invoked_commands(src, "invoke");
+    assert_eq!(
+        got.into_iter().collect::<Vec<_>>(),
+        ["qualified", "short_path"]
+    );
+    assert_eq!(non_literal, ["name, ()).await }"]);
+    let (fallible, _) = invoked_commands(src, "invoke_result");
+    assert_eq!(
+        fallible.into_iter().collect::<Vec<_>>(),
+        ["qualified_fallible"]
+    );
+}
+
+#[test]
 fn a_comment_mention_is_not_a_registration() {
     let src = strip_line_comments(
         r#"
@@ -566,8 +594,8 @@ fn the_walk_reaches_nested_dirs_and_skips_the_mock() {
         .map(|(p, _)| p.strip_prefix(&root).expect("under src").to_path_buf())
         .collect();
     assert!(
-        paths.contains(&PathBuf::from("views/tabs/federated_tab.rs")),
-        "the walk must recurse: {paths:?}"
+        paths.iter().any(|p| p.components().count() > 2),
+        "the walk must recurse below the first level: {paths:?}"
     );
     assert!(
         paths
