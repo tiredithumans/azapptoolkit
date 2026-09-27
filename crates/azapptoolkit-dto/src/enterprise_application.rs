@@ -116,6 +116,9 @@ pub struct AppRolesView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppAssignmentDto {
     pub assignment_id: String,
+    /// Object id of the assigned user/group — what the Access tab's search
+    /// excludes (per role: Graph rejects only a duplicate principal + role pair).
+    pub principal_id: String,
     pub principal_display_name: Option<String>,
     pub principal_type: Option<String>,
     /// The assigned app role's id. The all-zero GUID is the "default access"

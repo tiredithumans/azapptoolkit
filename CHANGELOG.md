@@ -19,9 +19,21 @@
   gallery app opens on its SSO tab, where its own hint says to finish single sign-on. The wizard's
   summary has an Open application button. Before, the dialog just closed, and you had to find the
   new app in the list.
+- **The Access tab can filter its assignments, and its search hides anyone who already has the
+  chosen role.** Type in the new filter box to narrow the list by name, type or role. The user and
+  group search no longer lists someone who already holds the selected role, since assigning it a
+  second time failed with a generic Graph error. People who hold a different role are still listed.
 
 ### Fixed
 
+- **An enterprise app's secret or certificate that expired within the last day now shows as
+  expired.** The enterprise Credentials tab dropped partial days, so a SAML signing certificate
+  that had lapsed a few hours earlier showed "0d left". It now rounds down, as the SSO tab does.
+  The SSO tab's certificate list now uses the same wording ("12d left", "Expired 3d ago") instead
+  of "1 days left" and "expired 3 days ago".
+- **The Access tab no longer lets you pick a role that only applications can hold.** Entra rejects
+  those roles for a user or group, and the tab showed the error only after the confirmation
+  dialog. They now appear greyed out and labelled "(applications only)".
 - **The new certificate from "Rotate and activate immediately" now stays on screen.** Entra returns
   the new signing certificate only once, but the SSO tab reloaded right after the rotation and the
   certificate vanished before you could copy it. It now stays up through the reload. It, and the

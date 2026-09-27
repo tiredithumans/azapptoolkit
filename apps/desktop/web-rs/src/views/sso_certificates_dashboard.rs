@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use azapptoolkit_core::audit::CredentialStatus;
+use azapptoolkit_core::audit::{CredentialStatus, EXPIRY_WARNING_DAYS as WARNING_DAYS};
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
 
@@ -25,9 +25,7 @@ use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::ui::{Callout, CopyableId};
 use crate::state::use_session;
-
-const CRITICAL_DAYS: i64 = 7;
-const WARNING_DAYS: i64 = 30;
+use crate::util::EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS;
 
 #[component]
 pub fn SsoCertificatesDashboard() -> impl IntoView {

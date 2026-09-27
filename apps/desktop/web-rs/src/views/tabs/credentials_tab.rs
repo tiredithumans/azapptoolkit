@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use azapptoolkit_core::audit::EXPIRY_WARNING_DAYS as WARN_DAYS;
 use chrono::NaiveDate;
 use leptos::prelude::*;
 use thaw::{
@@ -19,15 +20,16 @@ use crate::components::ui::{Callout, CopyableId, DataTable};
 use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
-use crate::util::{ls_get, ls_set, write_clipboard};
+use crate::util::{
+    EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, fmt_date, ls_get, ls_set, write_clipboard,
+};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::dialogs::secret_reveal_dialog::SecretRevealDialog;
 use crate::views::dialogs::upload_certificate_dialog::UploadCertificateDialog;
 use crate::views::tabs::federated_tab::FederatedTab;
 
-const WARN_DAYS: i64 = 30;
-const CRITICAL_DAYS: i64 = 7;
-
+/// Truncates like `core::audit::is_expired`, so `expired_count` equals what
+/// Remove-expired deletes — deliberately not `util::floored_days_until`.
 fn days_until(end: Option<chrono::DateTime<chrono::Utc>>) -> Option<i64> {
     let end = end?;
     let now = chrono::Utc::now();
@@ -738,10 +740,7 @@ pub fn CredentialsTab(
                                             <CopyableId value=s.key_id.clone() label="secret ID" />
                                         </td>
                                         <td>
-                                            {s
-                                                .end_date_time
-                                                .map(|d| d.date_naive().to_string())
-                                                .unwrap_or_else(|| "—".into())}
+                                            {fmt_date(s.end_date_time)}
                                         </td>
                                         <td>{status_badge(days)}</td>
                                         <td class="cell-mid">
@@ -828,10 +827,7 @@ pub fn CredentialsTab(
                                         <td>{c.usage.clone().unwrap_or_else(|| "—".into())}</td>
                                         <td>{c.r#type.clone().unwrap_or_else(|| "—".into())}</td>
                                         <td>
-                                            {c
-                                                .end_date_time
-                                                .map(|d| d.date_naive().to_string())
-                                                .unwrap_or_else(|| "—".into())}
+                                            {fmt_date(c.end_date_time)}
                                         </td>
                                         <td>{status_badge(days)}</td>
                                         <td class="cell-mid">

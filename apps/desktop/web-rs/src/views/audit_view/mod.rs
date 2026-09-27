@@ -34,6 +34,7 @@ use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::use_session;
+use crate::util::fmt_day;
 
 use filter::filter_indices;
 use row::AuditRowActions;
@@ -503,7 +504,7 @@ fn last_sign_in_cell(i: &AuditItem) -> AnyView {
             .into_any();
     }
     match i.last_sign_in {
-        Some(dt) => view! { <span>{dt.format("%Y-%m-%d").to_string()}</span> }.into_any(),
+        Some(dt) => view! { <span>{fmt_day(dt)}</span> }.into_any(),
         None => view! { <span class="muted">"Never"</span> }.into_any(),
     }
 }

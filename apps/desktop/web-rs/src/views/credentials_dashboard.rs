@@ -11,7 +11,7 @@
 //! (fetch, filters, export, keyboard-navigable table) lives in
 //! [`AuditDashboard`]; this view supplies the credential-specific bits.
 
-use azapptoolkit_core::audit::CredentialStatus;
+use azapptoolkit_core::audit::{CredentialStatus, EXPIRY_WARNING_DAYS as WARNING_DAYS};
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
@@ -19,9 +19,7 @@ use crate::bindings::credentials::{self, CredentialRowDto};
 use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::ui::{Callout, CopyableId};
 use crate::state::use_session;
-
-const CRITICAL_DAYS: i64 = 7;
-const WARNING_DAYS: i64 = 30;
+use crate::util::{EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, fmt_date};
 
 #[component]
 pub fn CredentialsDashboard() -> impl IntoView {
@@ -91,10 +89,7 @@ pub fn CredentialsDashboard() -> impl IntoView {
 
 fn credential_row(session: crate::state::Session, r: CredentialRowDto) -> impl IntoView {
     let (status_label, badge_class) = status_badge(r.status, r.days_to_expiry);
-    let expires = r
-        .end_date_time
-        .map(|d| d.date_naive().to_string())
-        .unwrap_or_else(|| "—".into());
+    let expires = fmt_date(r.end_date_time);
     let object_id = r.app_object_id.clone();
     view! {
         <tr>

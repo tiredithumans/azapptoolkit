@@ -2,6 +2,7 @@ use super::*;
 
 use crate::components::ui::{Callout, CopyBlock};
 use crate::hooks::use_command::use_command;
+use crate::util::{expiry_label, expiry_tone};
 
 /// SSO configuration for the enterprise app — view/edit the SAML or OIDC setup
 /// and surface the app-owner output summary. Reads `get_sso_config`; edits go
@@ -276,22 +277,17 @@ fn SigningCertRolloverPanel(
                                 .and_then(|d| d.split('T').next())
                                 .unwrap_or("unknown")
                                 .to_string();
-                            let days = c
-                                .days_to_expiry
-                                .map(|d| if d < 0 {
-                                    format!("expired {} days ago", -d)
-                                } else {
-                                    format!("{d} days left")
-                                })
-                                .unwrap_or_default();
+                            // The backend floors `days_to_expiry` (`div_euclid`),
+                            // which is exactly `expiry_label`'s input contract.
+                            let days = c.days_to_expiry.map(expiry_label).unwrap_or_default();
                             // An imminent expiry must not read with the same
                             // weight as one three years out — the live tenant
                             // showed "4 days left" and "1095 days left" in
                             // identical plain text. An already-expired one
                             // (d < 0) takes the danger arm too.
-                            let days_class = match c.days_to_expiry {
-                                Some(d) if d <= 7 => "cert-rollover__days badge badge--danger",
-                                Some(d) if d <= 30 => "cert-rollover__days badge badge--warning",
+                            let days_class = match c.days_to_expiry.map(expiry_tone) {
+                                Some("danger") => "cert-rollover__days badge badge--danger",
+                                Some("warning") => "cert-rollover__days badge badge--warning",
                                 _ => "cert-rollover__days",
                             };
                             // An expired, non-nominated certificate is dead

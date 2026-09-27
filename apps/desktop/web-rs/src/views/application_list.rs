@@ -36,7 +36,10 @@ use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
 use crate::hooks::use_list_export::use_list_export;
 use crate::state::{ActiveView, OpenItemKind, use_session};
-use crate::util::{contains_ignore_case, created_in_range, relative_time};
+use crate::util::{
+    contains_ignore_case, created_in_range, expiry_label, floored_days_until, fmt_day,
+    relative_time,
+};
 use crate::views::pairing::jump_to_paired_enterprise;
 
 /// A sortable App Registrations column.
@@ -155,11 +158,11 @@ fn credential_meta(
                 // Already gone: `relative_time` is the app's one past-tense phrase.
                 relative_time(now, end)
             } else {
-                // Still to come, in the Credential-expiry dashboard's own words.
-                format!("{}d left", (end - now).num_days())
+                // Still to come, in the app's one expiry phrase ("12d left").
+                expiry_label(floored_days_until(end, now))
             }
         }),
-        exact: soonest.map(|end| end.date_naive().to_string()),
+        exact: soonest.map(fmt_day),
     }
 }
 

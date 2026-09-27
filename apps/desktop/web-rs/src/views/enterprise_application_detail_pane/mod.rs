@@ -28,7 +28,7 @@ use crate::components::uri_list_editor::{UriListEditor, UriListState, redirect_u
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::{OpenItemKind, use_session};
-use crate::util::keep_alive;
+use crate::util::{fmt_date, keep_alive};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::pairing::jump_to_paired_app;
 use crate::views::tabs::EnterpriseTab;
@@ -60,32 +60,6 @@ use sso_tab::SsoContent;
 
 /// Entra's "default access" app-role id (no specific role).
 const DEFAULT_ACCESS_ROLE: &str = "00000000-0000-0000-0000-000000000000";
-
-/// Expiry label + badge class for a credential end date. Mirrors the per-app
-/// Credentials tab so enterprise-app credentials (incl. SAML signing certs) show
-/// the same urgency colours.
-fn cred_status(end: Option<chrono::DateTime<chrono::Utc>>) -> (String, &'static str) {
-    match end {
-        None => ("No expiry".to_string(), "badge"),
-        Some(e) => {
-            let days = (e - chrono::Utc::now()).num_days();
-            if days < 0 {
-                ("Expired".to_string(), "badge badge--danger")
-            } else if days <= 7 {
-                (format!("{days}d left"), "badge badge--danger")
-            } else if days <= 30 {
-                (format!("{days}d left"), "badge badge--warning")
-            } else {
-                (format!("{days}d left"), "badge badge--ok")
-            }
-        }
-    }
-}
-
-fn fmt_date(d: Option<chrono::DateTime<chrono::Utc>>) -> String {
-    d.map(|d| d.date_naive().to_string())
-        .unwrap_or_else(|| "—".to_string())
-}
 
 #[component]
 pub fn EnterpriseApplicationDetailPane(

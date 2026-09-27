@@ -1517,6 +1517,7 @@ pub fn held_exchange_grant(value: &str) -> AppRoleGrantDto {
 pub fn app_assignment(principal: &str, principal_type: &str) -> AppAssignmentDto {
     AppAssignmentDto {
         assignment_id: guid(&format!("assign:{principal}")),
+        principal_id: guid(&format!("principal:{principal}")),
         principal_display_name: Some(principal.to_string()),
         principal_type: Some(principal_type.to_string()),
         // All-zero GUID = "default access" (no specific role).

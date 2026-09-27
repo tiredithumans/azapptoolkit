@@ -15,7 +15,7 @@ use crate::bindings::auth;
 use crate::components::ui::{Callout, DataTable, DetailLoadError, Skeleton, SkeletonList};
 use crate::state::use_session;
 
-use crate::util::no_tenant;
+use crate::util::{fmt_datetime, no_tenant};
 
 /// App-registration Activity tab: changes to the app object and its paired SP.
 #[component]
@@ -129,7 +129,7 @@ fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
                         Ok(dto) if dto.available => {
                             let text = match dto.last_sign_in_date_time {
                                 Some(d) => {
-                                    format!("Last recorded sign-in: {}", d.format("%Y-%m-%d %H:%M UTC"))
+                                    format!("Last recorded sign-in: {}", fmt_datetime(d))
                                 }
                                 None => "No sign-in recorded in the reporting window.".to_string(),
                             };
@@ -201,7 +201,7 @@ fn activity_table(list: Vec<ActivityLogItem>) -> impl IntoView {
 fn activity_row(item: ActivityLogItem) -> impl IntoView {
     let when = item
         .activity_date_time
-        .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
+        .map(fmt_datetime)
         .unwrap_or_else(|| "—".into());
     let result = item.result.unwrap_or_else(|| "—".into());
     let result_class = match result.as_str() {

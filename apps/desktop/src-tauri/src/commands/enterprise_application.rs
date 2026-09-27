@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cache::CacheKind;
-use azapptoolkit_core::models::{ServicePrincipal, SynchronizationJob};
+use azapptoolkit_core::models::{AppRoleAssignment, ServicePrincipal, SynchronizationJob};
 use azapptoolkit_graph::GraphError;
 
 use crate::commands::applications::{enterprise_key, invalidate_app_lists};
@@ -192,15 +192,20 @@ pub async fn list_enterprise_app_assignments(
     let assignments = client
         .list_app_role_assigned_to(&service_principal_id)
         .await?;
-    Ok(assignments
-        .into_iter()
-        .map(|a| AppAssignmentDto {
-            assignment_id: a.id,
-            principal_display_name: a.principal_display_name,
-            principal_type: a.principal_type,
-            app_role_id: a.app_role_id,
-        })
-        .collect())
+    Ok(assignments.into_iter().map(assignment_dto).collect())
+}
+
+/// Projects one `appRoleAssignedTo` row onto the Access tab's DTO. The
+/// `principal_id` is what lets the tab's search hide a principal that already
+/// holds the selected role.
+fn assignment_dto(a: AppRoleAssignment) -> AppAssignmentDto {
+    AppAssignmentDto {
+        assignment_id: a.id,
+        principal_id: a.principal_id,
+        principal_display_name: a.principal_display_name,
+        principal_type: a.principal_type,
+        app_role_id: a.app_role_id,
+    }
 }
 
 /// Grants a principal (user/group) access to an enterprise application by
@@ -605,6 +610,23 @@ mod tests {
         SynchronizationExecution, SynchronizationQuarantine, SynchronizationStatus,
     };
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn assignment_dto_carries_the_principal_id() {
+        let dto = assignment_dto(AppRoleAssignment {
+            id: "assign-1".into(),
+            principal_id: "p-1".into(),
+            app_role_id: "role-1".into(),
+            principal_display_name: Some("Alice".into()),
+            principal_type: Some("User".into()),
+            ..Default::default()
+        });
+        assert_eq!(dto.principal_id, "p-1");
+        assert_eq!(dto.assignment_id, "assign-1");
+        assert_eq!(dto.app_role_id, "role-1");
+        assert_eq!(dto.principal_display_name.as_deref(), Some("Alice"));
+        assert_eq!(dto.principal_type.as_deref(), Some("User"));
+    }
 
     #[test]
     fn provisioning_403_appends_the_catalog_remediation() {
