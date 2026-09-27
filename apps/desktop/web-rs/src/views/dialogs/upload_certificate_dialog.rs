@@ -7,11 +7,12 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, 
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::bindings::applications::{self, AddCertificateInput};
+use crate::bindings::applications::{self, AddCertificateInput, UploadedCertificate};
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
-use crate::util::cert_payload_from_bytes;
+use crate::state::use_session;
+use crate::util::{cert_payload_from_bytes, fmt_day};
 
 #[component]
 pub fn UploadCertificateDialog(
@@ -20,6 +21,7 @@ pub fn UploadCertificateDialog(
     #[prop(into)] on_close: Callback<()>,
     #[prop(into)] on_uploaded: Callback<()>,
 ) -> impl IntoView {
+    let session = use_session();
     let cmd = use_command();
     let display_name = RwSignal::new(String::new());
     let pem = RwSignal::new(String::new());
@@ -70,10 +72,17 @@ pub fn UploadCertificateDialog(
         let dn = display_name.get();
         let body = pem.get();
         cmd.run(
-            move |()| {
+            move |uploaded: UploadedCertificate| {
                 display_name.set(String::new());
                 pem.set(String::new());
                 file_name.set(None);
+                // Read back from the certificate itself, so the operator can
+                // match it against the portal's Thumbprint column.
+                session.toast_success(format!(
+                    "Certificate uploaded. Thumbprint {}, expires {}.",
+                    uploaded.thumbprint,
+                    fmt_day(uploaded.not_after)
+                ));
                 on_uploaded.run(());
                 on_close.run(());
             },
@@ -101,7 +110,7 @@ pub fn UploadCertificateDialog(
                 <div class="modal modal--wide" node_ref=modal_ref>
                     <h3 id="upload-cert-dialog-title">"Upload certificate"</h3>
                     <Body1>
-                        "Choose a .cer, .pem, or .crt file — or paste a PEM block / base64-encoded DER. Graph derives the expiry from the certificate."
+                        "Choose a .cer, .pem, or .crt file — or paste a PEM block / base64-encoded DER. Graph derives the expiry from the certificate. Paste only the certificate — a private key is refused and never sent."
                     </Body1>
                     <Field label="Certificate file">
                         <input

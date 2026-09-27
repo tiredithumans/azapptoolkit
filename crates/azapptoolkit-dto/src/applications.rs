@@ -267,6 +267,18 @@ pub struct GenerateCertificateInput {
     pub validity_days: Option<u32>,
 }
 
+/// What `add_certificate_credential` uploaded, read from the certificate
+/// itself before it was sent — so the operator can confirm which certificate
+/// went up.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadedCertificate {
+    /// SHA-1 thumbprint, uppercase hex — the value Entra stores as
+    /// `customKeyIdentifier` and the portal lists as Thumbprint.
+    pub thumbprint: String,
+    /// The certificate's notAfter.
+    pub not_after: DateTime<Utc>,
+}
+
 /// Result of generating a self-signed certificate. `private_key_pem`,
 /// `pfx_base64` and `pfx_password` are all sensitive — shown once and never
 /// persisted by the backend.

@@ -275,7 +275,7 @@ pub async fn add_certificate_credential(
     tenant_id: &str,
     object_id: &str,
     input: &AddCertificateInput,
-) -> Result<(), UiError> {
+) -> Result<UploadedCertificate, UiError> {
     invoke_result(
         "add_certificate_credential",
         AddCertArgs {

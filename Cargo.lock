@@ -1262,6 +1262,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "wiremock",
+ "x509-parser",
  "zeroize",
 ]
 

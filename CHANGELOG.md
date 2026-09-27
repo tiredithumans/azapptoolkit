@@ -42,6 +42,19 @@
 
 ### Fixed
 
+- **Uploading a certificate now refuses a private key and shows which certificate went up.** The
+  upload dialog sent whatever you pasted to Microsoft Graph after checking only that it was base64,
+  so a PEM file that also held the private key sent the key along, and Graph's rejection didn't say
+  why. The toolkit now reads the certificate first: a private key, a paste with more than one
+  certificate, an expired certificate, or anything that isn't an X.509 certificate is refused with
+  the reason, and nothing is sent. After an upload, a confirmation shows the certificate's
+  thumbprint and expiry date as the Entra portal lists them.
+- **Redirect URIs and the front-channel logout URL are checked against Entra's rules before you
+  save.** A redirect URI using the IPv6 loopback address (`http://[::1]`) or longer than 256
+  characters passed the toolkit's check, but Entra supports neither, so the whole save then failed
+  with a generic Graph error. Both are now flagged on the row. The Authentication tab's
+  front-channel logout URL wasn't checked at all; it must now be an https address (or http on
+  localhost), and a bad one is named before anything is saved.
 - **Starting the app offline no longer looks like you were signed out.** If Entra ID can't be
   reached to restore your last session, the sign-in screen now says so and offers Retry, which
   picks the session back up once you're online, without a browser sign-in. Before, you got the

@@ -7,7 +7,7 @@ use azapptoolkit_core::models::{NewKeyCredential, PasswordCredential};
 use crate::dto::UiError;
 use crate::dto::applications::{
     AddCertificateInput, AddPasswordInput, GenerateCertificateInput, GeneratedCertificateResult,
-    KeyFailure, RemoveExpiredResult,
+    KeyFailure, RemoveExpiredResult, UploadedCertificate,
 };
 use crate::state::AppState;
 
@@ -113,27 +113,47 @@ pub async fn remove_password(
 
 // ---------------- Certificate credentials ----------------
 
+/// Uploads an operator-supplied certificate as a verify-only key credential
+/// and returns what went up (thumbprint + notAfter, read from the certificate).
+/// The paste is parsed first ([`parse_cert_upload`]): a private key, a bundle,
+/// an expired certificate or anything that isn't an X.509 certificate is
+/// refused before anything reaches Graph.
 #[tauri::command]
 pub async fn add_certificate_credential(
     state: State<'_, AppState>,
     tenant_id: String,
     object_id: String,
     input: AddCertificateInput,
-) -> Result<(), UiError> {
-    let key_b64 = normalize_cert_blob(&input.pem_or_base64)
+) -> Result<UploadedCertificate, UiError> {
+    add_certificate_credential_core(&state, &tenant_id, &object_id, input).await
+}
+
+/// The body of [`add_certificate_credential`], taking `&AppState` so "a
+/// refused paste never reaches Graph" is reachable from a test (the
+/// [`add_password_core`] seam).
+pub(crate) async fn add_certificate_credential_core(
+    state: &AppState,
+    tenant_id: &str,
+    object_id: &str,
+    input: AddCertificateInput,
+) -> Result<UploadedCertificate, UiError> {
+    let parsed = parse_cert_upload(&input.pem_or_base64, chrono::Utc::now())
         .map_err(|msg| UiError::validation("invalid_certificate", msg))?;
-    let client = state.graph_for(&tenant_id);
+    let client = state.graph_for(tenant_id);
     let new_cred = NewKeyCredential {
         display_name: Some(input.display_name),
         kind: Some("AsymmetricX509Cert".into()),
         usage: Some("Verify".into()),
-        key: key_b64,
+        key: parsed.key_b64,
         end_date_time: input.end_date_time,
         ..Default::default()
     };
-    client.add_key_credential(&object_id, new_cred).await?;
-    invalidate_app_credentials(&state.cache, &tenant_id, &object_id);
-    Ok(())
+    client.add_key_credential(object_id, new_cred).await?;
+    invalidate_app_credentials(&state.cache, tenant_id, object_id);
+    Ok(UploadedCertificate {
+        thumbprint: parsed.thumbprint,
+        not_after: parsed.not_after,
+    })
 }
 
 /// Generates a self-signed RSA certificate, attaches its public part to the
@@ -259,25 +279,123 @@ pub async fn remove_certificate_credential(
     Ok(())
 }
 
-/// Accepts either PEM-armoured text (`-----BEGIN CERTIFICATE-----`...) or a
-/// raw base64 blob. Returns a clean base64-encoded DER string suitable for
-/// the `key` field on Graph's `keyCredentials`. Performs minimal validation:
-/// strips headers/whitespace and confirms the remainder is valid base64.
-fn normalize_cert_blob(input: &str) -> std::result::Result<String, String> {
-    let stripped: String = input
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("-----"))
-        .flat_map(|line| line.chars())
-        .filter(|c| !c.is_whitespace())
-        .collect();
+/// A certificate read from an operator's paste, ready for Graph.
+struct UploadedCert {
+    /// Base64 of the parsed DER — the `key` on Graph's `keyCredentials`.
+    key_b64: String,
+    /// SHA-1, uppercase hex (Entra's `customKeyIdentifier`).
+    thumbprint: String,
+    not_after: chrono::DateTime<chrono::Utc>,
+}
 
-    if stripped.is_empty() {
+/// Reads an operator-pasted certificate: PEM-armoured text
+/// (`-----BEGIN CERTIFICATE-----`...) or a raw base64-encoded DER blob.
+///
+/// Every armour line is checked before anything is decoded, so a private key
+/// anywhere in the paste — alone, before or after the certificate — refuses
+/// the whole upload, as does any other PEM label (`PKCS7`, `CERTIFICATE
+/// REQUEST`, `PUBLIC KEY`) and a paste holding more than one certificate
+/// (taking the first could upload a CA certificate instead of the app's own).
+/// Lines outside a block (openssl's `Bag Attributes`, `subject=`) are ignored.
+/// The body is then parsed as X.509: a non-certificate, trailing data, or a
+/// certificate already expired at `now` is refused.
+///
+/// **Never echoes the pasted material** — a refusal names the PEM label or the
+/// problem, never a body line — and logs nothing: the paste may hold a key.
+fn parse_cert_upload(
+    input: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::result::Result<UploadedCert, String> {
+    let body = certificate_body(input)?;
+    if body.is_empty() {
         return Err("certificate body is empty".to_string());
     }
-    STANDARD
-        .decode(&stripped)
+    let der = STANDARD
+        .decode(&body)
         .map_err(|e| format!("not valid base64: {e}"))?;
-    Ok(stripped)
+    let (rest, cert) = x509_parser::parse_x509_certificate(&der).map_err(|_| {
+        "not an X.509 certificate — paste the certificate (.cer/.crt/.pem), not a key or a \
+         .pfx/.p7b bundle"
+            .to_string()
+    })?;
+    if !rest.is_empty() {
+        return Err("unexpected data after the certificate".to_string());
+    }
+    let not_after =
+        chrono::DateTime::<chrono::Utc>::from_timestamp(cert.validity().not_after.timestamp(), 0)
+            .ok_or_else(|| "the certificate's expiry date is out of range".to_string())?;
+    if not_after <= now {
+        return Err(format!(
+            "this certificate expired on {}; upload a current one",
+            not_after.format("%Y-%m-%d")
+        ));
+    }
+    // SHA-1 because it is Entra's `customKeyIdentifier` (the portal's
+    // Thumbprint) — an identifier, not a security primitive; same derivation
+    // as `cert::generate_self_signed`.
+    let thumbprint = azapptoolkit_core::thumbprint::hex_upper(
+        aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY, &der).as_ref(),
+    );
+    Ok(UploadedCert {
+        key_b64: STANDARD.encode(&der),
+        thumbprint,
+        not_after,
+    })
+}
+
+/// The base64 body of the one `CERTIFICATE` block in `input`, or — with no
+/// PEM armour at all — the whole input with whitespace removed.
+fn certificate_body(input: &str) -> std::result::Result<String, String> {
+    // The label between `-----BEGIN `/`-----END ` and the trailing dashes.
+    // Capped: it is echoed in a refusal, and only a real label belongs there.
+    let label_of =
+        |rest: &str| -> String { rest.trim_end_matches('-').trim().chars().take(40).collect() };
+    let mut armoured = false;
+    let mut current: Option<String> = None;
+    let mut blocks: Vec<String> = Vec::new();
+    for line in input.lines().map(str::trim) {
+        let (rest, begins) = if let Some(rest) = line.strip_prefix("-----BEGIN ") {
+            (rest, true)
+        } else if let Some(rest) = line.strip_prefix("-----END ") {
+            (rest, false)
+        } else {
+            if let Some(body) = current.as_mut() {
+                body.extend(line.chars().filter(|c| !c.is_whitespace()));
+            }
+            continue;
+        };
+        armoured = true;
+        let label = label_of(rest);
+        if label.contains("PRIVATE KEY") {
+            return Err(format!(
+                "this paste contains a private key ({label}). Upload only the certificate — \
+                 the private key stays with the app that signs with it, and nothing was sent"
+            ));
+        }
+        if label != "CERTIFICATE" {
+            return Err(format!(
+                "a {label} block isn't a certificate; paste the -----BEGIN CERTIFICATE----- block"
+            ));
+        }
+        match (begins, current.take()) {
+            (true, None) => current = Some(String::new()),
+            (false, Some(body)) => blocks.push(body),
+            // A BEGIN inside an open block, or an END with none open.
+            _ => return Err("incomplete PEM block".to_string()),
+        }
+    }
+    if current.is_some() {
+        return Err("incomplete PEM block".to_string());
+    }
+    if !armoured {
+        return Ok(input.chars().filter(|c| !c.is_whitespace()).collect());
+    }
+    match blocks.len() {
+        1 => Ok(blocks.remove(0)),
+        n => Err(format!(
+            "the paste holds {n} certificates; upload only the app's own certificate"
+        )),
+    }
 }
 
 /// Removes every expired password credential, by the audit's shared whole-day
@@ -452,7 +570,8 @@ mod password_window_tests {
 
 #[cfg(test)]
 mod cert_tests {
-    use super::{normalize_cert_blob, pfx_file_stem};
+    use super::{STANDARD, parse_cert_upload, pfx_file_stem};
+    use base64::Engine as _;
 
     /// The subject is operator-typed and lands in a *filename*. It only seeds
     /// the save dialog, but a default carrying a path separator is one nobody
@@ -476,30 +595,142 @@ mod cert_tests {
         assert_eq!(pfx_file_stem("..."), "certificate");
     }
 
-    #[test]
-    fn strips_pem_armour_and_whitespace() {
-        let pem = "-----BEGIN CERTIFICATE-----\nAAAAAA==\n-----END CERTIFICATE-----\n";
-        let out = normalize_cert_blob(pem).unwrap();
-        assert_eq!(out, "AAAAAA==");
+    /// A real certificate (and its key) from the generate path.
+    fn generated() -> crate::cert::GeneratedCert {
+        crate::cert::generate_self_signed("Upload Test", 30).unwrap()
+    }
+
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+    }
+
+    /// The base64 body of a PEM block, armour stripped.
+    fn pem_body(pem: &str) -> String {
+        pem.lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<String>()
     }
 
     #[test]
-    fn accepts_raw_base64() {
-        let out = normalize_cert_blob("AAAAAA==").unwrap();
-        assert_eq!(out, "AAAAAA==");
+    fn accepts_a_pem_certificate_and_matches_the_generate_paths_thumbprint() {
+        let c = generated();
+        let up = parse_cert_upload(&c.cert_pem, now()).unwrap();
+        assert_eq!(up.key_b64, c.cert_der_base64);
+        // The two SHA-1 derivations (upload, generate) must agree.
+        assert_eq!(up.thumbprint, c.thumbprint);
+        assert_eq!(up.not_after.timestamp(), c.not_after.unix_timestamp());
+    }
+
+    #[test]
+    fn accepts_raw_base64_der_and_indented_crlf_pem() {
+        let c = generated();
+        let raw = parse_cert_upload(&c.cert_der_base64, now()).unwrap();
+        assert_eq!(raw.thumbprint, c.thumbprint);
+
+        let indented: String = c.cert_pem.lines().map(|l| format!("   {l}\r\n")).collect();
+        let up = parse_cert_upload(&indented, now()).unwrap();
+        assert_eq!(up.key_b64, c.cert_der_base64);
+
+        // openssl's text around a block is ignored.
+        let with_headers = format!("Bag Attributes\nsubject=CN = Upload Test\n{}", c.cert_pem);
+        assert!(parse_cert_upload(&with_headers, now()).is_ok());
+    }
+
+    /// The upload must never forward a private key: refused wherever it sits,
+    /// and the refusal never echoes the key material.
+    #[test]
+    fn refuses_a_private_key_alone_and_in_a_bundle_either_order() {
+        let c = generated();
+        let key = c.private_key_pem.as_str();
+        let cases = [
+            key.to_string(),
+            format!("{}{key}", c.cert_pem),
+            format!("{key}{}", c.cert_pem),
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----".to_string(),
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIB\n-----END ENCRYPTED PRIVATE KEY-----"
+                .to_string(),
+        ];
+        for paste in &cases {
+            let err = parse_cert_upload(paste, now()).err().expect("refused");
+            assert!(err.contains("private key"), "{err}");
+            for line in key
+                .lines()
+                .filter(|l| !l.starts_with("-----") && l.len() > 10)
+            {
+                assert!(!err.contains(line), "the refusal echoed key material");
+            }
+        }
+    }
+
+    #[test]
+    fn refuses_a_bare_base64_private_key() {
+        let c = generated();
+        let err = parse_cert_upload(&pem_body(&c.private_key_pem), now())
+            .err()
+            .expect("a PKCS#8 key is not a certificate");
+        assert!(err.contains("not an X.509 certificate"), "{err}");
+    }
+
+    #[test]
+    fn refuses_other_pem_labels_and_multiple_certificates() {
+        for label in ["PKCS7", "CERTIFICATE REQUEST", "PUBLIC KEY"] {
+            let paste = format!("-----BEGIN {label}-----\nMIIB\n-----END {label}-----\n");
+            let err = parse_cert_upload(&paste, now()).err().expect(label);
+            assert!(err.contains("isn't a certificate"), "{label}: {err}");
+        }
+        let c = generated();
+        let err = parse_cert_upload(&format!("{}{}", c.cert_pem, c.cert_pem), now())
+            .err()
+            .expect("two certificates are refused, not cut down to the first");
+        assert!(err.contains("2 certificates"), "{err}");
+        // A block missing its END line.
+        let truncated = c.cert_pem.replace("-----END CERTIFICATE-----", "");
+        assert_eq!(
+            parse_cert_upload(&truncated, now()).err().as_deref(),
+            Some("incomplete PEM block")
+        );
+    }
+
+    #[test]
+    fn refuses_an_expired_certificate() {
+        let c = generated();
+        let not_after =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(c.not_after.unix_timestamp(), 0)
+                .unwrap();
+        let err = parse_cert_upload(&c.cert_pem, not_after + chrono::Duration::days(1))
+            .err()
+            .expect("expired");
+        assert!(err.contains("expired"), "{err}");
+        assert!(parse_cert_upload(&c.cert_pem, not_after - chrono::Duration::days(1)).is_ok());
+    }
+
+    #[test]
+    fn refuses_trailing_data_after_the_certificate() {
+        let c = generated();
+        let mut der = STANDARD.decode(&c.cert_der_base64).unwrap();
+        der.extend_from_slice(&[0, 0, 0]);
+        let err = parse_cert_upload(&STANDARD.encode(der), now())
+            .err()
+            .expect("trailing bytes");
+        assert!(err.contains("unexpected data"), "{err}");
     }
 
     #[test]
     fn rejects_non_base64() {
-        assert!(normalize_cert_blob("!!!!").is_err());
+        assert!(parse_cert_upload("!!!!", now()).is_err());
     }
 
     #[test]
     fn rejects_empty() {
-        assert!(normalize_cert_blob("").is_err());
-        assert!(
-            normalize_cert_blob("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n")
-                .is_err()
+        assert!(parse_cert_upload("", now()).is_err());
+        assert_eq!(
+            parse_cert_upload(
+                "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n",
+                now()
+            )
+            .err()
+            .as_deref(),
+            Some("certificate body is empty")
         );
     }
 }
@@ -594,6 +825,40 @@ mod handler_tests {
             "a failed mutation must leave the cached detail row alone"
         );
         assert!(indexes_intact(&state, TENANT));
+    }
+
+    /// A paste holding a private key is refused before the client is used —
+    /// the key material never reaches Graph, and nothing is invalidated.
+    #[tokio::test]
+    async fn a_private_key_paste_never_reaches_graph() {
+        // No mock mounted: any request would 404 and fail the test differently.
+        let (server, state) = mock_state(TENANT).await;
+        seed(&state);
+        let generated = crate::cert::generate_self_signed("Upload Test", 30).unwrap();
+        let err = add_certificate_credential_core(
+            &state,
+            TENANT,
+            OBJECT,
+            AddCertificateInput {
+                display_name: "bundle".to_string(),
+                pem_or_base64: format!("{}{}", generated.cert_pem, generated.private_key_pem),
+                end_date_time: None,
+            },
+        )
+        .await
+        .expect_err("a private key is refused");
+        assert_eq!(err.code, "invalid_certificate");
+        assert!(
+            detail_cached_here(&state),
+            "a refused paste invalidates nothing"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

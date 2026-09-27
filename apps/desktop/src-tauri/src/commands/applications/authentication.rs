@@ -68,10 +68,11 @@ pub(crate) fn extract_auth_fields(v: &serde_json::Value) -> ApplicationAuthentic
 
 /// Writes the app's Authentication-tab settings. Each redirect-URI list is a
 /// full replace of that platform's set (an empty list clears it), so the editor
-/// loads current values before saving. All URIs are validated (reusing the SSO
-/// redirect rules — no wildcards, https or loopback-http or custom schemes only)
-/// before the PATCH. On success the app-detail cache is busted, and the audit
-/// cache too (the public-client / implicit-grant flags feed audit rules).
+/// loads current values before saving. All URIs and the front-channel logout
+/// URL are validated first ([`validate_authentication_input`]) — nothing is
+/// sent when any is rejected. On success the app-detail cache is busted, and
+/// the audit cache too (the public-client / implicit-grant flags feed audit
+/// rules).
 #[tauri::command]
 pub async fn set_application_authentication(
     state: State<'_, AppState>,
@@ -79,14 +80,7 @@ pub async fn set_application_authentication(
     object_id: String,
     input: ApplicationAuthenticationDto,
 ) -> Result<(), UiError> {
-    for set in [
-        &input.web_redirect_uris,
-        &input.spa_redirect_uris,
-        &input.public_client_redirect_uris,
-    ] {
-        azapptoolkit_core::redirect::validate_redirect_uris(set)
-            .map_err(|e| UiError::validation("invalid_redirect_uri", e))?;
-    }
+    validate_authentication_input(&input)?;
     let client = state.graph_for(&tenant_id);
     let body = ApplicationAuthenticationPatch {
         web: Some(ApplicationWebPatch {
@@ -109,6 +103,93 @@ pub async fn set_application_authentication(
     client.patch_application_web(&object_id, &body).await?;
     invalidate_app_detail_state(&state.cache, &tenant_id);
     Ok(())
+}
+
+/// The pre-flight for [`set_application_authentication`]: every redirect URI
+/// on the three platforms (the SSO redirect rules — no wildcards, https or
+/// loopback-http or custom schemes only, Entra's length/`[::1]` limits) and a
+/// non-empty front-channel logout URL (the same rules, but https or
+/// loopback-http only — never a custom scheme). A rejection carries the typed
+/// `invalid_redirect_uri` code the tab already renders, instead of a raw
+/// Graph 400. Pure, so it is testable without `State`.
+fn validate_authentication_input(input: &ApplicationAuthenticationDto) -> Result<(), UiError> {
+    for set in [
+        &input.web_redirect_uris,
+        &input.spa_redirect_uris,
+        &input.public_client_redirect_uris,
+    ] {
+        azapptoolkit_core::redirect::validate_redirect_uris(set)
+            .map_err(|e| UiError::validation("invalid_redirect_uri", e))?;
+    }
+    // An empty value is how the tab clears the logout URL, so only a
+    // non-empty one is checked.
+    if let Some(url) = input
+        .logout_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        azapptoolkit_core::redirect::validate_logout_url(url)
+            .map_err(|e| UiError::validation("invalid_redirect_uri", e))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod input_validation_tests {
+    use super::validate_authentication_input;
+    use crate::dto::applications::ApplicationAuthenticationDto;
+
+    fn dto(logout_url: Option<&str>) -> ApplicationAuthenticationDto {
+        ApplicationAuthenticationDto {
+            web_redirect_uris: vec!["https://app.contoso.com/cb".into()],
+            spa_redirect_uris: vec![],
+            public_client_redirect_uris: vec!["myapp://auth".into()],
+            logout_url: logout_url.map(str::to_string),
+            is_fallback_public_client: false,
+            enable_access_token_issuance: false,
+            enable_id_token_issuance: false,
+        }
+    }
+
+    #[test]
+    fn a_bad_redirect_uri_is_refused_with_the_typed_code() {
+        let mut input = dto(None);
+        input
+            .web_redirect_uris
+            .push("https://*.contoso.com/cb".into());
+        let err = validate_authentication_input(&input).unwrap_err();
+        assert_eq!(err.code, "invalid_redirect_uri");
+
+        let mut input = dto(None);
+        input.spa_redirect_uris.push("http://[::1]:5173/cb".into());
+        let err = validate_authentication_input(&input).unwrap_err();
+        assert_eq!(err.code, "invalid_redirect_uri");
+    }
+
+    /// The logout URL rode to Graph unchecked; it is a browser redirect target
+    /// with the same threat profile as a reply URL, and stricter: no custom
+    /// scheme.
+    #[test]
+    fn the_logout_url_is_validated_before_the_patch() {
+        for bad in [
+            "myapp://signout",
+            "http://contoso.com/out",
+            "javascript:alert(1)",
+        ] {
+            let err = validate_authentication_input(&dto(Some(bad))).unwrap_err();
+            assert_eq!(err.code, "invalid_redirect_uri", "{bad}");
+        }
+        for ok in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("https://contoso.com/out"),
+            Some("http://localhost:5000/out"),
+        ] {
+            assert!(validate_authentication_input(&dto(ok)).is_ok(), "{ok:?}");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -81,6 +81,12 @@ aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sy
 # `rsa` edge is reachable only through the `builder` feature, which nothing here
 # enables. `deny.toml`'s `[[bans.deny]] name = "rsa"` is what actually holds it.
 p12-keystore = { version = "0.2.1", default-features = false }
+# Parses an operator-pasted certificate before upload (refuse a private key or
+# a non-certificate before anything reaches Graph; read its thumbprint and
+# notAfter). Already in the lock file via rcgen and p12-keystore, so this adds
+# an edge, not a crate. `default-features = false` keeps the ring-backed
+# `verify` feature off (its default set is empty; stated so it stays that way).
+x509-parser = { version = "0.18", default-features = false }
 rand = "0.10"
 zeroize = { workspace = true }
 time = "0.3"
