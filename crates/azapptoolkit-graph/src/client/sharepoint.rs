@@ -39,7 +39,8 @@ impl GraphClient {
     /// transport documents as the throttle-happiest.
     ///
     /// A sub-response that still carries an `@odata.nextLink` is followed
-    /// outside the batch by [`Self::finish_paged_batch`], so a site whose grant
+    /// outside the batch by [`Self::finish_paged_batch_scoped`] — on the same
+    /// SharePoint token, which page 2 needs as much as page 1 — so a site whose grant
     /// list spans pages is never silently truncated — the same contract the
     /// single-site path guarantees.
     pub async fn batch_list_site_permissions(

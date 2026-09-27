@@ -185,6 +185,9 @@ async fn conditional_access_policies_parse_and_follow_paging() {
     Mock::given(method("GET"))
             .and(path("/identity/conditionalAccess/policies"))
             .and(query_param_is_missing("page"))
+            // Every paged read sends `$top`: paging is serial, so Graph's
+            // default page is a round-trip multiplier on a large tenant.
+            .and(query_param("$top", "999"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [{
                     "id": "ca-1",

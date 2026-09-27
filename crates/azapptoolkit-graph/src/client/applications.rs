@@ -204,7 +204,7 @@ fn default_application_select() -> &'static [&'static str] {
 /// (`identifierUris`/`api`) blocks the per-tab paths fetch separately, so one
 /// GET (or one `$batch` sub-request) captures an app's whole configuration.
 /// Shared by the single and batched backup reads so their projections can't drift.
-const APP_BACKUP_SELECT: &str = "id,appId,displayName,description,signInAudience,publisherDomain,\
+pub(super) const APP_BACKUP_SELECT: &str = "id,appId,displayName,description,signInAudience,publisherDomain,\
      createdDateTime,passwordCredentials,keyCredentials,requiredResourceAccess,\
      isFallbackPublicClient,web,spa,publicClient,identifierUris,api";
 
@@ -416,7 +416,7 @@ impl GraphClient {
         let path = format!("/applications/{object_id}/owners");
         let params: [(&str, &str); 1] = [("$top", MAX_PAGE_SIZE)];
         let page: Paged<DirectoryObject> = self.get_json(&path, &params, false).await?;
-        self.collect_all_pages(page).await
+        self.collect_all_pages(page, false).await
     }
 
     pub async fn create_application(&self, body: &CreateApplicationRequest) -> Result<Application> {
@@ -623,7 +623,8 @@ impl GraphClient {
         let page: Paged<ApplicationTemplate> = self
             .get_json_prefer("/applicationTemplates", &params, "odata.maxpagesize=2800")
             .await?;
-        self.collect_all_pages(page).await
+        // `get_json_prefer` issues page 1 as a plain read; so do the rest.
+        self.collect_all_pages(page, false).await
     }
 
     /// PATCH `/applications/{id}` with a caller-built body carrying the SSO
@@ -631,7 +632,7 @@ impl GraphClient {
     /// `spa.redirectUris`). Kept separate from the typed `AppPatch` so the
     /// widely-used struct stays untouched. Accepts any `Serialize` body (an
     /// `ApplicationSsoPatch` or a `serde_json::Value`).
-    pub async fn patch_application_web<B: serde::Serialize>(
+    pub async fn patch_application_web<B: serde::Serialize + Sync>(
         &self,
         object_id: &str,
         body: &B,

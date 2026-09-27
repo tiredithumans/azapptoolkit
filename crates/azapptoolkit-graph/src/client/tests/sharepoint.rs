@@ -556,3 +556,43 @@ async fn a_non_application_permission_reports_no_app_id() {
     assert_eq!(perms[0].app_id(), None, "a site group is not an app grant");
     assert_eq!(perms[1].app_id(), Some("app-1"));
 }
+
+/// A batched site read whose grant list overflows continues page 2 on the
+/// SharePoint token, not the verb-selected read token (`tok`), which lacks
+/// `Sites.FullControl.All` — that fallback made page 2 a 403 while page 1
+/// succeeded.
+#[tokio::test]
+async fn batch_list_site_permissions_continues_page_two_on_the_sharepoint_token() {
+    let server = MockServer::start().await;
+    let next = format!("{}/sites/site-1/permissions?page=2", server.uri());
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .and(header("authorization", "Bearer sp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "responses": [{ "id": "0", "status": 200, "body": {
+                "value": [{ "id": "perm-1", "roles": ["read"] }],
+                "@odata.nextLink": next,
+            }}]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/sites/site-1/permissions"))
+        .and(query_param("page", "2"))
+        .and(header("authorization", "Bearer sp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "perm-2", "roles": ["write"] }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri()).with_sharepoint_token(StaticTokenProvider::new("sp"));
+    let out = client
+        .batch_list_site_permissions(&["site-1".to_string()])
+        .await
+        .unwrap();
+    let perms = out[0].as_ref().expect("page 2 rides the SharePoint bearer");
+    assert_eq!(perms.len(), 2);
+    assert_eq!(perms[0].id, "perm-1");
+    assert_eq!(perms[1].id, "perm-2");
+}

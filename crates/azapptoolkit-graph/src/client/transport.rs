@@ -1,9 +1,10 @@
 //! HTTP transport for [`GraphClient`]: the retrying core (`send_core*`), the
-//! one-shot scoped (explicit-token) family, the pagination helpers, and the
-//! wire-building free functions the domain modules share. Split out of
-//! `client.rs` as pure code motion — the behavioral contracts (retry budget,
-//! CAE single re-mint, origin guard, one-shot scoped calls degrading fast)
-//! are unchanged and pinned by `tests/transport.rs`.
+//! scoped (explicit-token) family, the pagination helpers, and the
+//! wire-building free functions the domain modules share. The behavioral
+//! contracts — retry budget, the retry class derived from the verb (a POST is
+//! never replayed after a 5xx), CAE single re-mint, origin guard, scoped
+//! writes riding the retry loop, and the one-shot `scoped_get` degrading
+//! fast — are pinned by `tests/transport.rs`.
 
 use super::*;
 use azapptoolkit_core::http_error::{describe_error_chain, sanitize_error_body};
@@ -78,13 +79,21 @@ impl GraphClient {
         serde_json::from_slice(&bytes).map_err(|e| GraphError::Deserialize(e.to_string()))
     }
 
-    /// POST/PATCH an absolute URL with an explicit (non-default) bearer token,
-    /// decoding the JSON response. The non-GET sibling of [`Self::scoped_get`]
-    /// — used for writes that need a separately-scoped token (claims-mapping
-    /// policies on `policy_write_token`) rather than the verb-selected
-    /// read/write token. Maps HTTP errors to typed `GraphError`s. Like
-    /// `scoped_get`, this deliberately skips the retry/throttle loop — these are
-    /// one-shot configuration writes, not high-volume reads.
+    /// POST/PATCH/DELETE an absolute URL with an explicit (non-default) bearer
+    /// token, decoding the JSON response. The non-GET sibling of
+    /// [`Self::scoped_get`] — used for writes that need a separately-scoped
+    /// token (claims-mapping policies on `policy_write_token`, group membership
+    /// on `group_member_token`, SharePoint grants on `sharepoint_token`) rather
+    /// than the verb-selected read/write token.
+    ///
+    /// Unlike `scoped_get`, these ride the retrying transport
+    /// ([`Self::send_core_url_with`]) with the class [`retry_class_for`] derives
+    /// from the verb: a 429 is replayed for any verb with `Retry-After` honored
+    /// exactly, while a 5xx or network failure is replayed only for DELETE/PUT
+    /// — a POST that may already have committed is never re-sent. They are not
+    /// one-shot configuration writes any more: callers loop over them (the DR
+    /// restore's group re-adds, the multi-target SharePoint list/item grants),
+    /// so a throttle must be ridden out, not recorded as a failure.
     pub(crate) async fn scoped_send_json<B, T>(
         &self,
         token: &Arc<dyn BearerProvider>,
@@ -93,7 +102,7 @@ impl GraphClient {
         body: &B,
     ) -> Result<T>
     where
-        B: Serialize + ?Sized,
+        B: Serialize + ?Sized + Sync,
         T: DeserializeOwned,
     {
         let bytes = self
@@ -103,7 +112,8 @@ impl GraphClient {
     }
 
     /// Scoped POST/PATCH/DELETE with no decoded response (the `$ref` assignment
-    /// and `$ref` removal endpoints return 204).
+    /// and `$ref` removal endpoints return 204). Same retry policy as
+    /// [`Self::scoped_send_json`].
     pub(crate) async fn scoped_send_no_content<B>(
         &self,
         token: &Arc<dyn BearerProvider>,
@@ -112,14 +122,16 @@ impl GraphClient {
         body: Option<&B>,
     ) -> Result<()>
     where
-        B: Serialize + ?Sized,
+        B: Serialize + ?Sized + Sync,
     {
         let _ = self.scoped_send_core(token, method, url, body).await?;
         Ok(())
     }
 
-    /// Shared transport for the scoped (explicit-token) write helpers above.
-    pub(crate) async fn scoped_send_core<B>(
+    /// Shared transport for the scoped (explicit-token) write helpers above:
+    /// the retrying core with the explicit provider and the verb's retry class,
+    /// so scoped writes also get the CAE re-mint and the throttle observer.
+    async fn scoped_send_core<B>(
         &self,
         token: &Arc<dyn BearerProvider>,
         method: Method,
@@ -127,41 +139,30 @@ impl GraphClient {
         body: Option<&B>,
     ) -> Result<bytes::Bytes>
     where
-        B: Serialize + ?Sized,
+        B: Serialize + ?Sized + Sync,
     {
-        let bearer = token.bearer().await.map_err(GraphError::Token)?;
-        let mut req = self
-            .http
-            .request(method, url)
-            .header(AUTHORIZATION, format!("Bearer {bearer}"));
-        if let Some(b) = body {
-            let value =
-                serde_json::to_value(b).map_err(|e| GraphError::Deserialize(e.to_string()))?;
-            req = req.json(&value);
-        }
-        let resp = req
-            .send()
+        let value = body
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| GraphError::Deserialize(e.to_string()))?;
+        let retry_class = retry_class_for(&method);
+        self.send_core_url_with(token, retry_class, method, url, &[], false, value, None)
             .await
-            .map_err(|e| GraphError::Network(describe_error_chain(&e)))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let code = status.as_u16();
-            let retry_after = parse_retry_after_seconds(
-                resp.headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok()),
-            );
-            let body = resp.text().await.unwrap_or_default();
-            return Err(map_error_status(code, body, retry_after));
-        }
-        resp.bytes()
-            .await
-            .map_err(|e| GraphError::Network(describe_error_chain(&e)))
     }
 
     /// Follows `@odata.nextLink` from an initial page until exhausted,
     /// concatenating every page's items. Collection endpoints that can exceed
     /// Graph's default page size use this so they don't silently truncate.
+    ///
+    /// `consistency_eventual` must match the choice the **first** page was
+    /// issued with — there is deliberately no default. Graph does not carry
+    /// `ConsistencyLevel` into the `nextLink` request, so an advanced query
+    /// (`$search`/`$count`) must restate it on every continuation, while a
+    /// plain read must not add it: an `$expand` enumeration paged as an
+    /// advanced query gets a 200 with the expanded property missing, and any
+    /// other plain read would serve pages 2+ from the eventually-consistent
+    /// index (which can miss a just-written grant) and page 1 from the
+    /// directory.
     ///
     /// Hard-errors past [`MAX_PAGES`], which is the right guard for the
     /// *small* collections that use it (owners, role assignments, grants,
@@ -172,25 +173,12 @@ impl GraphClient {
     /// failure.
     pub(crate) async fn collect_all_pages<T: DeserializeOwned>(
         &self,
-        page: Paged<T>,
-    ) -> Result<Vec<T>> {
-        // Advanced-query continuation is the default; see
-        // [`Self::collect_all_pages_with`] for why an `$expand` enumeration
-        // must opt out.
-        self.collect_all_pages_with(page, true).await
-    }
-
-    /// [`Self::collect_all_pages`] carrying the originating request's
-    /// consistency choice, so an `$expand` enumeration keeps `false` on every
-    /// page instead of silently dropping the expansion from page two.
-    pub(crate) async fn collect_all_pages_with<T: DeserializeOwned>(
-        &self,
         mut page: Paged<T>,
         consistency_eventual: bool,
     ) -> Result<Vec<T>> {
         // Bound a pathological/cyclic nextLink; legitimate paging is far under
-        // this. (Origin safety is enforced by `get_json_absolute`'s same-origin
-        // check.) Mirrors `list_conditional_access_policies`.
+        // this. (Origin safety is enforced by `get_json_absolute_with`'s
+        // same-origin check.) Mirrors `list_conditional_access_policies`.
         const MAX_PAGES: usize = 200;
         let mut out = Vec::new();
         out.append(&mut page.items);
@@ -220,8 +208,9 @@ impl GraphClient {
     /// beyond the cap, so the caller can log/surface that coverage is partial.
     ///
     /// `consistency_eventual` must match the choice the **first** page was
-    /// issued with: an `$expand` enumeration that pages as an advanced query
-    /// gets a 200 with the expanded property missing, not an error.
+    /// issued with, exactly as for [`Self::collect_all_pages`]: an `$expand`
+    /// enumeration that pages as an advanced query gets a 200 with the
+    /// expanded property missing, not an error.
     ///
     /// The item cap is **not** a cycle guard, despite what this doc used to
     /// claim. Only a non-empty page advances toward it, so
@@ -303,19 +292,18 @@ impl GraphClient {
 
     /// Issues a GET against an absolute URL (e.g. an `@odata.nextLink`) and
     /// decodes the response body. All retry + throttle-observer behavior
-    /// applies identically to path-relative requests.
-    /// [`Self::get_json_absolute`] with the originating request's consistency
-    /// choice.
+    /// applies identically to path-relative requests. The caller states the
+    /// originating request's consistency choice; there is no defaulted variant.
     ///
     /// `ConsistencyLevel: eventual` turns a request into an *advanced query*,
     /// and Graph answers an advanced query that also `$expand`s with a 200 whose
     /// expanded property is simply **missing** — no error. `list_applications`
     /// computes `let eventual = q.search.is_some();` for exactly that reason,
     /// but page one was the only request that honoured it: the paging helpers
-    /// went through `get_json_absolute`, which sent `true` unconditionally. In a
+    /// went through a `get_json_absolute` that sent `true` unconditionally. In a
     /// tenant past one page of applications, every page after the first silently
     /// dropped `owners`, and the audit's ownerless-app finding fired on apps
-    /// that have owners.
+    /// that have owners. That defaulted helper is gone for the same reason.
     pub async fn get_json_absolute_with<T: DeserializeOwned>(
         &self,
         url: &str,
@@ -347,15 +335,6 @@ impl GraphClient {
         )))
     }
 
-    pub async fn get_json_absolute<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
-        // Defaults to the advanced-query header, which a `$search`/`$count`
-        // continuation requires. A caller whose first page deliberately did NOT
-        // use it — an `$expand` enumeration — must page with
-        // [`Self::get_json_absolute_with`] instead, or the expansion silently
-        // vanishes from page two onward.
-        self.get_json_absolute_with(url, true).await
-    }
-
     pub(crate) async fn get_json<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -372,7 +351,8 @@ impl GraphClient {
     /// whole-gallery fetch to ask for large pages (`odata.maxpagesize=…`) so a
     /// full-collection read is a handful of round trips instead of hundreds. The
     /// effective page size carries into `@odata.nextLink`, so only this first
-    /// request needs the header; subsequent pages ride `get_json_absolute`.
+    /// request needs the header; subsequent pages ride
+    /// `collect_all_pages(page, false)`.
     pub(crate) async fn get_json_prefer<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -398,7 +378,7 @@ impl GraphClient {
     /// POST/PATCH with a JSON body, returning a decoded response.
     pub(crate) async fn send_json<B, T>(&self, method: Method, path: &str, body: &B) -> Result<T>
     where
-        B: Serialize + ?Sized,
+        B: Serialize + ?Sized + Sync,
         T: DeserializeOwned,
     {
         let value =
@@ -418,7 +398,7 @@ impl GraphClient {
         body: Option<&B>,
     ) -> Result<()>
     where
-        B: Serialize + ?Sized,
+        B: Serialize + ?Sized + Sync,
     {
         let value = match body {
             Some(b) => {
@@ -754,12 +734,12 @@ pub(crate) fn parse_claims_challenge(www_authenticate: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-/// Maps a non-success status from the one-shot scoped transport
-/// ([`GraphClient::scoped_get`] / `scoped_send_core`) to the same typed error
-/// the retrying transport returns, so a throttled scoped call surfaces as
-/// [`GraphError::Throttled`] (ui code `throttled`, retryable) rather than a
-/// generic `Api`. Only the mapping is shared — the one-shot helpers still
-/// deliberately skip the retry/throttle loop.
+/// Maps a non-success status from the one-shot scoped read
+/// ([`GraphClient::scoped_get`], now its only user — the scoped writes ride the
+/// retrying transport) to the same typed error the retrying transport returns,
+/// so a throttled scoped read surfaces as [`GraphError::Throttled`] (ui code
+/// `throttled`, retryable) rather than a generic `Api`. Only the mapping is
+/// shared — `scoped_get` still deliberately skips the retry/throttle loop.
 fn map_error_status(code: u16, body: String, retry_after: Option<u64>) -> GraphError {
     let body = sanitize_error_body(&body);
     match code {

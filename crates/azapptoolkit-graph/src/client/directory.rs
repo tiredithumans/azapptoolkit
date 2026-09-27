@@ -77,7 +77,10 @@ impl GraphClient {
     /// mistakes "lost auth mid-scan" for "no policies".
     pub async fn list_conditional_access_policies(&self) -> Result<Vec<ConditionalAccessPolicy>> {
         let token = self.policy_token()?;
-        let url = format!("{}/identity/conditionalAccess/policies", self.base_url);
+        let url = format!(
+            "{}/identity/conditionalAccess/policies?$top={MAX_PAGE_SIZE}",
+            self.base_url
+        );
 
         match self.scoped_get(token, &url).await {
             Ok(page) => self
@@ -172,7 +175,7 @@ impl GraphClient {
             ("$top", MAX_PAGE_SIZE),
         ];
         let page: Paged<GroupSummary> = self.get_json(&path, &params, true).await?;
-        self.collect_all_pages(page).await
+        self.collect_all_pages(page, true).await
     }
 
     /// Batched [`Self::list_service_principal_groups`]: the group memberships of
@@ -180,7 +183,9 @@ impl GraphClient {
     /// cast is an advanced query, so each sub-request carries its own
     /// `ConsistencyLevel: eventual` header (the outer POST's headers don't reach
     /// batched sub-requests) alongside `$count=true`. Returns each SP's group
-    /// list in input order; the rare overflow paginates outside the batch. The
+    /// list in input order; the rare overflow paginates outside the batch —
+    /// as an advanced query too, since Graph does not carry the header into
+    /// the `nextLink` request. The
     /// caller treats a per-SP `Err` as "no groups" (matching the un-batched
     /// path's degrade-to-empty), so a tenant that rejects `$count` in a batch
     /// loses group data but never fails the backup.
@@ -204,7 +209,7 @@ impl GraphClient {
         let pages: Vec<Result<Paged<GroupSummary>>> = self
             .batch_get_json_with_headers(&urls, &[("ConsistencyLevel", "eventual")])
             .await?;
-        self.finish_paged_batch(pages).await
+        self.finish_paged_batch(pages, true).await
     }
 
     /// Adds a directory object (here: a service principal) as a member of a
@@ -285,7 +290,7 @@ impl GraphClient {
     /// Follows `@odata.nextLink`. Deliberately bypasses the shared retry/throttle
     /// loop: this is an optional report, and a failure is handled, not retried.
     /// The `nextLink` still rides the privileged `AuditLog.Read.All` bearer and is
-    /// attacker-influenced server output, so — like [`Self::get_json_absolute`]
+    /// attacker-influenced server output, so — like [`Self::get_json_absolute_with`]
     /// and [`Self::list_conditional_access_policies`] — each page is origin-checked
     /// before the token is attached and the loop is bounded against a cyclic link.
     pub async fn list_service_principal_sign_in_activities(

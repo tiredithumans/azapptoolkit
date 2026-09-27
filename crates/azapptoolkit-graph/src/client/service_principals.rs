@@ -116,7 +116,7 @@ impl GraphClient {
         ];
         let page: Paged<ServicePrincipal> =
             self.get_json("/servicePrincipals", &params, false).await?;
-        self.collect_all_pages(page).await
+        self.collect_all_pages(page, false).await
     }
 
     /// Tenant-owned service principals that may expose app roles, for the
@@ -147,7 +147,7 @@ impl GraphClient {
         ];
         let page: Paged<ServicePrincipal> =
             self.get_json("/servicePrincipals", &params, true).await?;
-        self.collect_all_pages(page).await
+        self.collect_all_pages(page, true).await
     }
 
     /// Single per-tenant service-principal scan shared by both list views'
@@ -160,10 +160,12 @@ impl GraphClient {
     /// Returning *every* SP — rather than a server-side
     /// `servicePrincipalType ne 'ManagedIdentity'` slice — is deliberate: the
     /// App Registrations join needs all SPs, and a single unfiltered result is
-    /// what lets both views reuse one cache entry. `$count=true` (and the
-    /// `ConsistencyLevel: eventual` it implies) keeps the response shape
-    /// identical to the prior index calls; pagination follows
-    /// `@odata.nextLink` to exhaustion.
+    /// what lets both views reuse one cache entry. `$count=true` with
+    /// `ConsistencyLevel: eventual` makes this an *advanced query*, and Graph
+    /// does not carry the `ConsistencyLevel` header into the `nextLink`
+    /// request (learn.microsoft.com/graph/paging), so every continuation
+    /// restates it — page 1 and pages 2+ are served by the same store.
+    /// Pagination follows `@odata.nextLink` up to [`SP_INDEX_MAX`].
     pub async fn list_service_principals_index(&self) -> Result<Vec<ServicePrincipal>> {
         let params: [(&str, &str); 3] = [
             (
@@ -202,7 +204,7 @@ impl GraphClient {
         // truncated, so neither can detect truncation from its own length; they
         // must ask about the index itself (`sp_index_truncated`).
         let (all, truncated) = self
-            .collect_all_pages_capped(page, SP_INDEX_MAX, false)
+            .collect_all_pages_capped(page, SP_INDEX_MAX, true)
             .await?;
         if truncated {
             tracing::warn!(
@@ -404,7 +406,7 @@ impl GraphClient {
         let path = format!("/servicePrincipals/{sp_object_id}/owners");
         let params: [(&str, &str); 1] = [("$top", MAX_PAGE_SIZE)];
         let page: Paged<DirectoryObject> = self.get_json(&path, &params, false).await?;
-        self.collect_all_pages(page).await
+        self.collect_all_pages(page, false).await
     }
 
     /// Adds an owner to a service principal (`POST /servicePrincipals/{id}/owners/$ref`).
@@ -611,7 +613,7 @@ impl GraphClient {
     /// `preferredSingleSignOnMode` and `preferredTokenSigningKeyThumbprint`
     /// during SSO setup. Accepts any `Serialize` body (a typed patch struct or
     /// a `serde_json::Value`).
-    pub async fn patch_service_principal<B: serde::Serialize>(
+    pub async fn patch_service_principal<B: serde::Serialize + Sync>(
         &self,
         object_id: &str,
         body: &B,

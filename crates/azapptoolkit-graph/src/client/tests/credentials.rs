@@ -242,3 +242,51 @@ async fn update_federated_credential_patches_credential_endpoint() {
         .await
         .unwrap();
 }
+
+/// `addTokenSigningCertificate` writes three objects per certificate sharing
+/// one `customKeyIdentifier`: a `Sign` key, a `Verify` key and the PFX
+/// password in `passwordCredentials`. Retiring the certificate drops all
+/// three (the thumbprint compared case-insensitively) and keeps every
+/// unrelated entry byte-for-byte — removing only the key halves stranded the
+/// password credential forever.
+#[tokio::test]
+async fn removing_a_sp_signing_cert_drops_both_key_halves_and_its_pfx_password() {
+    let server = MockServer::start().await;
+    let other_key = serde_json::json!({
+        "keyId": "k-other", "customKeyIdentifier": "BBB", "usage": "Verify", "type": "AsymmetricX509Cert"
+    });
+    let other_password = serde_json::json!({ "keyId": "p-bbb", "customKeyIdentifier": "BBB" });
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-1"))
+        .and(query_param("$select", "keyCredentials,passwordCredentials"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "keyCredentials": [
+                { "keyId": "k-sign", "customKeyIdentifier": "AAA", "usage": "Sign", "type": "X509CertAndPassword" },
+                // Same certificate, different case: the match is case-insensitive.
+                { "keyId": "k-verify", "customKeyIdentifier": "aaa", "usage": "Verify", "type": "AsymmetricX509Cert" },
+                other_key.clone()
+            ],
+            "passwordCredentials": [
+                { "keyId": "p-aaa", "customKeyIdentifier": "AAA" },
+                other_password.clone()
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/servicePrincipals/sp-1"))
+        .and(wiremock::matchers::body_json(serde_json::json!({
+            "keyCredentials": [other_key],
+            "passwordCredentials": [other_password]
+        })))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    client
+        .remove_service_principal_key_credential("sp-1", "k-sign")
+        .await
+        .expect("the PATCH carries exactly the surviving entries");
+}

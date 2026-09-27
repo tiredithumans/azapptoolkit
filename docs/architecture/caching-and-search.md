@@ -322,7 +322,8 @@ any new heavy fan-out; don't hand-roll a second tracker or a raw per-item loop:
 
 - **Graph JSON batching** — `client.batch_get_json[_with_headers]`
   (`graph/src/client/batch.rs`): 20 GETs per POST, results returned in input order, inner-429
-  sub-requests re-batched. Advanced queries inside a batch (e.g. `memberOf` `$count`) need the
+  and 5xx sub-requests re-batched on the shared `RetryBudget` (the same policy the GET would get
+  sent alone; only a 429 notifies the throttle observer). Advanced queries inside a batch (e.g. `memberOf` `$count`) need the
   **per-sub-request** header form — the outer POST's headers don't reach sub-requests.
   Whole-batch failures must degrade to per-object reads through `dispatch::batch_or_serial`,
   never fail the run.
@@ -344,6 +345,13 @@ rather than an error, so the caller reads an empty collection and concludes the 
 related entities. Keep `$count`/`$orderby` on the `$search` paths that need them, and never add them
 to a request that expands.
 
+Every paging helper (`collect_all_pages`, `collect_all_pages_capped`, `finish_paged_batch`) takes
+the consistency flag page 1 was issued with — there is no default. Graph does not carry
+`ConsistencyLevel` into the `nextLink` request, so an advanced query (the SP index, the `memberOf`
+casts) restates it on every continuation, and a plain read never adds it: page 2 of an `$expand`
+scan would lose the expansion, and page 2 of any other plain read would come from the
+eventually-consistent index while page 1 came from the directory.
+
 ## Page size is a wall-clock divisor, not a tuning knob
 
 Paging is strictly **serial** — each request needs the prior response's `@odata.nextLink` — so the
@@ -356,6 +364,14 @@ public `DEFAULT_APP_PAGE_SIZE`. Asking above an endpoint's real cap is harmless 
 silently), and per-endpoint caps are **not reliably documented** — `list_service_principals_index`
 logs its effective first-page size for exactly that reason. Batched sub-requests carry it too, so a
 `$batch` sub-response rarely overflows into `finish_paged_batch`'s serial continuation.
+
+The rule is pinned by `repo_invariants/fanout.rs::every_paged_graph_read_sends_a_page_size`: every
+function in `graph/src/client/` that calls a paging helper must send `$top` (as a query pair or
+inline, `MAX_PAGE_SIZE` / `DEFAULT_APP_PAGE_SIZE`) or, where an endpoint's `$top` ceiling is too
+low, `Prefer: odata.maxpagesize` (the application gallery, 2800 a page). Two exemptions are
+justified in its table: `list_applications_all` (page 1 is `list_applications`, which sends
+`DEFAULT_APP_PAGE_SIZE`) and `list_federated_credentials` (Graph caps them at 20 per app). A stale
+exemption fails the rule.
 
 The read that dominates is `appRoleAssignedTo` **on the Microsoft Graph service principal**: it holds
 every application-permission grant in the tenant, and both the security audit

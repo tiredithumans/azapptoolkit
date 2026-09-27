@@ -22,6 +22,21 @@
 
 ### Fixed
 
+- **Restoring group memberships and granting SharePoint access to several sites or lists now
+  waits out Microsoft Graph throttling.** These writes use their own permissions, and unlike every
+  other change the app makes they gave up at the first "too many requests" reply, so a DR restore
+  or a multi-site grant recorded failures you had to redo by hand. They now wait as long as Graph
+  asks and try again, like other writes. A write that creates something is still never re-sent
+  after a server error, so nothing is granted twice.
+- **A brief Microsoft Graph server error on one site no longer leaves the whole SharePoint sweep
+  incomplete.** Reads sent in batches of 20 retried an item that was throttled but not one that hit
+  a server error, though the same read sent on its own was retried. One such reply marked the site
+  sweep incomplete and kept it from being cached, and made a DR backup skip that object. Those
+  items are now retried on the same schedule.
+- **Long lists now read every page the same way.** Owners, permission grants, role assignments and
+  federated credentials read their first page from the directory and later pages from its search
+  index, which can lag behind recent changes, so a grant you had just made could be missing from
+  page two. Every page now uses the same source.
 - **The New SSO application wizard now refuses an OIDC client-secret lifetime outside 1–730 days
   instead of creating a broken app.** A lifetime of 0 created a secret that had already expired, and
   a very large one failed only after the application and its service principal existed, leaving a

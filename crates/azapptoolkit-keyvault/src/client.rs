@@ -119,7 +119,7 @@ impl KeyVaultClient {
 
     async fn send_json<B, T>(&self, method: Method, path: &str, body: &B) -> Result<T>
     where
-        B: Serialize + ?Sized,
+        B: Serialize + ?Sized + Sync,
         T: DeserializeOwned,
     {
         let value =

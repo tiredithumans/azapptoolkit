@@ -4,8 +4,9 @@
 //! request count (and throttling exposure) on the audit's per-app fan-out. The
 //! outer POST goes through the shared retry/throttle loop; inner per-request
 //! statuses are mapped to the same typed [`GraphError`]s as an individual GET,
-//! and inner 429s re-batch just the throttled sub-requests (honoring the inner
-//! `Retry-After`) — the outer retry loop can't see those.
+//! and inner 429 and 5xx sub-responses re-batch just the retried sub-requests
+//! (honoring an inner `Retry-After`) on the shared `RetryBudget` — the outer
+//! retry loop can't see those, and the same GET sent alone would be retried.
 //! See <https://learn.microsoft.com/en-us/graph/json-batching>.
 
 use std::collections::HashMap;
@@ -84,8 +85,9 @@ impl GraphClient {
     /// chunks automatically, up to [`CHUNK_CONCURRENCY`] chunks in flight).
     /// Returns one `Result<T>` per input URL, **in order**.
     /// Inner per-request statuses map to the same typed `GraphError`s as an
-    /// individual GET; inner 429s re-batch the throttled subset (honoring the
-    /// inner `Retry-After`) up to `MAX_RETRIES`. `urls` are relative to the Graph
+    /// individual GET; inner 429s and 5xx re-batch just that subset (honoring
+    /// an inner `Retry-After`) on the shared retry budget, the same policy the
+    /// GET would get sent alone. `urls` are relative to the Graph
     /// version root (e.g. `"/servicePrincipals?$filter=..."`). The `$batch` POST
     /// rides the **read** token — it wraps reads, so a browse-only session can use it.
     pub async fn batch_get_json<T: DeserializeOwned>(
@@ -159,6 +161,13 @@ impl GraphClient {
     /// `Ok` (a whole-batch failure was already surfaced by `batch_get_json`'s
     /// `?`); it's kept so paged-batch helpers read uniformly with the rest.
     ///
+    /// `consistency_eventual` states whether the sub-requests were issued as
+    /// advanced queries (a `ConsistencyLevel: eventual` sub-request header, as
+    /// `batch_list_service_principal_groups` sends). Graph does not carry the
+    /// header into the `nextLink` request, so an overflow continuation must
+    /// restate it — and a plain batch must not add it, or pages 2+ come from
+    /// the eventually-consistent index while page 1 came from the directory.
+    ///
     /// The overflow continuations are resolved serially (one `collect_all_pages`
     /// at a time) **by design**: an order-preserving `join_all` would parallelize
     /// them, but the overflow path almost never fires — federated creds cap at
@@ -168,11 +177,12 @@ impl GraphClient {
     pub(crate) async fn finish_paged_batch<T: DeserializeOwned>(
         &self,
         pages: Vec<Result<Paged<T>>>,
+        consistency_eventual: bool,
     ) -> Result<Vec<Result<Vec<T>>>> {
         let mut out = Vec::with_capacity(pages.len());
         for page in pages {
             match page {
-                Ok(p) => out.push(self.collect_all_pages(p).await),
+                Ok(p) => out.push(self.collect_all_pages(p, consistency_eventual).await),
                 Err(e) => out.push(Err(e)),
             }
         }
@@ -182,7 +192,7 @@ impl GraphClient {
     /// [`Self::finish_paged_batch`] for a batch issued under a **specific**
     /// token.
     ///
-    /// The unscoped version continues through `get_json_absolute`, which selects
+    /// The unscoped version continues through `get_json_absolute_with`, which selects
     /// its provider by verb and therefore picks the default read token. That is
     /// right for the batches whose sub-requests the read token already covers,
     /// and wrong for a batch deliberately issued via `batch_get_json_scoped`:
@@ -212,7 +222,8 @@ impl GraphClient {
         Ok(out)
     }
 
-    /// One `$batch` POST for `urls` (already ≤ `BATCH_MAX`), with inner-429 retry.
+    /// One `$batch` POST for `urls` (already ≤ `BATCH_MAX`), with inner 429/5xx
+    /// retry (see [`retried_sub_status`]).
     /// `headers`, when non-empty, are attached to every sub-request.
     async fn batch_chunk<T: DeserializeOwned>(
         &self,
@@ -226,11 +237,13 @@ impl GraphClient {
         // response; the sub-request `id` is the index so order is preserved.
         let mut pending: Vec<usize> = (0..urls.len()).collect();
         // The SAME schedule the four unified clients use — this loop retries
-        // only the throttled sub-requests, so it can't be `with_retries`, but
-        // the budget and the backoff curve are not its to re-derive.
+        // only the throttled or failed sub-requests, so it can't be
+        // `with_retries`, but the budget and the backoff curve are not its to
+        // re-derive.
         let mut budget = RetryBudget::new();
-        // Inner 429s surfaced as `Throttled` because the budget was spent —
-        // logged once after the loop so an exhausted re-batch is not silent.
+        // Inner 429s/5xx surfaced as `Throttled`/`Server` because the budget
+        // was spent — logged once after the loop so an exhausted re-batch is
+        // not silent.
         let mut exhausted: usize = 0;
 
         while !pending.is_empty() {
@@ -273,7 +286,10 @@ impl GraphClient {
             let envelope: BatchEnvelope = serde_json::from_slice(&bytes)
                 .map_err(|e| GraphError::Deserialize(e.to_string()))?;
 
-            let mut throttled: Vec<usize> = Vec::new();
+            let mut retry: Vec<usize> = Vec::new();
+            // Inner 429s this round — the only status that is service
+            // pressure worth telling the throttle observer about.
+            let mut throttled_count: usize = 0;
             let mut max_retry_after: Option<u64> = None;
             for sub in envelope.responses {
                 let Ok(idx) = sub.id.parse::<usize>() else {
@@ -282,45 +298,55 @@ impl GraphClient {
                 if idx >= urls.len() || results[idx].is_some() {
                     continue;
                 }
-                // Retry inner 429s while we still have budget; otherwise let
-                // map_batch_response surface them as `Throttled`.
-                if sub.status == 429 && budget.may_retry() {
+                // Retry inner 429s/5xx while we still have budget; otherwise
+                // let map_batch_response surface them as `Throttled`/`Server`.
+                if retried_sub_status(sub.status) && budget.may_retry() {
+                    // A 5xx normally carries no `Retry-After`, so the wait
+                    // below falls back to the shared jittered backoff.
                     let ra = sub.retry_after_secs();
                     max_retry_after = match (max_retry_after, ra) {
                         (Some(a), Some(b)) => Some(a.max(b)),
                         (a, b) => a.or(b),
                     };
-                    throttled.push(idx);
+                    if sub.status == 429 {
+                        throttled_count += 1;
+                    }
+                    retry.push(idx);
                     continue;
                 }
-                if sub.status == 429 {
+                if retried_sub_status(sub.status) {
                     exhausted += 1;
                 }
                 results[idx] = Some(map_batch_response::<T>(sub));
             }
 
-            if throttled.is_empty() {
+            if retry.is_empty() {
                 break;
             }
-            if let Some(obs) = self.throttle_observer.read().as_ref() {
+            // A 5xx is a failed request, not service pressure: only a 429
+            // feeds the adaptive concurrency throttle.
+            if throttled_count > 0
+                && let Some(obs) = self.throttle_observer.read().as_ref()
+            {
                 obs.on_throttle(max_retry_after);
             }
             // Counts only — the sub-request URLs carry object ids and filters.
             tracing::info!(
-                throttled = throttled.len(),
+                throttled = throttled_count,
+                failed = retry.len() - throttled_count,
                 chunk = urls.len(),
                 attempt = budget.attempt(),
                 retry_after_secs = ?max_retry_after,
-                "graph $batch: re-batching throttled sub-requests"
+                "graph $batch: re-batching throttled or failed sub-requests"
             );
             budget.wait(max_retry_after).await;
-            pending = throttled;
+            pending = retry;
         }
         if exhausted > 0 {
             tracing::warn!(
                 exhausted,
                 attempts = budget.attempt() + 1,
-                "graph $batch: retry budget exhausted; surfacing throttled sub-requests"
+                "graph $batch: retry budget exhausted; surfacing throttled or failed sub-requests"
             );
         }
 
@@ -333,4 +359,14 @@ impl GraphClient {
             })
             .collect())
     }
+}
+
+/// Whether an inner `$batch` sub-response status is re-batched. Mirrors the
+/// single-request classification in `transport.rs` (`send_core_url_with`),
+/// where every status that is not a terminal 4xx — a 429 or any 5xx — is an
+/// `Attempt::Retry`: the same GET must get the same retry policy whether it
+/// travels batched or alone. Every sub-request here is a GET, so replaying a
+/// 5xx cannot double-commit anything.
+fn retried_sub_status(status: u16) -> bool {
+    status == 429 || status >= 500
 }

@@ -51,7 +51,7 @@ impl GraphClient {
             ("$top", MAX_PAGE_SIZE),
         ];
         let page: Paged<AppRoleAssignment> = self.get_json(&path, &params, false).await?;
-        self.collect_all_pages(page).await
+        self.collect_all_pages(page, false).await
     }
 
     /// Principals (users/groups/SPs) assigned **to** this service principal's
@@ -75,7 +75,7 @@ impl GraphClient {
             ("$top", MAX_PAGE_SIZE),
         ];
         let page: Paged<AppRoleAssignment> = self.get_json(&path, &params, false).await?;
-        self.collect_all_pages(page).await
+        self.collect_all_pages(page, false).await
     }
 
     /// [`Self::list_app_role_assigned_to`] read through the cache
@@ -135,7 +135,7 @@ impl GraphClient {
             })
             .collect();
         let pages: Vec<Result<Paged<AppRoleAssignment>>> = self.batch_get_json(&urls).await?;
-        self.finish_paged_batch(pages).await
+        self.finish_paged_batch(pages, false).await
     }
 
     /// Batched [`Self::list_app_role_assignments`]: the application permissions
@@ -158,7 +158,7 @@ impl GraphClient {
             })
             .collect();
         let pages: Vec<Result<Paged<AppRoleAssignment>>> = self.batch_get_json(&urls).await?;
-        self.finish_paged_batch(pages).await
+        self.finish_paged_batch(pages, false).await
     }
 
     /// Assigns a principal (user/group) to a role on `resource_sp_id` — grants
@@ -209,7 +209,7 @@ impl GraphClient {
         let page: Paged<OAuth2PermissionGrant> = self
             .get_json("/oauth2PermissionGrants", &params, false)
             .await?;
-        self.collect_all_pages(page).await
+        self.collect_all_pages(page, false).await
     }
 
     /// Every delegated permission grant in the tenant (`/oauth2PermissionGrants`,
@@ -230,7 +230,7 @@ impl GraphClient {
         let page: Paged<OAuth2PermissionGrant> = self
             .get_json("/oauth2PermissionGrants", &params, false)
             .await?;
-        let all = self.collect_all_pages(page).await?;
+        let all = self.collect_all_pages(page, false).await?;
         self.cache.put(CacheKind::Permissions, cache_key, &all);
         Ok(all)
     }

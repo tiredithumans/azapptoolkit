@@ -80,7 +80,7 @@ impl GraphClient {
         let params: [(&str, &str); 1] =
             [("$select", "id,name,issuer,subject,description,audiences")];
         let page: Paged<FederatedIdentityCredential> = self.get_json(&path, &params, false).await?;
-        self.collect_all_pages(page).await
+        self.collect_all_pages(page, false).await
     }
 
     /// Batched [`Self::list_federated_credentials`]: one `$batch` POST per 20
@@ -103,7 +103,7 @@ impl GraphClient {
             .collect();
         let pages: Vec<Result<Paged<FederatedIdentityCredential>>> =
             self.batch_get_json(&urls).await?;
-        self.finish_paged_batch(pages).await
+        self.finish_paged_batch(pages, false).await
     }
 
     /// Creates a federated identity credential on an application.
