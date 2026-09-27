@@ -43,6 +43,7 @@ pub mod test_support;
 pub mod demo;
 
 use bindings::config::AuthConfigStatus;
+use components::browser_fallback_notice::BrowserFallbackNotice;
 use state::{ActiveView, provide_session, use_session};
 use util::keep_alive;
 use views::{
@@ -156,6 +157,10 @@ fn Root() -> impl IntoView {
     // already — the friction this whole path exists to remove. The demo build
     // starts signed in and never asks.
     let restoring = RwSignal::new(!cfg!(feature = "demo"));
+    // Raised when the launch restore could not reach Entra ID (`network`): the
+    // sign-in card then offers a Retry of the silent restore. Shared with the
+    // card so its Retry and this launch attempt are one code path.
+    let restore_unreachable = RwSignal::new(false);
     // Chained into the config probe rather than spawned beside it: the restore
     // is only meaningful once the app HAS a client/tenant to redeem a refresh
     // token against, and one task is also what makes "exactly once" structural.
@@ -164,18 +169,24 @@ fn Root() -> impl IntoView {
         let status = bindings::config::get_auth_config().await;
         let configured = status.configured;
         config.set(Some(status));
-        // Every failure — nothing stored, a revoked token, an unreachable
-        // keyring — comes back as `Ok(None)` or an `Err` we ignore, and lands on
-        // the untouched sign-in card. Deliberately no error surface here: the
-        // card is the recovery, and it already says what to do.
-        if configured && let Ok(Some(restored)) = bindings::auth::restore_session().await {
-            session.set_active_tenant(Some(restored));
+        // Only an unreachable Entra ID (offline, captive portal, proxy down)
+        // gets a surface: a warning Callout with Retry on the sign-in card, since
+        // the stored session is intact and "sign in" would open a browser that
+        // can't load either. Every other failure — nothing stored, a revoked
+        // token, a locked keyring — lands on the untouched card, which is the
+        // recovery and already says what to do.
+        if configured {
+            views::sign_in::attempt_restore(session, restore_unreachable).await;
         }
         restoring.set(false);
     });
 
     view! {
         <div style="height: 100%; display: flex; flex-direction: column;">
+            // Mounted once, above every screen: sign-in, consent, step-up and
+            // re-auth all run the same browser flow, so a browser that won't
+            // open offers its link here whichever surface started it.
+            <BrowserFallbackNotice />
             {move || match config.get() {
                 None => ().into_any(),
                 // Freshly-downloaded release with no usable client/tenant IDs —
@@ -202,6 +213,7 @@ fn Root() -> impl IntoView {
                                 view! {
                                     <SignInScreen
                                         tenant=tenant_id.clone()
+                                        restore_unreachable=restore_unreachable
                                         // Drops back to the (prefilled) config
                                         // form. Sign-in is the only surface an
                                         // install pointed at the wrong tenant

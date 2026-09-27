@@ -1,6 +1,6 @@
 //! Tenant-scoped cache lifecycle: invalidate only on `Ok`, pin only the
-//! tenant-wide indexes, and take the generation watch **before** the fetch it
-//! guards.
+//! tenant-wide indexes, take the generation watch **before** the fetch it
+//! guards, and forget every per-tenant map on sign-out.
 //!
 //! AGENTS.md calls cross-tenant leakage "the #1 footgun"; these are the rules
 //! that keep it mechanical rather than remembered.
@@ -1067,4 +1067,67 @@ fn the_run_is_cacheable_guard_detector_rejects_every_escape() {
             "detector accepted an unguarded write: {escape}"
         );
     }
+}
+
+/// Sign-out forgets **every** per-tenant map on `AppState`, through one sweep.
+///
+/// `sign_out` used to drop two of the five client maps by hand and leave the Key
+/// Vault / ARM / Log Analytics clients (and the tenant's single-flight gates)
+/// behind — harmless today, since a client holds no token, but a list someone
+/// must remember to extend. `AppState::forget_tenant` is the one sweep; this rule
+/// derives the field list from the struct itself, so a new `Mutex<HashMap<…>>`
+/// fails here until the sweep names it.
+#[test]
+fn sign_out_forgets_every_per_tenant_map_on_app_state() {
+    let state = include_str!("../../src/state.rs");
+    let (_, after) = state
+        .split_once("pub struct AppState {")
+        .expect("AppState struct in state.rs");
+    let (body, _) = after.split_once("\n}\n").expect("end of AppState struct");
+    let names: Vec<&str> = body
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//") && l.contains("Mutex<HashMap<"))
+        .filter_map(|l| l.split_once(':'))
+        .filter_map(|(before, _)| before.split_whitespace().last())
+        .collect();
+    assert!(
+        names.len() >= 6,
+        "expected the single-flight map plus five client maps on AppState, found {names:?} \
+         — the field scan has gone vacuous"
+    );
+    assert!(
+        names.contains(&"kv_clients"),
+        "field scan missed kv_clients: {names:?}"
+    );
+
+    let (_, after) = state
+        .split_once("pub fn forget_tenant(")
+        .expect("AppState::forget_tenant in state.rs");
+    let (forget, _) = after.split_once("\n    }\n").expect("end of forget_tenant");
+    for name in &names {
+        assert!(
+            forget.contains(&format!("self.{name}")),
+            "`AppState::{name}` is a per-tenant map sign-out does not forget — \
+             name it in `AppState::forget_tenant`"
+        );
+    }
+    assert!(
+        forget.contains("invalidate_tenant("),
+        "`AppState::forget_tenant` must sweep every cache kind via `invalidate_tenant`"
+    );
+
+    let auth = include_str!("../../src/commands/auth.rs");
+    let (_, after) = auth
+        .split_once("pub async fn sign_out(")
+        .expect("sign_out command in commands/auth.rs");
+    let (sign_out, _) = after.split_once("\n}\n").expect("end of sign_out");
+    assert!(
+        sign_out.contains("forget_tenant("),
+        "`sign_out` must call `AppState::forget_tenant`, the one sign-out sweep"
+    );
+    assert!(
+        !sign_out.contains("_clients.lock()"),
+        "`sign_out` re-inlines a partial client sweep — call `AppState::forget_tenant` instead, \
+         or a per-tenant map sign-out does not forget slips back in"
+    );
 }

@@ -236,7 +236,9 @@ Two formats:
 Both need **glibc 2.35 or newer** — Ubuntu 22.04, Debian 12 or newer;
 RHEL 9 (glibc 2.34) is not supported. Both also need a WebKitGTK runtime
 (`libwebkit2gtk-4.1`), present on most modern desktops and pulled in
-automatically by the `.deb`.
+automatically by the `.deb`, and a running Secret Service (GNOME Keyring
+or KWallet) to keep your sign-in — see
+[First-run configuration](#first-run-configuration).
 
 ## Updates
 
@@ -298,7 +300,8 @@ the updater endpoint at any point in the session.
 
 - Windows 10 or newer (primary target), macOS on Apple Silicon, or a
   x86_64 Linux desktop with glibc 2.35 or newer (Ubuntu 22.04, Debian 12
-  or newer) and WebKitGTK — installers for all three
+  or newer), WebKitGTK and a Secret Service provider (GNOME Keyring or
+  KWallet) running in the desktop session — installers for all three
   are on the [Releases page](https://github.com/tiredithumans/azapptoolkit/releases).
 - A Microsoft Entra ID account with at least the
   `Application Administrator` role, or the equivalent delegated
@@ -339,6 +342,13 @@ On first launch, azapptoolkit opens a loopback listener, pops your default
 browser for the Entra sign-in, and persists the resulting refresh token in the
 OS keyring (Windows Credential Manager / macOS Keychain / the Secret Service on
 Linux). Access tokens are refreshed lazily and never written to disk.
+
+On Linux a Secret Service provider — GNOME Keyring or KWallet, running in
+your desktop session over D-Bus — is required. Without one, sign-in
+completes in the browser and then fails with "no OS credential store is
+available". Headless/SSH sessions, WSLg and minimal window managers often
+lack one; start a provider (e.g. `gnome-keyring-daemon`) in the session,
+then restart azapptoolkit.
 
 ### Permissions
 

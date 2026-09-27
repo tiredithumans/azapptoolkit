@@ -66,6 +66,15 @@ pub enum AuthError {
     #[error("keyring: {0}")]
     Keyring(String),
 
+    /// The OS credential store could not be registered at all — on Linux, no
+    /// Secret Service provider (GNOME Keyring / KWallet) on the D-Bus session
+    /// bus. Distinct from [`AuthError::Keyring`], a store that exists but
+    /// refused (e.g. locked): there is nothing to unlock here. The failure is
+    /// memoised for the process (`token_cache::ensure_keyring_store`), so
+    /// recovering needs a restart once a provider is running.
+    #[error("no OS credential store is available: {0}")]
+    KeyringUnavailable(String),
+
     /// Rendered with its cause chain: reqwest's own Display stops at "error
     /// sending request for url (…)", hiding DNS / connect / TLS / proxy on the
     /// sign-in card.

@@ -13,7 +13,10 @@ The convention is universal: every kind — Lists, Audit (`{tenant}|audit_run`,
 prefix-sweeps **all four kinds**, so a different operator signing into the *same* tenant never
 reads the previous session's audit/sweep/SP data. The audit-run entry is stored typed
 (`put_typed`, unpinned) and must be read with `get_typed::<CachedAuditRun>` — an untyped `get` on
-it misses.
+it misses. `sign_out` calls `AppState::forget_tenant`, the one sign-out sweep: every per-tenant
+client map (graph/exchange/kv/arm/la), the tenant's idle single-flight gates, and
+`invalidate_tenant`. A new `Mutex<HashMap<…>>` field on `AppState` must be named there (pinned by
+`repo_invariants/cache.rs::sign_out_forgets_every_per_tenant_map_on_app_state`).
 
 ### Proving the session, and what may be pinned
 

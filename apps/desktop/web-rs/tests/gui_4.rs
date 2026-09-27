@@ -37,3 +37,5 @@ mod settings;
 mod shell;
 #[path = "gui/shortcuts.rs"]
 mod shortcuts;
+#[path = "gui/sign_in.rs"]
+mod sign_in;

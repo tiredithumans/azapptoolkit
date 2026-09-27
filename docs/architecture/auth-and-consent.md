@@ -10,8 +10,10 @@ Access tokens are refreshed lazily (~60s before expiry) behind a shared mutex; r
 persist in the OS keyring, access tokens never touch disk (in-memory, zeroized on drop). Write
 scopes are consented **incrementally** on first write — a browse-only session holds no
 mutate-capable token. Error codes distinguish failure modes (`not_signed_in`, `keyring`,
-`token_exchange`, `network`, `authorization`, `consent_required`, `interaction_required`,
-`cancelled`).
+`keyring_unavailable`, `token_exchange`, `network`, `authorization`, `consent_required`,
+`interaction_required`, `cancelled`). `keyring_unavailable` is a credential store that could not be
+registered at all (on Linux: no Secret Service provider on the session bus) — memoised for the
+process, so its sign-in hint says to start one and restart, never to "unlock" it.
 
 **The cache keys on CAE-ness.** Access tokens are cached per `(tenant, scope_key, cae)`. Every Graph
 adapter is `ScopedTokenAdapter::new_cae` (tokens minted with the `cp1` client capability, revoked
@@ -56,6 +58,21 @@ the *configured* tenant: an account remembered under a different directory is re
 used to address someone else's keyring entry. Every empty case — nothing stored, signed out, tenant
 repointed, token revoked, keyring locked — returns `Ok(None)`, not an error, and lands on the normal
 sign-in card; a failed attempt removes the context again so it can never leave a half-live session.
+The one restore failure returned as an error is an unreachable token endpoint (`network`: offline, a
+captive portal, a proxy down) — the refresh token is untouched (only `InvalidGrant` purges it), so
+the launch screen shows a warning Callout with a Retry of the silent restore
+(`views::sign_in::attempt_restore`, shared by `Root`'s launch attempt and the button) instead of
+sending the operator to a browser that can't load Entra ID either.
+
+**A browser that won't launch offers its link in the app.** When `open_system_browser` fails (no
+default handler, a confined `xdg-open`, a policy blocking the handler), `run_auth_code_flow` hands
+the authorize URL to the hook installed with `EntraAuthService::set_browser_fallback` —
+`Some(url)`, then `None` when the browser leg ends however it ends (a `ManualLinkOffer` guard). The
+desktop emits it as the `auth-browser-fallback` event (`commands::auth::offer_sign_in_link_in_the_webview`,
+wired in `lib.rs` setup), and `BrowserFallbackNotice`, mounted once in `Root` above every screen,
+shows it through `CopyBlock` — so sign-in, consent, step-up and re-auth are all covered. The URL is
+single-use (PKCE + `state`) and redeemable only through this process's loopback listener; it is
+shown to the operator, never logged.
 
 **Keyring chunking (Windows footgun).** Refresh tokens are chunked across numbered keyring entries
 (`{tenant}:{oid}`, `{tenant}:{oid}#1`, …) in `token_cache.rs` because Windows Credential Manager

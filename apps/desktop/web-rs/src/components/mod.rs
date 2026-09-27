@@ -3,6 +3,7 @@
 pub mod aap_migration_report;
 pub mod app_site_access_panel;
 pub mod audit_dashboard;
+pub mod browser_fallback_notice;
 pub mod bulk_action_bar;
 pub mod changelog_notes;
 pub mod claims_editor;

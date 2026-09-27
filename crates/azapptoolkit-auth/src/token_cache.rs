@@ -6,8 +6,10 @@
 //! token minted without the `cp1` client capability is never served to a
 //! Continuous Access Evaluation consumer (or vice versa).
 //! Refresh tokens, which are scope-agnostic, live in the OS secret store via
-//! [`keyring_core`] — Windows Credential Manager / macOS Keychain / Secret
-//! Service — and are shared across audiences for the same account.
+//! [`keyring_core`] — Windows Credential Manager / macOS Keychain / the D-Bus
+//! Secret Service on Linux (a hard requirement there: without a provider,
+//! sign-in fails with [`AuthError::KeyringUnavailable`]) — and are shared
+//! across audiences for the same account.
 
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
@@ -22,9 +24,13 @@ pub const KEYRING_SERVICE: &str = "azapptoolkit";
 /// keyring v4 split out `keyring-core` and no longer auto-installs a platform
 /// credential store, so the first `Entry::new` fails with "No default store has
 /// been set" until one is registered. Register the OS-native store (macOS
-/// Keychain / Windows Credential Manager / Linux keyutils) exactly once, on
-/// first use, memoizing the outcome so a registration failure surfaces the same
-/// error on every subsequent call.
+/// Keychain / Windows Credential Manager / the Secret Service via zbus on
+/// Linux/BSD) exactly once, on first use, memoizing the outcome so a
+/// registration failure surfaces the same error on every subsequent call.
+///
+/// A registration failure is [`AuthError::KeyringUnavailable`] — there is no
+/// store at all (on Linux: no Secret Service provider on the session bus) —
+/// never [`AuthError::Keyring`], which means a store that exists but refused.
 fn ensure_keyring_store() -> Result<()> {
     static STORE: OnceLock<std::result::Result<(), String>> = OnceLock::new();
     STORE
@@ -40,7 +46,7 @@ fn ensure_keyring_store() -> Result<()> {
             }
         })
         .clone()
-        .map_err(AuthError::Keyring)
+        .map_err(AuthError::KeyringUnavailable)
 }
 
 /// Registers the OS-native credential store as `keyring_core`'s default store.

@@ -14,6 +14,7 @@ pub fn run() {
     install_panic_hook();
 
     let app_state = state::AppState::new();
+    let auth = std::sync::Arc::clone(&app_state.auth);
 
     let builder = tauri::Builder::default();
     // macOS only: Windows and Linux get no menu bar at all (Tauri installs a
@@ -25,7 +26,10 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|_app| {
+        .setup(move |app| {
+            // A browser that won't launch hands the sign-in link to the webview
+            // instead of leaving the operator waiting out the redirect timeout.
+            commands::auth::offer_sign_in_link_in_the_webview(app.handle().clone(), &auth);
             // Ensure the config directory exists for the settings/keyring paths.
             // The former silent background auto-install lived here; updates are
             // now interactive — the front-end checks on launch and drives the

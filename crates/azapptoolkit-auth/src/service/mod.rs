@@ -4,7 +4,8 @@
 //!   1. Bind a loopback listener on an ephemeral port.
 //!   2. Build the authorize URL (read-only scopes from
 //!      `azapptoolkit_core::constants::GRAPH_READ_SCOPES` plus `offline_access`),
-//!      open it in the system browser. Write scopes are consented incrementally
+//!      open it in the system browser — or, if that fails, hand the URL to the
+//!      app's browser fallback. Write scopes are consented incrementally
 //!      the first time a mutating Graph call needs them.
 //!   3. Accept requests on the listener until a redirect carrying the pending
 //!      `state` arrives (others are answered 400 and ignored), pull `code`,
@@ -69,6 +70,21 @@ type RefreshLocks = Mutex<HashMap<(String, String), Arc<AsyncMutex<()>>>>;
 /// `EntraAuthService::open_browser` field.
 type BrowserOpener = Box<dyn Fn(&str) -> Result<()> + Send + Sync>;
 
+/// Offers the `/authorize` URL in the app when the browser can't be launched.
+/// See the `EntraAuthService::browser_fallback` field.
+type BrowserFallback = Arc<dyn Fn(Option<&str>) + Send + Sync>;
+
+/// Withdraws a manually offered sign-in link when the browser leg of the flow
+/// ends — however it ends: a redirect, an error, the timeout, or the future
+/// being dropped (the operator's Cancel).
+struct ManualLinkOffer(BrowserFallback);
+
+impl Drop for ManualLinkOffer {
+    fn drop(&mut self) {
+        (self.0)(None)
+    }
+}
+
 pub struct EntraAuthService {
     client_id: String,
     /// Single-tenant authority. The OAuth authorize/token URLs are
@@ -103,6 +119,12 @@ pub struct EntraAuthService {
     /// and `reauthenticate` end to end — the loopback `redirect_uri`, `state`
     /// and `nonce` all travel in the URL it is handed.
     open_browser: BrowserOpener,
+    /// Told `Some(authorize_url)` when the system browser can't be launched,
+    /// and `None` when that flow ends however it ends (success, error, Cancel,
+    /// timeout), so a UI can offer the link only while it is live. Unset (the
+    /// default), a launch failure is only logged. Installed by the app via
+    /// [`Self::set_browser_fallback`].
+    browser_fallback: Mutex<Option<BrowserFallback>>,
 }
 
 impl EntraAuthService {
@@ -138,7 +160,17 @@ impl EntraAuthService {
                 .build()
                 .expect("reqwest client builds"),
             open_browser: Box::new(open_system_browser),
+            browser_fallback: Mutex::new(None),
         })
+    }
+
+    /// Installs the hook an interactive flow calls when the system browser
+    /// can't be launched: `Some(authorize_url)` so the app can show the link,
+    /// then `None` once that flow's browser leg is over. The URL is single-use
+    /// (PKCE + `state`) and redeemable only through this process's loopback
+    /// listener; the hook must never log it. Replaces any earlier hook.
+    pub fn set_browser_fallback(&self, f: impl Fn(Option<&str>) + Send + Sync + 'static) {
+        *self.browser_fallback.lock() = Some(Arc::new(f));
     }
 
     /// The Microsoft cloud this service targets — chosen by the caller:
@@ -422,12 +454,21 @@ impl EntraAuthService {
             url_length = auth_url.as_str().len(),
             "opening system browser for Entra authorize"
         );
-        if let Err(err) = (self.open_browser)(auth_url.as_str()) {
-            tracing::warn!(
-                ?err,
-                "failed to auto-open browser; user must open URL manually"
-            );
-        }
+        let manual_link = match (self.open_browser)(auth_url.as_str()) {
+            Ok(()) => None,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to auto-open browser; offering the sign-in link in the app"
+                );
+                // Cloned out: the hook is never called under the lock.
+                let fallback = self.browser_fallback.lock().clone();
+                fallback.map(|fallback| {
+                    fallback(Some(auth_url.as_str()));
+                    ManualLinkOffer(fallback)
+                })
+            }
+        };
 
         // Bound the wait on the browser redirect (`REDIRECT_WAIT`) so a sleeping
         // machine or a browser that never completes the flow can't hang sign-in
@@ -438,8 +479,10 @@ impl EntraAuthService {
             REDIRECT_WAIT,
             listen_for_code(listener, csrf_state.secret()),
         )
-        .await
-        .map_err(|_| AuthError::Cancelled)??;
+        .await;
+        // The browser leg is over, whatever it returned: withdraw the link.
+        drop(manual_link);
+        let code = code.map_err(|_| AuthError::Cancelled)??;
 
         // Moved, not copied: this is the only verifier string, and it is wiped
         // on drop. (oauth2 has no zeroize, so the random pre-image inside its
@@ -1064,6 +1107,7 @@ mod tests {
             known_tenants: Mutex::new(HashMap::new()),
             http: reqwest::Client::new(),
             open_browser,
+            browser_fallback: Mutex::new(None),
         }
     }
 
@@ -1702,6 +1746,30 @@ mod tests {
         svc
     }
 
+    /// Offline at launch: the token endpoint is unreachable, which is not a
+    /// dead session — the stored refresh token survives for a retry, and no
+    /// unproven context is left registered.
+    #[tokio::test(start_paused = true)]
+    async fn restore_session_while_offline_keeps_the_stored_token() {
+        let (tenant, oid) = ("restore-offline-tenant", "restore-offline-oid");
+        let svc = relaunched_service("http://127.0.0.1:1".into(), tenant, oid);
+        let context = TenantContext {
+            tenant_id: tenant.into(),
+            account_oid: oid.into(),
+            username: None,
+            display_name: None,
+        };
+
+        let result = svc.restore_session(&context).await;
+
+        assert!(matches!(result, Err(AuthError::Http(_))), "{result:?}");
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("stored-refresh-token")
+        );
+        assert!(svc.tenant_context(tenant).is_none());
+    }
+
     #[tokio::test]
     async fn restore_session_revives_the_session_from_the_keyring() {
         let server = MockServer::start().await;
@@ -1928,6 +1996,88 @@ mod tests {
 
         assert!(matches!(result, Err(AuthError::Cancelled)), "{result:?}");
         assert!(svc.known_tenants.lock().is_empty());
+    }
+
+    // ---- F114: a browser that won't launch hands the link to the app ----
+
+    /// Records every call a browser fallback receives.
+    type FallbackLog = Arc<Mutex<Vec<Option<String>>>>;
+
+    #[tokio::test]
+    async fn a_browser_that_will_not_launch_hands_the_link_to_the_app_then_withdraws_it() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("fallback-tenant", "fallback-oid");
+        let svc = fresh_service(
+            server.uri(),
+            tenant,
+            Box::new(|_| Err(AuthError::Io(std::io::Error::other("no handler")))),
+        );
+        let nonce_slot = Arc::new(Mutex::new(None));
+        // The operator pastes the offered link into a browser by hand.
+        let deliver = redirecting_opener(nonce_slot.clone(), Arc::new(AtomicUsize::new(0)));
+        let seen: FallbackLog = Arc::default();
+        let log = Arc::clone(&seen);
+        svc.set_browser_fallback(move |url| {
+            log.lock().push(url.map(str::to_owned));
+            if let Some(url) = url {
+                deliver(url).unwrap();
+            }
+        });
+        mount_interactive_token(&server, tenant, tenant, Some(oid), None, nonce_slot).await;
+
+        svc.sign_in().await.unwrap();
+
+        let seen = seen.lock().clone();
+        assert_eq!(seen.len(), 2, "offered once, then withdrawn: {seen:?}");
+        assert!(
+            seen[1].is_none(),
+            "the link is withdrawn when the flow ends"
+        );
+        let offered = seen[0].as_deref().expect("the authorize URL was offered");
+        let query: HashMap<String, String> = url::Url::parse(offered)
+            .unwrap()
+            .query_pairs()
+            .into_owned()
+            .collect();
+        assert!(query.contains_key("state"));
+        assert!(query.contains_key("code_challenge"));
+        assert!(query["redirect_uri"].starts_with("http://127.0.0.1:"));
+    }
+
+    #[tokio::test]
+    async fn a_launched_browser_never_involves_the_fallback() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("launched-tenant", "launched-oid");
+        let (svc, nonce, _) = interactive_service(server.uri(), tenant);
+        let seen: FallbackLog = Arc::default();
+        let log = Arc::clone(&seen);
+        svc.set_browser_fallback(move |url| log.lock().push(url.map(str::to_owned)));
+        mount_interactive_token(&server, tenant, tenant, Some(oid), None, nonce).await;
+
+        svc.sign_in().await.unwrap();
+
+        assert!(seen.lock().is_empty(), "{:?}", seen.lock());
+    }
+
+    /// Nobody opens the link: the wait times out as `Cancelled`, and the link
+    /// is withdrawn all the same.
+    #[tokio::test(start_paused = true)]
+    async fn the_link_is_withdrawn_when_the_flow_is_abandoned() {
+        let svc = fresh_service(
+            "http://localhost".into(),
+            "fallback-abandoned-tenant",
+            Box::new(|_| Err(AuthError::Io(std::io::Error::other("no handler")))),
+        );
+        let seen: FallbackLog = Arc::default();
+        let log = Arc::clone(&seen);
+        svc.set_browser_fallback(move |url| log.lock().push(url.map(str::to_owned)));
+
+        let result = svc.sign_in().await;
+
+        assert!(matches!(result, Err(AuthError::Cancelled)), "{result:?}");
+        let seen = seen.lock().clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[0].is_some() && seen[1].is_none(), "{seen:?}");
     }
 
     // ---- F111: the /token POST rides the shared retry budget ----

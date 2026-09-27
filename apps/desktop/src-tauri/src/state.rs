@@ -523,6 +523,39 @@ impl AppState {
         }
     }
 
+    /// Everything this process holds for `tenant_id`, dropped on sign-out: every
+    /// per-tenant client map, the tenant's idle single-flight gates, and every
+    /// cache kind. Distinct from [`Self::forget_account`] (the settings.json
+    /// restore pointer).
+    ///
+    /// The clients hold no tokens — each carries a `ScopedTokenAdapter` that
+    /// re-asks the auth service, whose tokens `sign_out` has just purged — so
+    /// dropping them is hygiene, not a leak fix: it keeps the sweep exhaustive
+    /// and bounds `kv_clients`, which is keyed per `(tenant, vault)` and would
+    /// otherwise only grow. Only *idle* gates are dropped (the same rule the
+    /// [`Self::single_flight`] sweep uses): a gate some fetch still holds is
+    /// left alone, since dropping it would split that in-flight fetch.
+    ///
+    /// The cache sweep drops EVERY tenant-scoped entry — lists, the cached audit
+    /// run + site sweep (`CacheKind::Audit`), and the SP/permission lookups — so
+    /// the next sign-in (a different tenant, or a different operator on the SAME
+    /// tenant) never reads this session's data. `invalidate_tenant` sweeps all
+    /// kinds by the shared `{tenant_id}|` convention (and is unit-tested in
+    /// core). A new `Mutex<HashMap<…>>` field on `AppState` must be named here —
+    /// pinned by `repo_invariants/cache.rs`.
+    pub fn forget_tenant(&self, tenant_id: &str) {
+        self.graph_clients.lock().remove(tenant_id);
+        self.exchange_clients.lock().remove(tenant_id);
+        self.kv_clients.lock().retain(|(t, _), _| t != tenant_id);
+        self.arm_clients.lock().remove(tenant_id);
+        self.la_clients.lock().remove(tenant_id);
+        let prefix = format!("{tenant_id}|");
+        self.inflight
+            .lock()
+            .retain(|k, gate| !k.starts_with(&prefix) || Arc::strong_count(gate) > 1);
+        self.cache.invalidate_tenant(tenant_id);
+    }
+
     /// The account a previous run remembered, if it belongs to the tenant *this*
     /// run resolved (see `UserSettings::remembered_account_for` for why the
     /// tenant guard is not optional). Read fresh from disk rather than cached at
@@ -901,7 +934,8 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{CancelFlag, IdSource, resolve};
+    use super::{AppState, CancelFlag, IdSource, resolve};
+    use azapptoolkit_core::cache::CacheKind;
 
     /// Never set by anything, so the env-var branch is skipped. The `Env` arm
     /// itself is not tested: it needs `std::env::set_var`, which is `unsafe`
@@ -1008,6 +1042,53 @@ mod tests {
         f.cancel();
         let run = f.claim();
         assert!(!run.is_cancelled());
+    }
+
+    #[test]
+    fn forget_tenant_drops_only_that_tenants_clients_and_idle_gates() {
+        let state = AppState::for_test("t1", "http://127.0.0.1:9");
+        state.kv_for("t1", "vault1").expect("valid vault name");
+        state.kv_for("t2", "vault1").expect("valid vault name");
+        state.arm_for("t1");
+        state.arm_for("t2");
+        state.log_analytics_for("t1");
+        state.exchange_for("t1", "a@contoso.com");
+        state.graph_for("t2");
+        let held = state.single_flight("t1|held");
+        drop(state.single_flight("t1|idle"));
+        drop(state.single_flight("t2|idle"));
+        state.cache.put(CacheKind::Lists, "t1|x".to_string(), &1u32);
+        state.cache.put(CacheKind::Lists, "t2|x".to_string(), &2u32);
+
+        state.forget_tenant("t1");
+
+        assert!(!state.graph_clients.lock().contains_key("t1"));
+        assert!(!state.exchange_clients.lock().contains_key("t1"));
+        assert!(!state.arm_clients.lock().contains_key("t1"));
+        assert!(!state.la_clients.lock().contains_key("t1"));
+        assert!(state.kv_clients.lock().keys().all(|(t, _)| t != "t1"));
+
+        assert!(state.graph_clients.lock().contains_key("t2"));
+        assert!(state.arm_clients.lock().contains_key("t2"));
+        assert!(
+            state
+                .kv_clients
+                .lock()
+                .contains_key(&("t2".to_string(), "vault1".to_string()))
+        );
+
+        let gates = state.inflight.lock();
+        assert!(gates.contains_key("t1|held"), "a held gate must survive");
+        assert!(!gates.contains_key("t1|idle"), "an idle t1 gate is dropped");
+        assert!(
+            gates.contains_key("t2|idle"),
+            "another tenant's gate is kept"
+        );
+        drop(gates);
+
+        assert_eq!(state.cache.get::<u32>(CacheKind::Lists, "t1|x"), None);
+        assert_eq!(state.cache.get::<u32>(CacheKind::Lists, "t2|x"), Some(2));
+        drop(held);
     }
 
     mod consent_features {

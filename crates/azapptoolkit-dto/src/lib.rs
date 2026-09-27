@@ -220,6 +220,7 @@ mod backend_conv {
                 AuthError::StateMismatch => ("state_mismatch", false),
                 AuthError::Cancelled => ("cancelled", false),
                 AuthError::Keyring(_) => ("keyring", false),
+                AuthError::KeyringUnavailable(_) => ("keyring_unavailable", false),
                 AuthError::Http(_) => ("network", true),
                 AuthError::Url(_) => ("url", false),
                 AuthError::Serde(_) => ("serde", false),
@@ -285,6 +286,11 @@ mod backend_conv {
                 (AuthError::StateMismatch, "state_mismatch", false),
                 (AuthError::Cancelled, "cancelled", false),
                 (AuthError::Keyring("locked".into()), "keyring", false),
+                (
+                    AuthError::KeyringUnavailable("no session bus".into()),
+                    "keyring_unavailable",
+                    false,
+                ),
                 (
                     AuthError::Url(url::Url::parse("http://[bad").unwrap_err()),
                     "url",

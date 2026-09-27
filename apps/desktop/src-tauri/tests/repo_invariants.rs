@@ -17,7 +17,8 @@
 //! - [`sources`] — the command layer as data: the source walk and the
 //!   per-command / per-function extractors every rule reads
 //! - [`fanout`] — dead-session gating in the long-running fan-outs
-//! - [`cache`] — invalidate-on-`Ok`, pinned indexes, watch-before-fetch
+//! - [`cache`] — invalidate-on-`Ok`, pinned indexes, watch-before-fetch, the
+//!   sign-out sweep
 //! - [`cancel`] — one `CancelToken` claim per long-running command
 //! - [`commands`] — whole-layer scans (the Callout primitive, consent
 //!   detection, resource-gated scope fixes)

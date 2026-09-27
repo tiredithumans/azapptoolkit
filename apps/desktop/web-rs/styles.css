@@ -448,6 +448,15 @@ h3 {
 }
 
 /* ---------- Sign-in ---------- */
+/* The sign-in link offered when the system browser won't open (Root, above
+   every screen). The link is long; cap its block rather than the whole page. */
+.browser-fallback {
+  margin: var(--space-3) var(--space-4) 0;
+}
+.browser-fallback .secret-reveal {
+  max-height: 8em;
+  overflow: auto;
+}
 .signin-shell {
   display: flex;
   flex: 1;

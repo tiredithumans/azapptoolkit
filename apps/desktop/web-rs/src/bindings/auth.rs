@@ -22,6 +22,10 @@ pub async fn sign_in() -> Result<SignInOutcome, UiError> {
 /// here, the operator signed out, or the stored refresh token expired or was
 /// revoked); the backend deliberately reports every such case this way, so a
 /// caller shows the normal sign-in card rather than an error.
+///
+/// `Err` means exactly one thing: Entra ID was unreachable (code `network`).
+/// The stored session is intact, so the caller offers a Retry
+/// (`views::sign_in::attempt_restore`).
 pub async fn restore_session() -> Result<Option<TenantContext>, UiError> {
     invoke_result("restore_session", ()).await
 }

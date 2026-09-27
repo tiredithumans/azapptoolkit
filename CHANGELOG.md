@@ -34,9 +34,22 @@
   tell which app skips the consent prompt without looking it up. Each row now shows the app's name
   from this tenant's directory. The Add dialog searches enterprise apps and app registrations by
   name or ID. You can still add a client from another tenant by pasting its application ID.
+- **If azapptoolkit can't open your browser to sign in, it shows the sign-in link.** Sign-in,
+  consent and re-authentication used to wait five minutes and then fail when no default browser
+  could be launched (a confined `xdg-open`, or a policy that blocks the browser handler). The link
+  now appears at the top of the window with a Copy button. Paste it into a browser on this computer
+  to continue.
 
 ### Fixed
 
+- **Starting the app offline no longer looks like you were signed out.** If Entra ID can't be
+  reached to restore your last session, the sign-in screen now says so and offers Retry, which
+  picks the session back up once you're online, without a browser sign-in. Before, you got the
+  plain sign-in card, and signing in opened a browser that couldn't load.
+- **On Linux without a credential store, sign-in says what's missing.** azapptoolkit keeps your
+  sign-in in the Secret Service (GNOME Keyring or KWallet). When none is running, the error told
+  you to unlock a keychain that doesn't exist. It now says no credential store is available and how
+  to fix it, and the README lists the requirement.
 - **A sign-in Entra refuses in the browser now shows the step that fixes it, and a stray request
   can no longer cancel a sign-in.** When you declined consent (AADSTS65004) or a Conditional Access
   policy blocked you (AADSTS53003), the sign-in card showed only the generic "declined" hint,

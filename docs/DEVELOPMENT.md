@@ -29,7 +29,9 @@ these, but you provide them via your OS package manager:
 
 - A C toolchain: MSVC on Windows, Xcode CLT on macOS, gcc/clang on Linux (`just setup` checks
   `cc`/`gcc`/`clang`, `xcode-select -p`, or the MSVC build tools via `vswhere`)
-- On Linux: `libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libssl-dev`
+- On Linux: `libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libssl-dev`;
+  and, to sign in under `just dev`, a running Secret Service provider (e.g. `gnome-keyring`) in the
+  desktop session — the refresh token has no other store on Linux
 - On Windows, for MSI packaging: WiX Toolset 3.11+ (the NSIS target needs no manual prereq — Tauri
   downloads its toolchain on first build)
 
@@ -388,6 +390,10 @@ Invariants every change must preserve (the audit/review baseline for auth-adjace
   (`Zeroize` on `AccessToken` in `azapptoolkit-auth/src/token_cache.rs`); their `Debug` impl prints
   `<redacted>`. Refresh tokens go to the OS keyring — chunked across numbered entries because
   Windows Credential Manager caps a blob at 2560 UTF-16 bytes (don't collapse the chunking).
+  On Linux the only store is the Secret Service via zbus (`zbus_secret_service_keyring_store`); a
+  missing provider surfaces as `keyring_unavailable` (`AuthError::KeyringUnavailable`, memoised for
+  the process), distinct from `keyring` (a store that exists but refused, e.g. locked). There is no
+  in-memory fallback for the refresh token.
   Exactly what is wiped from the heap: `AccessToken` on drop; the refresh token on load (each
   keyring chunk and the combined buffer) and on save (each chunk string); the `/token` response
   body buffer and the parsed access/refresh/id tokens (`TokenResponse`'s token fields are

@@ -8,8 +8,25 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 
 use crate::bindings::auth;
-use crate::components::ui::Card;
-use crate::state::use_session;
+use crate::components::ui::{Callout, Card};
+use crate::state::{Session, use_session};
+
+/// One silent attempt at reviving the previous session — the launch restore in
+/// `Root` and the offline card's Retry are this same call. A restored session
+/// replaces the sign-in card; an unreachable Entra ID (`network`, the one case
+/// the backend returns as an error) raises `unreachable` so the card offers a
+/// Retry; every other outcome is the plain card. The error message is never
+/// shown: its cause chain can carry the token URL.
+pub(crate) async fn attempt_restore(session: Session, unreachable: RwSignal<bool>) {
+    match auth::restore_session().await {
+        Ok(Some(tenant)) => {
+            unreachable.set(false);
+            session.set_active_tenant(Some(tenant));
+        }
+        Err(e) if e.code == "network" => unreachable.set(true),
+        Ok(None) | Err(_) => unreachable.set(false),
+    }
+}
 
 #[component]
 pub fn SignInScreen(
@@ -24,9 +41,26 @@ pub fn SignInScreen(
     /// can never complete.
     #[prop(into)]
     on_reconfigure: Callback<()>,
+    /// Set when the launch restore could not reach Entra ID: the stored
+    /// session is intact, so the card offers a Retry of the silent restore
+    /// instead of only a browser sign-in that can't load either. Owned by
+    /// `Root`, which runs the launch attempt.
+    #[prop(optional)]
+    restore_unreachable: RwSignal<bool>,
 ) -> impl IntoView {
     let session = use_session();
     let busy = RwSignal::new(false);
+    let retrying = RwSignal::new(false);
+    let on_retry = move |_| {
+        if retrying.get() {
+            return;
+        }
+        retrying.set(true);
+        leptos::task::spawn_local(async move {
+            attempt_restore(session, restore_unreachable).await;
+            retrying.set(false);
+        });
+    };
     // (message, hint): the hint translates the machine error code into a
     // recovery step, since "error [keyring]" means nothing to most users.
     let error: RwSignal<Option<(String, &'static str)>> = RwSignal::new(None);
@@ -40,7 +74,11 @@ pub fn SignInScreen(
         let session = session;
         leptos::task::spawn_local(async move {
             match auth::sign_in().await {
-                Ok(outcome) => session.set_active_tenant(Some(outcome.tenant)),
+                Ok(outcome) => {
+                    // So a later sign-out doesn't repaint a stale offline callout.
+                    restore_unreachable.set(false);
+                    session.set_active_tenant(Some(outcome.tenant));
+                }
                 // Surface the error code alongside the message (matches the
                 // detail-pane `error [code]: message` convention) so failures
                 // are diagnosable.
@@ -64,6 +102,36 @@ pub fn SignInScreen(
                 <Body1>
                     "Use Entra ID to manage App Registrations, permissions, and run security audits."
                 </Body1>
+                {move || {
+                    restore_unreachable
+                        .get()
+                        .then(|| {
+                            view! {
+                                <Callout tone="warn" role="status">
+                                    <Body1>
+                                        "Couldn't reach Entra ID to restore your session — check your network connection, then retry."
+                                    </Body1>
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                        class="signin-restore-retry"
+                                        on_click=Box::new(on_retry)
+                                        disabled=Signal::derive(move || retrying.get())
+                                    >
+                                        {move || {
+                                            if retrying.get() {
+                                                view! {
+                                                    <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                }
+                                                    .into_any()
+                                            } else {
+                                                view! { "Retry" }.into_any()
+                                            }
+                                        }}
+                                    </Button>
+                                </Callout>
+                            }
+                        })
+                }}
                 {(!tenant.is_empty())
                     .then(|| {
                         view! {
@@ -156,6 +224,13 @@ fn recovery_hint(code: &str, message: &str) -> &'static str {
         "keyring" => {
             "The OS credential store couldn't be reached — unlock your \
              keychain/credential manager, then retry."
+        }
+        // No store at all — nothing to unlock. Registration is memoised for the
+        // process, so a provider started afterwards needs a restart.
+        "keyring_unavailable" => {
+            "No OS credential store is available, so azapptoolkit can't keep your \
+             sign-in. On Linux it needs a running Secret Service (GNOME Keyring or \
+             KWallet) in your desktop session — start one, then restart azapptoolkit."
         }
         "authorization" | "consent_required" => {
             "The sign-in was declined. An administrator may need to grant the app \
@@ -286,6 +361,17 @@ mod tests {
             recovery_hint("network", "connection refused"),
             "Check your network connection, then select Sign in to retry.",
         );
+    }
+
+    #[test]
+    fn a_missing_credential_store_is_not_told_to_unlock_it() {
+        let hint = recovery_hint(
+            "keyring_unavailable",
+            "no OS credential store is available: no session bus",
+        );
+        assert!(hint.contains("Secret Service"), "{hint}");
+        assert!(hint.contains("restart"), "{hint}");
+        assert!(!hint.contains("unlock"), "{hint}");
     }
 
     #[test]
