@@ -3,6 +3,7 @@ use tauri::State;
 use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_core::models::{RequiredResourceAccess, ResourceAccess, ServicePrincipal};
 
+use crate::commands::applications::app_role_resources_key;
 use crate::dto::UiError;
 use crate::dto::permissions::{
     CatalogResourceSummary, DowngradeOutcome, GrantFailure, GrantResult, PermissionKind,
@@ -25,10 +26,6 @@ pub fn list_catalog_resources() -> Vec<CatalogResourceSummary> {
         .collect()
 }
 
-fn app_role_resources_key(tenant_id: &str) -> String {
-    format!("{tenant_id}|app_role_resources")
-}
-
 /// Tenant-owned resources (the org's own app registrations / service
 /// principals) that expose at least one enabled Application app role, for the
 /// Grant-access picker's "Tenant app registrations" group. Returns only the
@@ -37,8 +34,11 @@ fn app_role_resources_key(tenant_id: &str) -> String {
 /// selected, and the grant path (`grant_managed_identity_permission` /
 /// `grant_single_permission`) already accepts an arbitrary `resource_app_id`, so
 /// this adds no grant surface. Cached under [`CacheKind::Lists`] (tenant-scoped
-/// key) — a read-only directory busted by the Lists TTL and the sign-out tenant
-/// sweep, so no mutation-driven invalidation is wired.
+/// key, [`app_role_resources_key`]). Busted by `invalidate_app_lists` (an app/SP
+/// create or delete changes the set) and by the App roles tab's writers through
+/// `invalidate_app_role_resources` (the first enabled Application role added, or
+/// the last one disabled/removed, moves an SP in or out of this directory and
+/// shifts its count); the Lists TTL and the sign-out tenant sweep cover the rest.
 #[tauri::command]
 pub async fn list_app_role_resources(
     state: State<'_, AppState>,

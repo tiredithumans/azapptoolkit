@@ -2,6 +2,27 @@
 
 ### Fixed
 
+- **Editing an app's SAML URLs, OIDC redirect URIs or claims mapping, and the bulk "Remove expired
+  credentials" sweep, no longer force a re-scan of the whole tenant.** Each of those changes one
+  app in place, yet they dropped the two tenant-wide directory indexes (every app registration and
+  every service principal) that the App Registrations, Enterprise Apps and search surfaces join
+  against — so the next list visit re-enumerated the tenant (tens of seconds on a large one) for a
+  change that touched neither. They now bust only what they changed: the affected app's detail
+  payload, its list row, the credential-expiry board and the audit, exactly as the per-app
+  credential actions already did.
+- **"Fix all" and the bulk "Remove expired credentials" action read only the selected apps.** The
+  sweep walked every page of the tenant's app registrations (to the same 10 000-app ceiling the
+  lists use) and then discarded everything but the selection; a selection now arrives in a handful
+  of batched reads, with the full walk reserved for the tenant-wide sweep. An app that could not
+  be read is listed among the failures instead of silently left out.
+- **The Grant-access picker's "Tenant app registrations" group reflects app-role changes at
+  once.** Exposing an app's first Application role (or removing its last) on the App roles tab,
+  and creating or deleting an app, left the cached directory untouched for up to an hour, so a
+  freshly published API was missing and a deleted app lingered. Those writes now refresh it.
+- **Assigning an Azure role to a managed identity refreshes the Key Vault access view.** The "who
+  can touch this vault?" sweep was cached for an hour and not cleared by the app's own role
+  assignment, so a role granted from the Managed Identities pane was invisible there until the
+  cache expired. The assignment now drops the cached sweep; the next visit re-runs it.
 - **The audit now sees the newer mailbox permissions Exchange RBAC can scope — `MailboxItem.*`,
   `MailboxFolder.*`, `MailboxConfigItem.*`, `MailTips.ReadBasic.All` and
   `Mail-Advanced.ReadWrite.All`.** An org-wide Microsoft Graph grant of `MailboxItem.ReadWrite.All`

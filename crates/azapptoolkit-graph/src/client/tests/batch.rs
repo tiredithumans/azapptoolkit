@@ -76,6 +76,42 @@ async fn batch_get_service_principals_maps_404_to_none_in_order() {
 }
 
 #[tokio::test]
+async fn batch_get_applications_credentials_projects_secrets_and_keeps_input_order() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        // The sweep reads `passwordCredentials`; a projection that drops it
+        // would make every app look secret-free and the sweep a silent no-op.
+        .and(body_string_contains("passwordCredentials"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "responses": [
+                // Reversed on purpose: results are matched by `id`, not position.
+                { "id": "1", "status": 404, "body": { "error": { "message": "gone" } } },
+                { "id": "0", "status": 200, "body": {
+                    "id": "obj-0", "appId": "app-0", "displayName": "Zero",
+                    "passwordCredentials": [{ "keyId": "k1", "endDateTime": "2020-01-01T00:00:00Z" }]
+                } }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let ids = vec!["obj-0".to_string(), "obj-1".to_string()];
+    let out = client
+        .batch_get_applications_credentials(&ids)
+        .await
+        .unwrap();
+    assert_eq!(out.len(), 2);
+    let first = out[0].as_ref().unwrap();
+    assert_eq!(first.id, "obj-0");
+    assert_eq!(first.password_credentials.len(), 1);
+    assert_eq!(first.password_credentials[0].key_id, "k1");
+    // A vanished selected app is that id's own `Err`, not a hole in the vec.
+    assert!(matches!(out[1], Err(GraphError::NotFound(_))));
+}
+
+#[tokio::test]
 async fn batch_list_app_role_assigned_to_follows_nextlink_overflow() {
     let server = MockServer::start().await;
     // First (batched) page carries an `@odata.nextLink` (same-origin, so

@@ -318,6 +318,31 @@ impl GraphClient {
         self.batch_get_json(&urls).await
     }
 
+    /// Batched `GET /applications/{id}` projected to what the bulk
+    /// expired-secret sweep reads (`id,appId,displayName,passwordCredentials`) —
+    /// the sweep's **selection** read, so a "Fix all N" fetches exactly the
+    /// selected apps in one `$batch` POST per 20 ids instead of walking every
+    /// page of the tenant and discarding all but the selection. The projection
+    /// mirrors the sweep's tenant-walk `$select` so both read paths see the same
+    /// fields. One `Result<Application>` per input id **in order**; a per-id
+    /// failure is one `Err` in the vec, a whole-batch failure is the outer `Err`
+    /// so the caller can fall back to per-id reads.
+    pub async fn batch_get_applications_credentials(
+        &self,
+        object_ids: &[String],
+    ) -> Result<Vec<Result<Application>>> {
+        let urls: Vec<String> = object_ids
+            .iter()
+            .map(|id| {
+                batch_sub_url(
+                    &format!("/applications/{id}"),
+                    &[("$select", "id,appId,displayName,passwordCredentials")],
+                )
+            })
+            .collect();
+        self.batch_get_json(&urls).await
+    }
+
     /// Fetches every application in the tenant by following `@odata.nextLink`
     /// until exhausted. A safety `cap` argument prevents unbounded memory in
     /// pathological tenants; pass `None` to disable.

@@ -405,6 +405,12 @@ pub async fn assign_managed_identity_azure_role(
         }
         ui
     })?;
+    // An assignment at ANY level can change who can reach a vault — the Key
+    // Vault sweep keeps the assignment's own scope, and a resource-group or
+    // subscription grant covers every vault beneath it — so bust unconditionally
+    // rather than only for a `/providers/Microsoft.KeyVault/vaults/` scope. One
+    // key per tenant, refilled only by an explicit sweep: the bust costs nothing.
+    crate::commands::keyvault_rbac::invalidate_kv_sweep(&state.cache, &tenant_id);
     Ok(())
 }
 

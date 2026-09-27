@@ -33,8 +33,11 @@ fn cache_invalidation_never_runs_on_an_error_path() {
             if trimmed.starts_with("//") || !INVALIDATORS.iter().any(|f| line.contains(f)) {
                 continue;
             }
-            // Skip the definitions themselves.
-            if line.contains("fn invalidate_app") {
+            // Skip the definitions themselves — by the `fn` keyword, not by the
+            // `invalidate_app` prefix, so a tiered invalidator defined in another
+            // module (`invalidate_kv_sweep`, `invalidate_site_sweep`) is skipped
+            // by name rather than by luck.
+            if line.contains("fn invalidate_") {
                 continue;
             }
             let indent = line.len() - trimmed.len();
@@ -101,7 +104,152 @@ const INVALIDATORS: &[&str] = &[
     "invalidate_app_credentials(",
     "invalidate_app_detail_state(",
     "invalidate_app_details(",
+    "invalidate_app_role_resources(",
+    "invalidate_kv_sweep(",
 ];
+
+/// An **in-place** write on one app never busts the list tier.
+///
+/// `invalidate_app_lists` drops the two tenant-wide indexes (`sp_index`,
+/// `app_name_index`) that cost a full `/applications` + `/servicePrincipals`
+/// re-enumeration — tens of seconds on a large tenant — and exists for writes
+/// that add, remove or rename an app or SP. A credential add/remove, an
+/// identifier/redirect-URI PATCH, an exposed-scope edit or a claims-policy
+/// re-assignment changes one app in place and none of that; it takes the
+/// credential tier (`invalidate_app_credentials`) or the detail tier
+/// (`invalidate_app_details`). The tiering is documented in
+/// `applications/cache.rs`, and four commands had drifted off it unnoticed —
+/// the bulk expired-secret sweep and the three SSO URL/claims writers — because
+/// nothing mechanical pinned which command may call which tier.
+///
+/// Lexical, like its siblings: a command body that contains one of the
+/// in-place mutation calls and **no** set-changing call is an in-place writer,
+/// and must not name `invalidate_app_lists(`. The set-changing fragments are
+/// the reads-and-writes that can add or remove an object (`.create_`,
+/// `.delete_`, `ensure_service_principal(`, `instantiate_application_template(`)
+/// plus `_core(` — a body that delegates to a `*_core` helper is either a
+/// create flow (`create_application_core`) or has its body checked by that
+/// helper's own tests, so it is out of this rule's lexical reach on purpose. A
+/// body that mixes an in-place write into a create flow is therefore excused
+/// here, which is right: a create IS a set change.
+#[test]
+fn an_in_place_write_never_busts_the_list_tier() {
+    const IN_PLACE_WRITES: &[&str] = &[
+        ".add_password(",
+        ".remove_password(",
+        ".add_key_credential(",
+        ".remove_key_credential(",
+        ".patch_application_web(",
+        ".patch_application_expose_api(",
+        "apply_claims_policy(",
+    ];
+    const SET_CHANGING_WRITES: &[&str] = &[
+        ".create_",
+        ".delete_",
+        "ensure_service_principal(",
+        "instantiate_application_template(",
+        "_core(",
+    ];
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for cmd in super::sources::commands() {
+        let in_place = IN_PLACE_WRITES.iter().any(|w| cmd.body.contains(w));
+        let set_changing = SET_CHANGING_WRITES.iter().any(|w| cmd.body.contains(w));
+        if !in_place || set_changing {
+            continue;
+        }
+        checked += 1;
+        if cmd.body.contains("invalidate_app_lists(") {
+            offenders.push(format!("{}::{}", cmd.module, cmd.name));
+        }
+    }
+    offenders.sort();
+
+    assert!(
+        checked >= 8,
+        "only {checked} in-place writer(s) found — the source walk or the fragment list is          broken, and a rule that scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "in-place write(s) that bust the LIST tier: {offenders:#?}\n\
+         A write that changes one app in place adds, removes or renames no app or SP, so it must \
+         not call `invalidate_app_lists` — that tier drops the two tenant-wide indexes, which cost \
+         a full directory re-enumeration (tens of seconds on a large tenant) to rebuild. Use the \
+         tier that matches the write: credential-only → `invalidate_app_credentials(cache, tenant, \
+         object_id)`; in-place PATCH (URIs, exposed scopes/roles, claims) → \
+         `invalidate_app_details(cache, tenant)`. See `applications/cache.rs`."
+    );
+}
+
+/// Every writer of an app's exposed roles refreshes the Grant-access picker's
+/// tenant-app directory.
+///
+/// `list_app_role_resources` caches which tenant SPs expose ≥1 enabled
+/// Application role (plus a count) under its own `Lists` key. The App roles
+/// tab's two writers change exactly that set — the first Application role added
+/// moves an SP in, the last one disabled or removed moves it out — and for a
+/// while called only `invalidate_app_details`, so a freshly published API was
+/// missing from the picker (and a deleted role still counted) for up to the
+/// Lists TTL. `write_roles(` is the one seam both go through.
+#[test]
+fn an_exposed_app_role_write_refreshes_the_role_resource_directory() {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for cmd in super::sources::commands() {
+        if !cmd.body.contains("write_roles(") {
+            continue;
+        }
+        checked += 1;
+        if !cmd.body.contains("invalidate_app_role_resources(") {
+            offenders.push(format!("{}::{}", cmd.module, cmd.name));
+        }
+    }
+    assert!(
+        checked >= 2,
+        "only {checked} app-role writer(s) found (expected the upsert and the delete) — the          source walk or the `write_roles(` seam moved, and a rule that scans nothing passes          vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "exposed-app-role writer(s) that leave the role-resource directory stale: {offenders:#?}\n\
+         Call `invalidate_app_role_resources(&state.cache, &tenant_id)` on the `Ok` path next to \
+         `invalidate_app_details`, or the Grant-access picker's \"Tenant app registrations\" group \
+         misses the new API (and keeps a removed one) until the Lists TTL."
+    );
+}
+
+/// Every Azure role assignment made from this app busts the Key Vault sweep.
+///
+/// The sweep (`{tenant}|keyvault_sweep`, `CacheKind::Audit`) answers "who can
+/// touch this vault?" and is reached by neither `invalidate_app_lists` nor
+/// `invalidate_audit_cache`. It is read-only about vault roles, but
+/// `assign_managed_identity_azure_role` changes the answer — and an assignment
+/// at resource-group or subscription level reaches every vault beneath it, so
+/// the bust is unconditional rather than gated on a vault-shaped scope.
+#[test]
+fn an_azure_role_assignment_busts_the_key_vault_sweep() {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for cmd in super::sources::commands() {
+        if !cmd.body.contains(".create_role_assignment(") {
+            continue;
+        }
+        checked += 1;
+        if !cmd.body.contains("invalidate_kv_sweep(") {
+            offenders.push(format!("{}::{}", cmd.module, cmd.name));
+        }
+    }
+    assert!(
+        checked >= 1,
+        "no command creates an Azure role assignment — the source walk or the ARM call moved, and          a rule that scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "Azure role assignment(s) that leave the Key Vault sweep cache stale: {offenders:#?}\n\
+         Call `keyvault_rbac::invalidate_kv_sweep(&state.cache, &tenant_id)` on the `Ok` path — \
+         the cached sweep otherwise serves the pre-assignment answer for the rest of the audit TTL."
+    );
+}
 
 /// Every pinned cache write lands on a **tenant-wide index key**, never a
 /// per-object one.

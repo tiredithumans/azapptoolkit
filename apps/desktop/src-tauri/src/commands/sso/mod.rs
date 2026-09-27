@@ -27,7 +27,7 @@ use azapptoolkit_graph::{GraphClient, GraphError};
 mod claims;
 use claims::{build_claims_definition, parse_claims_definition};
 
-use crate::commands::applications::invalidate_app_lists;
+use crate::commands::applications::{invalidate_app_details, invalidate_app_lists};
 use crate::dto::UiError;
 use crate::dto::sso::{
     ClaimsPolicyDto, MetadataProbeDto, OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput,
@@ -630,8 +630,9 @@ fn extract_app_sso_fields(
 /// `"oidc"`; any other value (e.g. `""`, `"disabled"`, `"none"`) clears it to
 /// `null` (SSO disabled). Password-based and linked SSO aren't settable here —
 /// they require portal-only configuration — so the UI only offers SAML/OIDC/off.
-/// No cache bust: the mode is read live on the (uncached) SSO tab and is on no
-/// cached list/audit payload.
+/// Busts only the SSO-certificate expiry board (`invalidate_sso_cert_board`):
+/// the mode decides whether the app is on the board at all. The SSO tab reads
+/// the mode live and no other cached payload carries it.
 #[tauri::command]
 pub async fn set_sso_mode(
     state: State<'_, AppState>,
@@ -704,7 +705,12 @@ pub async fn set_saml_urls(
         spa: None,
     };
     client.patch_application_web(&object_id, &body).await?;
-    invalidate_app_lists(&state.cache, &tenant_id);
+    // An in-place PATCH of one app's identifier/reply URLs adds, removes or
+    // renames nothing, so nothing in the list tier (`sp_index`,
+    // `app_name_index`, the enterprise list, the search corpus) changes; the SSO
+    // tab reads live. The detail sweep is the can't-miss cheap tier (same as
+    // the Expose-an-API and App roles PATCHes of this resource).
+    invalidate_app_details(&state.cache, &tenant_id);
     Ok(())
 }
 
@@ -1659,7 +1665,10 @@ pub async fn set_claims_mapping(
     } else {
         Some(apply_claims_policy(&client, &service_principal_id, &display_name, &policy).await?)
     };
-    invalidate_app_lists(&state.cache, &tenant_id);
+    // Re-assigning one SP's claims-mapping policy adds, removes or renames no
+    // app or SP, so the list tier is untouched; the SSO tab reads the policy
+    // live. Detail tier only (see `set_saml_urls`).
+    invalidate_app_details(&state.cache, &tenant_id);
     Ok(policy_id)
 }
 
@@ -1709,10 +1718,32 @@ pub async fn set_oidc_redirect_uris(
     redirect_uris: Vec<String>,
     spa_redirect_uris: Vec<String>,
 ) -> Result<(), UiError> {
+    set_oidc_redirect_uris_core(
+        &state,
+        &tenant_id,
+        &object_id,
+        redirect_uris,
+        spa_redirect_uris,
+    )
+    .await
+}
+
+/// The handler body, taking `&AppState` so a test can drive it against a mock
+/// Graph (`tauri::State` is only constructible by the runtime — the same seam
+/// `applications::credentials::add_password_core` uses, and for the same
+/// reason: the rules that live here, invalidate only on `Ok` and only the
+/// detail tier, had never been exercised by a test).
+pub(crate) async fn set_oidc_redirect_uris_core(
+    state: &AppState,
+    tenant_id: &str,
+    object_id: &str,
+    redirect_uris: Vec<String>,
+    spa_redirect_uris: Vec<String>,
+) -> Result<(), UiError> {
     azapptoolkit_core::redirect::validate_redirect_uris(&redirect_uris)
         .and_then(|()| azapptoolkit_core::redirect::validate_redirect_uris(&spa_redirect_uris))
         .map_err(invalid_redirect_uri)?;
-    let client = state.graph_for(&tenant_id);
+    let client = state.graph_for(tenant_id);
     let body = ApplicationSsoPatch {
         identifier_uris: None,
         web: Some(ApplicationWebPatch {
@@ -1724,8 +1755,13 @@ pub async fn set_oidc_redirect_uris(
             redirect_uris: Some(spa_redirect_uris),
         }),
     };
-    client.patch_application_web(&object_id, &body).await?;
-    invalidate_app_lists(&state.cache, &tenant_id);
+    client.patch_application_web(object_id, &body).await?;
+    // An in-place PATCH of one app's redirect URIs adds, removes or renames
+    // nothing, so the list tier (`sp_index`, `app_name_index`, the enterprise
+    // list, the search corpus) is untouched and the tens-of-seconds tenant
+    // re-scan dropping it costs is avoided; the SSO tab reads live. Detail tier
+    // only (see `set_saml_urls`).
+    invalidate_app_details(&state.cache, tenant_id);
     Ok(())
 }
 
@@ -1776,6 +1812,146 @@ pub async fn get_sso_summary(
             claims_policy_id: config.claims_policy_id,
         };
         serde_json::to_value(summary).map_err(|e| UiError::serde(e.to_string()))
+    }
+}
+
+/// End-to-end handler tests against a mock Graph — the shape
+/// `applications::credentials::handler_tests` established. Kept apart from
+/// `tests` below (pure helpers) so the mock-server fixtures don't grow into it.
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+
+    use azapptoolkit_core::cache::CacheKind;
+    use azapptoolkit_core::models::{Application, ServicePrincipal};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::commands::applications::{
+        app_detail_key, app_name_index_hit, app_name_index_store, sp_index_hit, sp_index_store,
+    };
+
+    const TENANT: &str = "t1";
+    const OBJECT: &str = "obj-1";
+
+    /// Seeds what an in-place PATCH must NOT drop (the two pinned tenant-wide
+    /// indexes) alongside what it must drop (the app's detail row).
+    fn seed(state: &AppState) {
+        sp_index_store(&state.cache, TENANT, vec![ServicePrincipal::default()]);
+        app_name_index_store(&state.cache, TENANT, vec![Application::default()]);
+        state.cache.put(
+            CacheKind::Lists,
+            app_detail_key(TENANT, OBJECT),
+            &serde_json::json!({"id": OBJECT}),
+        );
+    }
+
+    fn detail_cached(state: &AppState) -> bool {
+        state
+            .cache
+            .get::<serde_json::Value>(CacheKind::Lists, &app_detail_key(TENANT, OBJECT))
+            .is_some()
+    }
+
+    #[tokio::test]
+    async fn a_redirect_uri_patch_busts_the_detail_tier_and_keeps_the_indexes() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+
+        set_oidc_redirect_uris_core(
+            &state,
+            TENANT,
+            OBJECT,
+            vec!["https://app.example/cb".into()],
+            Vec::new(),
+        )
+        .await
+        .expect("the mocked PATCH succeeds");
+
+        assert!(
+            !detail_cached(&state),
+            "the app's detail row must be busted — the Authentication tab reads it"
+        );
+        // The point of the detail tier: a redirect-URI edit adds, removes or
+        // renames no app or SP, so the two indexes (a full directory scan each
+        // to rebuild) must survive it.
+        assert!(
+            sp_index_hit(&state.cache, TENANT).is_some(),
+            "the SP index must survive an in-place app PATCH"
+        );
+        assert!(
+            app_name_index_hit(&state.cache, TENANT).is_some(),
+            "the app-registration index must survive an in-place app PATCH"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_redirect_uri_patch_invalidates_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(&server)
+            .await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+
+        let err = set_oidc_redirect_uris_core(
+            &state,
+            TENANT,
+            OBJECT,
+            vec!["https://app.example/cb".into()],
+            Vec::new(),
+        )
+        .await
+        .expect_err("a 403 must surface as an error");
+        assert_eq!(err.code, "forbidden");
+
+        // "Invalidate caches only on `Ok`".
+        assert!(
+            detail_cached(&state),
+            "a failed mutation must leave the cached detail row alone"
+        );
+        assert!(sp_index_hit(&state.cache, TENANT).is_some());
+        assert!(app_name_index_hit(&state.cache, TENANT).is_some());
+    }
+
+    #[tokio::test]
+    async fn an_invalid_redirect_uri_never_reaches_graph() {
+        // No mock mounted: any request would 404 and fail the test differently.
+        let server = MockServer::start().await;
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+
+        let err = set_oidc_redirect_uris_core(
+            &state,
+            TENANT,
+            OBJECT,
+            vec!["http://insecure.example/cb".into()],
+            Vec::new(),
+        )
+        .await
+        .expect_err("an insecure redirect URI is rejected locally");
+        assert_eq!(err.code, "invalid_redirect_uri");
+        assert!(
+            detail_cached(&state),
+            "a rejected input invalidates nothing"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+        );
     }
 }
 

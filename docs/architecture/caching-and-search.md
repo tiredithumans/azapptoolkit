@@ -163,9 +163,11 @@ full-gallery zero.)
 After a successful mutation, bust the relevant list cache (`invalidate_app_lists(...)`); never on
 the error path, so a failed write doesn't clear fresh data.
 
-`invalidate_app_lists` drops **seven** things together: the apps-pairing, enterprise, `sp_index`,
-`app_name_index`, and `search_corpus` keys, plus — transitively — the per-app detail cache
-(`invalidate_app_details`) and the cached audit run (`invalidate_audit_cache`). The transitive two
+`invalidate_app_lists` drops **eight** things together: the apps-pairing, enterprise, `sp_index`,
+`app_name_index`, `search_corpus` and `app_role_resources` keys (the last is the Grant-access
+picker's "Tenant app registrations" directory — a create/delete adds or removes an SP that may
+expose roles), plus — transitively — the per-app detail cache (`invalidate_app_details`) and the
+cached audit run (`invalidate_audit_cache`). The transitive two
 matter: a scope grant or credential change re-scores the app, so the audit/posture tile must
 refetch too (two reviews independently mis-read this as a missing invalidation because earlier
 versions of this doc listed only the four list keys) — so any mutation that can add/remove/rename a service principal or app registration
@@ -173,8 +175,9 @@ versions of this doc listed only the four list keys) — so any mutation that ca
 index survives until the TTL.
 
 **Credential-only mutations are tiered.** `add_password`, `remove_password`, the certificate
-add/remove pair, `generate_self_signed_certificate`, and `remove_expired_passwords` change a single
-app's secrets/certs — which surfaces in the App Registrations list row (its credential-status
+add/remove pair, `generate_self_signed_certificate`, `remove_expired_passwords`,
+`remediate_remove_expired_credentials` and the bulk `bulk_remove_expired_credentials` sweep (once
+per mutated app) change a single app's secrets/certs — which surfaces in the App Registrations list row (its credential-status
 badge), that app's detail payload, and the audit (expiring-credential findings), but **cannot** add,
 remove, or rename a service principal or app registration. They call
 `invalidate_app_credentials(cache, tenant, object_id)` instead of `invalidate_app_lists`: it drops
@@ -182,6 +185,21 @@ apps-pairing, the *one* app's detail, and the audit run, and deliberately **keep
 `app_name_index`, the enterprise list, and the mailbox-scope verdicts. Keeping the two tenant-wide
 indexes is the point — dropping them would force the next list visit to re-enumerate every app and
 every service principal (tens of seconds on a large tenant) for a change that touched neither.
+
+**In-place PATCHes of one app take the detail tier.** SSO URLs (`set_saml_urls`), OIDC redirect
+URIs (`set_oidc_redirect_uris`), the claims mapping (`set_claims_mapping`), and the exposed
+roles/scopes (`app_roles.rs`, `expose_api.rs`) change one app or SP in place — they add, remove or
+rename nothing, so nothing in the list tier changes — and call `invalidate_app_details` (the
+can't-miss cheap sweep of the per-app payloads). `repo_invariants::an_in_place_write_never_busts_the_list_tier`
+pins both tiers lexically: a command body with an in-place mutation call and no set-changing call
+must not name `invalidate_app_lists`.
+
+**The app-role resource directory has two busts.** `list_app_role_resources` (the Grant-access
+picker's "Tenant app registrations" group) caches which tenant SPs expose ≥1 enabled Application
+role. `invalidate_app_lists` drops it (a create/delete changes the set), and the App roles tab's
+writers call `invalidate_app_role_resources` directly — the first Application role added, or the
+last one disabled or removed, moves an SP in or out of the directory (pinned by
+`an_exposed_app_role_write_refreshes_the_role_resource_directory`).
 
 ### The other half: a scan that raced an invalidation must not be stored
 
@@ -305,11 +323,14 @@ sweep — a security-posture surface — could show a revoked grant as still pre
 one) for up to the audit TTL.
 
 The **Key Vault RBAC** reverse-lookup caches its completed sweep under `{tenant}|keyvault_sweep`
-(same `CacheKind::Audit` + TTL). It's a **read-only** view of ARM role assignments — the app grants
-no Key Vault roles — so there's no in-app mutation to invalidate it; the 60-minute TTL and the
-sign-out tenant sweep are the only clears (matching the managed-identity Azure-roles read caches).
-Like the site sweep, a cancelled or partially-failed run is never cached, so coverage is never
-overstated.
+(same `CacheKind::Audit` + TTL). The sweep itself is a **read-only** view of ARM role assignments,
+but the app's own `assign_managed_identity_azure_role` (the Managed Identities pane) can change the
+answer, so it calls `invalidate_kv_sweep` on `Ok` — **unconditionally**, not only for a
+`/providers/Microsoft.KeyVault/vaults/` scope, because a resource-group or subscription-level grant
+reaches every vault beneath it and the sweep keeps the assignment's own scope (pinned by
+`an_azure_role_assignment_busts_the_key_vault_sweep`). The 60-minute TTL and the sign-out tenant
+sweep remain the other clears. Like the site sweep, a cancelled or partially-failed run is never
+cached, so coverage is never overstated.
 
 ## Mailbox-scope verdicts are cached per principal
 

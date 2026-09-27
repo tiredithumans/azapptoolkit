@@ -18,7 +18,7 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_arm::{KeyVaultResource, RoleAssignment};
-use azapptoolkit_core::cache::CacheKind;
+use azapptoolkit_core::cache::{Cache, CacheKind};
 
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
 use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
@@ -54,6 +54,17 @@ const KV_HIGH_PRIVILEGE_ROLES: &[&str] = &[
 /// the site sweep and the list caches).
 fn kv_sweep_cache_key(tenant_id: &str) -> String {
     format!("{tenant_id}|keyvault_sweep")
+}
+
+/// Drops the cached vault-access sweep for this tenant. The sweep lives under
+/// its own `CacheKind::Audit` key, so neither `invalidate_app_lists` nor
+/// `invalidate_audit_cache` reaches it (mirrors `sharepoint::invalidate_site_sweep`).
+/// The sweep itself is read-only about vault roles, but the app's own
+/// `assign_managed_identity_azure_role` changes "who can touch this vault", so
+/// every in-app mutation that can change the answer calls this on `Ok` — or the
+/// pre-assignment sweep is served as current for the rest of the audit TTL.
+pub(crate) fn invalidate_kv_sweep(cache: &Cache, tenant_id: &str) {
+    cache.invalidate(CacheKind::Audit, &kv_sweep_cache_key(tenant_id));
 }
 
 /// Maps an ARM error to a `UiError`, replacing a 403's message with the
@@ -479,6 +490,40 @@ mod tests {
     fn cache_key_is_tenant_scoped() {
         assert_eq!(kv_sweep_cache_key("t1"), "t1|keyvault_sweep");
         assert_ne!(kv_sweep_cache_key("t1"), kv_sweep_cache_key("t2"));
+    }
+
+    /// An Azure role assignment made from the Managed Identities pane changes
+    /// which principals the sweep would list, and the sweep key is NOT covered
+    /// by `invalidate_app_lists` or `invalidate_audit_cache` (a different
+    /// Audit-kind key) — so the assignment busts it directly. The other tenant's
+    /// sweep must survive.
+    #[test]
+    fn invalidate_kv_sweep_drops_only_the_target_tenant() {
+        let cache = Cache::new();
+        let sweep = KeyVaultSweepResult {
+            tenant_id: "t1".into(),
+            total_vaults: 1,
+            vaults_scanned: 1,
+            vaults_failed: 0,
+            rows: Vec::new(),
+            cancelled: false,
+        };
+        cache.put(CacheKind::Audit, kv_sweep_cache_key("t1"), &sweep);
+        cache.put(CacheKind::Audit, kv_sweep_cache_key("t2"), &sweep);
+
+        invalidate_kv_sweep(&cache, "t1");
+
+        assert!(
+            cache
+                .get::<KeyVaultSweepResult>(CacheKind::Audit, &kv_sweep_cache_key("t1"))
+                .is_none()
+        );
+        assert!(
+            cache
+                .get::<KeyVaultSweepResult>(CacheKind::Audit, &kv_sweep_cache_key("t2"))
+                .is_some(),
+            "other tenant must survive"
+        );
     }
 
     #[test]

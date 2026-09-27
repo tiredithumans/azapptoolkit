@@ -73,6 +73,30 @@ pub(crate) fn credential_expirations_key(tenant_id: &str) -> String {
     format!("{tenant_id}|credential_expirations")
 }
 
+/// Cache key for the Grant-access picker's "Tenant app registrations" directory
+/// (`permissions::list_app_role_resources`): the tenant-owned service principals
+/// exposing at least one enabled Application role, each with its role count.
+/// Lives here (not in `permissions.rs`) because two mutation families bust it —
+/// see [`invalidate_app_role_resources`]. The key string is unchanged from its
+/// original home, so no cached format changed.
+pub(crate) fn app_role_resources_key(tenant_id: &str) -> String {
+    format!("{tenant_id}|app_role_resources")
+}
+
+/// Drops the cached app-role resource directory for `tenant_id`.
+///
+/// Two triggers move an SP in or out of that directory (or shift its count):
+/// the App roles tab's writers (`upsert_enterprise_app_role` /
+/// `delete_enterprise_app_role` — the first enabled Application role added, or
+/// the last one disabled or removed), which call this directly after their
+/// `invalidate_app_details`; and any create/delete of an app or SP, which
+/// reaches it through [`invalidate_app_lists`]. The graph crate already busts
+/// its own `resource:` prefix on the same writes; this is the command-side
+/// directory that had been left out. Call only on `Ok`.
+pub(crate) fn invalidate_app_role_resources(cache: &Cache, tenant_id: &str) {
+    cache.invalidate(CacheKind::Lists, &app_role_resources_key(tenant_id));
+}
+
 /// Drops every cached detail-pane payload for `tenant_id`. Detail entries are
 /// invalidated as a per-tenant group rather than one key at a time because
 /// several mutations that change detail-visible state (revoking a role
@@ -124,6 +148,9 @@ pub(crate) fn invalidate_app_lists(cache: &Cache, tenant_id: &str) {
     );
     // A create/delete changes the app set the credential-expiry list scans.
     cache.invalidate(CacheKind::Lists, &credential_expirations_key(tenant_id));
+    // A create/delete adds or removes an SP that may expose Application roles,
+    // so the Grant-access picker's tenant-app directory is stale too.
+    invalidate_app_role_resources(cache, tenant_id);
     // Any list-changing mutation (create/delete, credential add/remove, …) also
     // changes the affected app's detail payload, so drop the cached details too.
     invalidate_app_details(cache, tenant_id);
@@ -637,6 +664,72 @@ mod detail_cache_tests {
         );
     }
 
+    /// A create/delete adds or removes an SP that may expose Application roles,
+    /// so the Grant-access picker's "Tenant app registrations" directory must
+    /// fall with the lists — a deleted app lingered there (and a fresh API was
+    /// missing) for the full Lists TTL before this was wired.
+    #[test]
+    fn invalidate_app_lists_also_clears_the_app_role_resources_directory() {
+        use super::app_role_resources_key;
+        let cache = Cache::new();
+        cache.put(
+            CacheKind::Lists,
+            app_role_resources_key("t1"),
+            &"dir".to_string(),
+        );
+        cache.put(
+            CacheKind::Lists,
+            app_role_resources_key("t2"),
+            &"dir".to_string(),
+        );
+        invalidate_app_lists(&cache, "t1");
+        assert!(
+            cache
+                .get::<String>(CacheKind::Lists, &app_role_resources_key("t1"))
+                .is_none()
+        );
+        assert!(
+            cache
+                .get::<String>(CacheKind::Lists, &app_role_resources_key("t2"))
+                .is_some(),
+            "other tenant's directory must survive"
+        );
+    }
+
+    /// The App roles tab's targeted bust: one tenant's directory, nothing else.
+    #[test]
+    fn invalidate_app_role_resources_is_tenant_scoped() {
+        use super::{app_role_resources_key, invalidate_app_role_resources};
+        let cache = Cache::new();
+        cache.put(
+            CacheKind::Lists,
+            app_role_resources_key("t1"),
+            &"dir".to_string(),
+        );
+        cache.put(
+            CacheKind::Lists,
+            app_role_resources_key("t2"),
+            &"dir".to_string(),
+        );
+        put_detail(&cache, "t1", "a");
+        invalidate_app_role_resources(&cache, "t1");
+        assert!(
+            cache
+                .get::<String>(CacheKind::Lists, &app_role_resources_key("t1"))
+                .is_none()
+        );
+        assert!(
+            cache
+                .get::<String>(CacheKind::Lists, &app_role_resources_key("t2"))
+                .is_some(),
+            "other tenant's directory must survive"
+        );
+        assert!(
+            has_detail(&cache, "t1", "a"),
+            "a directory bust is not a detail bust"
+        );
+    }
+
     #[test]
     fn invalidate_app_details_also_clears_mail_scopes_tenant_scoped() {
         // A grant/revoke/scope mutation can change a mailbox-scope verdict, so
@@ -666,13 +759,18 @@ mod detail_cache_tests {
         // Other apps' details, the mail-scope verdicts, and the other tenant
         // are untouched.
         use super::{
-            app_name_index_key, apps_pairing_key, enterprise_key, invalidate_app_credentials,
-            sp_index_key,
+            app_name_index_key, app_role_resources_key, apps_pairing_key, enterprise_key,
+            invalidate_app_credentials, sp_index_key,
         };
         use crate::commands::audit::audit_cache_key;
 
         let cache = Cache::new();
         cache.put(CacheKind::Lists, sp_index_key("t1"), &"sp".to_string());
+        cache.put(
+            CacheKind::Lists,
+            app_role_resources_key("t1"),
+            &"dir".to_string(),
+        );
         cache.put(
             CacheKind::Lists,
             app_name_index_key("t1"),
@@ -700,6 +798,10 @@ mod detail_cache_tests {
         assert!(kept(&sp_index_key("t1")), "sp_index kept (no SP change)");
         assert!(kept(&app_name_index_key("t1")), "name index kept");
         assert!(kept(&enterprise_key("t1")), "enterprise list kept");
+        assert!(
+            kept(&app_role_resources_key("t1")),
+            "app-role resource directory kept (a credential can't change which SPs expose roles)"
+        );
         assert!(has_detail(&cache, "t1", "other"), "other app's detail kept");
         assert!(
             has_mail_scopes(&cache, "t1", "held|mutated|Mail.Read"),

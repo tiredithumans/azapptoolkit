@@ -17,9 +17,10 @@ use std::future::Future;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::audit::expired_password_key_ids;
+use azapptoolkit_core::models::Application;
 use azapptoolkit_graph::client::AppListQuery;
 
-use crate::commands::dispatch::{SessionDead, dispatch_capped};
+use crate::commands::dispatch::{SessionDead, batch_or_serial, dispatch_capped};
 use crate::commands::progress::emit_progress;
 use crate::commands::throttle::FanOutMeter;
 use crate::dto::UiError;
@@ -137,11 +138,17 @@ pub fn cancel_bulk(state: State<'_, AppState>) {
 /// is expired per [`expired_password_key_ids`]'s whole-day rule. Note this is
 /// **secrets-only** by design; the per-app one-click fix
 /// (`commands::remediation::remediate_remove_expired_credentials`)
-/// also removes expired *certificates*. When `object_ids` is `Some`, only those apps
-/// are scanned (the UI scopes the sweep to the user's selection); when `None`,
-/// every app in the tenant is swept. Cancellation flows through
-/// [`AppState::audit_cancel`] — the audit and bulk loops share it so the UI
-/// only needs one Cancel button concept.
+/// also removes expired *certificates*.
+///
+/// Two read paths. When `object_ids` is `Some` (the UI scopes the sweep to the
+/// user's selection — the Findings pane's "Fix all" and the App Registrations
+/// bulk bar always do), exactly those apps are fetched by id in one `$batch`
+/// per 20 (per-id reads if a whole batch fails), never a tenant walk; an app
+/// that cannot be read is reported as a failure row rather than silently left
+/// out. When `None`, every app in the tenant is walked, capped at
+/// [`APPS_MAX`](super::applications::APPS_MAX) like every other tenant-wide
+/// enumeration. Cancellation flows through [`AppState::audit_cancel`] — the
+/// audit and bulk loops share it so the UI only needs one Cancel button concept.
 #[tauri::command]
 pub async fn bulk_remove_expired_credentials(
     app_handle: AppHandle,
@@ -149,34 +156,78 @@ pub async fn bulk_remove_expired_credentials(
     tenant_id: String,
     object_ids: Option<Vec<String>>,
 ) -> Result<BulkRemoveExpiredResult, UiError> {
-    // Claimed before the first await: the tenant-wide app list below can walk
-    // 10 000 apps, and a token claimed after it carries a higher generation
-    // than a cancel issued during it, which `is_cancelled()` then discards.
-    // Pinned by `repo_invariants::cancel`.
+    // Claimed before the first await: the tenant walk below can cover 10 000
+    // apps (and the batched selection read is an await too), and a token
+    // claimed after it carries a higher generation than a cancel issued during
+    // it, which `is_cancelled()` then discards. Pinned by
+    // `repo_invariants::cancel`.
     let cancel = state.audit_cancel.claim();
     let client = state.graph_for(&tenant_id);
-    // Project only what the sweep reads (`expired_password_key_ids` touches
-    // `passwordCredentials`); the default projection drags in
+    let session = SessionDead::new();
+    let mut summaries: Vec<AppRemovalSummary> = Vec::new();
+
+    // Both paths project only what the sweep reads (`expired_password_key_ids`
+    // touches `passwordCredentials`); the default projection drags in
     // `requiredResourceAccess` etc. — the bulk of a permission-heavy app's
     // payload, multiplied across a full-tenant scan. Mirrors
     // `list_credential_expirations`.
-    // `_truncated`: the sweep is either scoped to an explicit `object_ids` set
-    // (below, where the cap cannot matter) or is a best-effort tenant sweep whose
-    // per-app outcomes are all reported individually — it never claims to have
-    // covered every app.
-    let (mut apps, _truncated) = client
-        .list_applications_all(
-            AppListQuery::default()
-                .with_top(azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE)
-                .with_select(vec!["id", "appId", "displayName", "passwordCredentials"]),
-            Some(10_000),
-        )
-        .await?;
-    // Scope the sweep to the selected apps, if any were provided. Reuses the
-    // same list path so credential semantics stay identical to the full sweep.
-    if let Some(ids) = &object_ids {
-        apps.retain(|app| ids.contains(&app.id));
-    }
+    let apps: Vec<Application> = match &object_ids {
+        Some(ids) => {
+            // The selection path fetches exactly the selected ids. It used to
+            // walk every page of `/applications` and then `retain` the
+            // selection — tens of seconds on a large tenant for a "Fix all 12".
+            let graph = client.as_ref();
+            let batched = graph.batch_get_applications_credentials(ids).await;
+            let fetched = batch_or_serial(
+                "expired-credential sweep app",
+                ids,
+                batched,
+                |oid: String| async move { graph.get_application(&oid).await },
+            )
+            .await;
+            let mut apps = Vec::with_capacity(ids.len());
+            for (id, read) in ids.iter().zip(fetched) {
+                match read {
+                    Ok(app) => apps.push(app),
+                    Err(err) => {
+                        // A selected app that could not be read is a failure
+                        // row (the frontend lists it under its id), not a
+                        // silent thinning of the operator's selection. A
+                        // re-auth-fatal code latches the session so the
+                        // dispatch below spawns nothing and the command returns
+                        // the dead-session error instead of a partial result.
+                        let ui = UiError::from(err);
+                        session.note_code(&ui.code);
+                        summaries.push(AppRemovalSummary {
+                            object_id: id.clone(),
+                            display_name: id.clone(),
+                            removed_key_ids: Vec::new(),
+                            failed_key_ids: Vec::new(),
+                            error: Some(ui.into()),
+                        });
+                    }
+                }
+            }
+            apps
+        }
+        None => {
+            // `_truncated`: the cap applies only to this best-effort tenant
+            // sweep, whose per-app outcomes are all reported individually — it
+            // never claims to have covered every app. The selection path above
+            // fetches exactly the selected ids, so the cap cannot apply there.
+            let (apps, _truncated) = client
+                .list_applications_all(
+                    AppListQuery::default()
+                        .with_top(azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE)
+                        .with_select(vec!["id", "appId", "displayName", "passwordCredentials"]),
+                    Some(super::applications::APPS_MAX),
+                )
+                .await?;
+            apps
+        }
+    };
+    // Apps actually evaluated; a selected app that failed to read is counted in
+    // `summaries`, not here.
     let total = apps.len();
 
     // Adaptive 429 backoff (was a fixed `CONCURRENCY` cap with no observer): the
@@ -198,8 +249,6 @@ pub async fn bulk_remove_expired_credentials(
 
     let now = chrono::Utc::now();
 
-    let mut summaries: Vec<AppRemovalSummary> = Vec::new();
-    let session = SessionDead::new();
     let cancelled_early = dispatch_capped(
         apps,
         || meter.limit(),
@@ -280,12 +329,20 @@ pub async fn bulk_remove_expired_credentials(
     .await;
 
     // Invalidate BEFORE the dead-session check: the removals that already
-    // landed are real, so the list caches are stale either way. Returning the
-    // error without busting them would leave the UI showing credentials this
-    // run deleted.
-    let any_removed = summaries.iter().any(|s| !s.removed_key_ids.is_empty());
-    if any_removed {
-        super::applications::invalidate_app_lists(&state.cache, &tenant_id);
+    // landed are real, so the caches are stale either way. Returning the error
+    // without busting them would leave the UI showing credentials this run
+    // deleted. The only mutation here is `remove_password` — a credential-only
+    // change — so each mutated app takes the credential tier, which keeps the
+    // shared SP/app-name indexes, the enterprise list and every mailbox-scope
+    // verdict intact (`applications::cache::invalidate_app_credentials` explains
+    // the cost of dropping them: a full tenant re-enumeration). The shared keys
+    // it does drop are hash removals, so repeating them per app is free.
+    for mutated in summaries.iter().filter(|s| !s.removed_key_ids.is_empty()) {
+        super::applications::invalidate_app_credentials(
+            &state.cache,
+            &tenant_id,
+            &mutated.object_id,
+        );
     }
     // A partial sweep reads as a complete one — the caller cannot tell "no
     // expired credentials left" from "the session died on app 40 of 900".
