@@ -27,6 +27,27 @@ use web_sys::{Element, HtmlElement, ResizeObserver};
 
 use crate::hooks::use_grid_keynav::{RowSource, use_row_keynav};
 
+/// The caller half of [`VirtualList`]'s `scroll_offset`: zero the carried
+/// offset whenever `items` changes, from a scope that outlives the list.
+///
+/// `VirtualList` snaps to the top itself on a row-set change — but only while it
+/// is mounted. The App Registrations / Enterprise lists wrap it in a
+/// `<Show when=non-empty>`, so a search that matches nothing unmounts it before
+/// its snap runs; without this, the next non-empty result would remount it at
+/// the offset of the old, unrelated row set. The first run is skipped: a fresh
+/// caller (a refetch remount) is exactly where the carried offset must survive.
+pub fn reset_scroll_offset_on_change<T>(items: Memo<Arc<Vec<T>>>, offset: RwSignal<f64>)
+where
+    T: Send + Sync + 'static,
+{
+    Effect::new(move |prev: Option<()>| {
+        items.track();
+        if prev.is_some() {
+            offset.set(0.0);
+        }
+    });
+}
+
 #[component]
 pub fn VirtualList<T, K, KF, R>(
     /// All rows, reactively. Only the visible window is rendered; when the
@@ -62,7 +83,10 @@ pub fn VirtualList<T, K, KF, R>(
     /// instance, so a parent that remounts the list on a refetch (the
     /// `<Suspense>` bodies of the App Registrations / Enterprise lists) lands
     /// back where the operator was; a row-set change within one instance still
-    /// snaps to the top.
+    /// snaps to the top. A caller that can unmount this list while the row set
+    /// changes (an empty-state `<Show>`) must also call
+    /// [`reset_scroll_offset_on_change`], or the offset outlives the row set it
+    /// pointed into.
     #[prop(optional)]
     scroll_offset: Option<RwSignal<f64>>,
 ) -> impl IntoView
@@ -93,21 +117,22 @@ where
     // `display:none`, e.g. a bulk delete run from the Bulk Actions page)
     // ignores `scrollTop` — so this is retried from the ResizeObserver, which
     // fires on the hidden → shown transition.
-    let pending_restore = StoredValue::new(
-        scroll_offset
-            .map(|s| s.get_untracked())
-            .filter(|v| *v > 0.0),
-    );
+    //
+    // The value replayed is the signal's CURRENT one, not a snapshot taken at
+    // construction: the caller's `reset_scroll_offset_on_change` may zero it
+    // after this instance was built for the new row set, and that reset wins.
+    let pending_restore = StoredValue::new(scroll_offset.is_some_and(|s| s.get_untracked() > 0.0));
     let apply_pending = move |el: &HtmlElement| {
-        if el.client_height() > 0
-            && let Some(v) = pending_restore.get_value()
-        {
-            pending_restore.set_value(None);
-            el.set_scroll_top(v.round() as i32);
-            // Read back: the browser clamps to the (possibly shrunk) list, and
-            // a clamp to 0 fires no scroll event — without this the window
-            // would stay at a stale offset.
-            scroll_top.set(el.scroll_top() as f64);
+        if el.client_height() > 0 && pending_restore.get_value() {
+            pending_restore.set_value(false);
+            let v = scroll_top.get_untracked();
+            if v > 0.0 {
+                el.set_scroll_top(v.round() as i32);
+                // Read back: the browser clamps to the (possibly shrunk) list,
+                // and a clamp to 0 fires no scroll event — without this the
+                // window would stay at a stale offset.
+                scroll_top.set(el.scroll_top() as f64);
+            }
         }
     };
 
@@ -177,7 +202,7 @@ where
         if prev.is_some() {
             // A carried offset pointed into the old row set too; don't let a
             // later visibility change jump back to it.
-            pending_restore.set_value(None);
+            pending_restore.set_value(false);
             if let Some(el) = scroll_ref.get_untracked() {
                 el.set_scroll_top(0);
             }

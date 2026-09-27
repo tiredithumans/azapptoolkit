@@ -24,7 +24,7 @@ use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
     Badge, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
 };
-use crate::components::virtual_list::VirtualList;
+use crate::components::virtual_list::{VirtualList, reset_scroll_offset_on_change};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
@@ -315,6 +315,9 @@ fn VirtualRows(
     total: usize,
 ) -> impl IntoView {
     let session = use_session();
+    // Here, not in `VirtualList`: the `<Show>` below unmounts the list when a
+    // search matches nothing, and the carried offset must still reset then.
+    reset_scroll_offset_on_change(items, session.tenant_ui.enterprise_scroll_top);
     view! {
         <Show
             when=move || items.with(|v| !v.is_empty())

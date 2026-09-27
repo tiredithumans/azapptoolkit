@@ -293,3 +293,56 @@ async fn refetch_keeps_the_scroll_position() {
     ts::set_input_value(SEARCH, "App 1");
     ts::wait_for(|| m.session.tenant_ui.apps_scroll_top.get_untracked() == 0.0).await;
 }
+
+/// A search that matches nothing unmounts the list (the empty state replaces
+/// it) before the list's own snap-to-top can run. The carried offset must still
+/// reset, or the next non-empty result would reopen at the old row set's
+/// position instead of the top.
+#[wasm_bindgen_test]
+async fn an_empty_search_does_not_carry_the_offset_into_the_next_result() {
+    use wasm_bindgen::JsCast;
+
+    ts::reset();
+    let names: Vec<String> = (0..200).map(|i| format!("App {i:03}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    ts::mock_ok("list_applications_with_pairing", &fixtures::apps(&names));
+
+    let m = ts::mount_view(|| {
+        view! {
+            <style>
+                {".app-list__scroller{height:260px;overflow:auto;position:relative}\
+                  .app-list__sizer{position:relative}\
+                  .app-list__row{position:absolute;left:0;width:100%}"}
+            </style>
+            <ApplicationList />
+        }
+    });
+    ts::wait_for(|| ts::text(COUNT) == "200 app registrations").await;
+
+    let el: web_sys::HtmlElement = ts::query(".app-list__scroller")
+        .expect("the list scroller")
+        .unchecked_into();
+    el.set_scroll_top(5200);
+    let _ = el.dispatch_event(&web_sys::Event::new("scroll").unwrap());
+    ts::wait_for(|| m.session.tenant_ui.apps_scroll_top.get_untracked() >= 5000.0).await;
+
+    ts::set_input_value(SEARCH, "no such app");
+    ts::wait_for(|| ts::body_contains("No matching apps")).await;
+    ts::wait_for(|| m.session.tenant_ui.apps_scroll_top.get_untracked() == 0.0).await;
+
+    // 100 rows (5200px) under a 260px viewport: a stale 5200 would clamp to a
+    // non-zero offset here, so a zero really is "started at the top".
+    ts::set_input_value(SEARCH, "App 0");
+    ts::wait_for(|| ts::text(COUNT) == "100 of 200 app registrations").await;
+    ts::wait_for(|| ts::body_contains("App 000")).await;
+    // Give a (wrong) replay from the mount effect / ResizeObserver its chance.
+    for _ in 0..10 {
+        ts::tick().await;
+    }
+    let scroller: web_sys::HtmlElement = ts::query(".app-list__scroller")
+        .expect("the list is back")
+        .unchecked_into();
+    assert_eq!(scroller.scroll_top(), 0, "the new result starts at the top");
+    assert_eq!(m.session.tenant_ui.apps_scroll_top.get_untracked(), 0.0);
+    assert!(ts::body_contains("App 000"));
+}
