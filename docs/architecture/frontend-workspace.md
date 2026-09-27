@@ -89,7 +89,9 @@ surfaces reuse it rather than re-implementing the markup.
   whole picked object to `on_pick`, which is what lets one component back a direct callback, a
   text-field append, and a stage-then-confirm dialog flow; a caller with the object can derive a
   name, an id, or a mail address, and none of those can reconstruct the object. `scope` is a
-  `Signal<DirectoryScope>` so a caller can drive it from a `TabBar`. Pass your own `query` +
+  `Signal<DirectoryScope>` so a caller can drive it from a `TabBar`; `DirectoryScope::Applications`
+  searches apps through the cached global search and returns the **appId** as the row's `id` (the
+  Expose an API tab's client picker). Pass your own `query` +
   `clear_on_pick=false` when the box should clear only after a mutation succeeds. The results
   region gates on the **raw** query, not the debounced one, so an untouched box renders nothing
   rather than "No matches." — the bug two of the four copies had.

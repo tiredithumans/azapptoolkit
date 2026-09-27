@@ -24,8 +24,23 @@
   group search no longer lists someone who already holds the selected role, since assigning it a
   second time failed with a generic Graph error. People who hold a different role are still listed.
 
+- **Authorized client applications show their names, and you can find a client by name.** The
+  Expose an API tab listed each pre-authorized client by its application ID alone, so you couldn't
+  tell which app skips the consent prompt without looking it up. Each row now shows the app's name
+  from this tenant's directory. The Add dialog searches enterprise apps and app registrations by
+  name or ID. You can still add a client from another tenant by pasting its application ID.
+
 ### Fixed
 
+- **Adding or removing an Application ID URI no longer undoes a change someone else made.** The
+  Expose an API tab saved the list of URIs it loaded when it opened, with your change applied. So a
+  URI added since then, by another admin or in the Entra portal, was silently deleted. The app now
+  reads the current list when you save and changes only the URI you added or removed, as it already
+  did for scopes and authorized client applications.
+- **The Expose an API, Authentication and Federated credentials tabs, and the permission picker,
+  offer Retry when they fail to load.** A throttled or dropped request used to leave a red error
+  line, and you had to close and reopen the app or the dialog. They now show the same message and
+  Retry button as the other tabs.
 - **An enterprise app's secret or certificate that expired within the last day now shows as
   expired.** The enterprise Credentials tab dropped partial days, so a SAML signing certificate
   that had lapsed a few hours earlier showed "0d left". It now rounds down, as the SSO tab does.

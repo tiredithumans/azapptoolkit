@@ -14,6 +14,12 @@ pub struct ExposeApiDto {
     pub identifier_uris: Vec<String>,
     pub scopes: Vec<OAuth2PermissionScope>,
     pub pre_authorized_applications: Vec<PreAuthorizedApplication>,
+    /// Display name per pre-authorized client, keyed by lowercased appId,
+    /// resolved from the tenant SP index. Best-effort: a client with no
+    /// service principal in this tenant — or an index that couldn't be read —
+    /// is absent, and the row shows the bare application id.
+    #[serde(default)]
+    pub client_display_names: std::collections::BTreeMap<String, String>,
 }
 
 /// Create or update one delegated scope via `upsert_api_scope`. `id: None` ⇒
@@ -48,6 +54,25 @@ pub struct SetPreAuthorizedAppInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `clientDisplayNames` is additive: a payload without it (an older
+    /// backend, a fixture) still deserializes, to an empty map.
+    #[test]
+    fn expose_api_dto_client_names_are_additive() {
+        let json = serde_json::json!({
+            "identifierUris": ["api://a"],
+            "scopes": [],
+            "preAuthorizedApplications": [],
+        });
+        let dto: ExposeApiDto = serde_json::from_value(json).unwrap();
+        assert!(dto.client_display_names.is_empty());
+
+        let mut dto = ExposeApiDto::default();
+        dto.client_display_names
+            .insert("aaaa".into(), "Contoso Portal".into());
+        let back = serde_json::to_value(&dto).unwrap();
+        assert_eq!(back["clientDisplayNames"]["aaaa"], "Contoso Portal");
+    }
 
     /// The bindings serialize inputs camelCase (Tauri's JS-side convention);
     /// pin the wire shape so a field rename can't silently break the IPC.

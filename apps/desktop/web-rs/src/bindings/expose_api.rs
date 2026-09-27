@@ -23,25 +23,42 @@ pub async fn get_expose_api(tenant_id: &str, object_id: &str) -> Result<ExposeAp
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SetUrisArgs<'a> {
+struct IdentifierUriArgs<'a> {
     tenant_id: &'a str,
     object_id: &'a str,
-    uris: &'a [String],
+    uri: &'a str,
 }
 
-/// Full-replace write of the Application ID URIs — callers send the complete
-/// desired list (loaded from `get_expose_api`).
-pub async fn set_identifier_uris(
+/// Adds one Application ID URI. The backend re-reads the live list and appends
+/// to it, so a URI added elsewhere since the tab loaded is kept.
+pub async fn add_identifier_uri(
     tenant_id: &str,
     object_id: &str,
-    uris: &[String],
+    uri: &str,
 ) -> Result<(), UiError> {
     invoke_result(
-        "set_identifier_uris",
-        SetUrisArgs {
+        "add_identifier_uri",
+        IdentifierUriArgs {
             tenant_id,
             object_id,
-            uris,
+            uri,
+        },
+    )
+    .await
+}
+
+/// Removes one Application ID URI from the live list (idempotent).
+pub async fn remove_identifier_uri(
+    tenant_id: &str,
+    object_id: &str,
+    uri: &str,
+) -> Result<(), UiError> {
+    invoke_result(
+        "remove_identifier_uri",
+        IdentifierUriArgs {
+            tenant_id,
+            object_id,
+            uri,
         },
     )
     .await

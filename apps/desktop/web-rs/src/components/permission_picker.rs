@@ -22,7 +22,7 @@ use crate::bindings::permissions::{
 };
 use crate::components::scope_badge::app_permission_risk_badge;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{Badge, Card, TabBar, TabBarItem};
+use crate::components::ui::{Badge, Card, DetailLoadError, TabBar, TabBarItem};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 
@@ -122,9 +122,12 @@ pub fn PermissionPicker(
         });
     });
 
+    // Bumped by the load-failure Retry to re-run the same resource's read.
+    let reload = RwSignal::new(0_u32);
     let permissions_res = LocalResource::new(move || {
         let tenant = tenant_id.get();
         let resource = resource_app_id.get();
+        let _ = reload.get();
         async move {
             let Some(t) = tenant else {
                 return Err(azapptoolkit_dto::UiError {
@@ -240,9 +243,10 @@ pub fn PermissionPicker(
                             }
                                 .into_any(),
                             Err(err) => view! {
-                                <Body1 class="form-error">
-                                    {format!("Failed to load: {}", err.message)}
-                                </Body1>
+                                <DetailLoadError
+                                    error=err
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                />
                             }
                                 .into_any(),
                         }

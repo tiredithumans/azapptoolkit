@@ -14,7 +14,7 @@ use crate::bindings::applications::{
     UpdateFederatedCredentialInput,
 };
 use crate::bindings::managed_identity;
-use crate::components::ui::{DataTable, SkeletonList};
+use crate::components::ui::{DataTable, DetailLoadError, SkeletonList};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -582,7 +582,13 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                                 .into_any()
                         }
                         Err(e) => {
-                            view! { <Body1 class="form-error">{e.message}</Body1> }.into_any()
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                />
+                            }
+                                .into_any()
                         }
                     }
                 })}

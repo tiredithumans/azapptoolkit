@@ -3,8 +3,8 @@
 //! Every "type 2+ characters, get `DirectoryObject`s back, click a row to act on
 //! one" surface in the app is this component with different props: the Settings
 //! default-owner editors, the Settings SSO-notification distribution-list
-//! picker, the Exchange scope forms' group typeahead, and both search blocks on
-//! the enterprise Access tab. Before this there were four hand-rolled copies of
+//! picker, the Exchange scope forms' group typeahead, both search blocks on
+//! the enterprise Access tab, and the Expose an API tab's client picker. Before this there were four hand-rolled copies of
 //! the same 60 lines — same 300 ms debounce, same 2-char gate, same
 //! `Suspense` + "Searching…" spinner, same `.candidates` markup — which had
 //! already drifted apart in three ways (see below).
@@ -25,6 +25,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 
 use crate::bindings::applications;
+use crate::bindings::search::GlobalSearchResults;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 
@@ -45,6 +46,11 @@ pub enum DirectoryScope {
     /// *before* the empty check, so a page of mailless groups reads "No
     /// matches." rather than rendering an empty list.
     DistributionLists,
+    /// Applications by name or application ID, through the cached global
+    /// search. Rows carry the **appId** in `id` — what a pre-authorization
+    /// keys on — not an object id; an enterprise app and its app registration
+    /// share one, so the two buckets dedupe to one row.
+    Applications,
 }
 
 impl DirectoryScope {
@@ -56,7 +62,7 @@ impl DirectoryScope {
                 .user_principal_name
                 .clone()
                 .unwrap_or_else(|| o.id.clone()),
-            Self::Groups => o.id.clone(),
+            Self::Groups | Self::Applications => o.id.clone(),
             Self::DistributionLists => o.mail.clone().unwrap_or_else(|| o.id.clone()),
         }
     }
@@ -65,7 +71,7 @@ impl DirectoryScope {
     fn admits(self, o: &DirectoryObject) -> bool {
         match self {
             Self::DistributionLists => o.mail.is_some(),
-            Self::Users | Self::Groups => true,
+            Self::Users | Self::Groups | Self::Applications => true,
         }
     }
 }
@@ -169,6 +175,11 @@ pub fn DirectorySearch(
                 DirectoryScope::Groups => applications::search_groups(&t.tenant_id, &q).await,
                 DirectoryScope::DistributionLists => {
                     applications::search_distribution_lists(&t.tenant_id, &q).await
+                }
+                DirectoryScope::Applications => {
+                    crate::bindings::search::global_search(&t.tenant_id, &q)
+                        .await
+                        .map(application_candidates)
                 }
             };
             found.map(|v| (scope, v)).map_err(|e| e.message)
@@ -282,5 +293,68 @@ pub fn DirectorySearch(
             {results}
         }
         .into_any(),
+    }
+}
+
+/// Flattens global-search hits into application picks keyed by appId.
+/// Enterprise apps come first so their (tenant-facing) name wins a dedupe;
+/// managed identities are left out — one can't be a delegated client — and a
+/// hit without an appId can't be keyed on at all.
+fn application_candidates(r: GlobalSearchResults) -> Vec<DirectoryObject> {
+    let mut seen = HashSet::new();
+    r.enterprise_apps
+        .into_iter()
+        .chain(r.app_registrations)
+        .filter_map(|h| {
+            let app_id = h.app_id.filter(|a| !a.trim().is_empty())?;
+            seen.insert(app_id.to_ascii_lowercase())
+                .then(|| DirectoryObject {
+                    id: app_id,
+                    display_name: Some(h.display_name),
+                    ..Default::default()
+                })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bindings::search::SearchHit;
+
+    fn hit(id: &str, app_id: Option<&str>, name: &str) -> SearchHit {
+        SearchHit {
+            id: id.into(),
+            app_id: app_id.map(Into::into),
+            display_name: name.into(),
+        }
+    }
+
+    #[test]
+    fn application_candidates_dedupe_by_app_id_and_skip_managed_identities() {
+        let r = GlobalSearchResults {
+            enterprise_apps: vec![
+                hit("sp-1", Some("AAAA"), "Contoso (enterprise)"),
+                hit("sp-2", None, "No app id"),
+            ],
+            app_registrations: vec![
+                hit("app-1", Some("aaaa"), "Contoso (registration)"),
+                hit("app-2", Some("bbbb"), "Fabrikam"),
+                hit("app-3", Some(""), "Empty app id"),
+            ],
+            managed_identities: vec![hit("mi-1", Some("cccc"), "Managed identity")],
+            ..Default::default()
+        };
+        let got: Vec<(String, Option<String>)> = application_candidates(r)
+            .into_iter()
+            .map(|o| (o.id, o.display_name))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("AAAA".to_string(), Some("Contoso (enterprise)".to_string())),
+                ("bbbb".to_string(), Some("Fabrikam".to_string())),
+            ]
+        );
     }
 }

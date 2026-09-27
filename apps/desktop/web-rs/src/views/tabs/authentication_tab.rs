@@ -19,7 +19,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 
 use crate::bindings::applications::{self, ApplicationAuthenticationDto, ApplicationDetail};
-use crate::components::ui::DetailSkeleton;
+use crate::components::ui::{DetailLoadError, DetailSkeleton};
 use crate::components::uri_list_editor::{UriListEditor, UriListState, redirect_uri_reason};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -65,7 +65,13 @@ pub fn AuthenticationTab(
                                 .into_any()
                         }
                         Err(e) => {
-                            view! { <Body1 class="form-error">{e.message}</Body1> }.into_any()
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                />
+                            }
+                                .into_any()
                         }
                     }
                 })}

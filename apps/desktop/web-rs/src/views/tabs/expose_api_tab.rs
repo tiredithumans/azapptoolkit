@@ -4,11 +4,14 @@
 //! consent prompt.
 //!
 //! Loads live state via `get_expose_api` (these fields aren't on the cached
-//! list shape), then each mutation goes through its own command; the backend
-//! re-reads live state before every write because Graph full-replaces the
-//! `api` arrays. After a successful save the tab refetches itself and bumps
-//! the parent detail (the paired SP mirrors the scope list).
+//! list shape), then each mutation goes through its own command carrying only
+//! its delta — one URI added or removed, one scope, one client — and the
+//! backend re-reads live state and merges it before every write, because
+//! Graph full-replaces `identifierUris` and the `api` arrays. After a
+//! successful save the tab refetches itself and bumps the parent detail (the
+//! paired SP mirrors the scope list).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use leptos::prelude::*;
@@ -18,8 +21,9 @@ use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::expose_api::{
     self, ExposeApiDto, SetPreAuthorizedAppInput, UpsertApiScopeInput,
 };
+use crate::components::directory_search::{DirectoryScope, DirectorySearch};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::DetailSkeleton;
+use crate::components::ui::{DetailLoadError, DetailSkeleton};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -79,7 +83,13 @@ pub fn ExposeApiTab(
                                 .into_any()
                         }
                         Err(e) => {
-                            view! { <Body1 class="form-error">{e.message}</Body1> }.into_any()
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                />
+                            }
+                                .into_any()
                         }
                     }
                 })}
@@ -97,7 +107,9 @@ fn ExposeApiLoaded(
 ) -> impl IntoView {
     let session = use_session();
     let object_id = StoredValue::new(object_id);
-    let uris = StoredValue::new(dto.identifier_uris.clone());
+    // Only for the Add dialog's early duplicate check — never a write's merge
+    // base (the backend re-reads live and is authoritative).
+    let loaded_uris = StoredValue::new(dto.identifier_uris.clone());
     let scopes = StoredValue::new(dto.scopes.clone());
 
     // ---- Application ID URI ----
@@ -120,14 +132,12 @@ fn ExposeApiLoaded(
             uri_add_cmd.error.set(Some("Enter a URI.".into()));
             return;
         }
-        let mut list = uris.get_value();
-        if list.iter().any(|u| u.eq_ignore_ascii_case(&v)) {
+        if loaded_uris.with_value(|l| l.iter().any(|u| u.eq_ignore_ascii_case(&v))) {
             uri_add_cmd
                 .error
                 .set(Some("That URI is already set.".into()));
             return;
         }
-        list.push(v);
         uri_add_cmd.run(
             move |()| {
                 session.toast_success("Application ID URIs updated.");
@@ -136,13 +146,12 @@ fn ExposeApiLoaded(
             },
             move |tenant_id| {
                 let id = object_id.get_value();
-                async move { expose_api::set_identifier_uris(&tenant_id, &id, &list).await }
+                async move { expose_api::add_identifier_uri(&tenant_id, &id, &v).await }
             },
         );
     };
 
     let remove_uri = move |uri: String| {
-        let list: Vec<String> = uris.get_value().into_iter().filter(|u| u != &uri).collect();
         uri_remove_cmd.run(
             move |()| {
                 session.toast_success("Application ID URIs updated.");
@@ -151,7 +160,7 @@ fn ExposeApiLoaded(
             },
             move |tenant_id| {
                 let id = object_id.get_value();
-                async move { expose_api::set_identifier_uris(&tenant_id, &id, &list).await }
+                async move { expose_api::remove_identifier_uri(&tenant_id, &id, &uri).await }
             },
         );
     };
@@ -267,10 +276,27 @@ fn ExposeApiLoaded(
     let pre_selected: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
     let pre_cmd = use_command();
     let pre_remove_cmd = use_command();
-    let pending_remove_pre: RwSignal<Option<String>> = RwSignal::new(None);
+    // (client appId, subject): like `pending_delete_scope`, the row's label
+    // rides along to be the confirm dialog's subject.
+    let pending_remove_pre: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+    // (appId, name) of the client picked from directory search — shown as
+    // "Selected: …" only while the Client ID field still holds that appId.
+    let pre_picked: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+    let client_names = StoredValue::new(dto.client_display_names.clone());
+    let client_name = move |app_id: &str| {
+        client_names.with_value(|m| m.get(&app_id.to_ascii_lowercase()).cloned())
+    };
+    // Already-authorized clients are hidden from the Add dialog's search.
+    let authorized_ids: HashSet<String> = dto
+        .pre_authorized_applications
+        .iter()
+        .map(|p| p.app_id.clone())
+        .collect();
+    let authorized_ids = Signal::derive(move || authorized_ids.clone());
 
     let open_add_pre = move || {
         pre_editing.set(false);
+        pre_picked.set(None);
         pre_client_id.set(String::new());
         pre_selected.set(Vec::new());
         pre_cmd.error.set(None);
@@ -524,6 +550,7 @@ fn ExposeApiLoaded(
                 </Body1>
                 {
                     let list = dto.pre_authorized_applications.clone();
+                    let names = dto.client_display_names.clone();
                     let by_id: std::collections::HashMap<String, String> = dto
                         .scopes
                         .iter()
@@ -536,6 +563,7 @@ fn ExposeApiLoaded(
                             <table class="data-table">
                                 <thead>
                                     <tr>
+                                        <th>"Client application"</th>
                                         <th>"Client ID"</th>
                                         <th>"Authorized scopes"</th>
                                         <th></th>
@@ -561,9 +589,15 @@ fn ExposeApiLoaded(
                                                 .join(", ");
                                             let edit_id = p.app_id.clone();
                                             let edit_scopes = p.delegated_permission_ids.clone();
+                                            let name = names.get(&p.app_id.to_ascii_lowercase()).cloned();
+                                            let remove_subject = match &name {
+                                                Some(n) => format!("{n} ({})", p.app_id),
+                                                None => p.app_id.clone(),
+                                            };
                                             let remove_id = p.app_id.clone();
                                             view! {
                                                 <tr>
+                                                    <td>{name.unwrap_or_else(|| "—".into())}</td>
                                                     <td class="mono">{p.app_id.clone()}</td>
                                                     <td>{scope_names}</td>
                                                     <td>
@@ -581,7 +615,10 @@ fn ExposeApiLoaded(
                                                                 class="button--danger"
                                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                                 on_click=Box::new(move |_| {
-                                                                    pending_remove_pre.set(Some(remove_id.clone()))
+                                                                    pending_remove_pre
+                                                                        .set(
+                                                                            Some((remove_id.clone(), remove_subject.clone())),
+                                                                        )
                                                                 })
                                                             >
                                                                 "Remove"
@@ -735,15 +772,51 @@ fn ExposeApiLoaded(
             >
                 {move || {
                     if pre_editing.get() {
-                        view! { <Body1 class="mono">{pre_client_id.get()}</Body1> }.into_any()
+                        let id = pre_client_id.get();
+                        let heading = match client_name(&id) {
+                            Some(n) => view! {
+                                <Body1>
+                                    <strong>{n}</strong>
+                                    " "
+                                    <span class="mono">{id}</span>
+                                </Body1>
+                            }
+                                .into_any(),
+                            None => view! { <Body1 class="mono">{id}</Body1> }.into_any(),
+                        };
+                        heading
                     } else {
                         view! {
+                            <DirectorySearch
+                                on_pick=Callback::new(move |o: azapptoolkit_core::models::DirectoryObject| {
+                                    let name = o.display_name.clone().unwrap_or_else(|| o.id.clone());
+                                    pre_client_id.set(o.id.clone());
+                                    pre_picked.set(Some((o.id, name)));
+                                })
+                                scope=Signal::derive(|| DirectoryScope::Applications)
+                                exclude=authorized_ids
+                                label="Find the client application"
+                                placeholder="Search by name or application ID…"
+                                action_label="Select"
+                            />
+                            {move || {
+                                let id = pre_client_id.get();
+                                pre_picked
+                                    .get()
+                                    .filter(|(picked, _)| picked == id.trim())
+                                    .map(|(_, name)| {
+                                        view! { <Body1 class="hint">{format!("Selected: {name}")}</Body1> }
+                                    })
+                            }}
                             <Field label="Client ID (application ID of the client app)">
                                 <Input
                                     value=pre_client_id
                                     placeholder="00000000-0000-0000-0000-000000000000"
                                 />
                             </Field>
+                            <Body1 class="hint">
+                                "A client registered in another tenant won't appear in search — paste its application ID."
+                            </Body1>
                         }
                             .into_any()
                     }
@@ -849,14 +922,17 @@ fn ExposeApiLoaded(
                 open=Signal::derive(move || pending_remove_pre.with(|p| p.is_some()))
                 title="Remove this authorized client application?"
                 body="The client can still request these scopes, but users will be prompted to consent again."
-                // No display name is resolvable for a pre-authorized client — the
-                // client id IS the row's identity here (and its only column), so
-                // it is the one string the operator can match to the row.
-                subject=Signal::derive(move || pending_remove_pre.get().unwrap_or_default())
+                // "Name (appId)" when the tenant SP index names the client, else
+                // the bare appId — either way both strings the row shows.
+                subject=Signal::derive(move || {
+                    pending_remove_pre
+                        .with(|p| p.as_ref().map(|(_, subject)| subject.clone()))
+                        .unwrap_or_default()
+                })
                 confirm_label="Remove"
                 busy=Signal::derive(move || pre_remove_cmd.busy.get())
                 on_confirm=Callback::new(move |()| {
-                    if let Some(id) = pending_remove_pre.get() {
+                    if let Some((id, _)) = pending_remove_pre.get() {
                         remove_pre(id);
                     }
                 })
