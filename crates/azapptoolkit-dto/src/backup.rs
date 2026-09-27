@@ -25,10 +25,13 @@
 //! their backup is a redeploy-runbook + permission-rebind snapshot, not a
 //! restorable object. See `docs/architecture/backup-and-restore.md`.
 
+use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_core::models::{
     FederatedIdentityCredential, OAuth2PermissionScope, PreAuthorizedApplication,
     RequiredResourceAccess,
 };
+
+use crate::managed_identity::MiSubtype;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -46,9 +49,10 @@ pub struct TenantBackup {
     /// fail) when this differs from the destination tenant — that mismatch is
     /// the *expected* DR case.
     pub source_tenant_id: String,
-    /// Cloud label (`Commercial` / `UsGov` / `UsGovDod` / `China`). Restore
-    /// rejects a cross-cloud manifest — endpoints and well-known appIds differ.
-    pub cloud: String,
+    /// The source cloud, serialized as [`CloudEnvironment::as_str`]
+    /// (`commercial` / `usgov` / `usgovdod` / `china`). Restore rejects a
+    /// cross-cloud manifest — endpoints and well-known appIds differ.
+    pub cloud: CloudEnvironment,
     #[serde(default)]
     pub app_registrations: Vec<AppRegistrationBackup>,
     #[serde(default)]
@@ -63,6 +67,10 @@ pub struct TenantBackup {
     /// per-object failures were logged at `warn!` — which reaches a log file
     /// nobody reads during an incident, not the operator holding the file.
     ///
+    /// An entry may also name a *part* of an object that IS in the manifest
+    /// (an enterprise app's assignees, a managed identity's held app-roles):
+    /// that object restores without the named part.
+    ///
     /// A non-empty list does not invalidate the backup; it bounds it. Restore
     /// surfaces the same list so the gap is visible at the moment it matters.
     /// `#[serde(default)]` so manifests written before this field load as
@@ -75,7 +83,11 @@ pub struct TenantBackup {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkippedObject {
-    /// `application`, `enterpriseApp`, or `managedIdentity`.
+    /// `application` / `enterpriseApp`: the object is absent from the
+    /// manifest. `enterpriseAppAssignments` / `enterpriseAppGroups` /
+    /// `managedIdentity`: the object is in the manifest, but the named part
+    /// (assigned users/groups, group memberships, held app-roles) could not be
+    /// read and is empty.
     pub kind: String,
     /// Directory object id, so the operator can find it in the source tenant.
     pub object_id: String,
@@ -225,8 +237,8 @@ pub struct ManagedIdentityBackup {
     pub source_principal_id: String,
     pub source_app_id: String,
     pub display_name: String,
-    /// `systemAssigned` / `userAssigned` / `unknown`.
-    pub subtype: String,
+    /// Serialized by [`MiSubtype`]'s camelCase serde form.
+    pub subtype: MiSubtype,
     /// ARM resource id (user-assigned MIs only) — tells the infra team which
     /// resource to recreate. `None` for system-assigned (recreated with host).
     #[serde(default)]
@@ -371,8 +383,8 @@ pub struct RestorePlan {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudMismatch {
-    pub backup_cloud: String,
-    pub destination_cloud: String,
+    pub backup_cloud: CloudEnvironment,
+    pub destination_cloud: CloudEnvironment,
 }
 
 /// Outcome of a restore run. Carries the old→new id remap, the freshly-minted
@@ -519,7 +531,7 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             source_tenant_id: "tenant-src".into(),
-            cloud: "Commercial".into(),
+            cloud: CloudEnvironment::Commercial,
             app_registrations: vec![AppRegistrationBackup {
                 source_object_id: "obj-1".into(),
                 source_app_id: "app-1".into(),
@@ -555,7 +567,7 @@ mod tests {
                 source_principal_id: "mi-1".into(),
                 source_app_id: "mi-app-1".into(),
                 display_name: "mi-prod".into(),
-                subtype: "userAssigned".into(),
+                subtype: MiSubtype::UserAssigned,
                 arm_resource_id: Some("/subscriptions/s/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/mi-prod".into()),
                 ..Default::default()
             }],
@@ -566,6 +578,9 @@ mod tests {
         // camelCase keys on the wire.
         assert_eq!(json["schemaVersion"], BACKUP_SCHEMA_VERSION);
         assert_eq!(json["sourceTenantId"], "tenant-src");
+        // The typed fields keep the wire strings earlier builds wrote.
+        assert_eq!(json["cloud"], "commercial");
+        assert_eq!(json["managedIdentities"][0]["subtype"], "userAssigned");
         assert!(
             json["appRegistrations"][0]["adminConsentGranted"]
                 .as_bool()
@@ -588,7 +603,31 @@ mod tests {
                 .as_deref(),
             Some("Mail.Read")
         );
-        assert_eq!(back.managed_identities[0].subtype, "userAssigned");
+        assert_eq!(back.managed_identities[0].subtype, MiSubtype::UserAssigned);
+    }
+
+    /// A manifest written while `cloud` and `subtype` were plain strings has
+    /// the same JSON, so it must still load into the typed fields.
+    #[test]
+    fn a_manifest_written_before_the_typed_fields_still_loads() {
+        let json = serde_json::json!({
+            "schemaVersion": 1,
+            "createdAt": "2026-06-15T00:00:00Z",
+            "sourceTenantId": "tenant-src",
+            "cloud": "commercial",
+            "managedIdentities": [{
+                "sourcePrincipalId": "mi-1",
+                "sourceAppId": "mi-app-1",
+                "displayName": "mi-prod",
+                "subtype": "systemAssigned"
+            }]
+        });
+        let backup: TenantBackup = serde_json::from_value(json).unwrap();
+        assert_eq!(backup.cloud, CloudEnvironment::Commercial);
+        assert_eq!(
+            backup.managed_identities[0].subtype,
+            MiSubtype::SystemAssigned
+        );
     }
 
     /// `CredentialMeta` has no value field — this is the structural guarantee

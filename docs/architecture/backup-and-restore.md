@@ -108,16 +108,22 @@ of `BATCH_CHUNK` (20, Graph's `$batch` cap) and `dispatch_capped`s the chunks:
   (`batch_get_service_principals` — the lean index lacks `appRoles`/`tags`/
   `appRoleAssignmentRequired`), `batch_list_app_role_assigned_to`, and
   `batch_list_service_principal_groups` (the advanced `memberOf` query rides a
-  per-sub-request `ConsistencyLevel` header). Group/assignee failures degrade to
-  empty; a vanished SP is skipped.
+  per-sub-request `ConsistencyLevel` header). A group/assignee read failure still
+  captures the SP, without that part, and is recorded in `TenantBackup.skipped`
+  as a partial entry (`enterpriseAppAssignments` / `enterpriseAppGroups`); a
+  vanished SP is left out.
 - **Pass 3 — managed identities:** `batch_list_app_role_assignments` for all MIs,
   then one batched prewarm of each **distinct** resource SP (seeding
   `ResourceLookup`), then assembly with no further round trips. Azure RBAC isn't
-  scanned (runbook-only on restore).
+  scanned (runbook-only on restore). A per-MI assignment read failure captures
+  the MI without its app-roles and is recorded as a `managedIdentity` skip; like
+  Passes 1 and 2, every failure is classified through `SessionDead`, so a dead
+  session aborts the backup.
 
 Each batched read returns `Vec<Result<T>>` in input order; a **whole-batch
 failure degrades to per-object reads** for that chunk (never failing the backup),
-and a per-object failure skips just that object. Concurrency is **adaptive**: a
+and a per-object failure skips (or partially captures) just that object,
+recorded in `skipped`. Concurrency is **adaptive**: a
 shared `ConcurrencyThrottle` (`commands/throttle.rs`, the audit's tracker)
 wired as the Graph client's `ThrottleObserver` halves the chunk cap on each 429
 and recovers it when quiet; the cap is fed to `dispatch_capped` and emitted as

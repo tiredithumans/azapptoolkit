@@ -240,23 +240,26 @@ pub async fn backup_tenant(
     // ---- Managed identities: identity + held Graph app-roles (the re-bindable
     // permission). Azure RBAC isn't scanned here — it's runbook-only on restore
     // (source scopes don't exist in the destination) and the MI detail view
-    // already surfaces it for DR planning.
-    let managed_identities = backup_managed_identities(
-        &client,
-        &managed,
-        &cancel,
-        &app_handle,
-        &done,
-        total,
-        &throttle,
-    )
-    .await?;
+    // already surfaces it for DR planning. A per-MI read failure is recorded in
+    // `skipped`; a dead session or a cancel aborts the backup (the `?`).
+    let report_mi = |count: usize, name: &str| {
+        emit(
+            &app_handle,
+            count,
+            total,
+            Some(name.to_string()),
+            Some(throttle.current_limit()),
+        );
+    };
+    let (managed_identities, mut mi_skipped) =
+        backup_managed_identities(&client, &managed, &cancel, &done, &report_mi, &session).await?;
+    skipped.append(&mut mi_skipped);
 
     Ok(TenantBackup {
         schema_version: BACKUP_SCHEMA_VERSION,
         created_at: chrono::Utc::now(),
         source_tenant_id: tenant_id,
-        cloud: state.auth.cloud().as_str().to_string(),
+        cloud: state.auth.cloud(),
         app_registrations: app_backups,
         enterprise_apps,
         managed_identities,
@@ -500,9 +503,10 @@ fn assemble_app_backup(
 /// the inbound role assignments, and the group memberships each go out as one
 /// `$batch` POST (three POSTs per chunk, fired concurrently), instead of three
 /// individual reads per SP. A whole-batch failure for any of the three degrades
-/// to per-SP reads for this chunk; assignment/group per-SP failures degrade to
-/// empty (matching the prior best-effort reads); an SP that vanished between the
-/// index read and now is skipped. Emits per-SP progress.
+/// to per-SP reads for this chunk; an assignment/group per-SP failure still
+/// captures the SP, without that part, and is recorded in `skipped` as a
+/// partial entry (see [`enterprise_entry`]); an SP that vanished between the
+/// index read and now is left out. Emits per-SP progress.
 #[allow(clippy::too_many_arguments)]
 async fn backup_enterprise_chunk(
     client: &GraphClient,
@@ -550,34 +554,15 @@ async fn backup_enterprise_chunk(
     let mut out = Vec::with_capacity(chunk.len());
     let mut skipped: Vec<SkippedObject> = Vec::new();
     for (i, index_sp) in chunk.iter().enumerate() {
-        let entry = match &full_sps[i] {
-            Ok(Some(sp)) => {
-                // Assignment/group failures degrade to empty, like the prior reads.
-                let assigned_i = match &assigned[i] {
-                    Ok(v) => v.clone(),
-                    Err(_) => Vec::new(),
-                };
-                let groups_i = match &groups[i] {
-                    Ok(v) => v.clone(),
-                    Err(_) => Vec::new(),
-                };
-                let paired = app_obj_by_app_id.get(&sp.app_id).cloned();
-                Some(assemble_enterprise_backup(
-                    sp, assigned_i, groups_i, tenant_id, paired,
-                ))
-            }
-            Ok(None) => None, // vanished between the index read and now
-            Err(err) => {
-                tracing::warn!(sp = %index_sp.id, error = %err, "backup: enterprise SP fetch failed; skipping");
-                skipped.push(SkippedObject::new(
-                    "enterpriseApp",
-                    &index_sp.id,
-                    Some(index_sp.display_name.clone()),
-                    format!("service principal could not be read: {err}"),
-                ));
-                None
-            }
-        };
+        let entry = enterprise_entry(
+            index_sp,
+            &full_sps[i],
+            &assigned[i],
+            &groups[i],
+            tenant_id,
+            app_obj_by_app_id,
+            &mut skipped,
+        );
         if let Some(b) = entry {
             out.push(b);
         }
@@ -595,6 +580,73 @@ async fn backup_enterprise_chunk(
         );
     }
     (out, skipped)
+}
+
+/// Turns one enterprise SP's three already-fetched reads into its backup entry —
+/// no I/O. A failed SP read leaves the app out (an `enterpriseApp` skip); a
+/// vanished SP (`Ok(None)`) is left out silently. A failed assignee or group
+/// read still captures the app, without that part, and records the gap as an
+/// `enterpriseAppAssignments` / `enterpriseAppGroups` skip: an entry with zero
+/// assignees restores as "nobody had access", so the manifest has to say it
+/// does not know.
+fn enterprise_entry(
+    index_sp: &ServicePrincipal,
+    full: &Result<Option<ServicePrincipal>, GraphError>,
+    assigned: &Result<Vec<AppRoleAssignment>, GraphError>,
+    groups: &Result<Vec<GroupSummary>, GraphError>,
+    tenant_id: &str,
+    app_obj_by_app_id: &HashMap<String, String>,
+    skipped: &mut Vec<SkippedObject>,
+) -> Option<EnterpriseAppBackup> {
+    match full {
+        Ok(Some(sp)) => {
+            let assigned = match assigned {
+                Ok(v) => v.clone(),
+                Err(err) => {
+                    tracing::warn!(sp = %sp.id, error = %err, "backup: enterprise assignee read failed; recording as partial");
+                    skipped.push(SkippedObject::new(
+                        "enterpriseAppAssignments",
+                        &sp.id,
+                        Some(sp.display_name.clone()),
+                        format!(
+                            "assigned users/groups could not be read: {err}; captured without them"
+                        ),
+                    ));
+                    Vec::new()
+                }
+            };
+            let groups = match groups {
+                Ok(v) => v.clone(),
+                Err(err) => {
+                    tracing::warn!(sp = %sp.id, error = %err, "backup: enterprise group-membership read failed; recording as partial");
+                    skipped.push(SkippedObject::new(
+                        "enterpriseAppGroups",
+                        &sp.id,
+                        Some(sp.display_name.clone()),
+                        format!(
+                            "group memberships could not be read: {err}; captured without them"
+                        ),
+                    ));
+                    Vec::new()
+                }
+            };
+            let paired = app_obj_by_app_id.get(&sp.app_id).cloned();
+            Some(assemble_enterprise_backup(
+                sp, assigned, groups, tenant_id, paired,
+            ))
+        }
+        Ok(None) => None, // vanished between the index read and now
+        Err(err) => {
+            tracing::warn!(sp = %index_sp.id, error = %err, "backup: enterprise SP fetch failed; skipping");
+            skipped.push(SkippedObject::new(
+                "enterpriseApp",
+                &index_sp.id,
+                Some(index_sp.display_name.clone()),
+                format!("service principal could not be read: {err}"),
+            ));
+            None
+        }
+    }
 }
 
 /// Assembles one enterprise application's backup from already-fetched data — no
@@ -671,40 +723,41 @@ fn assemble_enterprise_backup(
 /// between phases and per MI. (Uses the batch helpers' own internal concurrency
 /// rather than the adaptive chunk cap: the MI set is small and Pass 1/2 are the
 /// throttle pressure that matters.)
-#[allow(clippy::too_many_arguments)]
+///
+/// Like Passes 1 and 2, every read failure is classified through `session`: a
+/// dead session aborts the backup rather than saving a manifest whose managed
+/// identities all hold nothing. A per-MI assignment read failure still captures
+/// the MI (so its redeploy runbook item exists) and records a `managedIdentity`
+/// skip, so the missing app-roles are never read as "holds none".
 async fn backup_managed_identities(
     client: &GraphClient,
     managed: &[ServicePrincipal],
     cancel: &CancelToken,
-    app_handle: &AppHandle,
     done: &Mutex<usize>,
-    total: usize,
-    throttle: &ConcurrencyThrottle,
-) -> Result<Vec<ManagedIdentityBackup>, UiError> {
+    // Called once per MI with the running total and the MI's display name, so
+    // the pass stays decoupled from the Tauri `AppHandle` (see
+    // `backup_app_chunk`'s `report`).
+    report: &(dyn Fn(usize, &str) + Sync),
+    session: &SessionDead,
+) -> Result<(Vec<ManagedIdentityBackup>, Vec<SkippedObject>), UiError> {
     if cancel.is_cancelled() {
         return Err(cancelled_err());
     }
     let mi_ids: Vec<String> = managed.iter().map(|sp| sp.id.clone()).collect();
 
-    // Phase 1: every MI's held app-role assignments. A read failure (whole-batch
-    // or per-MI) degrades to empty, matching the prior best-effort per-MI read.
-    let assignments: Vec<Vec<AppRoleAssignment>> = batch_or_serial(
+    // Phase 1: every MI's held app-role assignments. A whole-batch failure takes
+    // the per-MI path; each per-MI result is kept so a failure is recorded below.
+    let assignments: Vec<Result<Vec<AppRoleAssignment>, GraphError>> = batch_or_serial(
         "backup MI assignment",
         &mi_ids,
-        client
-            .batch_list_app_role_assignments(&mi_ids)
-            .await
-            // Per-item errors degrade to empty here (best-effort, as before);
-            // only a WHOLE-batch failure takes the per-item path.
-            .map(|v| v.into_iter().map(Result::unwrap_or_default).collect()),
-        |id: String| async move {
-            client
-                .list_app_role_assignments(&id)
-                .await
-                .unwrap_or_default()
-        },
+        client.batch_list_app_role_assignments(&mi_ids).await,
+        |id: String| async move { client.list_app_role_assignments(&id).await },
     )
     .await;
+    note_graph_failures(session, assignments.iter().map(Result::as_ref));
+    if session.is_dead() {
+        return Err(session.err("the tenant backup"));
+    }
 
     if cancel.is_cancelled() {
         return Err(cancelled_err());
@@ -712,10 +765,11 @@ async fn backup_managed_identities(
 
     // Phase 2: resolve each distinct resource SP once, batched, seeding the
     // lookup so the per-MI assembly below makes no further round trips.
-    let mut resolver = ResourceLookup::new(client);
+    let mut resolver = ResourceLookup::new(client, session);
     let mut seen = std::collections::HashSet::new();
     let unique: Vec<String> = assignments
         .iter()
+        .filter_map(|r| r.as_ref().ok())
         .flatten()
         .filter(|a| seen.insert(a.resource_id.clone()))
         .map(|a| a.resource_id.clone())
@@ -724,32 +778,45 @@ async fn backup_managed_identities(
 
     // Phase 3: assemble (cache hits).
     let mut out = Vec::with_capacity(managed.len());
-    let mut count = *done.lock().await;
+    let mut skipped: Vec<SkippedObject> = Vec::new();
     for (i, sp) in managed.iter().enumerate() {
         if cancel.is_cancelled() {
             return Err(cancelled_err());
         }
-        let subtype = MiSubtype::from_alternative_names(&sp.alternative_names);
-        let held_app_roles = resolver.held_app_roles_from(&assignments[i]).await;
+        let held_app_roles = match &assignments[i] {
+            Ok(a) => resolver.held_app_roles_from(a).await,
+            Err(err) => {
+                tracing::warn!(mi = %sp.id, error = %err, "backup: MI app-role read failed; recording as partial");
+                skipped.push(SkippedObject::new(
+                    "managedIdentity",
+                    &sp.id,
+                    Some(sp.display_name.clone()),
+                    format!("held Graph app-roles could not be read: {err}; captured without them"),
+                ));
+                Vec::new()
+            }
+        };
         out.push(ManagedIdentityBackup {
             source_principal_id: sp.id.clone(),
             source_app_id: sp.app_id.clone(),
             display_name: sp.display_name.clone(),
-            subtype: mi_subtype_wire_label(subtype).to_string(),
+            subtype: MiSubtype::from_alternative_names(&sp.alternative_names),
             arm_resource_id: user_assigned_arm_id(&sp.alternative_names),
             held_app_roles,
             ..Default::default()
         });
-        count += 1;
-        emit(
-            app_handle,
-            count,
-            total,
-            Some(sp.display_name.clone()),
-            Some(throttle.current_limit()),
-        );
+        let count = {
+            let mut d = done.lock().await;
+            *d += 1;
+            *d
+        };
+        report(count, &sp.display_name);
     }
-    Ok(out)
+    // A resource-SP resolve can latch the session too.
+    if session.is_dead() {
+        return Err(session.err("the tenant backup"));
+    }
+    Ok((out, skipped))
 }
 
 fn is_managed_identity(sp: &ServicePrincipal) -> bool {
@@ -763,6 +830,9 @@ fn is_managed_identity(sp: &ServicePrincipal) -> bool {
 /// destination).
 struct ResourceLookup<'a> {
     client: &'a GraphClient,
+    // A resolve miss degrades to raw ids, but its failure is still classified:
+    // a dead session must stop the backup, not thin every grant to raw ids.
+    session: &'a SessionDead,
     cache: HashMap<String, Option<ResourceInfo>>,
 }
 
@@ -788,9 +858,10 @@ impl ResourceInfo {
 }
 
 impl<'a> ResourceLookup<'a> {
-    fn new(client: &'a GraphClient) -> Self {
+    fn new(client: &'a GraphClient, session: &'a SessionDead) -> Self {
         Self {
             client,
+            session,
             cache: HashMap::new(),
         }
     }
@@ -820,7 +891,9 @@ impl<'a> ResourceLookup<'a> {
                             self.cache.insert(id.clone(), None);
                         }
                         // Leave cold: `resolve` retries this id per-request.
-                        Err(_) => {}
+                        Err(err) => {
+                            self.session.note_code(err.ui_code());
+                        }
                     }
                 }
             }
@@ -843,6 +916,7 @@ impl<'a> ResourceLookup<'a> {
             Ok(None) => None,
             Err(err) => {
                 tracing::warn!(%resource_sp_id, error = %err, "backup: resource SP resolve failed; recording raw ids");
+                self.session.note_code(err.ui_code());
                 None
             }
         };
@@ -886,16 +960,6 @@ fn user_assigned_arm_id<S: AsRef<str>>(alternative_names: &[S]) -> Option<String
         .map(AsRef::as_ref)
         .find(|n| n.to_ascii_lowercase().contains("userassignedidentities"))
         .map(str::to_string)
-}
-
-/// Stable camelCase label for [`MiSubtype`], matching its serde wire form so the
-/// backup's `subtype` string round-trips against the same vocabulary the UI uses.
-fn mi_subtype_wire_label(subtype: MiSubtype) -> &'static str {
-    match subtype {
-        MiSubtype::SystemAssigned => "systemAssigned",
-        MiSubtype::UserAssigned => "userAssigned",
-        MiSubtype::Unknown => "unknown",
-    }
 }
 
 /// Secret metadata — never a value. The `secretText` is only present on an
@@ -974,19 +1038,6 @@ mod tests {
         let sys =
             ["/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm-1"];
         assert_eq!(user_assigned_arm_id(&sys), None);
-    }
-
-    #[test]
-    fn mi_subtype_label_matches_camel_case_wire_form() {
-        assert_eq!(
-            mi_subtype_wire_label(MiSubtype::UserAssigned),
-            "userAssigned"
-        );
-        assert_eq!(
-            mi_subtype_wire_label(MiSubtype::SystemAssigned),
-            "systemAssigned"
-        );
-        assert_eq!(mi_subtype_wire_label(MiSubtype::Unknown), "unknown");
     }
 
     #[test]
@@ -1095,15 +1146,9 @@ mod tests {
         // No-op progress callback — the degrade logic under test doesn't depend on
         // it, and this keeps the test free of a Tauri AppHandle / mock runtime.
         let report = |_count: usize| {};
-        let (out, skipped) = backup_app_chunk(
-            &client,
-            chunk,
-            &sp_app_ids,
-            &done,
-            &report,
-            &SessionDead::new(),
-        )
-        .await;
+        let session = SessionDead::new();
+        let (out, skipped) =
+            backup_app_chunk(&client, chunk, &sp_app_ids, &done, &report, &session).await;
 
         // The run never fails: obj-1 is recovered via the per-object fallback, and
         // obj-2's failed read is skipped rather than aborting the chunk.
@@ -1124,5 +1169,224 @@ mod tests {
         );
         // Progress still advances for every object in the chunk, including the skip.
         assert_eq!(*done.lock().await, 2);
+        // A transient failure is a per-object skip, never the end of the session.
+        assert!(
+            !session.is_dead(),
+            "a transient 500 must not latch the session"
+        );
+    }
+
+    /// A token provider whose refresh token is gone: every read fails with the
+    /// re-auth-fatal code before any request is sent.
+    struct DeadSession;
+    #[async_trait::async_trait]
+    impl azapptoolkit_core::token::BearerProvider for DeadSession {
+        async fn bearer(&self) -> Result<String, azapptoolkit_core::token::TokenError> {
+            Err(azapptoolkit_core::token::TokenError::new(
+                "refresh_missing",
+                "gone",
+            ))
+        }
+    }
+
+    fn graph_over(server: &wiremock::MockServer, dead: bool) -> GraphClient {
+        use azapptoolkit_core::cache::Cache;
+        use azapptoolkit_core::token::{BearerProvider, StaticTokenProvider};
+        let token: Arc<dyn BearerProvider> = if dead {
+            Arc::new(DeadSession)
+        } else {
+            StaticTokenProvider::new("tok")
+        };
+        GraphClient::with_base_url(
+            "tenant-test",
+            token.clone(),
+            token,
+            Cache::new(),
+            server.uri(),
+        )
+    }
+
+    fn mi(id: &str, name: &str) -> ServicePrincipal {
+        ServicePrincipal {
+            id: id.into(),
+            app_id: format!("{id}-app"),
+            display_name: name.into(),
+            service_principal_type: Some("ManagedIdentity".into()),
+            ..Default::default()
+        }
+    }
+
+    // The latch the backup's per-item classification exists for: a re-auth-fatal
+    // read must end the run, not thin the manifest by every app it touches.
+    #[tokio::test]
+    async fn a_reauth_fatal_read_latches_the_backup_session() {
+        // Never answered: the token fails before any request is sent.
+        let server = wiremock::MockServer::start().await;
+        let client = graph_over(&server, true);
+        let done = Mutex::new(0usize);
+        let report = |_count: usize| {};
+        let session = SessionDead::new();
+        let (out, _skipped) = backup_app_chunk(
+            &client,
+            vec![("app-1".to_string(), "obj-1".to_string())],
+            &std::collections::HashSet::new(),
+            &done,
+            &report,
+            &session,
+        )
+        .await;
+        assert!(out.is_empty());
+        assert!(
+            session.is_dead(),
+            "a dead refresh token must latch the session"
+        );
+    }
+
+    // Pass 3 used to replace a failed held-app-role read with an empty list and
+    // record nothing, so the MI restored as "holds no permissions".
+    #[tokio::test]
+    async fn backup_managed_identities_records_an_unreadable_mi_as_skipped() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/$batch"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/servicePrincipals/mi-1/appRoleAssignments"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/servicePrincipals/mi-2/appRoleAssignments"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
+            )
+            .mount(&server)
+            .await;
+        let client = graph_over(&server, false);
+
+        let managed = vec![mi("mi-1", "mi-one"), mi("mi-2", "mi-two")];
+        let cancel = crate::state::CancelFlag::new().claim();
+        let done = Mutex::new(0usize);
+        let report = |_count: usize, _name: &str| {};
+        let session = SessionDead::new();
+        let (out, skipped) =
+            backup_managed_identities(&client, &managed, &cancel, &done, &report, &session)
+                .await
+                .expect("a transient per-MI failure must not fail the backup");
+
+        // Both MIs are captured — the unreadable one still needs its runbook item.
+        assert_eq!(out.len(), 2);
+        let mi1 = out
+            .iter()
+            .find(|m| m.source_principal_id == "mi-1")
+            .unwrap();
+        assert!(mi1.held_app_roles.is_empty());
+        // ...and the gap is recorded, so the empty list doesn't read as "holds none".
+        assert_eq!(skipped.len(), 1, "only the unreadable MI is recorded");
+        assert_eq!(skipped[0].kind, "managedIdentity");
+        assert_eq!(skipped[0].object_id, "mi-1");
+        assert_eq!(skipped[0].display_name.as_deref(), Some("mi-one"));
+        assert!(!skipped[0].reason.is_empty());
+        assert!(!session.is_dead(), "a transient 500 must not latch");
+        assert_eq!(*done.lock().await, 2);
+    }
+
+    #[tokio::test]
+    async fn backup_managed_identities_aborts_on_a_dead_session() {
+        let server = wiremock::MockServer::start().await;
+        let client = graph_over(&server, true);
+        let managed = vec![mi("mi-1", "mi-one"), mi("mi-2", "mi-two")];
+        let cancel = crate::state::CancelFlag::new().claim();
+        let done = Mutex::new(0usize);
+        let report = |_count: usize, _name: &str| {};
+        let session = SessionDead::new();
+        let err = backup_managed_identities(&client, &managed, &cancel, &done, &report, &session)
+            .await
+            .expect_err("a dead session must stop the backup, not save empty MIs");
+        assert_eq!(err.code, "refresh_missing");
+        assert!(session.is_dead());
+    }
+
+    fn api_err() -> GraphError {
+        GraphError::Api {
+            status: 500,
+            body: "boom".into(),
+        }
+    }
+
+    fn ent_sp() -> ServicePrincipal {
+        ServicePrincipal {
+            id: "sp-1".into(),
+            app_id: "app-1".into(),
+            display_name: "Gallery App".into(),
+            ..Default::default()
+        }
+    }
+
+    fn entry_with(
+        full: Result<Option<ServicePrincipal>, GraphError>,
+        assigned: Result<Vec<AppRoleAssignment>, GraphError>,
+        groups: Result<Vec<GroupSummary>, GraphError>,
+    ) -> (Option<EnterpriseAppBackup>, Vec<SkippedObject>) {
+        let mut skipped = Vec::new();
+        let entry = enterprise_entry(
+            &ent_sp(),
+            &full,
+            &assigned,
+            &groups,
+            "tenant-test",
+            &HashMap::new(),
+            &mut skipped,
+        );
+        (entry, skipped)
+    }
+
+    // An enterprise app whose assignees could not be read is captured, but the
+    // gap is recorded — zero assignees would otherwise restore as "nobody had
+    // access".
+    #[test]
+    fn enterprise_entry_records_an_unreadable_assignee_list() {
+        let (entry, skipped) = entry_with(Ok(Some(ent_sp())), Err(api_err()), Ok(Vec::new()));
+        let entry = entry.expect("the SP itself was read, so it is captured");
+        assert!(entry.app_role_assignees.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].kind, "enterpriseAppAssignments");
+        assert_eq!(skipped[0].object_id, "sp-1");
+        assert_eq!(skipped[0].display_name.as_deref(), Some("Gallery App"));
+        assert!(!skipped[0].reason.is_empty());
+    }
+
+    #[test]
+    fn enterprise_entry_records_an_unreadable_group_list() {
+        let (entry, skipped) = entry_with(Ok(Some(ent_sp())), Ok(Vec::new()), Err(api_err()));
+        assert!(entry.expect("captured").group_memberships.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].kind, "enterpriseAppGroups");
+        assert_eq!(skipped[0].object_id, "sp-1");
+    }
+
+    #[test]
+    fn enterprise_entry_with_every_read_ok_records_nothing() {
+        let group = GroupSummary {
+            id: "g-1".into(),
+            ..Default::default()
+        };
+        let (entry, skipped) = entry_with(Ok(Some(ent_sp())), Ok(Vec::new()), Ok(vec![group]));
+        assert_eq!(entry.expect("captured").group_memberships.len(), 1);
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn enterprise_entry_leaves_out_an_unreadable_sp() {
+        let (entry, skipped) = entry_with(Err(api_err()), Ok(Vec::new()), Ok(Vec::new()));
+        assert!(entry.is_none());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].kind, "enterpriseApp");
+        assert_eq!(skipped[0].object_id, "sp-1");
     }
 }

@@ -40,7 +40,7 @@ use azapptoolkit_graph::client::{
 
 use crate::commands::applications::{create_application_core, invalidate_app_lists};
 use crate::commands::dispatch::SessionDead;
-use crate::commands::managed_identity::grant_managed_identity_roles_core;
+use crate::commands::managed_identity::{grant_managed_identity_roles_core, mi_subtype_label};
 use crate::commands::permissions::grant_admin_consent_core;
 use crate::commands::progress::emit_progress;
 use crate::dto::UiError;
@@ -89,11 +89,7 @@ pub async fn plan_restore(
     tenant_id: String,
     backup: TenantBackup,
 ) -> Result<RestorePlan, UiError> {
-    Ok(build_restore_plan(
-        &backup,
-        tenant_id,
-        state.auth.cloud().as_str(),
-    ))
+    Ok(build_restore_plan(&backup, tenant_id, state.auth.cloud()))
 }
 
 /// Refuses a manifest written by a *newer* build.
@@ -122,11 +118,15 @@ fn check_manifest_schema(schema_version: u32) -> Result<(), UiError> {
 
 /// Pure dry-run analysis (no I/O): the counts plus the cloud/tenant checks
 /// derived from the backup. Split out from [`plan_restore`] so it is unit-testable
-/// without an `AppState`. `dest_cloud` is the destination build's cloud label.
-fn build_restore_plan(backup: &TenantBackup, tenant_id: String, dest_cloud: &str) -> RestorePlan {
-    let cloud_mismatch = (backup.cloud != dest_cloud).then(|| CloudMismatch {
-        backup_cloud: backup.cloud.clone(),
-        destination_cloud: dest_cloud.to_string(),
+/// without an `AppState`. `dest_cloud` is the destination build's cloud.
+fn build_restore_plan(
+    backup: &TenantBackup,
+    tenant_id: String,
+    dest_cloud: CloudEnvironment,
+) -> RestorePlan {
+    let cloud_mismatch = (backup.cloud != dest_cloud).then_some(CloudMismatch {
+        backup_cloud: backup.cloud,
+        destination_cloud: dest_cloud,
     });
     let sum = |f: fn(&AppRegistrationBackup) -> usize| -> usize {
         backup.app_registrations.iter().map(f).sum()
@@ -159,13 +159,13 @@ pub async fn restore_tenant(
     // A cross-cloud restore is never valid: endpoints and well-known appIds
     // differ, so the remapped permissions would point at the wrong resources.
     let cloud = state.auth.cloud();
-    let dest_cloud = cloud.as_str();
-    if backup.cloud != dest_cloud {
+    if backup.cloud != cloud {
         return Err(UiError::validation(
             "cloud_mismatch",
             format!(
                 "backup is from cloud '{}', but this build targets '{}'",
-                backup.cloud, dest_cloud
+                backup.cloud.as_str(),
+                cloud.as_str()
             ),
         ));
     }
@@ -750,7 +750,8 @@ async fn restore_managed_identities(
                     "Managed identity ({}{}) not found in the destination. Recreate it via your \
                      infrastructure-as-code, then re-run the restore to re-bind its Graph \
                      app-roles.",
-                    mi.subtype, arm
+                    mi_subtype_label(mi.subtype),
+                    arm
                 ),
             });
             continue;
@@ -1062,7 +1063,7 @@ mod tests {
             schema_version: 1,
             created_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
             source_tenant_id: "src-tenant".into(),
-            cloud: "Commercial".into(),
+            cloud: CloudEnvironment::Commercial,
             app_registrations: vec![app(2, 1, 3, 1), app(0, 0, 0, 2)],
             enterprise_apps: Vec::new(),
             managed_identities: Vec::new(),
@@ -1071,7 +1072,11 @@ mod tests {
 
         // Same cloud, different destination tenant — the expected DR case. Counts
         // are summed across every app registration.
-        let plan = build_restore_plan(&backup, "dest-tenant".to_string(), "Commercial");
+        let plan = build_restore_plan(
+            &backup,
+            "dest-tenant".to_string(),
+            CloudEnvironment::Commercial,
+        );
         assert!(plan.cloud_mismatch.is_none());
         assert!(plan.tenant_changed);
         assert_eq!(plan.destination_tenant_id, "dest-tenant");
@@ -1083,7 +1088,8 @@ mod tests {
 
         // A cross-cloud manifest is flagged; restoring into the source tenant is
         // not a "tenant change".
-        let blocked = build_restore_plan(&backup, "src-tenant".to_string(), "UsGov");
+        let blocked =
+            build_restore_plan(&backup, "src-tenant".to_string(), CloudEnvironment::UsGov);
         assert!(blocked.cloud_mismatch.is_some());
         assert!(!blocked.tenant_changed);
     }

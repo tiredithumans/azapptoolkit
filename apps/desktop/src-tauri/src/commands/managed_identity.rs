@@ -435,8 +435,9 @@ fn scope_level(scope: &str) -> String {
 
 // ---------------- Inventory export ----------------
 
-/// Human label for a managed-identity sub-type, for the export's Subtype column.
-fn mi_subtype_label(subtype: MiSubtype) -> &'static str {
+/// Human label for a managed-identity sub-type, for the export's Subtype column
+/// and the restore runbook's "not found" item.
+pub(crate) fn mi_subtype_label(subtype: MiSubtype) -> &'static str {
     match subtype {
         MiSubtype::SystemAssigned => "System-assigned",
         MiSubtype::UserAssigned => "User-assigned",

@@ -50,7 +50,7 @@ fn backup() -> TenantBackup {
         schema_version: 1,
         created_at: chrono::Utc::now(),
         source_tenant_id: "source-tenant".to_string(),
-        cloud: "Commercial".to_string(),
+        cloud: azapptoolkit_core::cloud::CloudEnvironment::Commercial,
         app_registrations: Vec::new(),
         enterprise_apps: Vec::new(),
         managed_identities: Vec::new(),

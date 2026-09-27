@@ -173,6 +173,31 @@ impl CloudEnvironment {
     }
 }
 
+/// Serialized as [`CloudEnvironment::as_str`] — the one wire vocabulary for a
+/// cloud (a backup manifest's `cloud`, a restore plan's mismatch). Hand-written
+/// rather than a serde `rename_all` so `as_str`/`parse` stay the only
+/// definition of the labels.
+impl serde::Serialize for CloudEnvironment {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// Read back through [`CloudEnvironment::parse`], except that a blank value is
+/// rejected: `parse("")` means "unset, use the default" for the env var, but a
+/// manifest with an empty cloud must not quietly pass as commercial and slip
+/// past restore's cross-cloud check.
+impl<'de> serde::Deserialize<'de> for CloudEnvironment {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let s = String::deserialize(deserializer)?;
+        if s.trim().is_empty() {
+            return Err(D::Error::custom("cloud is empty"));
+        }
+        Self::parse(&s).ok_or_else(|| D::Error::custom(format!("unknown cloud '{s}'")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +290,26 @@ mod tests {
         ] {
             assert_eq!(CloudEnvironment::parse(c.as_str()).unwrap(), c);
         }
+    }
+
+    #[test]
+    fn serde_uses_the_as_str_vocabulary() {
+        use serde_json::json;
+        for c in [
+            CloudEnvironment::Commercial,
+            CloudEnvironment::UsGov,
+            CloudEnvironment::UsGovDod,
+            CloudEnvironment::China,
+        ] {
+            assert_eq!(serde_json::to_value(c).unwrap(), json!(c.as_str()));
+            let back: CloudEnvironment = serde_json::from_value(json!(c.as_str())).unwrap();
+            assert_eq!(back, c);
+        }
+        // Lenient on read, like `parse`.
+        let commercial: CloudEnvironment = serde_json::from_value(json!("Commercial")).unwrap();
+        assert_eq!(commercial, CloudEnvironment::Commercial);
+        // A blank label must not default to commercial, and an unknown one fails.
+        assert!(serde_json::from_value::<CloudEnvironment>(json!("")).is_err());
+        assert!(serde_json::from_value::<CloudEnvironment>(json!("mars")).is_err());
     }
 }

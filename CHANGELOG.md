@@ -2,6 +2,14 @@
 
 ### Fixed
 
+- **A tenant backup no longer reads as complete when it could not read a managed identity's
+  permissions or an enterprise app's assignments.** When Graph failed to return a managed
+  identity's held app roles, or an enterprise app's assigned users/groups or group memberships, the
+  backup quietly recorded them as empty — so a restore from it re-bound nothing and re-assigned no
+  one, and neither the backup screen nor the file said so. Each gap is now listed alongside the
+  objects the backup could not capture, and a sign-in that expires while managed identities are
+  being read stops the backup for re-authentication instead of saving a manifest with every
+  identity's permissions missing.
 - **An app whose service principal could not be read during a security audit is no longer
   scored as clean.** When the per-app service-principal lookup failed (a Graph outage that
   outlasted the retries), the audit carried on without it: the admin-consent and disabled-sign-in

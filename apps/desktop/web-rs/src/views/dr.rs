@@ -320,7 +320,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                                     <Callout tone="warn">
                                         <p>
                                             {format!(
-                                                "{n} object(s) could not be read and are NOT in this backup. Restoring it will not recreate them.",
+                                                "{n} object(s) could not be fully read. This backup is missing what is listed below, and restoring it will not recreate it.",
                                             )}
                                         </p>
                                         <ul class="dr-view__skipped-list">{rows}</ul>
@@ -437,7 +437,7 @@ fn RestorePlanView(plan: backup::RestorePlan) -> impl IntoView {
                     {format!(
                         "This backup is from the \"{}\" cloud, but this app targets \"{}\". \
                          Restore is blocked — use a build configured for the backup's cloud.",
-                        m.backup_cloud, m.destination_cloud,
+                        m.backup_cloud.as_str(), m.destination_cloud.as_str(),
                     )}
                 </p>
             })}

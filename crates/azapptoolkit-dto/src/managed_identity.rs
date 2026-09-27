@@ -11,11 +11,12 @@ use serde::{Deserialize, Serialize};
 /// User-assigned MIs include an ARM resource id containing
 /// `userAssignedIdentities`; system-assigned MIs are tied to a single
 /// Azure resource (their parent), and may have an empty `alternativeNames`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MiSubtype {
     SystemAssigned,
     UserAssigned,
+    #[default]
     Unknown,
 }
 
