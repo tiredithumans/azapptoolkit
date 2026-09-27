@@ -551,7 +551,8 @@ pub fn audit_item(name: &str, risk: RiskLevel, issues: &[String]) -> AuditItem {
 /// A populated cached audit run spanning every severity + every finding group
 /// the Security workbench renders (expired, org-wide mailbox/SharePoint,
 /// redundant, ownership, unused, over-privileged, high-risk delegated,
-/// SP-only, and the scoped/healthy counterparts), so the Home posture tile and
+/// SP-only, legacy Exchange Online grants, org-wide reach the toolkit can't
+/// confine, and the scoped/healthy counterparts), so the Home posture tile and
 /// every findings group light up. Per-row Fix remediations are attached where
 /// the finding has one (the mutations stay unmocked in the demo and degrade to
 /// the demo-unsupported toast).
@@ -696,12 +697,30 @@ pub fn audit_run_result() -> AuditRunResult {
         targets: vec!["Mail.Read".to_string()],
     }];
 
+    // Org-wide reach the toolkit can't confine — advisory findings with no
+    // Fix: a legacy Office 365 Exchange Online mail grant (advice: remove it)
+    // and Sites.* on Office 365 SharePoint Online (advice: review / re-declare
+    // on Microsoft Graph).
+    let legacy_exo = audit_item(
+        "Lamna Mail Reader",
+        RiskLevel::Medium,
+        &[format!("{}: Mail.Read", issue::UNSCOPABLE_LEGACY_MAILBOX)],
+    );
+    let unconfinable_spo = audit_item(
+        "Relecloud Records Archive",
+        RiskLevel::High,
+        &[format!(
+            "{}: Sites.Read.All",
+            issue::UNCONFINABLE_SHAREPOINT
+        )],
+    );
+
     let clean_a = audit_item("Proseware Sync", RiskLevel::Low, &[]);
     let clean_b = audit_item("Litware Analytics", RiskLevel::Low, &[]);
 
     AuditRunResult {
         tenant_id: "demo-tenant".to_string(),
-        total_apps: 14,
+        total_apps: 16,
         items: vec![
             over_privileged,
             mailbox,
@@ -713,6 +732,8 @@ pub fn audit_run_result() -> AuditRunResult {
             single_owner,
             second_over,
             legacy_scoped,
+            legacy_exo,
+            unconfinable_spo,
             scoped_mailbox,
             scoped_sharepoint,
             clean_a,

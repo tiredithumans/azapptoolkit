@@ -253,7 +253,9 @@ sub-tabs (the two audit panes plus four inventory lenses). (Finding
   homes (below). The four inventory lenses (Credential expiry, SSO certificates, Delegated grants,
   Application permissions) keep their own facets + `SavedViews` via
   `components::audit_dashboard::AuditDashboard`, because they filter their own datasets, not the
-  scan.
+  scan. The strip also carries the run's coverage caveats (cancelled / truncated / degraded) as
+  non-interactive callouts, above both audit panes and in the export's `coverage_sentences` wording;
+  the Findings pane keeps only the empty-state qualification of a partial run.
 - **Sub-tabs** — `security_tab`: `"findings" | "apps" | "credentials" | "sso-certificates" |
   "grants" | "app-permissions"`, keep-alive.
   **Findings** (default) renders the grouped accordion; expansion state is

@@ -3986,16 +3986,16 @@ h3 {
 
 /* Coverage-gap banner: what a degraded audit run could not determine. One
    line per failed tenant-wide read, inside the warn Callout. */
-.findings-pane__degraded-lede {
+.posture-strip__degraded-lede {
   margin: 0;
 }
 
-.findings-pane__degraded-list {
+.posture-strip__degraded-list {
   margin: var(--space-2) 0 0;
   padding-left: var(--space-4);
 }
 
-.findings-pane__degraded-list > li + li {
+.posture-strip__degraded-list > li + li {
   margin-top: var(--space-1);
 }
 

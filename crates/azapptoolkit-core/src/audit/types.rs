@@ -570,8 +570,10 @@ pub struct AuditItem {
 /// issues that **start with** these (or, for [`issue::SCOPED_VIA_RBAC`],
 /// *contain* it); the frontend matches the same constants instead of repeating
 /// the literals, so a wording change can't silently zero a facet. The
-/// `emitted_issue_markers_are_stable` test asserts the scorer still emits each,
-/// tying these constants to `score_application`'s output.
+/// `emitted_issue_markers_are_stable` test asserts the scorer still emits each
+/// finding marker (the Security workbench groups them through web-rs
+/// `filter::issue_marker`), tying these constants to `score_application`'s
+/// output.
 pub mod issue {
     pub const HIGH_RISK_APP_PERMS: &str = "High-risk application permissions:";
     pub const HIGH_RISK_DELEGATED_PERMS: &str = "High-risk delegated permissions:";

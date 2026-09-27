@@ -837,6 +837,33 @@ fn emitted_issue_markers_are_stable() {
         "scorer no longer emits {:?}: {legacy_issues:?}",
         issue::LEGACY_MAILBOX_POLICY
     );
+
+    // Org-wide reach the toolkit cannot confine: its three markers feed the
+    // Security workbench's two advisory groups (`unscopable_legacy_mailbox`,
+    // `unconfinable_orgwide`), so they are pinned here like every sibling.
+    // Kept off the first app so none of these shapes can mask the confinable
+    // ORG_WIDE_* markers above.
+    use crate::scoping::OFFICE365_SHAREPOINT_ONLINE_APP_ID;
+    let unconfinable_perms = AppPermissions {
+        app_role_grants: vec![
+            ResourcePermission::exchange_online("Mail.Read"), // UNSCOPABLE_LEGACY_MAILBOX
+            ResourcePermission::graph("Mail.ReadWrite.Shared"), // UNCONFINABLE_MAILBOX
+            ResourcePermission::on(OFFICE365_SHAREPOINT_ONLINE_APP_ID, "Sites.Read.All"), // UNCONFINABLE_SHAREPOINT
+        ],
+        ..Default::default()
+    };
+    let unconfinable_issues =
+        score_application(&base_app(), Some(true), &unconfinable_perms, now()).issues;
+    for marker in [
+        issue::UNSCOPABLE_LEGACY_MAILBOX,
+        issue::UNCONFINABLE_MAILBOX,
+        issue::UNCONFINABLE_SHAREPOINT,
+    ] {
+        assert!(
+            unconfinable_issues.iter().any(|i| i.starts_with(marker)),
+            "scorer no longer emits {marker:?}: {unconfinable_issues:?}"
+        );
+    }
 }
 
 #[test]

@@ -32,6 +32,19 @@
 
 ### Fixed
 
+- **Legacy Exchange Online mail grants and org-wide access the toolkit can't confine now appear in
+  the Security findings.** The audit already flagged an app holding, for example, `Mail.Read` on
+  Office 365 Exchange Online or `Sites.Read.All` on Office 365 SharePoint Online, but the finding
+  sat in no group and no count, so you only saw it in the All apps issue column or an export. Two
+  new groups, "Legacy Exchange Online mailbox grants" and "Org-wide access that can't be confined
+  here", list these apps with an Open link to the Permissions tab. They have no Fix button, because
+  removing or re-declaring the grant is your call. The Home Security Posture card counts them too.
+- **An audit that stopped at the per-run app limit now says so above the results, even when it
+  found problems.** On a tenant with more than 10,000 app registrations the audit scores at most
+  10,000. The notice only appeared when those came back clean, so the findings and every "Fix all"
+  count looked like a full scan. The notice now sits under the posture counts next to the
+  cancelled-scan notice. The "Part of this scan could not run" notice moved there too, so the All
+  apps view shows both.
 - **`/` now jumps to the filter on the page you're looking at.** Once you had opened App
   Registrations, pressing `/` on Enterprise Applications, Managed Identities or Security did
   nothing, because it found the hidden App Registrations filter first. With an app open, it now

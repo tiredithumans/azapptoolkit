@@ -333,18 +333,31 @@ healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed
   `SCOPED_VIA_RBAC` out of *both* legacy advisories. It is Actionable with **no bulk action**: the
   migration is per-app and plan-first, so a uniform bulk form would have nothing to show (the same
   shape as `high_risk_perms` / `no_local_app`).
+- **Unconfinable org-wide reach has advisory homes:** `unscopable_legacy_mailbox`
+  (`UNSCOPABLE_LEGACY_MAILBOX` — legacy Office 365 Exchange Online mail roles; advice is remove) and
+  `unconfinable_orgwide` (`UNCONFINABLE_MAILBOX` + `UNCONFINABLE_SHAREPOINT`; advice is review /
+  re-declare on Graph). Both are Actionable with no bulk action and no row Fix, kept out of
+  `orgwide_mailbox` / `orgwide_sharepoint` (whose Fix can't apply to them) and apart from each other
+  because the recommendations differ. `every_reach_marker_has_a_group` pins that every reach/risk
+  marker the scorer emits lands in some group; the three hygiene notes (instance lock, public
+  client, secret-over-cert) are deliberately left to the All-apps issue column.
 - **Load-bearing asymmetry:** `scoped_mailbox` matches with `.contains(SCOPED_VIA_RBAC)` while
   every sibling finding uses `.starts_with` — the marker sits mid-issue, not at the front. The
   `filter.rs` tests pin this; a "normalize everything to `starts_with`" sweep silently empties
   the finding.
 - **Shared counts, one source:** `audit_view/posture.rs::posture_counts` feeds both the Security
   tab's posture strip and the Home posture card (severity row + Top-findings counts), so the
-  numbers can't disagree. The Home card's ranked Top-findings list reuses
+  numbers can't disagree. Its finding buckets classify through `filter::matches_finding`, so a
+  count can't diverge from the group it summarizes (pinned by
+  `posture_counts_agree_with_finding_groups`); the Home card counts the two unconfinable-reach
+  groups too. `groups::tone` is the one `RiskLevel` → tone map (group dots, risk badges, the Home
+  card). The Home card's ranked Top-findings list reuses
   `groups::ranked_actionable_findings`, so the finding *order* and tone can't disagree either.
 - **Bulk-action pairing:** `groups::group_bulk_actions(key)` pairs each finding group with the
   fix that addresses **that rule**: Expired → RemoveExpired, Org-wide mailbox/SharePoint → Scope,
   Redundant → RemoveRedundant, Ownership → AddOwner, Unused → DisableSignIn + Delete. Advisory
-  groups get none — the old Over-privileged → RemoveRedundant cross-rule mapping is retired; do
+  groups (`high_risk_perms`, `high_risk_delegated`, `external_exposure`, `no_local_app`,
+  `unscopable_legacy_mailbox`, `unconfinable_orgwide`) get none — the old Over-privileged → RemoveRedundant cross-rule mapping is retired; do
   not reintroduce it. **No Grant consent on audit surfaces.** "Fix all N" only seeds
   `selected_audit_ids` with the group's *eligible* (Application-kind) ids — the
   `BulkActionBar`'s typed-confirm / target forms still gate execution.

@@ -152,7 +152,7 @@ and the EWS scope), and a surviving legacy grant does not flip the identically n
 permission's verdict. They still reach every mailbox, and nothing confines them once the AAP is gone,
 so they are surfaced as their own thing: `LegacyExchangeGrantsCallout` names them on the app-reg
 Permissions tab and in `HeldPermissionsPanel`, and the audit raises `UNSCOPABLE_LEGACY_MAILBOX` (its
-own finding, no Scope fix). They are unfixable from any scoping surface — `targets_from_declared`
+own finding group `unscopable_legacy_mailbox`, no Scope fix). They are unfixable from any scoping surface — `targets_from_declared`
 never targets them, so `remove_unscoped_grants` never strips them — and the only remedy is removing
 the grant. The predicate everywhere is `core::scoping::is_unscopable_legacy_exchange_permission` —
 the resource's mail-named roles **only**. Never widen it to the whole resource: `full_access_as_app`

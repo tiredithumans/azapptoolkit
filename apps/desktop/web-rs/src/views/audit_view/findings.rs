@@ -26,7 +26,7 @@ use crate::state::use_session;
 
 use super::controller::AuditController;
 use super::filter::issue_lines_for;
-use super::groups::{FindingGroup, GroupSection, group_bulk_actions, group_findings};
+use super::groups::{FindingGroup, GroupSection, group_bulk_actions, group_findings, tone};
 use super::row::AuditRowActions;
 use super::{last_sign_in_cell, risk_class};
 
@@ -62,36 +62,6 @@ pub(crate) fn FindingsPane() -> impl IntoView {
 
     view! {
         <div class="findings-pane">
-            // A run whose tenant-wide reads partly failed under-reports risk,
-            // and every other signal on this pane looks identical to a clean
-            // scan. Unconditional (not folded into the no-findings case below):
-            // the dangerous outcome is a run that DOES show findings while
-            // silently omitting whole categories of them.
-            {move || {
-                let gaps = ctrl
-                    .result
-                    .with(|r| r.as_ref().map(|r| r.degraded.clone()).unwrap_or_default());
-                (!gaps.is_empty())
-                    .then(|| {
-                        view! {
-                            <Callout tone="warn">
-                                // Deliberately not "reached every application":
-                                // `PerPrincipalScoring` is exactly the gap where
-                                // it did not, so a lede claiming full coverage
-                                // would contradict the item below it.
-                                <p class="findings-pane__degraded-lede">
-                                    "Part of this scan could not run — treat the results as incomplete and re-run."
-                                </p>
-                                <ul class="findings-pane__degraded-list">
-                                    {gaps
-                                        .into_iter()
-                                        .map(|g| view! { <li>{g.description()}</li> })
-                                        .collect_view()}
-                                </ul>
-                            </Callout>
-                        }
-                    })
-            }}
             {move || {
                 let Some(gs) = groups.get() else {
                     return view! {
@@ -278,12 +248,7 @@ fn finding_group_view(
         let _ = ctrl.result.with(|r| r.as_ref().map(|r| r.items.len()));
     });
 
-    let tone = match g.worst {
-        azapptoolkit_core::audit::RiskLevel::Critical => "critical",
-        azapptoolkit_core::audit::RiskLevel::High => "danger",
-        azapptoolkit_core::audit::RiskLevel::Medium => "warning",
-        azapptoolkit_core::audit::RiskLevel::Low => "ok",
-    };
+    let tone = tone(g.worst);
     // The dot is the collapsed header's only severity signal, so the tier has to
     // survive being unable to see colour: `role="img"` + `aria-label` folds it
     // into the header button's accessible name (which was otherwise just

@@ -486,13 +486,10 @@ pub fn AuditAppsPane() -> impl IntoView {
     }
 }
 
-fn risk_class(level: &RiskLevel) -> &'static str {
-    match level {
-        RiskLevel::Critical => "badge--critical",
-        RiskLevel::High => "badge--danger",
-        RiskLevel::Medium => "badge--warning",
-        RiskLevel::Low => "badge--ok",
-    }
+/// A risk badge's modifier class, derived from the one tone map
+/// ([`groups::tone`]) so badges and finding-group dots can't drift apart.
+fn risk_class(level: &RiskLevel) -> String {
+    format!("badge--{}", groups::tone(*level))
 }
 
 /// "Last sign-in" cell. Distinguishes never-signed-in from an unavailable report

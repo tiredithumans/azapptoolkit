@@ -552,8 +552,10 @@ fn card_skeleton() -> impl IntoView {
 }
 
 /// The posture count the card surfaces for a finding key — `None` for the
-/// findings the card doesn't drill into (redundant / delegated / no-local-app),
-/// so they're dropped from the ranked list (SAME drill targets as before).
+/// findings the card doesn't drill into (redundant / delegated / external
+/// exposure / no-local-app), so they're dropped from the ranked list. The two
+/// unconfinable-reach groups are counted: an app that reaches every mailbox or
+/// site must not leave the card reading "the tenant looks healthy".
 /// Counts come from `PostureCounts`, the one shared source, so the card and the
 /// Security workbench can't disagree.
 fn posture_count_for(c: &PostureCounts, key: &str) -> Option<usize> {
@@ -561,6 +563,8 @@ fn posture_count_for(c: &PostureCounts, key: &str) -> Option<usize> {
         "expired" => c.expired,
         "orgwide_mailbox" => c.orgwide_mailbox,
         "legacy_mailbox_scope" => c.legacy_mailbox_scope,
+        "unscopable_legacy_mailbox" => c.unscopable_legacy_mailbox,
+        "unconfinable_orgwide" => c.unconfinable_orgwide,
         "orgwide_sharepoint" => c.orgwide_sharepoint,
         "high_risk_perms" => c.over_privileged,
         "ownership" => c.unowned,

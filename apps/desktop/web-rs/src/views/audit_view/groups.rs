@@ -100,6 +100,22 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         tab: "permissions",
         section: GroupSection::Actionable,
     },
+    // Org-wide reach the toolkit cannot confine — advisory siblings of
+    // `high_risk_perms`, split by the scorer's advice (remove vs. review).
+    GroupSpec {
+        key: "unscopable_legacy_mailbox",
+        title: "Legacy Exchange Online mailbox grants",
+        blurb: "Mail, calendar, contacts and mailbox-settings permissions granted on the legacy Office 365 Exchange Online resource. They reach every mailbox and RBAC for Applications cannot confine them (it covers Microsoft Graph and EWS only); the Outlook REST endpoints they authorized were decommissioned in March 2024. Remove the grant and use the identically named Microsoft Graph permission instead.",
+        tab: "permissions",
+        section: GroupSection::Actionable,
+    },
+    GroupSpec {
+        key: "unconfinable_orgwide",
+        title: "Org-wide access that can't be confined here",
+        blurb: "Mailbox or SharePoint permissions that reach every mailbox or site, but that neither RBAC for Applications nor Sites.Selected can confine from this toolkit: a mail permission with no supported Exchange application role or whose resource could not be resolved, or Sites.* granted on Office 365 SharePoint Online. Review whether each grant is needed; where it is, re-declare it as a Microsoft Graph permission that can be scoped.",
+        tab: "permissions",
+        section: GroupSection::Actionable,
+    },
     GroupSpec {
         key: "external_exposure",
         title: "Reachable outside this tenant",
@@ -223,9 +239,9 @@ pub(crate) fn ranked_actionable_findings(
         .collect()
 }
 
-/// Maps a risk level to the shared tone-dot colour vocabulary (the same mapping
-/// `finding_group_view` uses inline).
-fn tone(level: RiskLevel) -> &'static str {
+/// The one `RiskLevel` → tone mapping; `finding_group_view`, `risk_class` and
+/// (via [`ranked_actionable_findings`]) the Home card all derive from it.
+pub(super) fn tone(level: RiskLevel) -> &'static str {
     match level {
         RiskLevel::Critical => "critical",
         RiskLevel::High => "danger",
@@ -262,8 +278,9 @@ pub(super) fn group_bulk_actions(key: &str) -> Vec<BulkAction> {
 /// section's own Fix with it. A section shows only the Fix for its own rule;
 /// the others are one click away in the section that owns them.
 ///
-/// Advisory groups (`high_risk_perms`, `external_exposure`,
-/// `high_risk_delegated`, `no_local_app`) and the Healthy positives own none —
+/// Advisory groups (`high_risk_perms`, `unscopable_legacy_mailbox`,
+/// `unconfinable_orgwide`, `external_exposure`, `high_risk_delegated`,
+/// `no_local_app`) and the Healthy positives own none —
 /// their rows keep the "Open" deep-link alone. Kinds are disjoint across
 /// groups, pinned by the tests below.
 pub(super) fn group_remediation_kinds(key: &str) -> &'static [RemediationKind] {
@@ -475,6 +492,89 @@ mod tests {
         assert!(group_bulk_actions("legacy_mailbox_scope").is_empty());
         assert!(group_bulk_actions("no_local_app").is_empty());
         assert!(group_bulk_actions("scoped_mailbox").is_empty());
+        // Unconfinable reach has no safe uniform mutation: removing or
+        // re-declaring the grant is the operator's call.
+        assert!(group_bulk_actions("unscopable_legacy_mailbox").is_empty());
+        assert!(group_bulk_actions("unconfinable_orgwide").is_empty());
+    }
+
+    /// The scorer keeps unconfinable reach out of the fixable org-wide groups
+    /// (their bulk Fix can't apply), so these rows need their own advisory
+    /// homes — and the legacy-resource one stays apart from the other two,
+    /// because "remove the grant" is the wrong advice for them.
+    #[test]
+    fn unconfinable_reach_lands_in_its_own_advisory_groups() {
+        let legacy = with_issue(
+            format!("{}: Mail.Read", issue::UNSCOPABLE_LEGACY_MAILBOX),
+            0,
+            RiskLevel::Medium,
+        );
+        let mailbox = with_issue(
+            format!("{}: Mail.ReadWrite.Shared", issue::UNCONFINABLE_MAILBOX),
+            0,
+            RiskLevel::Medium,
+        );
+        let sharepoint = with_issue(
+            format!("{}: Sites.Read.All", issue::UNCONFINABLE_SHAREPOINT),
+            0,
+            RiskLevel::High,
+        );
+        let items = vec![legacy, mailbox, sharepoint];
+        let groups = group_findings(&items);
+        assert_eq!(
+            group(&groups, "unscopable_legacy_mailbox").item_indices,
+            vec![0]
+        );
+        assert_eq!(
+            group(&groups, "unconfinable_orgwide").item_indices,
+            vec![1, 2]
+        );
+        for key in [
+            "orgwide_mailbox",
+            "orgwide_sharepoint",
+            "legacy_mailbox_scope",
+            "scoped_mailbox",
+            "scoped_sites",
+        ] {
+            assert!(
+                group(&groups, key).item_indices.is_empty(),
+                "unconfinable reach leaked into {key}"
+            );
+        }
+    }
+
+    /// The F127 regression class: a marker the scorer emits for a reach/risk
+    /// finding but that no group matches is scored yet invisible on the
+    /// findings-first pane. Every such marker must land in at least one group.
+    /// INSTANCE_LOCK_DISABLED, PUBLIC_CLIENT_CREDENTIALS and
+    /// PREFER_CERT_OVER_SECRET are hygiene notes deliberately left to the
+    /// All-apps issue column.
+    #[test]
+    fn every_reach_marker_has_a_group() {
+        for marker in [
+            issue::ORG_WIDE_MAILBOX,
+            issue::UNSCOPABLE_LEGACY_MAILBOX,
+            issue::UNCONFINABLE_MAILBOX,
+            issue::LEGACY_MAILBOX_POLICY,
+            issue::ORG_WIDE_SHAREPOINT,
+            issue::UNCONFINABLE_SHAREPOINT,
+            issue::SCOPED_SHAREPOINT,
+            issue::HIGH_RISK_APP_PERMS,
+            issue::HIGH_RISK_DELEGATED_PERMS,
+            issue::REDUNDANT_APP_PERMS,
+            issue::NO_OWNERS,
+            issue::SINGLE_OWNER,
+            issue::MULTITENANT_AUDIENCE,
+            issue::UNVERIFIED_PUBLISHER,
+        ] {
+            let item = with_issue(format!("{marker}: x"), 0, RiskLevel::Low);
+            assert!(
+                GROUP_CATALOG
+                    .iter()
+                    .any(|spec| matches_finding(&item, spec.key)),
+                "marker {marker:?} belongs to no finding group"
+            );
+        }
     }
 
     /// A section's `tab` is a deep-link target: an unknown value doesn't error,
@@ -530,6 +630,8 @@ mod tests {
             "high_risk_delegated",
             "external_exposure",
             "no_local_app",
+            "unscopable_legacy_mailbox",
+            "unconfinable_orgwide",
         ] {
             assert!(group_remediation_kinds(key).is_empty(), "advisory {key}");
         }

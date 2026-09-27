@@ -15,7 +15,7 @@ use azapptoolkit_core::audit::{
     AuditPrincipalKind, CredentialStatus, RemediationAction, RemediationKind, RiskLevel, issue,
 };
 use azapptoolkit_core::models::DirectoryObject;
-use azapptoolkit_dto::audit::AuditRunResult;
+use azapptoolkit_dto::audit::{AuditCoverageGap, AuditRunResult};
 use azapptoolkit_dto::bulk::{
     BulkAddOwnerResult, BulkDisableOutcome, BulkDisableSignInResult, BulkOwnerOutcome,
 };
@@ -184,6 +184,11 @@ fn click_panel_button(label: &str) {
 #[wasm_bindgen_test]
 async fn groups_rank_by_worst_severity_then_count() {
     let _m = mount_security().await;
+    // A complete run carries none of the coverage caveats — they are real-
+    // failure surfaces, and showing one here would call a full scan partial.
+    assert!(!ts::body_contains("cancelled early"));
+    assert!(!ts::body_contains("arbitrary prefix"));
+    assert!(!ts::body_contains("could not run"));
     let titles: Vec<String> = ts::query_all(".finding-group__title")
         .iter()
         .map(|el| el.text_content().unwrap_or_default())
@@ -223,6 +228,171 @@ async fn groups_rank_by_worst_severity_then_count() {
     assert!(!ts::body_contains("Mailbox access scoped"));
     ts::click(".finding-group__header--section");
     ts::wait_for(|| ts::body_contains("Mailbox access scoped")).await;
+}
+
+/// Trimmed text of the posture strip — the coverage caveats' one home, above
+/// both audit panes. Scoped to it because `body_contains` also sees the
+/// keep-alive-hidden panes.
+fn strip_text() -> String {
+    ts::query(".posture-strip")
+        .and_then(|el| el.text_content())
+        .unwrap_or_default()
+}
+
+/// A partial run must say so above everything it computed, whichever pane is
+/// showing — including when it DID find problems, which is exactly when the
+/// counts and every "Fix all N" look like a full scan. Cancelled, truncated and
+/// degraded are independent, so all three render together.
+#[wasm_bindgen_test]
+async fn partial_runs_are_marked_on_the_strip_above_both_panes() {
+    ts::reset();
+    ts::mock_ok(
+        "get_cached_audit",
+        &AuditRunResult {
+            cancelled: true,
+            truncated: true,
+            total_apps: 20,
+            degraded: vec![AuditCoverageGap::PerPrincipalScoring],
+            ..cached_run()
+        },
+    );
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    // Findings still render — the caveats qualify them, never replace them.
+    ts::wait_for(|| ts::body_contains("Missing or single owner")).await;
+    let strip = strip_text();
+    assert!(
+        strip.contains("This scan was cancelled early — 9 of 20 principals were scored"),
+        "{strip}"
+    );
+    assert!(strip.contains("covered an arbitrary prefix"), "{strip}");
+    assert!(strip.contains("Part of this scan could not run"), "{strip}");
+    assert!(
+        strip.contains(AuditCoverageGap::PerPrincipalScoring.description()),
+        "each gap is listed under the lede: {strip}"
+    );
+
+    // The strip sits above the tab bar, so the All-apps pane carries the same
+    // caveats (it rendered none of them before).
+    m.session.open_security("apps");
+    ts::wait_for(|| ts::query(".audit-apps-pane").is_some()).await;
+    let strip = strip_text();
+    assert!(strip.contains("arbitrary prefix"), "{strip}");
+    assert!(strip.contains("could not run"), "{strip}");
+}
+
+/// A truncated scan that found nothing scored only a prefix of the tenant, so
+/// the empty Findings pane must qualify itself instead of declaring all-clear.
+#[wasm_bindgen_test]
+async fn truncated_run_without_findings_is_not_an_all_clear() {
+    ts::reset();
+    ts::mock_ok(
+        "get_cached_audit",
+        &AuditRunResult {
+            truncated: true,
+            items: vec![fixtures::audit_item("Clean App", RiskLevel::Low, &[])],
+            total_apps: 1,
+            ..cached_run()
+        },
+    );
+    let _m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| {
+        ts::body_contains("No actionable findings among the applications this scan reached")
+    })
+    .await;
+    assert!(!ts::body_contains("nothing to fix right now"));
+    assert!(strip_text().contains("arbitrary prefix"));
+}
+
+/// Org-wide reach the toolkit can't confine is scored, so it must be visible
+/// on the findings-first pane: two advisory groups (the legacy-resource advice
+/// differs from the rest), no bulk Fix, and never folded into the fixable
+/// org-wide mailbox group whose Fix could not apply to them.
+#[wasm_bindgen_test]
+async fn unconfinable_reach_lands_in_advisory_groups() {
+    ts::reset();
+    let mut run = cached_run();
+    run.items.extend([
+        fixtures::audit_item(
+            "Legacy EXO App",
+            RiskLevel::Medium,
+            &[format!("{}: Mail.Read", issue::UNSCOPABLE_LEGACY_MAILBOX)],
+        ),
+        fixtures::audit_item(
+            "Unmapped Mail App",
+            RiskLevel::Medium,
+            &[format!(
+                "{}: Mail.ReadWrite.Shared",
+                issue::UNCONFINABLE_MAILBOX
+            )],
+        ),
+        fixtures::audit_item(
+            "SPO Legacy App",
+            RiskLevel::High,
+            &[format!(
+                "{}: Sites.Read.All",
+                issue::UNCONFINABLE_SHAREPOINT
+            )],
+        ),
+    ]);
+    run.total_apps = run.items.len();
+    ts::mock_ok("get_cached_audit", &run);
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Legacy Exchange Online mailbox grants")).await;
+    let titles: Vec<String> = ts::query_all(".finding-group__title")
+        .iter()
+        .map(|el| el.text_content().unwrap_or_default())
+        .collect();
+    assert!(
+        titles.contains(&"Org-wide access that can't be confined here".to_string()),
+        "{titles:?}"
+    );
+    // The fixable group keeps exactly its own two members.
+    let mailbox_header = ts::query_all(".finding-group__header")
+        .iter()
+        .map(|el| el.text_content().unwrap_or_default())
+        .find(|t| t.starts_with("Org-wide mailbox access"))
+        .expect("org-wide mailbox group renders");
+    assert!(mailbox_header.contains("2 principals"), "{mailbox_header}");
+
+    let details = || -> Vec<String> {
+        ts::query_all(".finding-group__detail")
+            .iter()
+            .map(|el| el.text_content().unwrap_or_default())
+            .collect()
+    };
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("unconfinable_orgwide".to_string()));
+    ts::wait_for(|| ts::query(".finding-group__detail").is_some()).await;
+    let d = details();
+    assert!(
+        d.iter().any(|x| x.contains("Mail.ReadWrite.Shared")),
+        "{d:?}"
+    );
+    assert!(d.iter().any(|x| x.contains("Sites.Read.All")), "{d:?}");
+    assert!(
+        !ts::query_all("button").iter().any(|b| b
+            .text_content()
+            .unwrap_or_default()
+            .trim()
+            .starts_with("Fix all")),
+        "an advisory group offers no bulk Fix"
+    );
+
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("unscopable_legacy_mailbox".to_string()));
+    ts::wait_for(|| {
+        details()
+            .iter()
+            .any(|x| x.contains("Unscopable legacy Exchange"))
+    })
+    .await;
+    let d = details();
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].contains("Mail.Read"), "{d:?}");
 }
 
 /// A pane grouped BY finding has to say what the finding is: the row quotes the

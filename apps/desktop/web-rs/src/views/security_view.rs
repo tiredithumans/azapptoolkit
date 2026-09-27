@@ -250,6 +250,54 @@ fn PostureStrip() -> impl IntoView {
                         }
                     })
             }}
+            // A truncated run is the same prefix problem from the other side:
+            // the tenant holds more app registrations than one run scores, so
+            // the counts, groups and every "Fix all N" cover only an arbitrary
+            // prefix. Unconditional (unlike the Findings pane's empty-state
+            // variant), independent of the cancelled notice (both can hold),
+            // and worded exactly as the export's `coverage_sentences`.
+            {move || {
+                ctrl.result
+                    .with(|r| r.as_ref().is_some_and(|r| r.truncated))
+                    .then(|| {
+                        view! {
+                            <Callout tone="warn">
+                                "The tenant holds more app registrations than one run scores, so this scan covered an arbitrary prefix of them. This is not an all-clear, and re-running will not extend it."
+                            </Callout>
+                        }
+                    })
+            }}
+            // A run whose tenant-wide reads partly failed under-reports risk,
+            // and every other signal on this workbench looks identical to a
+            // clean scan. Unconditional (not folded into the Findings pane's
+            // no-findings case): the dangerous outcome is a run that DOES show
+            // findings while silently omitting whole categories of them. On the
+            // strip so both audit panes carry it.
+            {move || {
+                let gaps = ctrl
+                    .result
+                    .with(|r| r.as_ref().map(|r| r.degraded.clone()).unwrap_or_default());
+                (!gaps.is_empty())
+                    .then(|| {
+                        view! {
+                            <Callout tone="warn">
+                                // Deliberately not "reached every application":
+                                // `PerPrincipalScoring` is exactly the gap where
+                                // it did not, so a lede claiming full coverage
+                                // would contradict the item below it.
+                                <p class="posture-strip__degraded-lede">
+                                    "Part of this scan could not run — treat the results as incomplete and re-run."
+                                </p>
+                                <ul class="posture-strip__degraded-list">
+                                    {gaps
+                                        .into_iter()
+                                        .map(|g| view! { <li>{g.description()}</li> })
+                                        .collect_view()}
+                                </ul>
+                            </Callout>
+                        }
+                    })
+            }}
             // AuditLog.Read.All consent prompt — the sign-in activity report
             // (behind the Unused finding) needs it. Offered when the last run
             // found it un-consented; granting re-runs the audit.

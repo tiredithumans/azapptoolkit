@@ -85,6 +85,19 @@ fn issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
         // both match.
         "legacy_mailbox_scope" => |x| x.starts_with(issue::LEGACY_MAILBOX_POLICY),
         "orgwide_sharepoint" => |x| x.starts_with(issue::ORG_WIDE_SHAREPOINT),
+        // Org-wide reach the toolkit cannot confine. Kept out of
+        // `orgwide_mailbox` / `orgwide_sharepoint` so these rows never sit under
+        // a group whose bulk Fix can't apply to them, and split in two because
+        // the scorer's advice differs: the legacy Office 365 Exchange Online
+        // mail roles should be removed, while the unconfinable ones (no
+        // supported RBAC role, an unresolved resource, or Sites.* on Office 365
+        // SharePoint Online) may be legitimate and are reviewed / re-declared on
+        // Microsoft Graph instead.
+        "unscopable_legacy_mailbox" => |x| x.starts_with(issue::UNSCOPABLE_LEGACY_MAILBOX),
+        "unconfinable_orgwide" => |x| {
+            x.starts_with(issue::UNCONFINABLE_MAILBOX)
+                || x.starts_with(issue::UNCONFINABLE_SHAREPOINT)
+        },
         // Rule 18 — held narrower permissions a broader held one already covers.
         // Its own finding key (not folded into `high_risk_perms`) so the
         // RemoveRedundant group/bulk action pairs with the rule it actually
@@ -377,6 +390,22 @@ mod tests {
                 format!("{} something", issue::REDUNDANT_APP_PERMS),
                 "redundant_perms",
             ),
+            (
+                format!("{} something", issue::MULTITENANT_AUDIENCE),
+                "external_exposure",
+            ),
+            (
+                format!("{}: Mail.Read", issue::UNSCOPABLE_LEGACY_MAILBOX),
+                "unscopable_legacy_mailbox",
+            ),
+            (
+                format!("{}: Mail.ReadWrite.Shared", issue::UNCONFINABLE_MAILBOX),
+                "unconfinable_orgwide",
+            ),
+            (
+                format!("{}: Sites.Read.All", issue::UNCONFINABLE_SHAREPOINT),
+                "unconfinable_orgwide",
+            ),
         ];
         let marker_findings = [
             "high_risk_perms",
@@ -388,6 +417,9 @@ mod tests {
             "scoped_sites",
             "ownership",
             "redundant_perms",
+            "external_exposure",
+            "unscopable_legacy_mailbox",
+            "unconfinable_orgwide",
         ];
         for (text, expect) in &cases {
             let item = with_issue(text.clone());

@@ -678,8 +678,7 @@ fn cached_run_coverage(run: &CachedAuditRun) -> AuditExportCoverage {
 /// was complete.
 ///
 /// Deliberately the **same wording** the Security workbench uses (the posture
-/// strip's cancelled callout, the Findings pane's truncated callout and
-/// degraded lede): an operator who read the caveat on screen must recognize it
+/// strip's cancelled, truncated and degraded callouts): an operator who read the caveat on screen must recognize it
 /// in the file, and a second set of words would eventually drift into a milder
 /// claim. `scored` is the exported item count, so the fraction is always about
 /// the rows actually in this file.
