@@ -786,6 +786,16 @@
   (28 KB → 11 KB compressed). The script that loads the app is unchanged: Trunk's minifier cannot
   parse it and ships it as written.
 
+### Security
+
+- **The app window can no longer contact Microsoft endpoints or install an update by itself.**
+  The app's backend makes every Graph, sign-in, Key Vault and Azure Resource Manager call, but
+  the window's content security policy still allowed it to reach 13 Microsoft hosts. Its
+  permissions also let it download and install an update without the Update & restart prompt.
+  Neither was used. The window can now only talk to the app itself, and update checks and file
+  dialogs still run through the backend as before. A link in the release notes becomes clickable
+  only when it is an https address.
+
 ## [0.30.2] - 2026-09-25
 
 ### Changed

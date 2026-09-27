@@ -58,6 +58,14 @@ so it only lights up for releases from **v0.8.0 onward** — v0.7.0's `latest.js
 **Do not reintroduce a silent background `download_and_install` in `lib.rs` setup** — it was
 removed in favour of this flow and would race the prompt.
 
+The webview holds no updater or dialog permission: `capabilities/default.json` grants only
+`core:default`, so webview script cannot call `plugin:updater|download_and_install` — the
+backend's `perform_update` (a Rust API, not capability-gated) is the only install path. The CSP's
+`connect-src` is `'self'` only; the frontend makes no network calls. Both are pinned by
+`repo_invariants/webview.rs`. The manifest's `notes` is **not** covered by the minisign signature
+(which signs the bundle, not `latest.json`) — it is trusted via TLS only — so `ChangelogNotes`
+builds elements, never raw HTML, and turns a link into an anchor only for an `https://` href.
+
 ### Who is offered an update
 
 `commands::updater::update_policy(auto_update, bundle_type())` gates **both** commands before any

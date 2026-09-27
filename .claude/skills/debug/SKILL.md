@@ -66,7 +66,7 @@ Start from the symptom, form one hypothesis, then check the layers in order. Rea
 | Command "not found" from the UI | parity hook output | handler missing from `generate_handler![]` or the binding string differs |
 | Args rejected (`invalid args`) | binding args struct | camelCase/snake_case mismatch |
 | WASM build error | `just web-build` | server-only dep (tokio/reqwest/rustls) not `cfg(not(wasm32))`-gated |
-| Frontend `fetch` blocked | `tauri.conf.json` `connect-src` | only WASM-side fetches need CSP; backend reqwest never does |
+| Frontend `fetch` blocked | `tauri.conf.json` `connect-src` | the webview makes no fetches (`connect-src 'self'`, pinned by `repo_invariants/webview.rs`); backend reqwest never needs CSP |
 | Audit score looks wrong | `AppPermissions.mail_scopes` | empty map = org-wide by design; check the scope probe |
 | Long write ignores Cancel | `claim()` before first await? | `CancelToken` claimed late / no `SessionDead` latch |
 

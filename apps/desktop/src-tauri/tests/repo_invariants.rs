@@ -29,6 +29,8 @@
 //!   update gate, the Linux glibc floor and the NSIS install mode
 //! - [`trust`] — every path that mints an authentication trust validates it,
 //!   and every signing-certificate mint bounds its lifetime
+//! - [`webview`] — the webview's grants: CSP `connect-src` holds no remote
+//!   origin, and the capability file grants only `core:default`
 
 #[path = "repo_invariants/cache.rs"]
 mod cache;
@@ -48,3 +50,5 @@ mod release;
 mod sources;
 #[path = "repo_invariants/trust.rs"]
 mod trust;
+#[path = "repo_invariants/webview.rs"]
+mod webview;

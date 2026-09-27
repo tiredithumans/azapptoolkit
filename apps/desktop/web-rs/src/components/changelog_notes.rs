@@ -3,9 +3,13 @@
 //! section for the release (`release.yml` slices it out) — so it arrives as
 //! Markdown. This handles the small subset our changelog actually uses: `###`
 //! headings, `-` bullet lists (one level of nesting + wrapped continuation
-//! lines), and inline `**bold**`, `` `code` ``, and `[text](url)` links. The
-//! notes are our own release content, never user input, so there's no untrusted
-//! HTML to sanitise — we build elements, never inject raw markup.
+//! lines), and inline `**bold**`, `` `code` ``, and `[text](url)` links.
+//!
+//! The notes are the `latest.json` `notes` field, which the minisign signature
+//! does not cover (it signs the bundle), so they are trusted via TLS only. We
+//! build elements and never inject raw markup, and a link becomes an anchor only
+//! for an `https://` href — any other scheme (`javascript:`, `file:`, `http:`, a
+//! relative path) renders as its plain text.
 //!
 //! # Summary first, detail on request
 //!
@@ -355,6 +359,10 @@ fn parse_inline(s: &str) -> Vec<Inline> {
                 }
             }
             _ => match parse_link(from) {
+                Some((Inline::Link { text: label, href }, consumed)) if !is_allowed_href(&href) => {
+                    text.push_str(&label);
+                    rest = &from[consumed..];
+                }
                 Some((link, consumed)) => {
                     flush_text(&mut out, &mut text);
                     out.push(link);
@@ -369,6 +377,12 @@ fn parse_inline(s: &str) -> Vec<Inline> {
     }
     flush_text(&mut out, &mut text);
     out
+}
+
+/// `latest.json`'s `notes` is not covered by the minisign signature (that signs
+/// the bundle) — it is trusted only via TLS — so a link renders only for https.
+fn is_allowed_href(href: &str) -> bool {
+    href.starts_with("https://")
 }
 
 /// Parse a `[text](url)` link at the start of `s`, returning the node and the
@@ -437,6 +451,26 @@ mod tests {
                 },
                 Inline::Text(" now".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn inline_renders_links_without_an_https_href_as_plain_text() {
+        assert_eq!(
+            parse_inline("a [click](javascript:void0) b"),
+            vec![Inline::Text("a click b".into())]
+        );
+        assert_eq!(
+            parse_inline("[f](file:///etc/passwd)"),
+            vec![Inline::Text("f".into())]
+        );
+        assert_eq!(
+            parse_inline("[h](http://example.com)"),
+            vec![Inline::Text("h".into())]
+        );
+        assert_eq!(
+            parse_inline("[r](docs/x.md)"),
+            vec![Inline::Text("r".into())]
         );
     }
 

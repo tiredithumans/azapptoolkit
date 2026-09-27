@@ -22,7 +22,7 @@
             }
         ],
         "security": {
-            "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://graph.microsoft.com https://graph.microsoft.us https://dod-graph.microsoft.us https://microsoftgraph.chinacloudapi.cn https://login.microsoftonline.com https://login.microsoftonline.us https://login.partner.microsoftonline.cn https://*.vault.azure.net https://*.vault.usgovcloudapi.net https://*.vault.azure.cn https://management.azure.com https://management.usgovcloudapi.net https://management.chinacloudapi.cn; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+            "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
         }
     },
     "bundle": {
