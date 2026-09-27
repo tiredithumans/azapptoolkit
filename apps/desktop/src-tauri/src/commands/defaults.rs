@@ -7,7 +7,7 @@
 //! the vault bindings on [`TenantDefaults`] are preserved as-is (they're owned by
 //! the credential-rotation flow — see [`UserSettings::apply_tenant_defaults`]).
 
-use azapptoolkit_core::defaults::{SCOPE_NAME_PLACEHOLDER, TenantDefaults};
+use azapptoolkit_core::defaults::{NAME_PATTERN_PLACEHOLDER, TenantDefaults};
 use azapptoolkit_core::settings::UserSettings;
 
 use crate::dto::UiError;
@@ -32,18 +32,26 @@ pub fn set_tenant_defaults(tenant_id: String, defaults: TenantDefaults) -> Resul
         ));
     }
 
-    let mut defaults = defaults;
+    let defaults = validated_defaults(defaults)?;
+
+    let config_dir = crate::config_directory();
+    UserSettings::mutate(&config_dir, |settings| {
+        settings.apply_tenant_defaults(&tenant_id, defaults);
+    })
+    .map_err(|e| UiError::io(format!("Could not write settings.json: {e}")))?;
+    Ok(())
+}
+
+/// Normalises the operator-editable fields of `defaults` before they are
+/// persisted: sanitises the SSO notification emails, stores every blank name
+/// pattern as unset (so it falls back to the built-in default), and refuses a
+/// non-blank pattern without the `{appId}` placeholder.
+fn validated_defaults(mut defaults: TenantDefaults) -> Result<TenantDefaults, UiError> {
     defaults.enterprise_application.default_notification_emails =
         sanitize_emails(&defaults.enterprise_application.default_notification_emails)?;
-    // A blank pattern is stored as "unset" so it falls back to the built-in default.
-    defaults.scope_name_pattern = defaults
-        .scope_name_pattern
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty());
-    defaults.group_name_pattern = defaults
-        .group_name_pattern
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty());
+    defaults.scope_name_pattern = blank_as_unset(defaults.scope_name_pattern);
+    defaults.group_name_pattern = blank_as_unset(defaults.group_name_pattern);
+    defaults.secret_name_pattern = blank_as_unset(defaults.secret_name_pattern);
 
     // A non-blank pattern MUST carry the placeholder. Without it the
     // substitution is a no-op and every app in the tenant resolves to the same
@@ -56,24 +64,26 @@ pub fn set_tenant_defaults(tenant_id: String, defaults: TenantDefaults) -> Resul
         ("secret_name_pattern", &defaults.secret_name_pattern),
     ] {
         if let Some(pat) = pattern
-            && !pat.contains(SCOPE_NAME_PLACEHOLDER)
+            && !pat.contains(NAME_PATTERN_PLACEHOLDER)
         {
             return Err(UiError::validation(
                 "invalid_pattern",
                 format!(
-                    "{label} must contain {SCOPE_NAME_PLACEHOLDER}, or every app in the tenant \
+                    "{label} must contain {NAME_PATTERN_PLACEHOLDER}, or every app in the tenant \
                      resolves to the same name and they share one scope, group or secret."
                 ),
             ));
         }
     }
+    Ok(defaults)
+}
 
-    let config_dir = crate::config_directory();
-    UserSettings::mutate(&config_dir, |settings| {
-        settings.apply_tenant_defaults(&tenant_id, defaults);
-    })
-    .map_err(|e| UiError::io(format!("Could not write settings.json: {e}")))?;
-    Ok(())
+/// A blank (or whitespace-only) pattern is stored as "unset"; anything else is
+/// stored trimmed.
+fn blank_as_unset(pattern: Option<String>) -> Option<String> {
+    pattern
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
 }
 
 /// Trims, drops blanks, case-insensitively dedupes, requires `@`, caps at 5 —
@@ -123,5 +133,56 @@ mod tests {
         assert!(sanitize_emails(&["nope".into()]).is_err());
         let six: Vec<String> = (0..6).map(|i| format!("u{i}@x.com")).collect();
         assert!(sanitize_emails(&six).is_err());
+    }
+
+    #[test]
+    fn a_blank_pattern_is_stored_as_unset_for_all_three() {
+        let out = validated_defaults(TenantDefaults {
+            scope_name_pattern: Some("   ".into()),
+            group_name_pattern: Some("   ".into()),
+            secret_name_pattern: Some("   ".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(out.scope_name_pattern, None);
+        assert_eq!(out.group_name_pattern, None);
+        assert_eq!(out.secret_name_pattern, None);
+    }
+
+    #[test]
+    fn patterns_are_trimmed() {
+        let out = validated_defaults(TenantDefaults {
+            scope_name_pattern: Some(" s-{appId} ".into()),
+            group_name_pattern: Some(" g-{appId} ".into()),
+            secret_name_pattern: Some(" k-{appId} ".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(out.scope_name_pattern.as_deref(), Some("s-{appId}"));
+        assert_eq!(out.group_name_pattern.as_deref(), Some("g-{appId}"));
+        assert_eq!(out.secret_name_pattern.as_deref(), Some("k-{appId}"));
+    }
+
+    #[test]
+    fn a_pattern_without_the_placeholder_is_refused() {
+        type Setter = fn(&mut TenantDefaults);
+        let cases: [(&str, Setter); 3] = [
+            ("scope_name_pattern", |d| {
+                d.scope_name_pattern = Some("fixed".into())
+            }),
+            ("group_name_pattern", |d| {
+                d.group_name_pattern = Some("fixed".into())
+            }),
+            ("secret_name_pattern", |d| {
+                d.secret_name_pattern = Some(" fixed ".into())
+            }),
+        ];
+        for (label, set) in cases {
+            let mut d = TenantDefaults::default();
+            set(&mut d);
+            let err = validated_defaults(d).unwrap_err();
+            assert_eq!(err.code, "invalid_pattern", "{label}");
+            assert!(err.message.contains(label), "{label}: {}", err.message);
+        }
     }
 }

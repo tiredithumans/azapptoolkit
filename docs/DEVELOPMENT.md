@@ -78,9 +78,19 @@ just build-windows         # (or `cargo tauri build` for your host target)
 
 The desktop crate's `build.rs` reads `.env` at the workspace root and
 emits the values via `cargo:rustc-env=AZAPPTOOLKIT_BUILD_*`. At runtime
-`state.rs` prefers a real `AZAPPTOOLKIT_*` env var, then the baked-in
-value, then the placeholder — so a packaged build "just works" while
-developers can still override locally with `export`. `.env` is
+`state.rs` resolves each ID as a non-empty `AZAPPTOOLKIT_*` env var, then
+the value saved in the user's `settings.json` (written by the first-run
+**Configure your tenant** screen and by Settings → Tenant connection; it
+lives in `%APPDATA%\azapptoolkit\` on Windows,
+`~/Library/Application Support/azapptoolkit/` on macOS and
+`~/.local/share/azapptoolkit/` on Linux),
+then the baked-in value, then the placeholder. So a packaged build "just
+works", developers can still override locally with `export`, and a stale
+in-app save beats a freshly baked `.env`: clear its `client_id` /
+`tenant_id` or re-save in the Tenant connection tab. The startup log line
+`resolved auth config` records which tier won for each ID, and Settings →
+Tenant connection names an active env or baked source. `build.rs` prints a
+`cargo:warning` when a `.env` ID is empty or not a GUID. `.env` is
 git-ignored; check in only `.env.example`.
 
 A sovereign-cloud team build can bake the cloud the same way: uncomment

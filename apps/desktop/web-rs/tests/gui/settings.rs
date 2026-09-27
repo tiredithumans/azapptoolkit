@@ -10,6 +10,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_web_rs::bindings::config::ConfigSource;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::settings_view::SettingsView;
 
@@ -94,6 +95,8 @@ async fn tenant_connection_tab_prefills_then_confirms_the_restart() {
     // both GUIDs.
     ts::wait_for(|| input_values().contains(&configured.tenant_id)).await;
     assert!(input_values().contains(&configured.client_id));
+    // IDs saved in-app are what this form edits, so no override note shows.
+    assert!(!ts::body_contains("overrides what you save here"));
 
     // The defaults' Save button doesn't follow the operator here — the two
     // saves write different files, and the wrong one silently does nothing.
@@ -118,4 +121,25 @@ async fn tenant_connection_tab_prefills_then_confirms_the_restart() {
         Some(configured.tenant_id.as_str())
     );
     ts::wait_for(|| ts::last_call("restart_app").is_some()).await;
+}
+
+/// With an env var supplying the IDs, a saved change would be ignored after
+/// the restart — the tab says so instead of letting the old tenant come back
+/// unexplained.
+#[wasm_bindgen_test]
+async fn tenant_connection_tab_names_an_active_env_override() {
+    ts::reset();
+    ts::mock_ok("get_tenant_defaults", &fixtures::tenant_defaults());
+    ts::mock_ok(
+        "get_auth_config",
+        &fixtures::configured_from(ConfigSource::Env),
+    );
+
+    let _m = ts::mount_view(|| view! { <SettingsView /> });
+    ts::wait_for(|| ts::body_contains("App Registration Defaults")).await;
+    ts::click(".ui-tabs button:nth-of-type(4)");
+    ts::wait_for(|| ts::body_contains("overrides what you save here")).await;
+    assert!(ts::body_contains(
+        "AZAPPTOOLKIT_CLIENT_ID and AZAPPTOOLKIT_TENANT_ID"
+    ));
 }

@@ -21,6 +21,7 @@ use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_graph::GraphClient;
 use azapptoolkit_keyvault::KeyVaultClient;
 
+use crate::dto::config::ConfigSource;
 use crate::token_adapter::ScopedTokenAdapter;
 
 /// Default client id for the public "azapptoolkit Desktop" app registration.
@@ -131,50 +132,40 @@ impl CancelToken {
     }
 }
 
-/// Where a resolved client/tenant id came from — logged at startup, because
-/// "is the env override, settings.json or the build winning?" is the classic
-/// support question the three-way resolution raises.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IdSource {
-    Env,
-    Settings,
-    Baked,
-    Unset,
-}
-
-impl IdSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            IdSource::Env => "env",
-            IdSource::Settings => "settings.json",
-            IdSource::Baked => "baked",
-            IdSource::Unset => "unset",
-        }
-    }
-}
-
-/// Resolution order for a client/tenant id: a non-empty runtime env var (for
-/// MDM/automation overrides), then the user's `settings.json` value (written by
-/// the first-run config screen), then the build-time bake from `.env`, then the
-/// placeholder default — which makes sign-in fail and the config screen show.
-/// Returns the value together with the [`IdSource`] that supplied it.
+/// Resolves a client/tenant id from the process environment; see
+/// [`resolve_from`] for the precedence.
 fn resolve(
     env_var: &str,
     settings: Option<&str>,
     baked: Option<&'static str>,
     default: &'static str,
-) -> (String, IdSource) {
-    if let Ok(v) = std::env::var(env_var)
-        && !v.is_empty()
-    {
-        return (v, IdSource::Env);
+) -> (String, ConfigSource) {
+    resolve_from(std::env::var(env_var).ok(), settings, baked, default)
+}
+
+/// Resolution order for a client/tenant id: a non-empty runtime env var (for
+/// MDM/automation overrides), then the user's `settings.json` value (written by
+/// the first-run config screen and Settings → Tenant connection), then the
+/// build-time bake from `.env`, then the placeholder default — which makes
+/// sign-in fail and the config screen show. An empty value at any tier falls
+/// through. Returns the value together with the [`ConfigSource`] that supplied
+/// it. Pure (the env value is passed in) so every tier is unit-testable without
+/// the `unsafe` `std::env::set_var`.
+fn resolve_from(
+    env: Option<String>,
+    settings: Option<&str>,
+    baked: Option<&'static str>,
+    default: &'static str,
+) -> (String, ConfigSource) {
+    if let Some(v) = env.filter(|v| !v.is_empty()) {
+        return (v, ConfigSource::Env);
     }
     if let Some(v) = settings.filter(|s| !s.is_empty()) {
-        return (v.to_string(), IdSource::Settings);
+        return (v.to_string(), ConfigSource::Settings);
     }
     match baked.filter(|s| !s.is_empty()) {
-        Some(v) => (v.to_owned(), IdSource::Baked),
-        None => (default.to_string(), IdSource::Unset),
+        Some(v) => (v.to_owned(), ConfigSource::Baked),
+        None => (default.to_string(), ConfigSource::Unset),
     }
 }
 
@@ -289,6 +280,11 @@ pub struct AppState {
     /// `get_auth_config` can report configuration status to the first-run UI.
     pub client_id: String,
     pub tenant_id: String,
+    /// Which resolution tier supplied [`Self::client_id`], so the Tenant
+    /// connection tab can say when an env var or the build decides it.
+    pub client_id_source: ConfigSource,
+    /// Which resolution tier supplied [`Self::tenant_id`].
+    pub tenant_id_source: ConfigSource,
     pub cache: Arc<Cache>,
     /// Single-flight gates, keyed by cache key. See [`AppState::single_flight`].
     inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -385,6 +381,8 @@ impl AppState {
             auth,
             client_id,
             tenant_id,
+            client_id_source,
+            tenant_id_source,
             cache: Cache::new(),
             inflight: Mutex::new(HashMap::new()),
             graph_clients: Mutex::new(HashMap::new()),
@@ -446,6 +444,8 @@ impl AppState {
             auth: EntraAuthService::new("test-client", tenant_id),
             client_id: "test-client".to_string(),
             tenant_id: tenant_id.to_string(),
+            client_id_source: ConfigSource::Settings,
+            tenant_id_source: ConfigSource::Settings,
             cache,
             inflight: Mutex::new(HashMap::new()),
             graph_clients: Mutex::new(HashMap::from([(tenant_id.to_string(), client)])),
@@ -934,39 +934,66 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, CancelFlag, IdSource, resolve};
+    use super::{AppState, CancelFlag, ConfigSource, resolve, resolve_from};
     use azapptoolkit_core::cache::CacheKind;
 
-    /// Never set by anything, so the env-var branch is skipped. The `Env` arm
-    /// itself is not tested: it needs `std::env::set_var`, which is `unsafe`
-    /// and the workspace denies `unsafe_code`.
+    /// Never set by anything, so the env-var branch of the [`resolve`] wiring
+    /// falls through. Every tier, the env arm included, is covered through the
+    /// pure [`resolve_from`] (setting a real env var needs the `unsafe`
+    /// `std::env::set_var`, and the workspace denies `unsafe_code`).
     const NEVER_SET: &str = "AZAPPTOOLKIT_TEST_NEVER_SET_F484";
 
     #[test]
-    fn a_settings_value_beats_the_bake() {
+    fn resolve_precedence_env_settings_baked_placeholder() {
+        use ConfigSource::*;
+        let env = |v: &str| Some(v.to_string());
+        type Case = (
+            Option<String>,
+            Option<&'static str>,
+            Option<&'static str>,
+            &'static str,
+            ConfigSource,
+        );
+        let cases: [Case; 9] = [
+            // The env var wins over settings and the bake.
+            (env("e"), Some("s"), Some("b"), "e", Env),
+            (env("e"), None, None, "e", Env),
+            // An empty env var falls through to settings.
+            (env(""), Some("s"), Some("b"), "s", Settings),
+            // A settings value beats the bake.
+            (None, Some("s"), Some("b"), "s", Settings),
+            // An empty settings value falls through to the bake.
+            (None, Some(""), Some("b"), "b", Baked),
+            (env(""), Some(""), Some("b"), "b", Baked),
+            // An empty bake falls to the placeholder.
+            (None, None, Some(""), "d", Unset),
+            (env(""), Some(""), Some(""), "d", Unset),
+            // Nothing anywhere is the placeholder.
+            (None, None, None, "d", Unset),
+        ];
+        for (i, (e, s, b, want, source)) in cases.into_iter().enumerate() {
+            assert_eq!(
+                resolve_from(e, s, b, "d"),
+                (want.to_string(), source),
+                "case {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_reads_the_env_then_applies_the_same_precedence() {
         assert_eq!(
             resolve(NEVER_SET, Some("s"), Some("b"), "d"),
-            ("s".to_string(), IdSource::Settings)
+            ("s".to_string(), ConfigSource::Settings)
         );
     }
 
     #[test]
-    fn an_empty_settings_value_falls_through_to_the_bake() {
-        assert_eq!(
-            resolve(NEVER_SET, Some(""), Some("b"), "d"),
-            ("b".to_string(), IdSource::Baked)
-        );
-    }
-
-    #[test]
-    fn nothing_configured_is_the_unset_default() {
-        assert_eq!(
-            resolve(NEVER_SET, None, Some(""), "d"),
-            ("d".to_string(), IdSource::Unset)
-        );
-        assert_eq!(resolve(NEVER_SET, None, None, "d").1, IdSource::Unset);
-        assert_eq!(IdSource::Unset.as_str(), "unset");
-        assert_eq!(IdSource::Settings.as_str(), "settings.json");
+    fn config_sources_keep_their_log_spellings() {
+        assert_eq!(ConfigSource::Env.as_str(), "env");
+        assert_eq!(ConfigSource::Settings.as_str(), "settings.json");
+        assert_eq!(ConfigSource::Baked.as_str(), "baked");
+        assert_eq!(ConfigSource::Unset.as_str(), "unset");
     }
 
     #[test]

@@ -103,32 +103,47 @@ pub const DEFAULT_SCOPE_NAME_PREFIX: &str = "app_scope_";
 /// distinct from [`DEFAULT_SCOPE_NAME_PREFIX`] so a management scope and its
 /// backing mail-group never collide on name.
 pub const DEFAULT_GROUP_NAME_PREFIX: &str = "app_scope_group_";
-/// Placeholder token substituted in a custom [`TenantDefaults::scope_name_pattern`],
-/// [`TenantDefaults::group_name_pattern`], or [`TenantDefaults::secret_name_pattern`].
-pub const SCOPE_NAME_PLACEHOLDER: &str = "{appId}";
+/// Placeholder token substituted in every custom name pattern:
+/// [`TenantDefaults::scope_name_pattern`], [`TenantDefaults::group_name_pattern`],
+/// and [`TenantDefaults::secret_name_pattern`].
+pub const NAME_PATTERN_PLACEHOLDER: &str = "{appId}";
 /// The built-in Key Vault secret-name prefix. Uses a dash (KV secret names
 /// forbid underscores).
 pub const DEFAULT_SECRET_NAME_PREFIX: &str = "secret-";
+
+/// The one resolver behind [`TenantDefaults::scope_name_for`],
+/// [`TenantDefaults::group_name_for`] and [`TenantDefaults::secret_name_for`]:
+/// the trimmed custom `pattern` with [`NAME_PATTERN_PLACEHOLDER`] substituted,
+/// else `<default_prefix><app_id>`.
+fn resolve_pattern(pattern: Option<&str>, default_prefix: &str, app_id: &str) -> String {
+    match pattern.map(str::trim) {
+        // The placeholder check is load-bearing, not cosmetic: `replace` is a
+        // no-op on a pattern that lacks it, so every app in the tenant would
+        // resolve to the SAME name. For a management scope that cross-wires
+        // mailboxes (`ensure_management_scope` is create-only, so scoping app B
+        // would silently return app A's scope and attach B's roles to a filter
+        // pointing at A's mailboxes); for the scope group it merges two apps'
+        // mailbox membership; for a Key Vault secret name it overwrites one
+        // app's rotated secret with another's. `set_tenant_defaults` rejects
+        // such a pattern; this is the belt-and-braces for a settings.json
+        // edited by hand.
+        Some(pat) if !pat.is_empty() && pat.contains(NAME_PATTERN_PLACEHOLDER) => {
+            pat.replace(NAME_PATTERN_PLACEHOLDER, app_id)
+        }
+        _ => format!("{default_prefix}{app_id}"),
+    }
+}
 
 impl TenantDefaults {
     /// Resolves the management-scope name for `app_id`: the custom pattern with
     /// `{appId}` substituted if one is set (and non-blank), else the built-in
     /// `app_scope_<app_id>`.
     pub fn scope_name_for(&self, app_id: &str) -> String {
-        match self.scope_name_pattern.as_deref().map(str::trim) {
-            // The placeholder check is load-bearing, not cosmetic: `replace` is
-            // a no-op on a pattern that lacks it, so every app in the tenant
-            // would resolve to the SAME name. `ensure_management_scope` is
-            // create-only, so scoping app B would silently return app A's scope
-            // and attach B's roles to a filter pointing at A's mailboxes — and
-            // the same collapse cross-wires Key Vault secret names between apps.
-            // `set_tenant_defaults` rejects such a pattern; this is the
-            // belt-and-braces for a settings.json edited by hand.
-            Some(pat) if !pat.is_empty() && pat.contains(SCOPE_NAME_PLACEHOLDER) => {
-                pat.replace(SCOPE_NAME_PLACEHOLDER, app_id)
-            }
-            _ => format!("{DEFAULT_SCOPE_NAME_PREFIX}{app_id}"),
-        }
+        resolve_pattern(
+            self.scope_name_pattern.as_deref(),
+            DEFAULT_SCOPE_NAME_PREFIX,
+            app_id,
+        )
     }
 
     /// Resolves the mail-enabled-security-group name for `app_id`: the custom
@@ -137,45 +152,28 @@ impl TenantDefaults {
     /// [`scope_name_for`](Self::scope_name_for) so a scope and its backing group
     /// never collide on name.
     pub fn group_name_for(&self, app_id: &str) -> String {
-        match self.group_name_pattern.as_deref().map(str::trim) {
-            // The placeholder check is load-bearing, not cosmetic: `replace` is
-            // a no-op on a pattern that lacks it, so every app in the tenant
-            // would resolve to the SAME name. `ensure_management_scope` is
-            // create-only, so scoping app B would silently return app A's scope
-            // and attach B's roles to a filter pointing at A's mailboxes — and
-            // the same collapse cross-wires Key Vault secret names between apps.
-            // `set_tenant_defaults` rejects such a pattern; this is the
-            // belt-and-braces for a settings.json edited by hand.
-            Some(pat) if !pat.is_empty() && pat.contains(SCOPE_NAME_PLACEHOLDER) => {
-                pat.replace(SCOPE_NAME_PLACEHOLDER, app_id)
-            }
-            _ => format!("{DEFAULT_GROUP_NAME_PREFIX}{app_id}"),
-        }
+        resolve_pattern(
+            self.group_name_pattern.as_deref(),
+            DEFAULT_GROUP_NAME_PREFIX,
+            app_id,
+        )
     }
 
     /// Resolves the Key Vault secret name for `app_id`: the custom pattern with
     /// `{appId}` substituted if one is set (and non-blank), else the built-in
     /// `secret-<app_id>`. The caller should still sanitize to KV-safe characters.
     pub fn secret_name_for(&self, app_id: &str) -> String {
-        match self.secret_name_pattern.as_deref().map(str::trim) {
-            // The placeholder check is load-bearing, not cosmetic: `replace` is
-            // a no-op on a pattern that lacks it, so every app in the tenant
-            // would resolve to the SAME name. `ensure_management_scope` is
-            // create-only, so scoping app B would silently return app A's scope
-            // and attach B's roles to a filter pointing at A's mailboxes — and
-            // the same collapse cross-wires Key Vault secret names between apps.
-            // `set_tenant_defaults` rejects such a pattern; this is the
-            // belt-and-braces for a settings.json edited by hand.
-            Some(pat) if !pat.is_empty() && pat.contains(SCOPE_NAME_PLACEHOLDER) => {
-                pat.replace(SCOPE_NAME_PLACEHOLDER, app_id)
-            }
-            _ => format!("{DEFAULT_SECRET_NAME_PREFIX}{app_id}"),
-        }
+        resolve_pattern(
+            self.secret_name_pattern.as_deref(),
+            DEFAULT_SECRET_NAME_PREFIX,
+            app_id,
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     /// A custom pattern that omits the placeholder must NOT collapse every app
     /// onto one name.
@@ -213,8 +211,6 @@ mod tests {
         };
         assert_eq!(d.scope_name_for("app-a"), "contoso_app-a_scope");
     }
-
-    use super::*;
 
     #[test]
     fn scope_name_falls_back_to_the_builtin_default() {
@@ -281,6 +277,26 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(blank.secret_name_for("app-1"), "secret-app-1");
+    }
+
+    /// The shared resolver is the single home of the placeholder guard: blank
+    /// and placeholder-less patterns fall back per app, a real pattern is
+    /// trimmed then substituted, and the caller's prefix is honoured.
+    #[test]
+    fn resolve_pattern_is_the_one_guard() {
+        assert_eq!(resolve_pattern(None, "p_", "app-1"), "p_app-1");
+        assert_eq!(resolve_pattern(Some("  "), "p_", "app-1"), "p_app-1");
+        assert_eq!(resolve_pattern(Some("x"), "p_", "app-1"), "p_app-1");
+        assert_ne!(
+            resolve_pattern(Some("x"), "p_", "app-1"),
+            resolve_pattern(Some("x"), "p_", "app-2"),
+            "a placeholder-less pattern must not collapse two apps onto one name"
+        );
+        assert_eq!(
+            resolve_pattern(Some(" p-{appId} "), "unused_", "app-1"),
+            "p-app-1"
+        );
+        assert_eq!(resolve_pattern(None, "other-", "app-1"), "other-app-1");
     }
 
     #[test]

@@ -15,6 +15,12 @@
 - **The Provisioning tab offers "Grant consent & retry".** It used to name
   `Synchronization.Read.All` and stop there. It now runs the consent round trip and reloads, as the
   Group memberships section does, and shows which roles can read provisioning.
+- **Settings → Tenant connection now says when an environment variable or the build decides your
+  tenant.** The tab only warned that an `AZAPPTOOLKIT_CLIENT_ID` / `AZAPPTOOLKIT_TENANT_ID` variable
+  *could* override a saved ID, so after saving and restarting you could see the old tenant come back
+  with no explanation. It now shows when a variable on this computer is supplying either ID, or when
+  the ID is built into your copy of azapptoolkit. A team build made from a `.env` with an empty or
+  mistyped ID also warns at build time instead of failing at sign-in.
 - **A team build can now bake in the sovereign cloud, like the client and tenant IDs.** Add
   `AZAPPTOOLKIT_CLOUD` to `.env` before building, and the installer targets US Gov, US Gov DoD or
   China with nothing set on each workstation. Previously every recipient had to set the variable,

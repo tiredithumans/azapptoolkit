@@ -15,7 +15,9 @@ fn main() {
 /// present) into the binary via `cargo:rustc-env` (names from
 /// `baked_env_name`), so an admin can produce a single distributable installer
 /// without requiring every recipient to set environment variables themselves.
-/// Runtime env vars still override the baked-in values — see `state.rs`.
+/// Runtime env vars and the user's in-app `settings.json` still override the
+/// baked-in values — see `state.rs`. An empty or non-GUID client/tenant id
+/// prints a `cargo:warning` (a non-GUID one is still baked).
 fn bake_client_config() {
     let env_path = workspace_root().join(".env");
     println!("cargo:rerun-if-changed={}", env_path.display());
@@ -28,6 +30,9 @@ fn bake_client_config() {
         let Some(baked) = baked_env_name(&key) else {
             continue;
         };
+        if let Some(w) = bake_warning(&key, &value) {
+            println!("cargo:warning={w}");
+        }
         if value.is_empty() || value.contains('\n') {
             continue;
         }

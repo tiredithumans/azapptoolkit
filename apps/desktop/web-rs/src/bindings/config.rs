@@ -4,7 +4,7 @@ use super::ipc::{invoke, invoke_result};
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
 
-pub use azapptoolkit_dto::config::AuthConfigStatus;
+pub use azapptoolkit_dto::config::{AuthConfigStatus, ConfigSource};
 
 /// Whether the app has usable client/tenant IDs (and their current values for
 /// prefilling the config form). Infallible — reads in-memory state.

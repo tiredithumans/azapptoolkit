@@ -13,14 +13,18 @@ use super::guid::is_guid;
 use crate::dto::config::AuthConfigStatus;
 use crate::state::AppState;
 
-/// Reports whether the app has usable client/tenant IDs and what they are (so
-/// the config form can prefill when reconfiguring). Drives the first-run gate.
+/// Reports whether the app has usable client/tenant IDs, what they are (so
+/// the config form can prefill when reconfiguring) and which resolution tier
+/// supplied each (so the Tenant connection tab can say when an env var or the
+/// build overrides a saved value). Drives the first-run gate.
 #[tauri::command]
 pub fn get_auth_config(state: State<'_, AppState>) -> AuthConfigStatus {
     AuthConfigStatus {
         configured: state.is_configured(),
         client_id: state.display_client_id().to_string(),
         tenant_id: state.display_tenant_id().to_string(),
+        client_id_source: state.client_id_source,
+        tenant_id_source: state.tenant_id_source,
     }
 }
 

@@ -42,7 +42,7 @@ pub mod test_support;
 #[cfg(feature = "demo")]
 pub mod demo;
 
-use bindings::config::AuthConfigStatus;
+use bindings::config::{AuthConfigStatus, ConfigSource};
 use components::browser_fallback_notice::BrowserFallbackNotice;
 use state::{ActiveView, provide_session, use_session};
 use util::keep_alive;
@@ -147,6 +147,8 @@ fn Root() -> impl IntoView {
             configured: true,
             client_id: String::new(),
             tenant_id: String::new(),
+            client_id_source: ConfigSource::Unset,
+            tenant_id_source: ConfigSource::Unset,
         })
     } else {
         None::<AuthConfigStatus>

@@ -19,7 +19,7 @@ use azapptoolkit_dto::applications::{
 };
 use azapptoolkit_dto::audit::AuditRunResult;
 use azapptoolkit_dto::bulk::{BulkProgress, BulkStageCertOutcome, BulkStageCertResult};
-use azapptoolkit_dto::config::AuthConfigStatus;
+use azapptoolkit_dto::config::{AuthConfigStatus, ConfigSource};
 use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};
 use azapptoolkit_dto::credentials::CredentialRowDto;
 use azapptoolkit_dto::diagnostics::CacheStatsDto;
@@ -109,10 +109,18 @@ pub fn no_apps() -> Vec<ApplicationListRowDto> {
 /// A "configured" auth-config status (client/tenant IDs already set), so the
 /// app shell proceeds past the first-run config screen.
 pub fn configured() -> AuthConfigStatus {
+    configured_from(ConfigSource::Settings)
+}
+
+/// [`configured`] with both IDs supplied by `source` — drives the Tenant
+/// connection tab's "an env var / the build decides this" note.
+pub fn configured_from(source: ConfigSource) -> AuthConfigStatus {
     AuthConfigStatus {
         configured: true,
         client_id: "11111111-1111-1111-1111-111111111111".to_string(),
         tenant_id: "22222222-2222-2222-2222-222222222222".to_string(),
+        client_id_source: source,
+        tenant_id_source: source,
     }
 }
 

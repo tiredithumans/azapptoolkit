@@ -24,7 +24,7 @@ use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
 
-use crate::bindings::config;
+use crate::bindings::config::{self, ConfigSource};
 use crate::bindings::defaults::{
     self, AppRegistrationDefaults, EnterpriseApplicationDefaults, StoredPrincipal, TenantDefaults,
 };
@@ -34,6 +34,65 @@ use crate::components::ui::{Callout, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
 use crate::util::parse_lines;
 use crate::views::config_screen::AuthConfigForm;
+
+/// The Tenant connection tab's note on where the IDs in use come from, as
+/// `(callout tone, text)`, or `None` when they come from `settings.json` (or
+/// nowhere yet) — the case the tab's own form edits. An environment variable
+/// beats the saved value, so an operator who saves and restarts would see the
+/// old ID come back; a baked ID is overridden by saving, but is otherwise
+/// invisible. An env var outranks a baked value, so it is the one named.
+fn connection_source_note(
+    client: ConfigSource,
+    tenant: ConfigSource,
+) -> Option<(&'static str, String)> {
+    let subject = |c: bool, t: bool| match (c, t) {
+        (true, true) => ("client and tenant IDs", true),
+        (true, false) => ("client ID", false),
+        _ => ("tenant ID", false),
+    };
+    let (client_env, tenant_env) = (client == ConfigSource::Env, tenant == ConfigSource::Env);
+    if client_env || tenant_env {
+        let (what, plural) = subject(client_env, tenant_env);
+        let vars = match (client_env, tenant_env) {
+            (true, true) => {
+                "AZAPPTOOLKIT_CLIENT_ID and AZAPPTOOLKIT_TENANT_ID environment variables"
+            }
+            (true, false) => "AZAPPTOOLKIT_CLIENT_ID environment variable",
+            _ => "AZAPPTOOLKIT_TENANT_ID environment variable",
+        };
+        let (verb, removed) = if plural {
+            ("are", "those variables are")
+        } else {
+            ("is", "that variable is")
+        };
+        return Some((
+            "warn",
+            format!(
+                "An environment variable on this computer overrides what you save here: the \
+                 {what} in use {verb} set by the {vars}. A saved change takes effect only once \
+                 {removed} removed."
+            ),
+        ));
+    }
+    let (client_baked, tenant_baked) =
+        (client == ConfigSource::Baked, tenant == ConfigSource::Baked);
+    if client_baked || tenant_baked {
+        let (what, plural) = subject(client_baked, tenant_baked);
+        let (verb, pronoun) = if plural {
+            ("are", "them")
+        } else {
+            ("is", "it")
+        };
+        return Some((
+            "info",
+            format!(
+                "The {what} in use {verb} built into this copy of azapptoolkit. Saving here \
+                 overrides {pronoun}."
+            ),
+        ));
+    }
+    None
+}
 
 fn to_stored(o: &DirectoryObject) -> StoredPrincipal {
     StoredPrincipal {
@@ -132,6 +191,9 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
     // so the three defaults tabs cost no extra IPC.
     let conn_client_id = RwSignal::new(String::new());
     let conn_tenant_id = RwSignal::new(String::new());
+    // Which tier supplied each ID in use (client, tenant) — drives the note
+    // that says an env var or the build, not the saved value, decides it.
+    let conn_sources: RwSignal<Option<(ConfigSource, ConfigSource)>> = RwSignal::new(None);
     let conn_loaded = RwSignal::new(false);
     Effect::new(move |_| {
         if active_tab.get() != "connection" || conn_loaded.get_untracked() {
@@ -140,6 +202,7 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
         conn_loaded.set(true);
         leptos::task::spawn_local(async move {
             let current = config::get_auth_config().await;
+            conn_sources.set(Some((current.client_id_source, current.tenant_id_source)));
             // Seed only what is still untouched: the read is a fast in-memory
             // IPC, but it must never overwrite an edit that beat it back.
             conn_client_id.update(|v| {
@@ -338,6 +401,18 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                                      signs you out — a sign-in that keeps failing on a well-formed ID is \
                                      usually a wrong one here."
                                 </Body1>
+                                {move || {
+                                    conn_sources
+                                        .get()
+                                        .and_then(|(c, t)| connection_source_note(c, t))
+                                        .map(|(tone, text)| {
+                                            view! {
+                                                <Callout tone=tone role="status">
+                                                    {text}
+                                                </Callout>
+                                            }
+                                        })
+                                }}
                                 <AuthConfigForm
                                     client_id=conn_client_id
                                     tenant_id=conn_tenant_id
@@ -470,5 +545,55 @@ fn DlEmailPicker(on_pick: Callback<String>) -> impl IntoView {
             placeholder="sso-alerts"
             class="owner-picker"
         />
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ConfigSource::*;
+
+    #[test]
+    fn a_saved_or_unset_id_needs_no_note() {
+        assert_eq!(connection_source_note(Settings, Settings), None);
+        assert_eq!(connection_source_note(Unset, Unset), None);
+        assert_eq!(connection_source_note(Settings, Unset), None);
+    }
+
+    #[test]
+    fn an_env_override_warns_and_names_only_the_overridden_ids() {
+        let (tone, text) = connection_source_note(Env, Env).unwrap();
+        assert_eq!(tone, "warn");
+        assert!(text.contains("overrides what you save here"), "{text}");
+        assert!(text.contains("client and tenant IDs"), "{text}");
+        assert!(
+            text.contains("AZAPPTOOLKIT_CLIENT_ID and AZAPPTOOLKIT_TENANT_ID"),
+            "{text}"
+        );
+
+        let (tone, text) = connection_source_note(Settings, Env).unwrap();
+        assert_eq!(tone, "warn");
+        assert!(text.contains("the tenant ID in use is set by"), "{text}");
+        assert!(text.contains("AZAPPTOOLKIT_TENANT_ID"), "{text}");
+        assert!(!text.contains("AZAPPTOOLKIT_CLIENT_ID"), "{text}");
+    }
+
+    #[test]
+    fn a_baked_id_is_explained_and_an_env_var_outranks_it() {
+        let (tone, text) = connection_source_note(Baked, Settings).unwrap();
+        assert_eq!(tone, "info");
+        assert!(text.contains("client ID in use is built into"), "{text}");
+        assert!(text.contains("overrides it"), "{text}");
+
+        let (tone, text) = connection_source_note(Baked, Baked).unwrap();
+        assert_eq!(tone, "info");
+        assert!(
+            text.contains("client and tenant IDs in use are built"),
+            "{text}"
+        );
+
+        let (tone, text) = connection_source_note(Env, Baked).unwrap();
+        assert_eq!(tone, "warn");
+        assert!(text.contains("the client ID in use is set by"), "{text}");
     }
 }
