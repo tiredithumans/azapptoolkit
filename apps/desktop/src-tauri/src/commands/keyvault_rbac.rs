@@ -100,6 +100,10 @@ pub async fn sweep_key_vault_access(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<KeyVaultSweepResult, UiError> {
+    // Names resolved below can come from cache; the rule counts only an
+    // explicit proof ahead of every read (a client factory only builds token
+    // adapters). Sync, so the claim still precedes every await.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     // Claimed before the first await — the token acquisition, subscription list
     // and per-subscription vault enumeration below all precede the dispatch,
     // and a token claimed after them discards any cancel issued during them

@@ -17,11 +17,17 @@ reads the previous session's audit/sweep/SP data.
 
 Two rules ride alongside the key prefix:
 
-- **A cache-only command must prove the session** with `state.auth.tenant_context(tenant_id)`. Every
-  other read proves it implicitly by needing a token; a command answering purely from cache has no
-  such gate, so without this an operator who signed out (or a window that never signed in) could
-  still read a populated tenant's data. Pinned by
-  `repo_invariants::cache::a_command_answering_from_cache_alone_checks_the_session`.
+- **A command that can answer from cache must prove the session** with
+  `session::prove_tenant_session(&state, &tenant_id)?` (or `state.auth.tenant_context(tenant_id)`)
+  as its first statement, ahead of any cache read. Every other read proves it implicitly by needing
+  a token; a command answering from cache has no such gate, so without this an operator whose
+  session died (or a window that never signed in) could still read a populated tenant's data. **A
+  client factory call is not a proof**: `graph_for` / `exchange_for` / `arm_for` / `keyvault_for`
+  only build token adapters, and no token is fetched until a request is sent. Reads through the
+  index accessors (`sp_index_cached` / `app_name_index_cached` / `indexes_cached` / `*_hit` /
+  `search_corpus` / `load_gallery_corpus`) count as cache reads. Pinned by
+  `repo_invariants::cache::a_command_answering_from_cache_alone_checks_the_session` (and
+  `every_index_accessor_counts_as_a_cache_read`).
 - **Never pin a per-object key.** Pinning is for the handful of entries that cost a full directory
   scan to rebuild (the two indexes, the search corpus). A pinned per-app entry can never be evicted,
   so a large tenant's thousands of `app_detail|…` writes would grow the bucket without bound. Pinned

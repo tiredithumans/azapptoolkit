@@ -10,20 +10,22 @@
 //! warm tenant filters instantly.
 //!
 //! Both caps this path is subject to are reported, never just applied: the
-//! per-kind display cap through the `*_total` counts and the corpus's inherited
-//! service-principal index cap through `corpus_truncated`. This is the fastest
-//! input in the app, and an operator treats its silence as an answer — so a
-//! result set that quietly omits rows is the one failure mode it cannot have.
+//! per-kind display cap through the `*_total` counts and either tenant-wide
+//! index cap the corpus inherits through `corpus_truncated`. A GUID lookup that
+//! failed for any reason but "not found" is reported too, through
+//! `lookup_degraded`. This is the fastest input in the app, and an operator
+//! treats its silence as an answer — so a result set that quietly omits rows is
+//! the one failure mode it cannot have.
 
 use std::sync::Arc;
 
 use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_core::models::{Application, ServicePrincipal};
-use azapptoolkit_graph::GraphClient;
 use azapptoolkit_graph::client::SP_INDEX_MAX;
+use azapptoolkit_graph::{GraphClient, GraphError};
 use tauri::State;
 
-use crate::commands::applications::search_corpus_key;
+use crate::commands::applications::{APPS_MAX, search_corpus_key};
 use crate::commands::guid::is_guid;
 use crate::dto::UiError;
 use crate::dto::search::{GlobalSearchResults, SearchHit};
@@ -36,6 +38,14 @@ use crate::state::AppState;
 /// match count (`*_total` on [`GlobalSearchResults`]) so the dropdown can say
 /// "10 of 47" instead of presenting a truncated set as the whole answer.
 const SEARCH_TOP: u32 = 10;
+
+// `corpus_cap` reports ONE number for a corpus built from two capped indexes.
+// That is honest only while the two caps are equal (caching-and-search.md: they
+// "must not drift"), so the assumption is pinned where it is made.
+const _: () = assert!(
+    APPS_MAX == SP_INDEX_MAX,
+    "corpus_cap names one cap for both indexes the corpus is built from"
+);
 
 /// Which result bucket a corpus row belongs to.
 #[derive(Clone, Copy)]
@@ -63,16 +73,17 @@ struct SearchRow {
 /// The tenant's search corpus: the pre-lowercased rows plus what the snapshot
 /// could NOT see.
 ///
-/// `sp_index_truncated` is the same signal `IndexCapNotice` renders on the three
-/// inventory lists (`sps.len() >= SP_INDEX_MAX`), carried here rather than
-/// re-derived per query for two reasons: after the two halves are merged the
+/// `index_truncated` covers BOTH halves: the service-principal index at
+/// `SP_INDEX_MAX` (the signal `IndexCapNotice` renders on the three inventory
+/// lists) and the app-registration index at `APPS_MAX`. It is carried here
+/// rather than re-derived per query for two reasons: after the two halves are merged the
 /// rows are indistinguishable, so the count is unrecoverable; and re-asking the
 /// index would put a second tenant-wide read back on the debounced keystroke
 /// path this whole cache exists to keep clear. It is a property of the snapshot,
 /// so it is cached with the snapshot.
 struct SearchCorpus {
     rows: Vec<SearchRow>,
-    sp_index_truncated: bool,
+    index_truncated: bool,
 }
 
 /// One half of the corpus, degrading a failed index read to no rows for that
@@ -188,14 +199,17 @@ async fn search_corpus(
             kind,
         });
     }
-    // Recorded at build time, from the SP half's own length: the two indexes are
-    // bounded at `SP_INDEX_MAX`, and a tenant that hit it has enterprise apps and
-    // managed identities the corpus never saw. Without this the dropdown answers
-    // "No matches." for a principal that is genuinely present — the one lie this
-    // path must not tell, and the one the three inventory lists already refuse to.
+    // Recorded at build time, from each half's own length. Both indexes are
+    // bounded, and a tenant that hit either cap has objects the corpus never saw.
+    // Only the SP half used to be checked, so a tenant with more registrations
+    // than service principals lost registrations silently. Without this the
+    // dropdown answers "No matches." for an object that is genuinely present —
+    // the one lie this path must not tell, and the one the three inventory lists
+    // already refuse to. A failed half is empty (len 0), which is right: failure
+    // is reported by not caching, not as truncation.
     let corpus = Arc::new(SearchCorpus {
         rows,
-        sp_index_truncated: sps.len() >= SP_INDEX_MAX,
+        index_truncated: sps.len() >= SP_INDEX_MAX || apps.len() >= APPS_MAX,
     });
     // Pinned: rebuilding this corpus costs two full directory scans. Stored
     // only if this key was not invalidated since `watch` (see above) AND both
@@ -232,6 +246,9 @@ pub async fn prefetch_search_corpus(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<(), UiError> {
+    // A warm corpus answers before any request is sent; `graph_for` only builds
+    // token adapters, so it is not a session proof.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let client = state.graph_for(&tenant_id);
     search_corpus(&state, &client, &tenant_id).await;
     Ok(())
@@ -243,6 +260,10 @@ pub async fn global_search(
     tenant_id: String,
     query: String,
 ) -> Result<GlobalSearchResults, UiError> {
+    // A warm corpus answers below before any request is sent, and `graph_for`
+    // only builds token adapters — so without this a dead session (or a stale
+    // tenant id) kept being answered from cache instead of `not_signed_in`.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let trimmed = query.trim().to_string();
     if trimmed.is_empty() {
         return Ok(GlobalSearchResults {
@@ -258,8 +279,9 @@ pub async fn global_search(
         // can be an App Reg object id, an App Reg appId (shared with its
         // paired SP), or an SP object id / appId. The appId → SP probe is what
         // finds an enterprise app that has no local app registration at all
-        // (gallery / third-party apps); each probe is best-effort, so a failed
-        // lookup just contributes no hit.
+        // (gallery / third-party apps). Each probe is best-effort — a failed
+        // lookup contributes no hit — but a failure other than "not found" also
+        // flags the result (`lookup_degraded`): an unanswered probe is not a miss.
         let (app_by_app_id, app_by_obj_id, sp_by_obj_id, sp_by_app_id) = futures::future::join4(
             client.find_application_by_app_id(&trimmed),
             client.get_application(&trimmed),
@@ -268,12 +290,14 @@ pub async fn global_search(
         )
         .await;
 
-        let (app_registrations, enterprise_apps, managed_identities) = assemble_guid_hits(
-            app_by_app_id.ok().flatten(),
-            app_by_obj_id.ok(),
-            sp_by_obj_id.ok().flatten(),
-            sp_by_app_id.ok().flatten(),
-        );
+        let (app_by_app_id, d1) = probe_hit(app_by_app_id, "application_by_app_id");
+        let (app_by_obj_id, d2) = probe_hit(app_by_obj_id.map(Some), "application_by_object_id");
+        let (sp_by_obj_id, d3) = probe_hit(sp_by_obj_id, "service_principal_by_object_id");
+        let (sp_by_app_id, d4) = probe_hit(sp_by_app_id, "service_principal_by_app_id");
+        let lookup_degraded = d1 || d2 || d3 || d4;
+
+        let (app_registrations, enterprise_apps, managed_identities) =
+            assemble_guid_hits(app_by_app_id, app_by_obj_id, sp_by_obj_id, sp_by_app_id);
 
         return Ok(GlobalSearchResults {
             query: trimmed,
@@ -282,12 +306,14 @@ pub async fn global_search(
             // returns at most one hit per bucket, nothing is capped, and the
             // index cap cannot hide the object from it (an exact read reaches a
             // principal past the 10 000th just fine). So the totals are the
-            // bucket lengths and there is nothing to warn about.
+            // bucket lengths and no cap can hide anything — but a failed probe
+            // can, and that is `lookup_degraded`.
             app_registrations_total: app_registrations.len(),
             enterprise_apps_total: enterprise_apps.len(),
             managed_identities_total: managed_identities.len(),
             corpus_truncated: false,
             corpus_cap: SP_INDEX_MAX,
+            lookup_degraded,
             app_registrations,
             enterprise_apps,
             managed_identities,
@@ -338,9 +364,31 @@ pub async fn global_search(
         app_registrations_total: app_total,
         enterprise_apps_total: ent_total,
         managed_identities_total: mi_total,
-        corpus_truncated: corpus.sp_index_truncated,
+        corpus_truncated: corpus.index_truncated,
         corpus_cap: SP_INDEX_MAX,
+        // Corpus-half failures are handled by serving the partial corpus
+        // uncached; this flag is the GUID branch's exact-lookup signal.
+        lookup_degraded: false,
     })
+}
+
+/// One exact GUID probe's answer, and whether it could NOT answer. Only a 404
+/// (`GraphError::NotFound`, or the `Ok(None)` the lookups map 404 to) means
+/// "not there"; a 429 past the retry budget, a 403, a network or session error
+/// is an unanswered question, and search must say so rather than read as a miss.
+fn probe_hit<T>(probe: Result<Option<T>, GraphError>, which: &str) -> (Option<T>, bool) {
+    match probe {
+        Ok(hit) => (hit, false),
+        Err(GraphError::NotFound(_)) => (None, false),
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                probe = which,
+                "global search: GUID lookup failed — reporting results as incomplete"
+            );
+            (None, true)
+        }
+    }
 }
 
 /// Buckets the four GUID-probe results into (app registrations, enterprise
@@ -500,6 +548,59 @@ mod tests {
         );
         assert_eq!(apps.len(), 1);
         assert_eq!(ents.len(), 1);
+    }
+
+    #[test]
+    fn probe_hit_counts_only_not_found_as_a_miss() {
+        let found: Result<Option<u32>, GraphError> = Ok(Some(7));
+        assert_eq!(probe_hit(found, "t"), (Some(7), false));
+        assert_eq!(probe_hit::<u32>(Ok(None), "t"), (None, false));
+        assert_eq!(
+            probe_hit::<u32>(Err(GraphError::NotFound("x".into())), "t"),
+            (None, false),
+            "a 404 is a real miss"
+        );
+        assert_eq!(
+            probe_hit::<u32>(
+                Err(GraphError::Throttled {
+                    retry_after_secs: Some(30)
+                }),
+                "t"
+            ),
+            (None, true),
+            "a throttled lookup is unanswered, not a miss"
+        );
+        assert_eq!(
+            probe_hit::<u32>(Err(GraphError::Forbidden("x".into())), "t"),
+            (None, true),
+            "a forbidden lookup is unanswered, not a miss"
+        );
+    }
+
+    async fn corpus_for(
+        tenant: &str,
+        apps: usize,
+        sps: usize,
+    ) -> (wiremock::MockServer, Arc<SearchCorpus>) {
+        use crate::commands::applications::{app_name_index_store, sp_index_store};
+        let (server, state) = crate::commands::test_support::mock_state(tenant).await;
+        app_name_index_store(&state.cache, tenant, vec![Application::default(); apps]);
+        sp_index_store(&state.cache, tenant, vec![ServicePrincipal::default(); sps]);
+        // Both indexes are warm, so building the corpus sends no request.
+        let client = state.graph_for(tenant);
+        let corpus = search_corpus(&state, &client, tenant).await;
+        (server, corpus)
+    }
+
+    #[tokio::test]
+    async fn a_capped_app_registration_index_marks_the_corpus_truncated() {
+        // The SP half is tiny, so only the app-registration cap can set the flag
+        // — the half that used to be ignored.
+        let (_server, corpus) = corpus_for("t1", APPS_MAX, 1).await;
+        assert!(corpus.index_truncated);
+
+        let (_server, corpus) = corpus_for("t2", 1, 1).await;
+        assert!(!corpus.index_truncated, "a small tenant is not truncated");
     }
 
     #[test]

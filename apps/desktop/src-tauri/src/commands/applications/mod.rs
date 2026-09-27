@@ -81,6 +81,9 @@ pub async fn get_directory_index_status(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<DirectoryIndexStatus, UiError> {
+    // A warm SP index answers below before any request is sent; `graph_for`
+    // only builds token adapters, so it is not a session proof.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let client = state.graph_for(&tenant_id);
     let sps = cache::sp_index_cached(&state, &client, &tenant_id).await?;
     Ok(DirectoryIndexStatus {

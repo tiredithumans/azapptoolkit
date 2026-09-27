@@ -1,13 +1,16 @@
 //! GUI tests for the global-search bar: the dropdown's keyboard navigation
 //! (both the "Go to" destinations and the record hits are reachable via the one
-//! roving Arrow/Enter selection, and Enter activates the highlighted row) and
-//! the focus-time corpus prewarm.
+//! roving Arrow/Enter selection, and Enter activates the highlighted row), the
+//! focus-time corpus prewarm, and what the dropdown admits it left out — a
+//! capped group's "N of M" footer, the index-cap notice, and the warning for a
+//! GUID lookup that failed rather than missed.
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
-use azapptoolkit_web_rs::components::global_search::GlobalSearch;
+use azapptoolkit_web_rs::components::global_search::{GlobalSearch, LOOKUP_DEGRADED_NOTICE};
+use azapptoolkit_web_rs::components::index_cap_notice::corpus_cap_message;
 use azapptoolkit_web_rs::state::ActiveView;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 
@@ -37,6 +40,11 @@ async fn arrow_down_moves_selection_through_record_hits_and_enter_opens() {
     // selection, not click-only) and the selection starts on the first.
     ts::wait_for(|| ts::query("#gs-rec-0").is_some() && ts::query("#gs-rec-1").is_some()).await;
     ts::wait_for(|| is_active("#gs-rec-0")).await;
+
+    // A whole answer admits nothing: no "N of M" footer, no index-cap notice.
+    // The negative half of `a_capped_result_renders_the_group_footer_and_the_cap_notice`.
+    assert!(ts::query(".global-search__more").is_none());
+    assert!(!ts::body_contains(&corpus_cap_message(10_000)));
 
     // The regression this guards: ArrowDown must *advance* the highlight to the
     // next record, not stay put — exercises both the record count seen by the
@@ -101,4 +109,53 @@ async fn focusing_the_bar_prewarms_the_search_corpus() {
 
     ts::focus(".global-search__field");
     ts::wait_for(|| ts::call_count("prefetch_search_corpus") == 1).await;
+}
+
+/// A capped group and a truncated corpus both have to be SAID. Their logic is
+/// unit-tested natively (`more_matches_label`, `flatten_hits`); this is the DOM
+/// wiring: the footer and the notice render, and neither joins the options.
+#[wasm_bindgen_test]
+async fn a_capped_result_renders_the_group_footer_and_the_cap_notice() {
+    ts::reset();
+    ts::mock_ok("prefetch_search_corpus", &());
+    ts::mock_ok(
+        "global_search",
+        &fixtures::global_search_capped(&["Contoso API", "Fabrikam Web"], 250),
+    );
+
+    let _m = ts::mount_view(|| view! { <GlobalSearch /> });
+    // "zqx" matches no destination, so every option on screen is a record.
+    ts::focus(".global-search__field");
+    ts::set_input_value(".global-search__field", "zqx");
+
+    ts::wait_for(|| ts::query("#gs-rec-1").is_some()).await;
+    assert!(ts::body_contains("2 of 250 — keep typing to narrow"));
+    let footer = ts::query(".global-search__more").expect("the capped group's footer");
+    assert_eq!(
+        footer.get_attribute("role").as_deref(),
+        Some("presentation"),
+        "the footer is text, not something Enter could open"
+    );
+    assert_eq!(
+        ts::query_all("[role=option]").len(),
+        2,
+        "the footer must not join the roving options"
+    );
+    assert!(ts::body_contains(&corpus_cap_message(10_000)));
+}
+
+/// A GUID search whose lookups did not all answer must not read as "not in
+/// this tenant": the empty dropdown carries the failed-lookup warning.
+#[wasm_bindgen_test]
+async fn a_failed_guid_lookup_warns_instead_of_reading_as_no_match() {
+    ts::reset();
+    ts::mock_ok("prefetch_search_corpus", &());
+    ts::mock_ok("global_search", &fixtures::global_search_lookup_degraded());
+
+    let _m = ts::mount_view(|| view! { <GlobalSearch /> });
+    ts::focus(".global-search__field");
+    ts::set_input_value(".global-search__field", "zqx");
+
+    ts::wait_for(|| ts::body_contains("No matching records.")).await;
+    assert!(ts::body_contains(LOOKUP_DEGRADED_NOTICE));
 }

@@ -196,6 +196,9 @@ pub async fn list_managed_identity_azure_roles(
     tenant_id: String,
     principal_id: String,
 ) -> Result<AzureRolesResult, UiError> {
+    // The role-definition names below are resolved from cache; a client
+    // factory only builds token adapters, so it is not a session proof.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     // Acquire the ARM token up front so a missing-consent rejection surfaces as
     // the typed `consent_required` code before any ARM call, bound to the `arm`
     // feature the UI's interactive consent button requests. On success the

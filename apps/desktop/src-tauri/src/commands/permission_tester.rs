@@ -478,6 +478,10 @@ pub async fn find_mailbox_reachers(
     tenant_id: String,
     mailbox: String,
 ) -> Result<MailboxReachersResult, UiError> {
+    // The app-registration index below can answer from cache, and the Exchange
+    // token error is swallowed when non-fatal, so neither it nor `graph_for`
+    // proves the session. Sync, so the claim still precedes every await.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     // Claimed before the first await: the Graph role index and the tenant-wide
     // app-role-assignment read below run before the dispatch, and a token
     // claimed after them discards a cancel issued during them. Pinned by

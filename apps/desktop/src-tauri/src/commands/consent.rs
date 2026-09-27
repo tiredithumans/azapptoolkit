@@ -61,6 +61,9 @@ pub async fn list_oauth2_grants_audit(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<Vec<OAuth2GrantDto>, UiError> {
+    // The SP index below can answer from cache; `graph_for` only builds token
+    // adapters, so it is not a session proof.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let client = state.graph_for(&tenant_id);
 
     // Reuse the shared per-tenant SP index for name resolution (same cache the

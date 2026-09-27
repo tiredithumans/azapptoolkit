@@ -154,6 +154,10 @@ pub async fn prefetch_application_gallery(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<(), UiError> {
+    // The corpus answers from cache before any request is sent. The catalog is
+    // tenant-independent, but its key is tenant-prefixed and the proof is a map
+    // lookup — cheaper than an exemption in the rule.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     load_gallery_corpus(&state, &tenant_id).await.map(|_| ())
 }
 
@@ -178,6 +182,9 @@ pub async fn search_application_templates(
     tenant_id: String,
     query: String,
 ) -> Result<GallerySearchResultsDto, UiError> {
+    // The corpus answers from cache before any request is sent — see
+    // `prefetch_application_gallery`.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let trimmed = query.trim();
     if trimmed.chars().count() < GALLERY_MIN_QUERY_CHARS {
         return Ok(GallerySearchResultsDto::default());

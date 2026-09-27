@@ -122,6 +122,9 @@ pub async fn get_enterprise_application_detail(
     tenant_id: String,
     service_principal_id: String,
 ) -> Result<EnterpriseApplicationDetail, UiError> {
+    // The pairing lookup below reads the cached app-registration index;
+    // `graph_for` only builds token adapters, so it is not a session proof.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let client = state.graph_for(&tenant_id);
 
     // The SP read and the owners read both key off the input

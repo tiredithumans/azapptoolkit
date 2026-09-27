@@ -2,6 +2,25 @@
 
 ### Fixed
 
+- **Search and the other commands that read the cached directory indexes now check that you are
+  signed in.** Top-bar search, the directory cap notice, DR backup, the delegated-grants audit, the
+  enterprise-app detail, the gallery picker, the Key Vault access sweep, a managed identity's Azure
+  roles and the mailbox-reach lookup could answer from the cached app and service-principal lists
+  without checking the tenant's session. After a session expired they kept serving the cached names
+  instead of reporting "not signed in", as the lists already do. They now check the session before
+  reading the cache.
+
+- **Pasting an ID into search now says when a lookup failed.** A GUID search runs four exact
+  directory lookups, and any lookup that failed (throttled after retries, refused with 403, or a
+  network error) counted as "not found", so the dropdown showed "No matching records." for an app
+  that exists. Only a real "not found" now counts as no match. Any other failure shows a warning
+  that the results may be incomplete.
+
+- **Search now warns when the tenant has more than 10 000 app registrations.** The top-bar search
+  already warned when it could see only the first 10 000 service principals, but not when the
+  app-registration list hit the same cap, so a registration past it searched as "No matching
+  records." Either cap now shows the warning.
+
 - **A damaged settings.json is no longer overwritten with defaults.** If settings.json could not
   be read or parsed (for example after a hand edit left a stray comma, or while antivirus held the
   file), the next sign-in, Settings save or secret rotation replaced it with a fresh file,

@@ -612,7 +612,8 @@ fn a_function_header_is_recognised_at_any_depth_or_visibility() {
 /// webview (a tenant switch mid-flight is the realistic one) serves another
 /// tenant's data: the cross-tenant leak AGENTS.md calls the #1 footgun.
 ///
-/// So: read the cache, and either build a client or check `tenant_context`.
+/// So: prove the session first (`prove_tenant_session`, or `tenant_context`
+/// directly). Building a client is not a proof — see [`first_session_proof`].
 #[test]
 fn a_command_answering_from_cache_alone_checks_the_session() {
     // Detection is whitespace-insensitive and the proof must DOMINATE the read.
@@ -652,8 +653,11 @@ fn a_command_answering_from_cache_alone_checks_the_session() {
     // matcher breaks, the count drops and this fires.
     // The real count, not a token floor. The rule this replaced asserted
     // `found >= 1` and was cleared by the single compliant command while the
-    // detector was blind to fifteen others.
-    const KNOWN_CACHE_READING_COMMANDS: usize = 16;
+    // detector was blind to fifteen others. It rose again when reads through the
+    // index accessors ([`CACHED_ACCESSORS`]) started counting: search, the
+    // directory-status probe and eight other tenant-wide scans read the cache
+    // one call away from the command body, where a `cache.get` scan cannot see.
+    const KNOWN_CACHE_READING_COMMANDS: usize = 25;
     assert!(
         checked.len() >= KNOWN_CACHE_READING_COMMANDS,
         "the cache-read detector found only {} command(s) but at least {} answer from cache \
@@ -686,37 +690,66 @@ fn flatten_out_whitespace(body: &str) -> (String, Vec<usize>) {
     (flat, map)
 }
 
-/// First `…cache.get(`, `…cache.get_typed(` or `…cache.get::<T>(` in flattened
-/// text. Written as a scan rather than a substring list because the turbofish
-/// form carries an arbitrary type between `::<` and `(` — including nested
-/// generics like `Vec<MailScopeEntry>`, whose `>>` defeats a naive pattern.
+/// Helpers that read the cache on the caller's behalf. A command calling one
+/// reads the cache exactly as if it had written the `cache.get` itself — the hit
+/// path returns before any request is sent — so the call counts as the read.
+///
+/// Module-level so `every_index_accessor_counts_as_a_cache_read` can hold it to
+/// the accessor definitions: a new `*_cached` / `*_hit` accessor that is missing
+/// here would make every command reading through it invisible to this rule.
+const CACHED_ACCESSORS: [&str; 8] = [
+    "sp_index_cached(",
+    "app_name_index_cached(",
+    "indexes_cached(",
+    "sp_index_hit(",
+    "app_name_index_hit(",
+    "search_corpus(",
+    "load_gallery_corpus(",
+    "resolve_mail_scopes_audit_cached(",
+];
+
+/// First cache read in flattened text: a direct `…cache.get(`,
+/// `…cache.get_typed(` or `…cache.get::<T>(`, or a call to one of the
+/// [`CACHED_ACCESSORS`] that reads the cache on the caller's behalf. The direct
+/// form is a scan rather than a substring list because the turbofish carries an
+/// arbitrary type between `::<` and `(` — including nested generics like
+/// `Vec<MailScopeEntry>`, whose `>>` defeats a naive pattern.
 fn first_cache_read(flat: &str) -> Option<usize> {
+    let mut direct = None;
     let mut from = 0usize;
     while let Some(hit) = flat[from..].find("cache.get") {
         let at = from + hit;
         let rest = &flat[at + "cache.get".len()..];
         if rest.starts_with('(') || rest.starts_with("_typed") || rest.starts_with("::<") {
-            return Some(at);
+            direct = Some(at);
+            break;
         }
         from = at + "cache.get".len();
     }
-    None
+    let via_accessor = CACHED_ACCESSORS.iter().filter_map(|a| flat.find(a)).min();
+    match (direct, via_accessor) {
+        (Some(d), Some(a)) => Some(d.min(a)),
+        (d, a) => d.or(a),
+    }
 }
 
-/// Either proves a session: a client factory needs a token for that tenant, and
-/// `tenant_context` is `None` unless that tenant signed in this session.
+/// The first session proof: `prove_tenant_session`, or the `tenant_context`
+/// lookup it wraps, which is `None` unless that tenant signed in this session.
+///
+/// A client factory (`graph_for` / `exchange_for` / `arm_for` / `keyvault_for`)
+/// is deliberately NOT a proof. It only builds `ScopedTokenAdapter`s; no token
+/// is fetched until a request is sent, so a factory call ahead of a cache read
+/// proves nothing. That is how a dead session (`known_tenants` purged on
+/// `RefreshTokenMissing`, data caches kept) kept being served search results
+/// from cache: `global_search` called `graph_for` first, and this rule counted
+/// it. Neither is `ensure_*_token(` a proof: a caller may swallow its non-fatal
+/// error, and text position cannot tell a real proof from a swallowed one.
 fn first_session_proof(flat: &str) -> Option<usize> {
-    const SESSION_PROOFS: [&str; 6] = [
+    const SESSION_PROOFS: [&str; 2] = [
         // The shared helper, and the raw lookup it wraps (Option-returning
         // commands use `tenant_context(&tenant_id)?` directly).
         "prove_tenant_session(",
         "tenant_context(",
-        // A client factory needs a token for that tenant, so reaching one is
-        // itself a proof — but only when it happens BEFORE the cache read.
-        "graph_for(",
-        "exchange_for(",
-        "arm_for(",
-        "keyvault_for(",
     ];
     SESSION_PROOFS.iter().filter_map(|p| flat.find(p)).min()
 }
@@ -734,10 +767,72 @@ fn the_cache_read_detector_sees_the_forms_rustfmt_actually_produces() {
     assert!(first_cache_read("self.cache.getter_helper()").is_none());
     assert!(first_cache_read("no_cache_here()").is_none());
 
+    // A read one call away, through an index accessor, is still a read.
+    assert!(first_cache_read("letc=search_corpus(&state,&client,&t).await;").is_some());
+    assert!(first_cache_read("cache::sp_index_cached(&state,&client,&t)").is_some());
+    assert!(first_cache_read("app_name_index_hit(&state.cache,&t)").is_some());
+    assert!(
+        first_cache_read("search_corpus_key(&t)").is_none(),
+        "building a cache key is not a read"
+    );
+    assert!(
+        first_session_proof("letclient=state.graph_for(&t);").is_none(),
+        "a client factory is not a session proof"
+    );
+
     // And the flattener must survive the wrapping rustfmt applies.
     let (flat, map) = flatten_out_whitespace("state\n    .cache\n    .get(CacheKind::Audit)");
     assert!(first_cache_read(&flat).is_some(), "wrapped read must match");
     assert_eq!(flat.len(), map.len());
+}
+
+/// Every tenant-wide index accessor is in [`CACHED_ACCESSORS`].
+///
+/// The session rule sees a read through an accessor only by name, so an
+/// accessor missing from the list makes every command that reads through it
+/// invisible — the vacuous pass this rule was hardened against. The accessors
+/// live in one file, `commands/applications/cache.rs`, and are named for what
+/// they are (`*_cached` reads through, `*_hit` reads only), so the ratchet reads
+/// that file directly. It deliberately does not walk every command module: the
+/// test helpers (`test_support::detail_cached`) share the suffix and are not
+/// production readers.
+#[test]
+fn every_index_accessor_counts_as_a_cache_read() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/applications/cache.rs");
+    let src = std::fs::read_to_string(&path).expect("read the index accessors");
+    let mut accessors: Vec<String> = Vec::new();
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        let Some(at) = trimmed.find("fn ") else {
+            continue;
+        };
+        let rest = &trimmed[at + "fn ".len()..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if name.ends_with("_cached") || name.ends_with("_hit") {
+            accessors.push(name);
+        }
+    }
+    assert!(
+        accessors.len() >= 5,
+        "found only {accessors:?} in {} — the scan is broken",
+        path.display()
+    );
+    let missing: Vec<&String> = accessors
+        .iter()
+        .filter(|name| !CACHED_ACCESSORS.contains(&format!("{name}(").as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these index accessors read the cache but are not in CACHED_ACCESSORS, so a command \
+         reading through them escapes the session rule: {missing:?}"
+    );
 }
 
 /// The audit run is written to the cache **only** inside

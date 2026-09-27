@@ -18,12 +18,13 @@
 //! palette.
 //!
 //! The dropdown says what it left out. The backend caps each kind at ten rows
-//! and filters a corpus built from the capped service-principal index, so
-//! without the per-group "10 of 47" footer and the index-cap `Callout` this is
-//! the fastest input in the app *and* the one that can quietly lie: ten rows
-//! reads as "there are ten", and a bare "No matches." reads as "not in this
-//! tenant". Neither annotation is focusable or part of the roving selection —
-//! see `render_group`.
+//! and filters a corpus built from the two capped tenant-wide indexes, and a
+//! pasted GUID runs exact lookups that can fail for reasons other than "not
+//! found". So without the per-group "10 of 47" footer, the index-cap `Callout`
+//! and the failed-lookup `Callout` this is the fastest input in the app *and*
+//! the one that can quietly lie: ten rows reads as "there are ten", and a bare
+//! "No matches." reads as "not in this tenant". None of these annotations is
+//! focusable or part of the roving selection — see `render_group`.
 //!
 //! **The roving index spans both kinds.** Destinations are selectable, so
 //! unlike the group footers they *do* enter `flatten_hits`, and the record
@@ -39,7 +40,7 @@ use web_sys::HtmlInputElement;
 
 use crate::bindings::search::{self, GlobalSearchResults, SearchHit};
 use crate::components::icon::{Icon, IconName};
-use crate::components::index_cap_notice::index_cap_message;
+use crate::components::index_cap_notice::corpus_cap_message;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::Callout;
 use crate::hooks::use_debounced::use_debounced;
@@ -54,6 +55,12 @@ use crate::state::{ActiveView, OpenItemKind, use_session};
 /// silently dropping one. The footer names whatever is left over, exactly as a
 /// capped record group does.
 const GOTO_LIMIT: usize = 8;
+
+/// The warning a GUID search shows when one of its exact lookups failed for a
+/// reason other than "not found" (`GlobalSearchResults::lookup_degraded`) — the
+/// one home for the wording, which the GUI test reads too.
+pub const LOOKUP_DEGRADED_NOTICE: &str = "A directory lookup failed, so these results may be \
+     incomplete — try the search again in a moment.";
 
 #[component]
 pub fn GlobalSearch() -> impl IntoView {
@@ -313,13 +320,24 @@ fn view_results(
 ) -> leptos::prelude::AnyView {
     // The corpus this query filtered is itself a truncated view of the tenant,
     // so every answer below — "No matching records." emphatically included — is
-    // a claim about a subset. Same cap, same warning, same wording as the three
-    // inventory lists (`IndexCapNotice`); the sizing class is theirs too, so the
-    // two truncation notices read as one thing said twice, not two things.
+    // a claim about a subset. Same cap as the three inventory lists
+    // (`IndexCapNotice`), plus the app-registration one, worded beside theirs;
+    // the sizing class is theirs too, so the two truncation notices read as one
+    // thing said twice, not two things.
     let cap_notice = results.corpus_truncated.then(|| {
         view! {
             <Callout tone="warn" class="app-list__cap-notice">
-                {index_cap_message(results.corpus_cap, "record")}
+                {corpus_cap_message(results.corpus_cap)}
+            </Callout>
+        }
+    });
+    // A GUID lookup that failed (throttled, forbidden, network) is an unanswered
+    // question, not a miss. Like the cap notice it is not a roving option, so
+    // `flatten_hits` never sees it.
+    let lookup_notice = results.lookup_degraded.then(|| {
+        view! {
+            <Callout tone="warn" class="app-list__cap-notice">
+                {LOOKUP_DEGRADED_NOTICE}
             </Callout>
         }
     });
@@ -333,6 +351,7 @@ fn view_results(
         // one thing worse than an over-broad claim.
         return view! {
             {cap_notice}
+            {lookup_notice}
             <div class="global-search__empty">"No matching records."</div>
         }
         .into_any();
@@ -345,6 +364,7 @@ fn view_results(
     let ent_n = results.enterprise_apps.len();
     view! {
         {cap_notice}
+        {lookup_notice}
         {render_group(
             "App Registrations",
             AppKind::AppRegistration,

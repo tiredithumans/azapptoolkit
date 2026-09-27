@@ -69,6 +69,10 @@ pub async fn backup_tenant(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<TenantBackup, UiError> {
+    // The two tenant-wide indexes below can answer from cache before any
+    // request is sent; `graph_for` only builds token adapters, so it is not a
+    // session proof. Sync, so it does not delay the claim past an await.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     // Claimed before the first await, not beside the dispatch it feeds. A token
     // claimed after a long read carries a HIGHER generation than a cancel
     // issued during that read, and `is_cancelled()` (`cancelled >= generation`)

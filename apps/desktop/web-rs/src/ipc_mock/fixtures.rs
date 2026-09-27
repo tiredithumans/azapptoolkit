@@ -936,7 +936,8 @@ pub fn mailbox_probe_progress(done: usize, total: usize) -> MailboxProbeProgress
 /// Every match fits on screen here: the per-kind total equals the row count and
 /// the corpus is whole, so the dropdown renders no "N of M" footer and no
 /// index-cap notice. Both of those need a *capped* result to show up, which is
-/// what `global_search_capped` below builds.
+/// what `global_search_capped` below builds. `tests/gui/global_search.rs`
+/// asserts that absence against this fixture.
 pub fn global_search_apps(display_names: &[&str]) -> azapptoolkit_dto::search::GlobalSearchResults {
     azapptoolkit_dto::search::GlobalSearchResults {
         query: String::new(),
@@ -957,6 +958,7 @@ pub fn global_search_apps(display_names: &[&str]) -> azapptoolkit_dto::search::G
         managed_identities_total: 0,
         corpus_truncated: false,
         corpus_cap: 10_000,
+        lookup_degraded: false,
     }
 }
 
@@ -968,6 +970,9 @@ pub fn global_search_apps(display_names: &[&str]) -> azapptoolkit_dto::search::G
 /// group presented as the whole answer, and a result set filtered from a partial
 /// directory — so they get a fixture rather than being reachable only against a
 /// >10 000-principal tenant.
+///
+/// Rendered by
+/// `gui::global_search::a_capped_result_renders_the_group_footer_and_the_cap_notice`.
 pub fn global_search_capped(
     display_names: &[&str],
     total: usize,
@@ -976,6 +981,18 @@ pub fn global_search_capped(
         app_registrations_total: total,
         corpus_truncated: true,
         ..global_search_apps(display_names)
+    }
+}
+
+/// A GUID search whose exact lookups did not all answer (throttled, forbidden,
+/// a network error): every bucket is empty, yet that is NOT "no such object".
+/// Rendered by
+/// `gui::global_search::a_failed_guid_lookup_warns_instead_of_reading_as_no_match`.
+pub fn global_search_lookup_degraded() -> azapptoolkit_dto::search::GlobalSearchResults {
+    azapptoolkit_dto::search::GlobalSearchResults {
+        looked_up_as_guid: true,
+        lookup_degraded: true,
+        ..global_search_apps(&[])
     }
 }
 
