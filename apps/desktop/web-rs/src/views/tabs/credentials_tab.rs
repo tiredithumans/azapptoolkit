@@ -495,6 +495,17 @@ pub fn CredentialsTab(
                 // so anything held here is unmounted before it can be read; the
                 // toast host lives at the shell root and survives. A partial
                 // failure rides an error toast, which lingers longer.
+                //
+                // A re-auth-fatal failure means the backend stopped the sweep
+                // on a dead session: offer Re-authenticate instead of leaving
+                // the operator with a count and no way forward.
+                if let Some(f) = r.failures.iter().find(|f| f.is_reauth_fatal()) {
+                    session.report_if_session_dead(&azapptoolkit_dto::UiError::new(
+                        f.code.clone(),
+                        f.message.clone(),
+                        false,
+                    ));
+                }
                 let removed = r.removed_key_ids.len();
                 if r.failures.is_empty() {
                     session.toast_success(format!("Removed {removed} expired secret(s)."));
@@ -509,7 +520,10 @@ pub fn CredentialsTab(
                 }
                 on_changed_cb.run(());
             },
-            move |e| error.set(Some(e.message)),
+            move |e| {
+                session.report_if_session_dead(&e);
+                error.set(Some(e.message));
+            },
             move |tenant_id| async move {
                 applications::remove_expired_passwords(&tenant_id, &id).await
             },

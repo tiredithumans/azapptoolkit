@@ -265,8 +265,14 @@ Two shapes of this bug are worth naming, because both hid behind a guard that lo
 
 The general rule for multi-step mutations: **a partial success is a real write — invalidate,
 gated on "something actually changed."** Audit remediations, `remove_exchange_mailbox_access`,
-`downgrade_application_permission`, the `bulk_*` commands, and the SSO create flows all follow it
+`downgrade_application_permission`, `create_application`, `grant_single_permission`,
+`grant_admin_consent` (and their bulk and DR-restore callers), the `bulk_*` commands, and the SSO
+create flows all follow it
 (see [audit-findings-and-remediation.md](./audit-findings-and-remediation.md#audit-remediations-one-click-fix) for the remediation case).
+A core that can fail after its first write returns the landed-write flags plus an
+`Option<UiError>` (`downgrade_application_permission_core`, `create_application_core`, the grant
+cores' `GrantRun`); the command busts on those flags and only then returns the error. A failure
+before the first write stays a plain `Err` — nothing landed, so nothing is invalidated.
 
 ## `CacheKind::ServicePrincipal` self-invalidates in the graph client
 
@@ -281,7 +287,8 @@ rely on it for SP-field freshness.
 Related: `ensure_service_principal` returns `(ServicePrincipal, bool)` where the bool is
 **created**. First-grant paths (`grant_single_permission`, `grant_admin_consent[_core]`, the bulk
 grant) call `invalidate_app_lists` only when an SP was newly created; otherwise the cheaper
-detail + audit bust suffices.
+detail + audit bust suffices. `GrantRun.sp_created` survives a later failure in the same run, so
+an SP created just before a refused grant still busts the list tier.
 
 ## Batched Graph fan-out + the adaptive throttle
 

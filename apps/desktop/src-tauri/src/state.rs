@@ -345,12 +345,26 @@ impl AppState {
     pub(crate) fn for_test(tenant_id: &str, base_url: &str) -> Self {
         use azapptoolkit_core::token::StaticTokenProvider;
 
+        Self::for_test_with_write_token(tenant_id, base_url, StaticTokenProvider::new("test-token"))
+    }
+
+    /// [`Self::for_test`] whose Graph client sends its writes (every non-GET)
+    /// with `write_token` — a provider that dies partway drives the
+    /// stop-on-a-dead-session paths of a multi-write command.
+    #[cfg(test)]
+    pub(crate) fn for_test_with_write_token(
+        tenant_id: &str,
+        base_url: &str,
+        write_token: Arc<dyn azapptoolkit_core::token::BearerProvider>,
+    ) -> Self {
+        use azapptoolkit_core::token::StaticTokenProvider;
+
         let cache = Cache::new();
         let client = Arc::new(
             GraphClient::with_base_url(
                 tenant_id.to_string(),
                 StaticTokenProvider::new("test-token"),
-                StaticTokenProvider::new("test-token"),
+                write_token,
                 Arc::clone(&cache),
                 format!("{}/v1.0", base_url.trim_end_matches('/')),
             )

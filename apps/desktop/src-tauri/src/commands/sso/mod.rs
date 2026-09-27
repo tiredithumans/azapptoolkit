@@ -27,7 +27,9 @@ use azapptoolkit_graph::{GraphClient, GraphError};
 mod claims;
 use claims::{build_claims_definition, parse_claims_definition};
 
-use crate::commands::applications::{invalidate_app_details, invalidate_app_lists};
+use crate::commands::applications::{
+    augment_with_object_id, invalidate_app_details, invalidate_app_lists,
+};
 use crate::dto::UiError;
 use crate::dto::sso::{
     ClaimsPolicyDto, MetadataProbeDto, OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput,
@@ -507,16 +509,6 @@ fn resolve_cert_lifetime_days(days: Option<u32>) -> Result<u32, UiError> {
         ));
     }
     Ok(days)
-}
-
-/// Annotates an error message with the created object id so a partial failure
-/// after instantiate tells the user which half-configured app to finish/clean up.
-fn augment_with_object_id(mut err: UiError, object_id: &str) -> UiError {
-    err.message = format!(
-        "{} (the application was created — object id {object_id}; you can finish or delete it from the list).",
-        err.message
-    );
-    err
 }
 
 // ---------------- read / edit (detail tab) ----------------

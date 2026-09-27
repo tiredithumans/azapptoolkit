@@ -509,21 +509,44 @@ pub async fn bulk_grant_permissions(
                 };
                 emit_progress(&app_handle, "bulk-progress", progress);
                 match res {
-                    Ok((r, sp_created)) => (
-                        BulkGrantOutcome {
-                            object_id: id,
-                            granted: r.role_assignments_created.len()
-                                + r.scope_grants_upserted.len(),
-                            skipped: r.role_assignments_skipped.len(),
-                            failed: r.failures.len(),
-                            error: r.failures.first().map(|f| BulkError {
-                                code: "partial_failure".into(),
-                                message: f.message.clone(),
-                                retryable: false,
-                            }),
-                        },
+                    // The client SP was created and a later step failed: the
+                    // row reports the error, and `sp_created` still reaches
+                    // `any_sp_created` so the new Enterprise App row is busted.
+                    Ok(super::permissions::GrantRun {
+                        error: Some(e),
                         sp_created,
-                    ),
+                        ..
+                    }) => {
+                        session.note_code(&e.code);
+                        (
+                            BulkGrantOutcome {
+                                object_id: id,
+                                granted: 0,
+                                skipped: 0,
+                                failed: 0,
+                                error: Some(e.into()),
+                            },
+                            sp_created,
+                        )
+                    }
+                    Ok(run) => {
+                        let r = run.result;
+                        (
+                            BulkGrantOutcome {
+                                object_id: id,
+                                granted: r.role_assignments_created.len()
+                                    + r.scope_grants_upserted.len(),
+                                skipped: r.role_assignments_skipped.len(),
+                                failed: r.failures.len(),
+                                error: r.failures.first().map(|f| BulkError {
+                                    code: "partial_failure".into(),
+                                    message: f.message.clone(),
+                                    retryable: false,
+                                }),
+                            },
+                            run.sp_created,
+                        )
+                    }
                     Err(e) => {
                         session.note_code(&e.code);
                         (
@@ -628,12 +651,23 @@ pub async fn bulk_create_applications(
                     ..Default::default()
                 };
                 match super::applications::create_application_core(&client, input).await {
-                    Ok(r) => BulkCreateOutcome {
+                    Ok((r, None)) => BulkCreateOutcome {
                         display_name: r.application.display_name,
                         status: "created".into(),
                         app_id: Some(r.application.app_id),
                         message: None,
                         error: None,
+                    },
+                    // The registration landed and a later step failed: the app
+                    // exists (so `any_created` busts the list tier below) and
+                    // the error still reaches the row — and `run_bulk_seq`,
+                    // which stops on a re-auth-fatal code.
+                    Ok((r, Some(e))) => BulkCreateOutcome {
+                        display_name: r.application.display_name,
+                        status: "created".into(),
+                        app_id: Some(r.application.app_id),
+                        message: Some(e.message.clone()),
+                        error: Some(e.into()),
                     },
                     Err(e) => BulkCreateOutcome {
                         display_name: spec.display_name,

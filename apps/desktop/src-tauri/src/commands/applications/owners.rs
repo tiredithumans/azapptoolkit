@@ -40,7 +40,11 @@ pub async fn remove_application_owner(
 /// `Set-AzAppOwner`. Owners present in the target but not currently assigned are
 /// added first (so the app is never transiently ownerless), then owners no
 /// longer in the target are removed. Per-principal failures are collected rather
-/// than aborting the whole operation.
+/// than aborting the whole operation — except a re-auth-fatal one: a dead
+/// session fails every remaining change identically, so the reconcile stops
+/// there (a fatal add also skips every removal, keeping "never transiently
+/// ownerless") and the fatal-coded failure tells the UI to offer
+/// Re-authenticate.
 #[tauri::command]
 pub async fn set_application_owners(
     state: State<'_, AppState>,
@@ -70,24 +74,34 @@ pub(crate) async fn set_application_owners_core(
     let mut removed = Vec::new();
     let mut failures = Vec::new();
 
+    // Set when a change failed on a dead session: nothing after it can land.
+    let mut stopped = false;
     for id in desired.iter().filter(|id| !current_ids.contains(*id)) {
         match client.add_owner(object_id, id).await {
             Ok(()) => added.push(id.clone()),
-            Err(err) => failures.push(OwnerChangeFailure {
-                principal_id: id.clone(),
-                action: "add".into(),
-                message: err.to_string(),
-            }),
+            Err(err) => {
+                let failure = owner_failure(id, "add", err.into());
+                stopped = failure.is_reauth_fatal();
+                failures.push(failure);
+                if stopped {
+                    break;
+                }
+            }
         }
     }
-    for id in current_ids.iter().filter(|id| !desired.contains(*id)) {
-        match client.remove_owner(object_id, id).await {
-            Ok(()) => removed.push(id.clone()),
-            Err(err) => failures.push(OwnerChangeFailure {
-                principal_id: id.clone(),
-                action: "remove".into(),
-                message: err.to_string(),
-            }),
+    if !stopped {
+        for id in current_ids.iter().filter(|id| !desired.contains(*id)) {
+            match client.remove_owner(object_id, id).await {
+                Ok(()) => removed.push(id.clone()),
+                Err(err) => {
+                    let failure = owner_failure(id, "remove", err.into());
+                    let fatal = failure.is_reauth_fatal();
+                    failures.push(failure);
+                    if fatal {
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -100,6 +114,17 @@ pub(crate) async fn set_application_owners_core(
         removed,
         failures,
     })
+}
+
+/// One failed owner change, carrying the error's `code` so the UI can tell a
+/// dead session (re-auth-fatal) from a per-principal refusal.
+fn owner_failure(principal_id: &str, action: &str, err: UiError) -> OwnerChangeFailure {
+    OwnerChangeFailure {
+        principal_id: principal_id.to_string(),
+        action: action.to_string(),
+        code: err.code,
+        message: err.message,
+    }
 }
 
 #[tauri::command]
@@ -157,7 +182,8 @@ mod handler_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::commands::test_support::{
-        detail_cached, indexes_intact, mock_state, seed_indexes_and_detail,
+        dead_token, detail_cached, indexes_intact, mock_state, mock_state_with_write_token,
+        seed_indexes_and_detail,
     };
 
     const TENANT: &str = "t1";
@@ -258,10 +284,39 @@ mod handler_tests {
         assert_eq!(out.failures.len(), 1);
         assert_eq!(out.failures[0].principal_id, "u2");
         assert_eq!(out.failures[0].action, "add");
+        assert_eq!(out.failures[0].code, "forbidden");
+        assert!(!out.failures[0].is_reauth_fatal());
         assert!(
             detail_cached(&state, TENANT, OBJECT),
             "nothing changed, so nothing is busted"
         );
+        assert!(indexes_intact(&state, TENANT));
+    }
+
+    /// A dead session on the first add stops the reconcile: no removal runs
+    /// (the app must never be left ownerless by a half-applied replace), and
+    /// the failure names the re-auth-fatal code the UI routes on.
+    #[tokio::test]
+    async fn a_dead_session_stops_the_reconcile_before_any_removal() {
+        let (server, state) = mock_state_with_write_token(TENANT, dead_token()).await;
+        mount_owners(&server, &["u1"]).await;
+        seed_indexes_and_detail(&state, TENANT, OBJECT);
+
+        let out = set_application_owners_core(&state, TENANT, OBJECT, vec!["u2".into()])
+            .await
+            .expect("a per-principal failure is data, not an error");
+        assert!(out.added.is_empty() && out.removed.is_empty());
+        assert_eq!(
+            out.failures.len(),
+            1,
+            "the removal of u1 is never attempted"
+        );
+        assert_eq!(out.failures[0].principal_id, "u2");
+        assert_eq!(out.failures[0].action, "add");
+        assert_eq!(out.failures[0].code, "refresh_missing");
+        assert!(out.failures[0].is_reauth_fatal());
+        assert_eq!(writes(&server).await, 0);
+        assert!(detail_cached(&state, TENANT, OBJECT));
         assert!(indexes_intact(&state, TENANT));
     }
 }

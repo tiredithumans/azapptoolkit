@@ -23,6 +23,7 @@
 //! anything those rules key on: no commands, no cache invalidations or pinned
 //! index writes, no fan-out drivers.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use azapptoolkit_core::cache::{Cache, CacheKind};
@@ -94,11 +95,65 @@ pub(crate) fn dead_token() -> Arc<dyn BearerProvider> {
     Arc::new(DeadSession)
 }
 
+/// A token provider that serves `n` bearers and then dies with the
+/// re-auth-fatal `refresh_missing` code — a session that expires partway
+/// through a multi-write operation. Used as a client's **write** token (see
+/// [`mock_graph_rw`] / [`mock_state_with_write_token`]) so the reads before
+/// the loop still succeed.
+pub(crate) struct DiesAfter(AtomicUsize);
+
+#[async_trait::async_trait]
+impl BearerProvider for DiesAfter {
+    async fn bearer(&self) -> Result<String, TokenError> {
+        let left = self
+            .0
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+        match left {
+            Ok(_) => Ok("tok".to_string()),
+            Err(_) => Err(TokenError::new("refresh_missing", "gone")),
+        }
+    }
+}
+
+/// [`DiesAfter`]`(n)` as the trait object a client takes.
+pub(crate) fn dies_after(n: usize) -> Arc<dyn BearerProvider> {
+    Arc::new(DiesAfter(AtomicUsize::new(n)))
+}
+
+/// [`mock_graph_with`] with separate read and write tokens. The client picks
+/// one per request by HTTP verb (GET reads, everything else writes), so a
+/// [`dies_after`] write token lets the reads succeed and fails the writes.
+pub(crate) fn mock_graph_rw(
+    server: &MockServer,
+    read: Arc<dyn BearerProvider>,
+    write: Arc<dyn BearerProvider>,
+    cache: Arc<Cache>,
+) -> GraphClient {
+    GraphClient::with_base_url(
+        "tenant-test",
+        read,
+        write,
+        cache,
+        format!("{}/v1.0", server.uri()),
+    )
+}
+
 /// A fresh mock server plus an [`AppState`] whose Graph client for `tenant` is
 /// rooted at it (`{mock}/v1.0`, via [`AppState::for_test`]).
 pub(crate) async fn mock_state(tenant: &str) -> (MockServer, AppState) {
     let server = MockServer::start().await;
     let state = AppState::for_test(tenant, &server.uri());
+    (server, state)
+}
+
+/// [`mock_state`] whose Graph client writes with `write` (reads keep a static
+/// bearer) — pair it with [`dies_after`] to drive a session that dies partway.
+pub(crate) async fn mock_state_with_write_token(
+    tenant: &str,
+    write: Arc<dyn BearerProvider>,
+) -> (MockServer, AppState) {
+    let server = MockServer::start().await;
+    let state = AppState::for_test_with_write_token(tenant, &server.uri(), write);
     (server, state)
 }
 

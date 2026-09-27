@@ -126,6 +126,7 @@ async fn a_partial_sweep_says_that_some_secrets_survived() {
             removed_key_ids: vec!["key-1".to_string()],
             failures: vec![KeyFailure {
                 key_id: "key-2".to_string(),
+                code: "forbidden".to_string(),
                 message: "Insufficient privileges.".to_string(),
             }],
         },
@@ -149,6 +150,41 @@ async fn a_partial_sweep_says_that_some_secrets_survived() {
         ts::query(".toast--error").is_some(),
         "a partial failure must not be styled as a clean success"
     );
+}
+
+/// A sweep the backend stopped on a dead session (a re-auth-fatal failure
+/// code) must offer the in-place Re-authenticate, not just a failure count the
+/// operator can do nothing with.
+#[wasm_bindgen_test]
+async fn a_sweep_stopped_by_a_dead_session_offers_reauthentication() {
+    ts::reset();
+    ts::mock_ok(
+        "remove_expired_passwords",
+        &RemoveExpiredResult {
+            removed_key_ids: vec!["key-1".to_string()],
+            failures: vec![KeyFailure {
+                key_id: "key-2".to_string(),
+                code: "refresh_missing".to_string(),
+                message: "Your sign-in has expired.".to_string(),
+            }],
+        },
+    );
+    let _m = mount_with_toasts(vec![expired_secret("key-1"), expired_secret("key-2")]);
+
+    ts::wait_for(|| ts::body_contains("Remove 2 expired")).await;
+    click_button("Remove 2 expired");
+    ts::wait_for(|| ts::body_contains("Remove all expired secrets?")).await;
+    click_button("Remove expired");
+    ts::wait_for(|| ts::call_count("remove_expired_passwords") == 1).await;
+
+    ts::wait_for(|| {
+        ts::query_all(".toast").iter().any(|t| {
+            t.text_content()
+                .unwrap_or_default()
+                .contains("Re-authenticate")
+        })
+    })
+    .await;
 }
 
 /// Mocks what the rotate dialog reads on open (the tenant default vault and the

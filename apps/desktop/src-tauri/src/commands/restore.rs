@@ -505,7 +505,17 @@ pub async fn restore_tenant(
         // can exist without it — not even one whose SP create then failed.
         let marker = restore_marker(&app.source_app_id);
         match create_application_core_tagged(&client, input, vec![marker]).await {
-            Ok(res) => {
+            // The registration landed even when its SP then failed (the only
+            // later step this input runs): record it as created — so it is
+            // wired, counted and cache-busted — with the SP failure as a
+            // warning, exactly as the adopt branch above does. Recording it as
+            // a failure hid an app that exists.
+            Ok((res, error)) => {
+                let mut warnings = Vec::new();
+                if let Some(e) = error {
+                    session.note_code(&e.code);
+                    warnings.push(format!("service principal: {}", e.message));
+                }
                 app_id_remap.insert(app.source_app_id.clone(), res.application.app_id.clone());
                 created.push(CreatedApp {
                     backup: app.clone(),
@@ -513,7 +523,7 @@ pub async fn restore_tenant(
                     new_app_id: res.application.app_id,
                     adopted: false,
                     live_secret_names: Vec::new(),
-                    warnings: Vec::new(),
+                    warnings,
                 });
             }
             Err(e) => {
@@ -568,16 +578,22 @@ pub async fn restore_tenant(
         if !c.backup.admin_consent_granted {
             continue;
         }
-        // The freshly-restored app reg already has its SP (Pass 1), so the
-        // `created` flag is moot here — list-cache freshness isn't relied on
-        // mid-restore.
+        // The freshly-restored app reg usually has its SP already (Pass 1),
+        // and a run that created one still busts the list tier below, since
+        // `created` is non-empty — so `sp_created` is moot here.
         match grant_admin_consent_core(&client, &c.new_object_id).await {
-            Ok((grant, _created)) => {
-                report.apps[idx].consent_granted = true;
-                for f in grant.failures {
+            Ok(run) => {
+                report.apps[idx].consent_granted = run.error.is_none();
+                for f in run.result.failures {
                     report.apps[idx]
                         .warnings
                         .push(format!("consent: {} ({})", f.message, f.resource_app_id));
+                }
+                if let Some(e) = run.error {
+                    session.note_code(&e.code);
+                    report.apps[idx]
+                        .warnings
+                        .push(format!("admin consent failed: {}", e.message));
                 }
             }
             Err(e) => {

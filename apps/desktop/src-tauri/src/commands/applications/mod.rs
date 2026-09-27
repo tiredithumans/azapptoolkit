@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::Duration;
 
 use tauri::{AppHandle, State};
 
@@ -305,18 +304,56 @@ pub async fn create_application(
     tenant_id: String,
     input: CreateApplicationInput,
 ) -> Result<CreateApplicationResult, UiError> {
-    let client = state.graph_for(&tenant_id);
-    let result = create_application_core(&client, input).await?;
-    invalidate_app_lists(&state.cache, &tenant_id);
-    Ok(result)
+    create_application_in_state(&state, &tenant_id, input).await
+}
+
+/// The body of [`create_application`], taking `&AppState` so the partial-create
+/// rule is reachable from a test (the `add_password_core` seam; the `_core`
+/// name is the Graph-only helper below).
+///
+/// Once the registration POST has landed the app exists, so the list tier is
+/// busted **whatever** happens after it — a partial success is a real write —
+/// and only then is a later step's error surfaced, naming the new app's object
+/// id so the operator can finish or delete it instead of creating a duplicate.
+pub(crate) async fn create_application_in_state(
+    state: &AppState,
+    tenant_id: &str,
+    input: CreateApplicationInput,
+) -> Result<CreateApplicationResult, UiError> {
+    let client = state.graph_for(tenant_id);
+    let (result, error) = create_application_core(&client, input).await?;
+    invalidate_app_lists(&state.cache, tenant_id);
+    match error {
+        Some(e) => Err(augment_with_object_id(e, &result.application.id)),
+        None => Ok(result),
+    }
+}
+
+/// Annotates an error message with the created object id so a partial failure
+/// after a create tells the user which half-configured app to finish/clean up.
+/// Shared by the plain create and the SSO create flows.
+pub(crate) fn augment_with_object_id(mut err: UiError, object_id: &str) -> UiError {
+    err.message = format!(
+        "{} (the application was created — object id {object_id}; you can finish or delete it from the list).",
+        err.message
+    );
+    err
 }
 
 /// Shared application-creation logic, reused by the single-app command and the
 /// bulk path so both have identical semantics.
+///
+/// Returns `(result, error)` rather than `Result<result>` for the reason
+/// `downgrade_application_permission_core` does: a failure *after* the
+/// registration POST still has a real write to report. A failure of the POST
+/// itself is a plain `Err` (nothing landed). After it, the first failing step
+/// (service principal, initial secret, a re-auth-fatal owner add) stops the
+/// run and comes back as `Some(error)` beside what did land; the caller busts
+/// the list tier on the `Ok` and then surfaces the error.
 pub(crate) async fn create_application_core(
     client: &azapptoolkit_graph::GraphClient,
     input: CreateApplicationInput,
-) -> Result<CreateApplicationResult, UiError> {
+) -> Result<(CreateApplicationResult, Option<UiError>), UiError> {
     create_application_core_tagged(client, input, Vec::new()).await
 }
 
@@ -327,7 +364,7 @@ pub(crate) async fn create_application_core_tagged(
     client: &azapptoolkit_graph::GraphClient,
     input: CreateApplicationInput,
     tags: Vec<String>,
-) -> Result<CreateApplicationResult, UiError> {
+) -> Result<(CreateApplicationResult, Option<UiError>), UiError> {
     let body = CreateApplicationRequest {
         display_name: input.display_name,
         sign_in_audience: input.sign_in_audience,
@@ -335,47 +372,74 @@ pub(crate) async fn create_application_core_tagged(
         tags,
     };
     let application = client.create_application(&body).await?;
+    // The registration exists from here on: a later failure is collected, not
+    // `?`-returned, so the caller still sees the app it must invalidate for.
+    // Nothing after a failed step is attempted — a secret minted after an
+    // error would be lost, since its value only travels in the `Ok` result.
+    let mut error: Option<UiError> = None;
 
     let service_principal = if input.create_service_principal {
-        // `create_application` already busts the list caches below, so the
+        // The caller busts the list tier for the new app anyway, so the
         // `created` flag is unused here.
-        Some(
-            client
-                .ensure_service_principal(&application.app_id)
-                .await?
-                .0,
-        )
+        match client.ensure_service_principal(&application.app_id).await {
+            Ok((sp, _)) => Some(sp),
+            Err(e) => {
+                error = Some(e.into());
+                None
+            }
+        }
     } else {
         None
     };
 
-    let initial_secret = if let Some(name) = input.initial_secret_display_name.as_deref() {
-        let days = input.initial_secret_lifetime_days.unwrap_or(180);
-        let lifetime = Duration::from_secs(days as u64 * 86_400);
-        Some(client.add_password(&application.id, name, lifetime).await?)
-    } else {
-        None
-    };
+    let mut initial_secret = None;
+    if error.is_none()
+        && let Some(name) = input.initial_secret_display_name.as_deref()
+    {
+        let end = preset_secret_end(input.initial_secret_lifetime_days, chrono::Utc::now());
+        match client
+            .add_password_window(&application.id, name, None, end)
+            .await
+        {
+            Ok(secret) => initial_secret = Some(secret),
+            Err(e) => error = Some(e.into()),
+        }
+    }
 
     let mut added_owner_ids = Vec::with_capacity(input.initial_owner_ids.len());
     let mut failed_owner_ids = Vec::new();
     for owner in input.initial_owner_ids {
+        // After a stop (an earlier step's error, or a dead session below) the
+        // remaining owners are reported as failed without being attempted.
+        if error.is_some() {
+            failed_owner_ids.push(owner);
+            continue;
+        }
         match client.add_owner(&application.id, &owner).await {
             Ok(()) => added_owner_ids.push(owner),
             Err(err) => {
                 tracing::warn!(%owner, ?err, "failed to add initial owner on create");
+                let e = UiError::from(err);
                 failed_owner_ids.push(owner);
+                // A dead session fails every remaining owner identically, and
+                // the caller must see the code to offer Re-authenticate.
+                if e.is_reauth_fatal() {
+                    error = Some(e);
+                }
             }
         }
     }
 
-    Ok(CreateApplicationResult {
-        application,
-        service_principal,
-        initial_secret,
-        added_owner_ids,
-        failed_owner_ids,
-    })
+    Ok((
+        CreateApplicationResult {
+            application,
+            service_principal,
+            initial_secret,
+            added_owner_ids,
+            failed_owner_ids,
+        },
+        error,
+    ))
 }
 
 #[tauri::command]
@@ -524,21 +588,137 @@ mod export_tests {
     }
 }
 
-/// Core-level partial-write test: `create_application_core` takes
-/// `&GraphClient`, so a mock Graph drives it as-is.
+/// Partial-write tests: `create_application_core` takes `&GraphClient`, so a
+/// mock Graph drives it as-is; `create_application_in_state` adds the command's
+/// cache rule on an [`AppState::for_test`].
 #[cfg(test)]
 mod handler_tests {
     use super::*;
 
+    use azapptoolkit_core::cache::Cache;
+    use azapptoolkit_core::token::StaticTokenProvider;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use crate::commands::test_support::mock_graph;
+    use crate::commands::test_support::{
+        dies_after, indexes_intact, mock_graph, mock_graph_rw, mock_state, seed_indexes_and_detail,
+    };
 
-    // Pins today's Err-after-landed-write; write-path-atomicity (F001/F004)
-    // flips this to the `(outcome, Option<UiError>)` shape and updates this test.
+    const TENANT: &str = "t1";
+
+    /// The app POST lands (`obj-new` / `app-new`), no SP exists yet, and the
+    /// SP POST is refused.
+    async fn mount_app_created_sp_refused(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/v1.0/applications"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "obj-new",
+                "appId": "app-new",
+                "displayName": "New",
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param("$filter", "appId eq 'app-new'"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/servicePrincipals"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(server)
+            .await;
+    }
+
+    fn with_sp() -> CreateApplicationInput {
+        CreateApplicationInput {
+            display_name: "New".into(),
+            create_service_principal: true,
+            initial_secret_display_name: None,
+            initial_owner_ids: vec![],
+            ..Default::default()
+        }
+    }
+
+    async fn count(server: &MockServer, verb: &str, suffix: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == verb && r.url.path().ends_with(suffix))
+            .count()
+    }
+
     #[tokio::test]
-    async fn create_application_core_errs_after_the_app_post_landed_when_sp_creation_fails() {
+    async fn create_application_core_reports_the_landed_app_when_sp_creation_fails() {
+        let server = MockServer::start().await;
+        mount_app_created_sp_refused(&server).await;
+        let client = mock_graph(&server);
+
+        let (res, err) = create_application_core(&client, with_sp())
+            .await
+            .expect("the registration landed, so the run is Ok with an error beside it");
+        let err = err.expect("the SP failure is reported");
+        assert_eq!(err.code, "forbidden");
+        assert_eq!(res.application.id, "obj-new");
+        assert!(res.service_principal.is_none());
+        assert_eq!(
+            count(&server, "POST", "/v1.0/applications").await,
+            1,
+            "the app registration was created once"
+        );
+    }
+
+    /// The command half of the rule: the app exists, so the list tier (and
+    /// with it both tenant-wide indexes) is busted even though the command
+    /// errs — and the error names the new object id so a retry is not a
+    /// blind duplicate create.
+    #[tokio::test]
+    async fn create_application_command_busts_the_list_tier_and_names_the_app_after_a_partial_create()
+     {
+        let (server, state) = mock_state(TENANT).await;
+        mount_app_created_sp_refused(&server).await;
+        seed_indexes_and_detail(&state, TENANT, "obj-1");
+
+        let err = create_application_in_state(&state, TENANT, with_sp())
+            .await
+            .expect_err("the SP failure still surfaces");
+        assert_eq!(err.code, "forbidden");
+        assert!(err.message.contains("obj-new"), "{}", err.message);
+        assert!(
+            !indexes_intact(&state, TENANT),
+            "a landed create must bust the list tier even when a later step failed"
+        );
+    }
+
+    /// A failure of the registration POST itself landed nothing: plain `Err`,
+    /// nothing busted.
+    #[tokio::test]
+    async fn a_refused_create_busts_nothing() {
+        let (server, state) = mock_state(TENANT).await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/applications"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(&server)
+            .await;
+        seed_indexes_and_detail(&state, TENANT, "obj-1");
+
+        let err = create_application_in_state(&state, TENANT, with_sp())
+            .await
+            .expect_err("a refused create is an error");
+        assert_eq!(err.code, "forbidden");
+        assert!(!err.message.contains("was created"), "{}", err.message);
+        assert!(indexes_intact(&state, TENANT), "invalidate only on Ok");
+    }
+
+    /// A dead session on the first initial owner stops the loop: the rest are
+    /// reported failed without being sent, and the fatal code comes back.
+    #[tokio::test]
+    async fn create_application_core_stops_the_owner_loop_on_a_dead_session() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1.0/applications"))
@@ -549,51 +729,37 @@ mod handler_tests {
             })))
             .mount(&server)
             .await;
-        Mock::given(method("GET"))
-            .and(path("/v1.0/servicePrincipals"))
-            .and(query_param("$filter", "appId eq 'app-new'"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
-            )
-            .mount(&server)
-            .await;
         Mock::given(method("POST"))
-            .and(path("/v1.0/servicePrincipals"))
-            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .and(path("/v1.0/applications/obj-new/owners/$ref"))
+            .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
-        let client = mock_graph(&server);
+        // One write bearer: the app POST gets it, the first owner add dies.
+        let client = mock_graph_rw(
+            &server,
+            StaticTokenProvider::new("tok"),
+            dies_after(1),
+            Cache::new(),
+        );
 
-        let err = create_application_core(
+        let (res, err) = create_application_core(
             &client,
             CreateApplicationInput {
                 display_name: "New".into(),
-                create_service_principal: true,
-                initial_secret_display_name: None,
-                initial_owner_ids: vec![],
+                initial_owner_ids: vec!["u1".into(), "u2".into()],
                 ..Default::default()
             },
         )
         .await
-        .expect_err("today an SP-creation failure surfaces as a bare Err");
-        assert_eq!(err.code, "forbidden");
-
-        let app_posts = server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/v1.0/applications")
-            .count();
-        assert_eq!(app_posts, 1, "the app registration was created");
-        // Tripwire for the F004 gap: the error does not name the app it just
-        // created (no `augment_with_object_id`, as `sso` does), so the operator
-        // cannot find the half-made app from the message. write-path-atomicity
-        // makes the error carry `obj-new` and flips this assertion.
-        assert!(
-            !err.message.contains("obj-new"),
-            "the error now names the new app — update this pin: {}",
-            err.message
+        .expect("the registration landed");
+        let err = err.expect("the dead session is reported");
+        assert_eq!(err.code, "refresh_missing");
+        assert!(res.added_owner_ids.is_empty());
+        assert_eq!(res.failed_owner_ids, ["u1", "u2"]);
+        assert_eq!(
+            count(&server, "POST", "/owners/$ref").await,
+            0,
+            "no owner add reached Graph after the session died"
         );
     }
 }

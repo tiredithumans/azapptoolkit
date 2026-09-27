@@ -77,12 +77,23 @@ fn resolve_password_window(
             }
             Ok((input.start_date_time, end))
         }
-        None => {
-            let days =
-                i64::from(input.lifetime_days.unwrap_or(180)).clamp(1, MAX_SECRET_LIFETIME_DAYS);
-            Ok((None, now + chrono::Duration::days(days)))
-        }
+        None => Ok((None, preset_secret_end(input.lifetime_days, now))),
     }
+}
+
+/// The end of a secret created from a preset lifetime: `lifetime_days`
+/// (default 180, the portal's recommended preset) clamped to
+/// `1..=`[`MAX_SECRET_LIFETIME_DAYS`], counted from `now`.
+///
+/// The one definition of that rule — `add_password` and the initial secret
+/// `create_application` mints both read it, so neither path can mint a
+/// zero-length or a past-the-cap secret the other would refuse.
+pub(crate) fn preset_secret_end(
+    lifetime_days: Option<u32>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> chrono::DateTime<chrono::Utc> {
+    let days = i64::from(lifetime_days.unwrap_or(180)).clamp(1, MAX_SECRET_LIFETIME_DAYS);
+    now + chrono::Duration::days(days)
 }
 
 #[tauri::command]
@@ -271,7 +282,9 @@ fn normalize_cert_blob(input: &str) -> std::result::Result<String, String> {
 /// rule (`azapptoolkit_core::audit::is_expired` — a sub-day lapse is still
 /// "expiring soon" and is left alone). Mirrors `Remove-AzAppExpiredCredential`.
 /// Partial success is surfaced via `failures` rather than aborting on the
-/// first error.
+/// first error — except a re-auth-fatal one: a dead session fails every
+/// remaining removal identically, so the sweep stops there and the fatal-coded
+/// failure tells the UI to offer Re-authenticate.
 #[tauri::command]
 pub async fn remove_expired_passwords(
     state: State<'_, AppState>,
@@ -302,10 +315,18 @@ pub(crate) async fn remove_expired_passwords_core(
         }
         match client.remove_password(object_id, &cred.key_id).await {
             Ok(()) => removed_key_ids.push(cred.key_id.clone()),
-            Err(err) => failures.push(KeyFailure {
-                key_id: cred.key_id.clone(),
-                message: err.to_string(),
-            }),
+            Err(err) => {
+                let e = UiError::from(err);
+                let fatal = e.is_reauth_fatal();
+                failures.push(KeyFailure {
+                    key_id: cred.key_id.clone(),
+                    code: e.code,
+                    message: e.message,
+                });
+                if fatal {
+                    break;
+                }
+            }
         }
     }
 
@@ -320,7 +341,7 @@ pub(crate) async fn remove_expired_passwords_core(
 
 #[cfg(test)]
 mod password_window_tests {
-    use super::{AddPasswordInput, resolve_password_window};
+    use super::{AddPasswordInput, preset_secret_end, resolve_password_window};
     use crate::commands::test_support::{at, fixed_now};
 
     fn input(
@@ -351,6 +372,27 @@ mod password_window_tests {
         let (_, end) =
             resolve_password_window(&input(Some(9999), None, None), fixed_now()).unwrap();
         assert_eq!(end, fixed_now() + chrono::Duration::days(730));
+    }
+
+    /// The initial secret `create_application` mints rides the same clamp as
+    /// `add_password`: `Some(0)` would be an already-expired secret Graph
+    /// rejects, `Some(9999)` a 27-year one the 24-month cap exists to refuse.
+    #[test]
+    fn preset_secret_end_defaults_and_clamps() {
+        let now = fixed_now();
+        for (days, expected) in [
+            (None, 180),
+            (Some(0), 1),
+            (Some(90), 90),
+            (Some(730), 730),
+            (Some(9999), 730),
+        ] {
+            assert_eq!(
+                preset_secret_end(days, now),
+                now + chrono::Duration::days(expected),
+                "{days:?}"
+            );
+        }
     }
 
     #[test]
@@ -467,7 +509,8 @@ mod handler_tests {
     use wiremock::{Mock, ResponseTemplate};
 
     use crate::commands::test_support::{
-        detail_cached, indexes_intact, mock_state, sample_app_json, seed_indexes_and_detail,
+        detail_cached, dies_after, indexes_intact, mock_state, mock_state_with_write_token,
+        sample_app_json, seed_indexes_and_detail,
     };
 
     const TENANT: &str = "t1";
@@ -717,10 +760,45 @@ mod handler_tests {
         assert_eq!(out.removed_key_ids, ["gone-1"]);
         assert_eq!(out.failures.len(), 1);
         assert_eq!(out.failures[0].key_id, "gone-2");
+        assert_eq!(out.failures[0].code, "forbidden");
+        assert!(!out.failures[0].is_reauth_fatal());
         assert!(
             !detail_cached_here(&state),
             "one secret WAS removed, so the credential list changed"
         );
+        assert!(indexes_intact(&state, TENANT));
+    }
+
+    /// A dead session fails every remaining removal the same way, so the sweep
+    /// stops at the first re-auth-fatal failure and names its code — the UI
+    /// reads that code to offer Re-authenticate instead of N identical errors.
+    #[tokio::test]
+    async fn a_dead_session_stops_the_expired_sweep_and_names_the_code() {
+        let (server, state) = mock_state_with_write_token(TENANT, dies_after(1)).await;
+        mount_app(
+            &server,
+            app_with_secrets(&[("a", EXPIRED), ("b", EXPIRED), ("c", EXPIRED)]),
+        )
+        .await;
+        for key in ["a", "b", "c"] {
+            mount_remove(&server, key, 204).await;
+        }
+        seed(&state);
+
+        let out = remove_expired_passwords_core(&state, TENANT, OBJECT)
+            .await
+            .expect("a per-secret failure is data, not an error");
+        assert_eq!(out.removed_key_ids, ["a"]);
+        assert_eq!(out.failures.len(), 1, "the sweep stops at the dead session");
+        assert_eq!(out.failures[0].key_id, "b");
+        assert_eq!(out.failures[0].code, "refresh_missing");
+        assert!(out.failures[0].is_reauth_fatal());
+        assert_eq!(
+            removal_requests(&server).await,
+            1,
+            "only the first removal reached Graph; `c` was never attempted"
+        );
+        assert!(!detail_cached_here(&state), "`a` WAS removed");
         assert!(indexes_intact(&state, TENANT));
     }
 }

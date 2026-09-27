@@ -229,11 +229,7 @@ pub async fn remove_declared_permission(
 ) -> Result<(), UiError> {
     // `None` for Unknown — a raw-GUID row whose declared type we couldn't
     // classify, so match on the permission id alone.
-    let entry_type = match kind {
-        PermissionKind::Application => Some("Role"),
-        PermissionKind::Delegated => Some("Scope"),
-        PermissionKind::Unknown => None,
-    };
+    let entry_type = entry_type_for(kind).ok();
 
     let client = state.graph_for(&tenant_id);
     let app = client.get_application(&object_id).await?;
@@ -353,15 +349,14 @@ pub async fn grant_admin_consent(
     object_id: String,
 ) -> Result<GrantResult, UiError> {
     let client = state.graph_for(&tenant_id);
-    let (result, sp_created) = grant_admin_consent_core(&client, &object_id).await?;
-    // A brand-new SP is a new Enterprise App row / search-index entry, so bust
-    // the full list caches; otherwise the cheaper detail+audit bust suffices.
-    if sp_created {
-        super::applications::invalidate_app_lists(&state.cache, &tenant_id);
-    } else {
-        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
+    let run = grant_admin_consent_core(&client, &object_id).await?;
+    // Bust for what landed first — a created SP survives a later failure —
+    // then surface that failure.
+    invalidate_after_grant(&state.cache, &tenant_id, &run);
+    match run.error {
+        Some(e) => Err(e),
+        None => Ok(run.result),
     }
-    Ok(result)
 }
 
 /// Builds a grant-failure message from a Graph error, appending the admin-consent
@@ -380,18 +375,94 @@ fn grant_failure_message(err: &azapptoolkit_graph::GraphError) -> String {
     base
 }
 
+/// What a grant core did: its [`GrantResult`] plus the writes that landed, so
+/// the caller can bust the right tier **even when a later step failed**.
+///
+/// The `downgrade_application_permission_core` shape: a failure before the
+/// first write is a plain `Err` (nothing landed, nothing to invalidate); a
+/// failure after one comes back here as `error: Some(..)` beside the landed
+/// flags, with `result` empty — the run stops at the failed step, as the
+/// earlier `?` did. Backend-only, never an IPC type.
+#[derive(Debug)]
+pub(crate) struct GrantRun {
+    pub(crate) result: GrantResult,
+    /// The app's `requiredResourceAccess` was PATCHed (single grant only).
+    pub(crate) manifest_changed: bool,
+    /// Ensuring the client SP created a brand-new one — a new Enterprise App
+    /// row / search-index entry.
+    pub(crate) sp_created: bool,
+    /// The step that failed after a write had landed; `None` for a full run.
+    pub(crate) error: Option<UiError>,
+}
+
+/// An empty [`GrantResult`] for a run that stopped after a landed write.
+fn empty_grant(client_service_principal_id: String) -> GrantResult {
+    GrantResult {
+        client_service_principal_id,
+        role_assignments_created: Vec::new(),
+        role_assignments_skipped: Vec::new(),
+        scope_grants_upserted: Vec::new(),
+        failures: Vec::new(),
+    }
+}
+
+/// The cache bust a grant run's landed writes need: a brand-new SP is a new
+/// Enterprise App row / search-index entry, so the full list tier; any other
+/// completed run, or a stopped one whose manifest PATCH landed, the cheaper
+/// detail + audit tier. A stopped run that landed nothing busts nothing.
+fn invalidate_after_grant(
+    cache: &azapptoolkit_core::cache::Cache,
+    tenant_id: &str,
+    run: &GrantRun,
+) {
+    if run.sp_created {
+        super::applications::invalidate_app_lists(cache, tenant_id);
+    } else if run.error.is_none() || run.manifest_changed {
+        super::applications::invalidate_app_detail_state(cache, tenant_id);
+    }
+}
+
 /// Shared admin-consent orchestration, reused by the single-app command and
 /// the bulk path so both keep identical semantics.
 ///
-/// Returns the [`GrantResult`] **and** whether ensuring the client SP created a
-/// brand-new one — callers bust the list caches (not just detail) on that path,
-/// since a new SP is a new Enterprise App row / search-index entry.
+/// Returns a [`GrantRun`]: the [`GrantResult`] **and** whether ensuring the
+/// client SP created a brand-new one — callers bust the list caches (not just
+/// detail) on that path, since a new SP is a new Enterprise App row /
+/// search-index entry. That flag survives a later failure: once the SP was
+/// created, a failing snapshot read stops the run as `error: Some(..)` rather
+/// than an `Err` that would lose it.
 pub(crate) async fn grant_admin_consent_core(
     client: &azapptoolkit_graph::GraphClient,
     object_id: &str,
-) -> Result<(GrantResult, bool), UiError> {
+) -> Result<GrantRun, UiError> {
     let app = client.get_application(object_id).await?;
     let (client_sp, sp_created) = client.ensure_service_principal(&app.app_id).await?;
+    match consent_with_sp(client, &app, &client_sp).await {
+        Ok(result) => Ok(GrantRun {
+            result,
+            manifest_changed: false,
+            sp_created,
+            error: None,
+        }),
+        // The SP POST landed before the failure: report it so the caller
+        // still busts for the new Enterprise App row.
+        Err(e) if sp_created => Ok(GrantRun {
+            result: empty_grant(client_sp.id),
+            manifest_changed: false,
+            sp_created,
+            error: Some(e),
+        }),
+        Err(e) => Err(e),
+    }
+}
+
+/// [`grant_admin_consent_core`] past the client SP: the idempotency snapshots
+/// and the per-resource grant loop.
+async fn consent_with_sp(
+    client: &azapptoolkit_graph::GraphClient,
+    app: &azapptoolkit_core::models::Application,
+    client_sp: &ServicePrincipal,
+) -> Result<GrantResult, UiError> {
     // Both idempotency snapshots are read ONCE, before the per-resource loop:
     // the assignments for the Role branch and the delegated grants for the Scope
     // branch. Each is a paged tenant read filtered to this client SP, and the
@@ -401,7 +472,8 @@ pub(crate) async fn grant_admin_consent_core(
     //
     // Must not swallow these: with the granted set unknown we can't tell which
     // roles/scopes are already in place, and proceeding would re-grant
-    // everything (duplicate/conflicting assignments).
+    // everything (duplicate/conflicting assignments). The run stops here; a
+    // client SP created just before still reaches the caller (see above).
     let (existing_assignments, existing_grants) = futures::future::try_join(
         client.list_app_role_assignments(&client_sp.id),
         client.list_oauth2_grants(&client_sp.id),
@@ -546,16 +618,13 @@ pub(crate) async fn grant_admin_consent_core(
         }
     }
 
-    Ok((
-        GrantResult {
-            client_service_principal_id: client_sp.id,
-            role_assignments_created,
-            role_assignments_skipped,
-            scope_grants_upserted,
-            failures,
-        },
-        sp_created,
-    ))
+    Ok(GrantResult {
+        client_service_principal_id: client_sp.id.clone(),
+        role_assignments_created,
+        role_assignments_skipped,
+        scope_grants_upserted,
+        failures,
+    })
 }
 
 // ---------------- Single-permission grant ----------------
@@ -575,18 +644,17 @@ pub async fn grant_single_permission(
     kind: PermissionKind,
 ) -> Result<GrantResult, UiError> {
     let client = state.graph_for(&tenant_id);
-    let (result, sp_created) =
+    let run =
         grant_single_permission_core(&client, &object_id, &resource_app_id, &permission_id, kind)
             .await?;
-
     // A first grant that materializes the app's SP adds an Enterprise App row /
-    // search-index entry, so bust the full list caches; otherwise detail+audit.
-    if sp_created {
-        super::applications::invalidate_app_lists(&state.cache, &tenant_id);
-    } else {
-        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
+    // search-index entry, so the full list tier; otherwise detail+audit — and
+    // both even when a later step failed, since the PATCH/SP had landed.
+    invalidate_after_grant(&state.cache, &tenant_id, &run);
+    match run.error {
+        Some(e) => Err(e),
+        None => Ok(run.result),
     }
-    Ok(result)
 }
 
 /// The manifest entry type a permission kind declares, or a validation error for
@@ -606,9 +674,11 @@ fn entry_type_for(kind: PermissionKind) -> Result<&'static str, UiError> {
 }
 
 /// Shared core of [`grant_single_permission`]: manifest patch + runtime grant,
-/// with no `State` and no cache side effects. Returns the result and whether the
-/// grant materialized the app's service principal (which decides how far the
-/// caller must invalidate).
+/// with no `State` and no cache side effects. Returns a [`GrantRun`]: the
+/// result, whether the manifest PATCH landed and whether the grant materialized
+/// the app's service principal (which decide how far the caller must
+/// invalidate). A failure after either write comes back as `error: Some(..)`
+/// beside those flags, not as an `Err` that would lose them.
 ///
 /// Extracted for the reason `grant_admin_consent_core` and
 /// `grant_managed_identity_roles_core` already were: behind a `#[tauri::command]`
@@ -621,21 +691,21 @@ pub(crate) async fn grant_single_permission_core(
     resource_app_id: &str,
     permission_id: &str,
     kind: PermissionKind,
-) -> Result<(GrantResult, bool), UiError> {
+) -> Result<GrantRun, UiError> {
     let entry_type = entry_type_for(kind)?;
-    let resource_app_id = resource_app_id.to_string();
-    let permission_id = permission_id.to_string();
     let mut app = client.get_application(object_id).await?;
 
     // 1) Patch requiredResourceAccess if the (resource, permission, kind)
     //    triple isn't already declared. Empty resource entry with the right
-    //    appId is created when needed.
-    if declare_resource_access(
+    //    appId is created when needed. The PATCH is the first write: its own
+    //    failure landed nothing, so it stays a plain `Err`.
+    let manifest_changed = declare_resource_access(
         &mut app.required_resource_access,
-        &resource_app_id,
-        &permission_id,
+        resource_app_id,
+        permission_id,
         entry_type,
-    ) {
+    );
+    if manifest_changed {
         let patch = azapptoolkit_graph::client::AppPatch {
             required_resource_access: Some(app.required_resource_access.clone()),
             ..Default::default()
@@ -645,7 +715,46 @@ pub(crate) async fn grant_single_permission_core(
 
     // 2) Create the runtime grant. Errors stay structured so the UI can
     //    show a per-row failure without losing the manifest patch.
-    let (client_sp, sp_created) = client.ensure_service_principal(&app.app_id).await?;
+    let (client_sp, sp_created) = match client.ensure_service_principal(&app.app_id).await {
+        Ok(ensured) => ensured,
+        Err(e) if manifest_changed => {
+            return Ok(GrantRun {
+                result: empty_grant(String::new()),
+                manifest_changed,
+                sp_created: false,
+                error: Some(e.into()),
+            });
+        }
+        Err(e) => return Err(e.into()),
+    };
+    match single_runtime_grant(client, &client_sp.id, resource_app_id, permission_id, kind).await {
+        Ok(result) => Ok(GrantRun {
+            result,
+            manifest_changed,
+            sp_created,
+            error: None,
+        }),
+        Err(e) if manifest_changed || sp_created => Ok(GrantRun {
+            result: empty_grant(client_sp.id),
+            manifest_changed,
+            sp_created,
+            error: Some(e),
+        }),
+        Err(e) => Err(e),
+    }
+}
+
+/// [`grant_single_permission_core`] past the client SP: resolve the resource
+/// SP and create (or skip) the one runtime grant.
+async fn single_runtime_grant(
+    client: &azapptoolkit_graph::GraphClient,
+    client_sp_id: &str,
+    resource_app_id: &str,
+    permission_id: &str,
+    kind: PermissionKind,
+) -> Result<GrantResult, UiError> {
+    let resource_app_id = resource_app_id.to_string();
+    let permission_id = permission_id.to_string();
     let resource_sp = client
         .resolve_resource_sp(&resource_app_id)
         .await?
@@ -663,7 +772,7 @@ pub(crate) async fn grant_single_permission_core(
 
     match kind {
         PermissionKind::Application => {
-            let existing = client.list_app_role_assignments(&client_sp.id).await?;
+            let existing = client.list_app_role_assignments(client_sp_id).await?;
             let already = existing
                 .iter()
                 .any(|a| a.resource_id == resource_sp.id && a.app_role_id == permission_id);
@@ -675,7 +784,7 @@ pub(crate) async fn grant_single_permission_core(
                 });
             } else {
                 match client
-                    .grant_app_role(&client_sp.id, &resource_sp.id, &permission_id)
+                    .grant_app_role(client_sp_id, &resource_sp.id, &permission_id)
                     .await
                 {
                     Ok(ara) => role_assignments_created.push(ara),
@@ -699,7 +808,7 @@ pub(crate) async fn grant_single_permission_core(
             match scope_value {
                 Some(value) => {
                     match client
-                        .upsert_admin_oauth2_grant(&client_sp.id, &resource_sp.id, &[value])
+                        .upsert_admin_oauth2_grant(client_sp_id, &resource_sp.id, &[value])
                         .await
                     {
                         Ok(grant) => scope_grants_upserted.push(ScopeGrantSummary {
@@ -723,19 +832,16 @@ pub(crate) async fn grant_single_permission_core(
                 }),
             }
         }
-        PermissionKind::Unknown => unreachable!("guarded above"),
+        PermissionKind::Unknown => unreachable!("guarded by `entry_type_for` in the caller"),
     }
 
-    Ok((
-        GrantResult {
-            client_service_principal_id: client_sp.id,
-            role_assignments_created,
-            role_assignments_skipped,
-            scope_grants_upserted,
-            failures,
-        },
-        sp_created,
-    ))
+    Ok(GrantResult {
+        client_service_principal_id: client_sp_id.to_string(),
+        role_assignments_created,
+        role_assignments_skipped,
+        scope_grants_upserted,
+        failures,
+    })
 }
 
 /// Declares a single permission in `object_id`'s `requiredResourceAccess`
@@ -756,16 +862,7 @@ pub async fn declare_app_permission(
     permission_id: String,
     kind: PermissionKind,
 ) -> Result<(), UiError> {
-    let entry_type = match kind {
-        PermissionKind::Application => "Role",
-        PermissionKind::Delegated => "Scope",
-        PermissionKind::Unknown => {
-            return Err(UiError::validation(
-                "invalid_permission_kind",
-                "permission kind must be Application or Delegated",
-            ));
-        }
-    };
+    let entry_type = entry_type_for(kind)?;
 
     let client = state.graph_for(&tenant_id);
     let mut app = client.get_application(&object_id).await?;
@@ -1417,8 +1514,8 @@ mod tests {
 }
 
 /// Core-level partial-write tests: the grant cores take `&GraphClient`, so a
-/// mock Graph drives them as-is. Each pins what the core does TODAY when a
-/// later step fails after an earlier write already landed.
+/// mock Graph drives them as-is. A failure after a landed write comes back as a
+/// [`GrantRun`] carrying the landed flags; one before any write stays `Err`.
 #[cfg(test)]
 mod handler_tests {
     use super::*;
@@ -1427,19 +1524,52 @@ mod handler_tests {
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use crate::commands::test_support::{mock_graph, sample_app_json};
+    use crate::commands::test_support::{
+        detail_cached, indexes_intact, mock_graph, sample_app_json, seed_indexes_and_detail,
+    };
 
     /// `sample_app_json()` (obj-1 / app-1, nothing declared) and no SP for
     /// app-1 yet — the state in which both cores must create one.
     async fn mount_app_without_sp(server: &MockServer) {
-        Mock::given(method("GET"))
-            .and(path("/v1.0/applications/obj-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(sample_app_json()))
-            .mount(server)
-            .await;
+        mount_app(server, sample_app_json()).await;
         Mock::given(method("GET"))
             .and(path("/v1.0/servicePrincipals"))
             .and(query_param("$filter", "appId eq 'app-1'"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+            )
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_app(server: &MockServer, app: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications/obj-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(app))
+            .mount(server)
+            .await;
+    }
+
+    async fn refuse_sp_create(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/v1.0/servicePrincipals"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(server)
+            .await;
+    }
+
+    /// The idempotency snapshot the admin-consent core reads right after the
+    /// client SP: its app-role assignments are refused.
+    async fn refuse_assignment_snapshot(server: &MockServer, sp_id: &str) {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1.0/servicePrincipals/{sp_id}/appRoleAssignments"
+            )))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/oauth2PermissionGrants"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
             )
@@ -1458,11 +1588,9 @@ mod handler_tests {
             .collect()
     }
 
-    // Pins today's Err-after-landed-write; write-path-atomicity (F001/F004)
-    // flips this to the `(outcome, Option<UiError>)` shape and updates this test.
     #[tokio::test]
-    async fn grant_single_permission_core_errs_after_the_manifest_patch_landed_when_sp_creation_fails()
-     {
+    async fn grant_single_permission_core_reports_the_landed_manifest_patch_when_sp_creation_fails()
+    {
         let server = MockServer::start().await;
         mount_app_without_sp(&server).await;
         Mock::given(method("PATCH"))
@@ -1470,14 +1598,10 @@ mod handler_tests {
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
-        Mock::given(method("POST"))
-            .and(path("/v1.0/servicePrincipals"))
-            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
-            .mount(&server)
-            .await;
+        refuse_sp_create(&server).await;
         let client = mock_graph(&server);
 
-        let err = grant_single_permission_core(
+        let run = grant_single_permission_core(
             &client,
             "obj-1",
             MICROSOFT_GRAPH_APP_ID,
@@ -1485,11 +1609,14 @@ mod handler_tests {
             PermissionKind::Application,
         )
         .await
-        .expect_err("today an SP-creation failure surfaces as a bare Err");
-        assert_eq!(err.code, "forbidden");
+        .expect("the manifest PATCH landed, so the run is Ok with an error beside it");
+        assert!(run.manifest_changed, "the PATCH is reported");
+        assert!(!run.sp_created);
+        assert_eq!(
+            run.error.expect("the SP failure is reported").code,
+            "forbidden"
+        );
 
-        // ...even though the manifest write already landed: the declared
-        // permission is live in the tenant and the Err says nothing of it.
         let patches = received(&server, "PATCH", "/v1.0/applications/obj-1").await;
         assert_eq!(patches.len(), 1, "exactly one manifest PATCH was sent");
         assert!(patches[0].contains("role-1"), "{}", patches[0]);
@@ -1506,10 +1633,46 @@ mod handler_tests {
         );
     }
 
-    // Pins today's Err-after-landed-write; write-path-atomicity (F001/F004)
-    // flips this to the `(outcome, Option<UiError>)` shape and updates this test.
+    /// Already declared → no PATCH, so an SP failure landed nothing: plain Err.
     #[tokio::test]
-    async fn grant_admin_consent_core_errs_after_creating_the_client_sp_and_loses_sp_created() {
+    async fn grant_single_permission_core_errs_when_nothing_landed_before_the_failure() {
+        let server = MockServer::start().await;
+        let mut app = sample_app_json();
+        app["requiredResourceAccess"] = serde_json::json!([{
+            "resourceAppId": MICROSOFT_GRAPH_APP_ID,
+            "resourceAccess": [{ "id": "role-1", "type": "Role" }],
+        }]);
+        mount_app(&server, app).await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param("$filter", "appId eq 'app-1'"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+            )
+            .mount(&server)
+            .await;
+        refuse_sp_create(&server).await;
+        let client = mock_graph(&server);
+
+        let err = grant_single_permission_core(
+            &client,
+            "obj-1",
+            MICROSOFT_GRAPH_APP_ID,
+            "role-1",
+            PermissionKind::Application,
+        )
+        .await
+        .expect_err("nothing landed, so the failure is a plain Err");
+        assert_eq!(err.code, "forbidden");
+        assert!(
+            received(&server, "PATCH", "/v1.0/applications/obj-1")
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn grant_admin_consent_core_reports_the_created_sp_when_the_grant_snapshot_fails() {
         let server = MockServer::start().await;
         mount_app_without_sp(&server).await;
         Mock::given(method("POST"))
@@ -1521,27 +1684,20 @@ mod handler_tests {
             })))
             .mount(&server)
             .await;
-        Mock::given(method("GET"))
-            .and(path("/v1.0/servicePrincipals/sp-new/appRoleAssignments"))
-            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1.0/oauth2PermissionGrants"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
-            )
-            .mount(&server)
-            .await;
+        refuse_assignment_snapshot(&server, "sp-new").await;
         let client = mock_graph(&server);
 
-        let err = grant_admin_consent_core(&client, "obj-1")
+        let run = grant_admin_consent_core(&client, "obj-1")
             .await
-            .expect_err("today a failed idempotency snapshot surfaces as a bare Err");
-        assert_eq!(err.code, "forbidden");
-        // The client SP now exists in the tenant, but `sp_created` rides the Ok
-        // arm only — so the command wrapper, seeing Err, busts nothing and the
-        // new Enterprise App row stays missing from the cached lists.
+            .expect("the SP was created, so the run is Ok with an error beside it");
+        assert!(run.sp_created, "the created SP survives the later failure");
+        assert!(!run.manifest_changed);
+        assert_eq!(run.result.client_service_principal_id, "sp-new");
+        assert!(run.result.role_assignments_created.is_empty());
+        assert_eq!(
+            run.error.expect("the snapshot failure is reported").code,
+            "forbidden"
+        );
         assert_eq!(
             received(&server, "POST", "/v1.0/servicePrincipals")
                 .await
@@ -1549,5 +1705,79 @@ mod handler_tests {
             1,
             "the SP creation landed before the failure"
         );
+        assert!(
+            received(
+                &server,
+                "POST",
+                "/v1.0/servicePrincipals/sp-new/appRoleAssignments"
+            )
+            .await
+            .is_empty(),
+            "the run stops: no grant is written with the granted set unknown"
+        );
+    }
+
+    /// The SP already existed → nothing landed before the snapshot failure:
+    /// plain Err.
+    #[tokio::test]
+    async fn grant_admin_consent_core_errs_when_the_sp_already_existed() {
+        let server = MockServer::start().await;
+        mount_app(&server, sample_app_json()).await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param("$filter", "appId eq 'app-1'"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "sp-1", "appId": "app-1", "displayName": "Demo App" }]
+            })))
+            .mount(&server)
+            .await;
+        refuse_assignment_snapshot(&server, "sp-1").await;
+        let client = mock_graph(&server);
+
+        let err = grant_admin_consent_core(&client, "obj-1")
+            .await
+            .expect_err("nothing landed, so the failure is a plain Err");
+        assert_eq!(err.code, "forbidden");
+        assert!(
+            received(&server, "POST", "/v1.0/servicePrincipals")
+                .await
+                .is_empty()
+        );
+    }
+
+    /// Each landed-write shape busts exactly the tier it needs — and a stopped
+    /// run that landed nothing busts nothing.
+    #[test]
+    fn invalidate_after_grant_busts_the_tier_the_landed_writes_need() {
+        const TENANT: &str = "t1";
+        const OBJECT: &str = "obj-1";
+        let forbidden = || Some(UiError::new("forbidden", "no", false));
+        // (manifest_changed, sp_created, error, detail kept, indexes kept)
+        let rows: [(bool, bool, Option<UiError>, bool, bool); 5] = [
+            (false, true, None, false, false),
+            (false, true, forbidden(), false, false),
+            (false, false, None, false, true),
+            (true, false, forbidden(), false, true),
+            (false, false, forbidden(), true, true),
+        ];
+        for (i, (manifest_changed, sp_created, error, detail_kept, indexes_kept)) in
+            rows.into_iter().enumerate()
+        {
+            let state = AppState::for_test(TENANT, "http://127.0.0.1:9");
+            seed_indexes_and_detail(&state, TENANT, OBJECT);
+            let run = GrantRun {
+                result: empty_grant(String::new()),
+                manifest_changed,
+                sp_created,
+                error,
+            };
+            invalidate_after_grant(&state.cache, TENANT, &run);
+            assert_eq!(
+                detail_cached(&state, TENANT, OBJECT),
+                detail_kept,
+                "row {i}"
+            );
+            assert_eq!(indexes_intact(&state, TENANT), indexes_kept, "row {i}");
+        }
     }
 }

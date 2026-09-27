@@ -140,7 +140,8 @@ pub struct CreateApplicationInput {
     pub initial_owner_ids: Vec<String>,
     pub initial_secret_display_name: Option<String>,
     /// When `initial_secret_display_name` is set, create a secret valid for
-    /// this many days. Defaults to 180 on the caller side when omitted.
+    /// this many days. Defaults to 180; clamped to `1..=730` like
+    /// `add_password`.
     pub initial_secret_lifetime_days: Option<u32>,
 }
 
@@ -305,10 +306,25 @@ impl std::fmt::Debug for GeneratedCertificateResult {
     }
 }
 
+/// One expired secret `remove_expired_passwords` could not remove.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyFailure {
     pub key_id: String,
+    /// The [`UiError`](crate::UiError) code of the failure. A re-auth-fatal
+    /// code ([`Self::is_reauth_fatal`]) means the sweep **stopped here**: the
+    /// session is dead, so the secrets after this one were not attempted.
+    /// Empty from a payload that predates the field.
+    #[serde(default)]
+    pub code: String,
     pub message: String,
+}
+
+impl KeyFailure {
+    /// See [`UiError::is_reauth_fatal`](crate::UiError::is_reauth_fatal) —
+    /// reads the one code set in `core::reauth::REAUTH_FATAL_CODES`.
+    pub fn is_reauth_fatal(&self) -> bool {
+        azapptoolkit_core::reauth::is_reauth_fatal(&self.code)
+    }
 }
 
 /// One owner add/remove that failed while applying a replace-all-owners
@@ -318,7 +334,22 @@ pub struct KeyFailure {
 pub struct OwnerChangeFailure {
     pub principal_id: String,
     pub action: String,
+    /// The [`UiError`](crate::UiError) code of the failure. A re-auth-fatal
+    /// code ([`Self::is_reauth_fatal`]) means the reconcile **stopped here**:
+    /// the session is dead, so the later owner changes (and, after a failed
+    /// add, every removal) were not attempted. Empty from a payload that
+    /// predates the field.
+    #[serde(default)]
+    pub code: String,
     pub message: String,
+}
+
+impl OwnerChangeFailure {
+    /// See [`UiError::is_reauth_fatal`](crate::UiError::is_reauth_fatal) —
+    /// reads the one code set in `core::reauth::REAUTH_FATAL_CODES`.
+    pub fn is_reauth_fatal(&self) -> bool {
+        azapptoolkit_core::reauth::is_reauth_fatal(&self.code)
+    }
 }
 
 /// Result of `set_application_owners`: the owner set was reconciled to exactly
@@ -406,6 +437,33 @@ mod tests {
         assert!(json.get("password_credential_count").is_some());
         let back: ApplicationListRowDto = serde_json::from_value(json).unwrap();
         assert_eq!(back, row);
+    }
+
+    /// `code` is additive: a failure serialized before it existed still
+    /// decodes (as a non-fatal empty code), and a fatal one reads as fatal.
+    #[test]
+    fn per_item_failures_default_their_code_and_read_the_fatal_set() {
+        let key: KeyFailure =
+            serde_json::from_value(serde_json::json!({ "key_id": "k", "message": "m" })).unwrap();
+        assert_eq!(key.code, "");
+        assert!(!key.is_reauth_fatal());
+        let owner: OwnerChangeFailure = serde_json::from_value(
+            serde_json::json!({ "principalId": "u", "action": "add", "message": "m" }),
+        )
+        .unwrap();
+        assert_eq!(owner.code, "");
+        assert!(!owner.is_reauth_fatal());
+
+        let key = KeyFailure {
+            code: "refresh_missing".into(),
+            ..key
+        };
+        assert!(key.is_reauth_fatal());
+        let owner = OwnerChangeFailure {
+            code: "forbidden".into(),
+            ..owner
+        };
+        assert!(!owner.is_reauth_fatal());
     }
 
     #[test]

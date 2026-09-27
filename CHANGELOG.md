@@ -2,6 +2,19 @@
 
 ### Fixed
 
+- **A new app registration now shows up in the list even when a later step of creating it
+  fails.** If the app was created but its enterprise application (service principal) couldn't be
+  (for example a 403, throttling or a directory replication delay), you saw only the error, and the
+  App Registrations list and search kept their cached copy for up to an hour, so trying again
+  created a second app with the same name. The error now says the application was created and
+  gives its object ID, and the list and search show it the next time they load. Granting a
+  permission or admin consent that fails partway now refreshes the app's details and the
+  Enterprise applications list in the same way.
+
+- **Removing expired secrets or replacing an app's owners now stops and offers Re-authenticate if
+  your session expires partway.** Before, every remaining secret or owner failed with the same
+  message and no way to recover.
+
 - **"Rotate & remove existing" now asks before deleting your other client secrets.** In the Rotate
   secret into Key Vault dialog, this button removed every client secret on the app, including
   active ones, in a single click, and its label didn't say how many. It now reads "Rotate & remove

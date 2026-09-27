@@ -243,6 +243,15 @@ pub fn OwnersTab(
                 Ok(res) => {
                     replacing.set(false);
                     staged.set(Vec::new());
+                    // A re-auth-fatal failure means the backend stopped the
+                    // reconcile on a dead session: offer Re-authenticate.
+                    if let Some(f) = res.failures.iter().find(|f| f.is_reauth_fatal()) {
+                        session.report_if_session_dead(&azapptoolkit_dto::UiError::new(
+                            f.code.clone(),
+                            f.message.clone(),
+                            false,
+                        ));
+                    }
                     if !res.failures.is_empty() {
                         let details = res
                             .failures
@@ -265,7 +274,10 @@ pub fn OwnersTab(
                     }
                     on_changed_cb.run(());
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => {
+                    session.report_if_session_dead(&e);
+                    error.set(Some(e.message));
+                }
             }
             applying.set(false);
         });
