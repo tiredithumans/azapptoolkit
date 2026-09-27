@@ -25,6 +25,8 @@ mod certificate_reveal;
 mod credential_sweep;
 #[path = "gui/enterprise_application_list.rs"]
 mod enterprise_application_list;
+#[path = "gui/federated_tab.rs"]
+mod federated_tab;
 #[path = "gui/open_items_dock.rs"]
 mod open_items_dock;
 #[path = "gui/sso_claims.rs"]

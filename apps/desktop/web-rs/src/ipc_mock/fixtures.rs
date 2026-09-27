@@ -14,7 +14,7 @@ use azapptoolkit_core::models::{
 };
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::applications::{
-    ApplicationAuthenticationDto, ApplicationDetail, ApplicationListRowDto,
+    ApplicationAuthenticationDto, ApplicationDetail, ApplicationListRowDto, FederatedCredentialDto,
 };
 use azapptoolkit_dto::audit::AuditRunResult;
 use azapptoolkit_dto::bulk::{BulkProgress, BulkStageCertOutcome, BulkStageCertResult};
@@ -266,6 +266,19 @@ pub fn application_authentication(
         is_fallback_public_client: false,
         enable_access_token_issuance: false,
         enable_id_token_issuance: false,
+    }
+}
+
+/// A GitHub Actions federated credential on an application. `subject: None`
+/// is a flexible (claims-matching expression) credential, which has no subject.
+pub fn federated_credential(name: &str, subject: Option<&str>) -> FederatedCredentialDto {
+    FederatedCredentialDto {
+        id: format!("fic-{name}"),
+        name: name.to_string(),
+        issuer: "https://token.actions.githubusercontent.com".to_string(),
+        subject: subject.map(str::to_string),
+        description: None,
+        audiences: vec!["api://AzureADTokenExchange".to_string()],
     }
 }
 

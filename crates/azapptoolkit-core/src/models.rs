@@ -15,6 +15,11 @@ use crate::scoping::SelectedScopeLevel;
 /// non-`Option` fields (`invalid type: null, expected a string`/`a sequence`).
 /// Graph emits explicit nulls for some apps (e.g. `displayName: null`, or a
 /// `null` collection), so pair this with `#[serde(default)]` to stay tolerant.
+///
+/// A new `Vec`/`String` model field that carries `#[serde(default)]` should
+/// pair it with this helper by default: `Paged<T>` deserializes as one
+/// document, so a single literal `null` on one item fails the whole page.
+/// `every_defaulted_vec_field_tolerates_null` pins this for `Vec` fields.
 fn null_to_default<'de, D, T>(de: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -176,7 +181,7 @@ pub struct ServicePrincipal {
 #[serde(rename_all = "camelCase")]
 pub struct AppRole {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub allowed_member_types: Vec<String>,
     #[serde(default, deserialize_with = "null_to_default")]
     pub display_name: String,
@@ -318,7 +323,13 @@ pub struct FederatedIdentityCredential {
     pub id: String,
     pub name: String,
     pub issuer: String,
-    pub subject: String,
+    // Graph returns `subject: null` for a *flexible* credential — one matched
+    // by `claimsMatchingExpression` (a beta-only property, so our v1.0
+    // `$select` never reads it). A bare `String` here failed the whole
+    // `Paged<>` list, which broke the Federated tab and made DR backup skip
+    // the app. `None` = expression-matched (flexible).
+    #[serde(default)]
+    pub subject: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default, deserialize_with = "null_to_default")]
@@ -445,7 +456,7 @@ pub struct GroupSummary {
     pub display_name: Option<String>,
     #[serde(default)]
     pub security_enabled: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub group_types: Vec<String>,
 }
 
@@ -690,9 +701,9 @@ pub struct Site {
 #[serde(rename_all = "camelCase")]
 pub struct SitePermission {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub roles: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub granted_to_identities: Vec<SiteIdentitySet>,
 }
 
@@ -728,7 +739,7 @@ pub struct SiteIdentity {
 #[serde(rename_all = "camelCase")]
 pub struct SelectedPermission {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub roles: Vec<String>,
     #[serde(default)]
     pub granted_to_v2: Option<SiteIdentitySet>,
@@ -907,11 +918,11 @@ pub struct ApplicationTemplate {
     pub publisher: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub categories: Vec<String>,
     #[serde(default)]
     pub logo_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub supported_single_sign_on_modes: Vec<String>,
 }
 
@@ -1081,6 +1092,96 @@ mod tests {
         }"#;
         let grant: OAuth2PermissionGrant = serde_json::from_str(json).unwrap();
         assert_eq!(grant.scope, "");
+    }
+
+    #[test]
+    fn federated_credential_tolerates_null_subject() {
+        // A flexible credential has `subject: null` plus a (beta-only)
+        // `claimsMatchingExpression`; one such item used to fail the whole
+        // page. The unknown key is ignored (no `deny_unknown_fields`).
+        let json = r#"{"value":[
+            {"id":"f-1","name":"gh-main","issuer":"https://token.actions.githubusercontent.com",
+             "subject":"repo:contoso/app:ref:refs/heads/main",
+             "audiences":["api://AzureADTokenExchange"]},
+            {"id":"f-2","name":"gh-flex","issuer":"https://token.actions.githubusercontent.com",
+             "subject":null,
+             "claimsMatchingExpression":{"value":"claims['sub'] matches 'repo:contoso/*'","languageVersion":1},
+             "audiences":["api://AzureADTokenExchange"]}
+        ]}"#;
+        let page: Paged<FederatedIdentityCredential> = serde_json::from_str(json).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(
+            page.items[0].subject.as_deref(),
+            Some("repo:contoso/app:ref:refs/heads/main")
+        );
+        assert!(page.items[1].subject.is_none());
+
+        // A missing key is the same as null.
+        let missing: FederatedIdentityCredential =
+            serde_json::from_str(r#"{"id":"f-3","name":"n","issuer":"i"}"#).unwrap();
+        assert!(missing.subject.is_none());
+    }
+
+    #[test]
+    fn bare_collections_tolerate_null() {
+        let role: AppRole =
+            serde_json::from_str(r#"{"id":"r","allowedMemberTypes":null}"#).unwrap();
+        assert!(role.allowed_member_types.is_empty());
+        let group: GroupSummary = serde_json::from_str(r#"{"id":"g","groupTypes":null}"#).unwrap();
+        assert!(group.group_types.is_empty());
+        let site: SitePermission =
+            serde_json::from_str(r#"{"id":"p","roles":null,"grantedToIdentities":null}"#).unwrap();
+        assert!(site.roles.is_empty());
+        assert!(site.granted_to_identities.is_empty());
+        let selected: SelectedPermission =
+            serde_json::from_str(r#"{"id":"p","roles":null}"#).unwrap();
+        assert!(selected.roles.is_empty());
+        let template: ApplicationTemplate = serde_json::from_str(
+            r#"{"id":"t","categories":null,"supportedSingleSignOnModes":null}"#,
+        )
+        .unwrap();
+        assert!(template.categories.is_empty());
+        assert!(template.supported_single_sign_on_modes.is_empty());
+    }
+
+    /// Source scan: every `Vec` field defaulted with `#[serde(default…)]`
+    /// also maps an explicit `null` through `null_to_default`. `Paged.items`
+    /// carries no default (Graph never nulls `value`), so it is exempt by
+    /// construction.
+    #[test]
+    fn every_defaulted_vec_field_tolerates_null() {
+        let src = include_str!("models.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        let mut vec_fields = 0;
+        let mut offenders = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim();
+            let Some(rest) = t.strip_prefix("pub ") else {
+                continue;
+            };
+            let Some((ident, ty)) = rest.split_once(':') else {
+                continue;
+            };
+            if !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                || !ty.trim_start().starts_with("Vec<")
+            {
+                continue;
+            }
+            vec_fields += 1;
+            let prev = if i > 0 { lines[i - 1] } else { "" };
+            if prev.contains("serde(default") && !prev.contains("null_to_default") {
+                offenders.push(format!("line {}: {t}", i + 1));
+            }
+        }
+        assert!(
+            vec_fields >= 20,
+            "scan found only {vec_fields} Vec fields; the matcher is broken"
+        );
+        assert!(
+            offenders.is_empty(),
+            "defaulted Vec fields without null_to_default: {offenders:#?}"
+        );
     }
 
     #[test]

@@ -49,7 +49,7 @@ use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_core::federation::validate_federated_credential;
-use azapptoolkit_core::models::{Application, DirectoryObject};
+use azapptoolkit_core::models::{Application, DirectoryObject, FederatedIdentityCredential};
 use azapptoolkit_core::redirect::validate_redirect_uri;
 use azapptoolkit_core::restore_plan::{
     remap_pre_authorized, remap_required_resource_access, rewrite_identifier_uris,
@@ -400,7 +400,14 @@ fn build_restore_plan(
         secrets_to_regenerate: sum(|a| a.secrets.len()) - expired_secrets_skipped,
         expired_secrets_skipped,
         certificates_needing_manual_upload: sum(|a| a.certificates.len()),
-        federated_credentials_to_restore: sum(|a| a.federated_credentials.len()),
+        // A flexible credential (no subject) is reported, not recreated — see
+        // `restorable_fic_subject` — so the preview does not promise it.
+        federated_credentials_to_restore: sum(|a| {
+            a.federated_credentials
+                .iter()
+                .filter(|f| f.subject.is_some())
+                .count()
+        }),
         owners_to_remap: sum(|a| a.owners.len()),
         enterprise_apps_to_reapply,
         enterprise_apps_manual: backup.enterprise_apps.len() - enterprise_apps_to_reapply,
@@ -745,6 +752,24 @@ struct CreatedApp {
     warnings: Vec<String>,
 }
 
+/// The subject a backed-up federated credential is recreated with, or the
+/// restore-report warning when it has none.
+///
+/// A *flexible* credential is matched by a `claimsMatchingExpression` (a
+/// beta-only Graph property) instead of a subject, so the v1.0 read backs it up
+/// with `subject: null` and nothing to recreate it from. It is skipped with the
+/// same "was NOT restored — {reason}" phrasing as a rejected credential.
+fn restorable_fic_subject(fic: &FederatedIdentityCredential) -> Result<&str, String> {
+    fic.subject.as_deref().ok_or_else(|| {
+        format!(
+            "federated credential '{}' was NOT restored — it is a flexible credential \
+             (matched by a claims expression, with no subject), which this app cannot \
+             recreate; add it again in the Entra portal",
+            fic.name
+        )
+    })
+}
+
 /// Pass-2 work for one created (or adopted) app: declared permissions,
 /// identifier URIs + Expose-an-API, authentication, federated credentials,
 /// owners, and secret regeneration.
@@ -934,6 +959,13 @@ async fn wire_application(
         HashSet::new()
     };
     for fic in &app.federated_credentials {
+        let subject = match restorable_fic_subject(fic) {
+            Ok(subject) => subject,
+            Err(warning) => {
+                out.warnings.push(warning);
+                continue;
+            }
+        };
         let audiences = if fic.audiences.is_empty() {
             vec![cloud.token_exchange_audience().to_string()]
         } else {
@@ -942,7 +974,7 @@ async fn wire_application(
         if let Err(reason) = validate_federated_credential(
             Some(&fic.name),
             &fic.issuer,
-            &fic.subject,
+            subject,
             &audiences,
             fic.description.as_deref(),
         ) {
@@ -963,7 +995,7 @@ async fn wire_application(
         let body = FederatedCredentialRequest {
             name: fic.name.clone(),
             issuer: fic.issuer.clone(),
-            subject: fic.subject.clone(),
+            subject: subject.to_string(),
             audiences,
             description: fic.description.clone(),
         };
@@ -982,7 +1014,7 @@ async fn wire_application(
                      from issuer '{}' can now obtain tokens as this application, with no \
                      secret and no expiry. Confirm that external workload still exists and \
                      should have this access in this tenant.",
-                    fic.subject, fic.issuer
+                    subject, fic.issuer
                 ),
             });
         }
@@ -1550,13 +1582,17 @@ mod tests {
     #[test]
     fn build_restore_plan_counts_actions_and_flags_cloud_and_tenant_changes() {
         use crate::dto::backup::{AppRegistrationBackup, CredentialMeta, TenantBackup};
-        use azapptoolkit_core::models::FederatedIdentityCredential;
-
         let app =
             |secrets: usize, certs: usize, feds: usize, owners: usize| AppRegistrationBackup {
                 secrets: vec![CredentialMeta::default(); secrets],
                 certificates: vec![CredentialMeta::default(); certs],
-                federated_credentials: vec![FederatedIdentityCredential::default(); feds],
+                federated_credentials: vec![
+                    FederatedIdentityCredential {
+                        subject: Some("sub".into()),
+                        ..Default::default()
+                    };
+                    feds
+                ],
                 owners: vec![PrincipalRef::default(); owners],
                 ..Default::default()
             };
@@ -1569,6 +1605,11 @@ mod tests {
         // expired then: only the expired one is left out.
         let mut first = app(2, 1, 3, 1);
         first.secrets.push(ending(2_000_000));
+        // A flexible credential (no subject) is not recreated, so it is not
+        // counted as one to restore.
+        first
+            .federated_credentials
+            .push(FederatedIdentityCredential::default());
         let mut second = app(0, 0, 0, 2);
         second.secrets.push(ending(500_000));
         let backup = TenantBackup {
@@ -2076,6 +2117,27 @@ mod tests {
     /// loop states. Reply URLs are where auth codes are delivered, so a wildcard
     /// or plaintext one must not reach the tenant just because it arrived in a
     /// file rather than through the editor.
+    #[test]
+    fn a_flexible_federated_credential_is_skipped_with_a_warning() {
+        let flexible = FederatedIdentityCredential {
+            name: "gh-flex".into(),
+            ..Default::default()
+        };
+        let warning = restorable_fic_subject(&flexible).unwrap_err();
+        assert!(warning.contains("'gh-flex' was NOT restored"), "{warning}");
+        assert!(warning.contains("flexible credential"), "{warning}");
+
+        let pinned = FederatedIdentityCredential {
+            name: "gh-main".into(),
+            subject: Some("repo:contoso/app:ref:refs/heads/main".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            restorable_fic_subject(&pinned),
+            Ok("repo:contoso/app:ref:refs/heads/main")
+        );
+    }
+
     #[test]
     fn restored_reply_urls_are_validated_like_editor_input() {
         let uris = [

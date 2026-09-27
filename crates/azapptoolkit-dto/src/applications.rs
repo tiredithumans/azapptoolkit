@@ -210,13 +210,16 @@ pub struct AddCertificateInput {
 }
 
 /// A federated identity credential (workload identity federation) on an app.
+///
+/// `subject` is `None` for a flexible (claims-matching expression) credential,
+/// which has no subject.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FederatedCredentialDto {
     pub id: String,
     pub name: String,
     pub issuer: String,
-    pub subject: String,
+    pub subject: Option<String>,
     pub description: Option<String>,
     pub audiences: Vec<String>,
 }
@@ -600,5 +603,15 @@ mod tests {
         let back: UpdateFederatedCredentialInput = serde_json::from_value(json).unwrap();
         assert_eq!(back.audiences, update.audiences);
         assert_eq!(back.subject, update.subject);
+    }
+
+    #[test]
+    fn federated_credential_dto_carries_a_null_subject() {
+        let dto: FederatedCredentialDto = serde_json::from_value(serde_json::json!({
+            "id": "f-1", "name": "gh-flex", "issuer": "i", "subject": null,
+            "description": null, "audiences": ["api://AzureADTokenExchange"]
+        }))
+        .unwrap();
+        assert!(dto.subject.is_none());
     }
 }

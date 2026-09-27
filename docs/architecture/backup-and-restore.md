@@ -239,6 +239,11 @@ be the person who wrote it. So pass 2 treats each one as untrusted input:
   documents that a wrong issuer "is created successfully without error", failing
   only later at token exchange), so a planted trust is otherwise invisible.
   `wire_application` returns these alongside the `RestoredApp` for that reason.
+- A *flexible* credential (no subject; matched by a `claimsMatchingExpression`,
+  which only Graph beta exposes, so the v1.0 read never sees it) is backed up
+  as-is with `subject: null`. Restore does not recreate it: `restorable_fic_subject`
+  turns it into a "was NOT restored" warning, and `build_restore_plan` leaves it out of
+  `RestorePlan.federated_credentials_to_restore`.
 
 It refuses a **cross-cloud** manifest outright, claims its own `restore_cancel`
 (stopped only by `cancel_restore`, never by a backup's Cancel; a cancel stops at

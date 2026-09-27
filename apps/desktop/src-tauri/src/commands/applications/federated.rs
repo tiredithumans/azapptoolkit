@@ -213,4 +213,26 @@ mod fic_audience_tests {
             .is_ok()
         );
     }
+
+    #[test]
+    fn a_two_audience_override_is_rejected_before_any_write() {
+        // `resolve_fic_audiences` passes an override through unchanged, so the
+        // single-value rule has to come from the validator.
+        let audiences = resolve_fic_audiences(
+            Some(vec![
+                "api://AzureADTokenExchange".into(),
+                "api://other".into(),
+            ]),
+            CloudEnvironment::Commercial,
+        );
+        let err = check_federated_credential(
+            Some("ok-name"),
+            "https://issuer.example",
+            "sub",
+            &audiences,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "invalid_federated_credential");
+    }
 }

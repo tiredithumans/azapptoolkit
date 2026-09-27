@@ -2,6 +2,13 @@
 
 ### Fixed
 
+- **Apps with a flexible federated credential now open their Federated credentials tab, and DR
+  backups include them.** A flexible credential (one that matches a claims expression instead of a
+  single subject, as GitHub recommends for pull-request and branch workflows) has no subject, and
+  reading one failed with `invalid type: null`, so the tab showed only that error and a backup
+  skipped the whole application. The tab now lists it with "Expression-matched (flexible)" in the
+  Subject column (edit it in the Entra portal). Restore reports that it was not recreated, and the
+  restore preview no longer counts it.
 - **A new app registration now shows up in the list even when a later step of creating it
   fails.** If the app was created but its enterprise application (service principal) couldn't be
   (for example a 403, throttling or a directory replication delay), you saw only the error, and the
