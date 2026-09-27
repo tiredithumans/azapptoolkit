@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+### Fixed
+
+- **Long-running scans keep backing off for as long as Microsoft Graph keeps throttling them.**
+  The adaptive concurrency cap behind the security audit, bulk actions, the site sweep and the DR
+  backup was meant to halve on every burst of 429s until a single request at a time was left, then
+  recover once the tenant went quiet. In practice it halved exactly once: every throttled reply,
+  including the retries of one hot request, re-opened the two-second "one halving per burst" window,
+  so a sustained storm held the cap at half and burned the retry budget instead of easing off. The
+  window is now anchored on the last actual halving. Separately, two of these runs on the same tenant
+  at once — an audit still scoring while a backup finished, say — shared one observer slot, and the
+  run that finished first switched off the other's back-off for the rest of its life; a finishing
+  run now detaches only its own tracker, and the survivor keeps adapting.
+
 ## [0.30.2] - 2026-09-25
 
 ### Changed

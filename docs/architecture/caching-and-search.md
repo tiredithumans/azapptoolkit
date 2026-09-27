@@ -257,7 +257,10 @@ any new heavy fan-out; don't hand-roll a second tracker or a raw per-item loop:
   and fed to `dispatch_capped` as `|| throttle.current_limit()`, so the in-flight cap halves on
   429 and recovers when quiet. Attach/detach with the `ThrottleGuard::attach(client, tracker)`
   RAII (used by the audit and the bulk fan-outs) so an early `?` can't leave a stale observer
-  halving the shared per-tenant client's cap.
+  halving the shared per-tenant client's cap, and a finishing fan-out detaches only its own tracker
+  (the slot is single: a concurrent attach displaces the earlier run, which then runs at a fixed
+  cap — logged). The halve window is anchored on the last *halving*, not the last 429, so a
+  sustained storm keeps degrading toward the floor instead of holding at half.
 
 ### `$count`/`$orderby` belong to `$search` alone
 

@@ -263,10 +263,24 @@ async fn get_json_absolute_rejects_foreign_origin() {
     assert!(matches!(err, GraphError::Protocol(_)));
 }
 
+/// A throttle observer that only counts how often it was notified.
+struct Counter(std::sync::atomic::AtomicUsize);
+impl Counter {
+    fn new() -> Arc<Self> {
+        Arc::new(Self(std::sync::atomic::AtomicUsize::new(0)))
+    }
+    fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+impl ThrottleObserver for Counter {
+    fn on_throttle(&self, _retry_after_secs: Option<u64>) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[tokio::test]
 async fn throttle_observer_fires_on_429() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     let server = MockServer::start().await;
     // Two 429s then a success to make sure the observer fires every time
     // even though the retry machinery ultimately recovers.
@@ -286,17 +300,70 @@ async fn throttle_observer_fires_on_429() {
         .mount(&server)
         .await;
 
-    struct Counter(AtomicUsize);
-    impl ThrottleObserver for Counter {
-        fn on_throttle(&self, _retry_after_secs: Option<u64>) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-    let counter = Arc::new(Counter(AtomicUsize::new(0)));
+    let counter = Counter::new();
     let client = make_client(&server.uri());
     client.set_throttle_observer(counter.clone());
     client.get_organization().await.unwrap();
-    assert_eq!(counter.0.load(Ordering::SeqCst), 2);
+    assert_eq!(counter.count(), 2);
+}
+
+/// Mounts one 429 (`Retry-After: 0`) followed by a 200 on `/organization`,
+/// replacing whatever the server held so an exhausted 429 mock can't shadow
+/// the re-mount.
+async fn mount_one_429_then_ok(server: &MockServer) {
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/organization"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "0")
+                .set_body_string("throttled"),
+        )
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/organization"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(sample_org_json()))
+        .mount(server)
+        .await;
+}
+
+/// The observer slot is single, so a second fan-out attaching on the same
+/// per-tenant client displaces the first — but a finishing run must detach
+/// only its OWN tracker. Before, `clear_throttle_observer` wiped whichever
+/// observer was installed, leaving the surviving run with a fixed cap and no
+/// back-off for the rest of its life.
+#[tokio::test]
+async fn clear_throttle_observer_detaches_only_its_own_observer() {
+    let server = MockServer::start().await;
+    let client = make_client(&server.uri());
+    let a = Counter::new();
+    let b = Counter::new();
+    let a_obs: Arc<dyn ThrottleObserver> = a.clone();
+    let b_obs: Arc<dyn ThrottleObserver> = b.clone();
+
+    // Phase 1: b displaces a; only the installed observer is notified.
+    client.set_throttle_observer(a_obs.clone());
+    client.set_throttle_observer(b_obs.clone());
+    mount_one_429_then_ok(&server).await;
+    client.get_organization().await.unwrap();
+    assert_eq!(a.count(), 0, "displaced observer is not notified");
+    assert_eq!(b.count(), 1);
+
+    // Phase 2: a's detach is a no-op because a is no longer installed — b
+    // stays attached and keeps seeing 429s.
+    assert!(!client.clear_throttle_observer(&a_obs));
+    mount_one_429_then_ok(&server).await;
+    client.get_organization().await.unwrap();
+    assert_eq!(b.count(), 2, "a's detach must not remove b");
+
+    // Phase 3: b's own detach works, after which nothing is notified.
+    assert!(client.clear_throttle_observer(&b_obs));
+    mount_one_429_then_ok(&server).await;
+    client.get_organization().await.unwrap();
+    assert_eq!(b.count(), 2, "detached observer is no longer notified");
+    assert_eq!(a.count(), 0);
 }
 
 // `same_origin` (incl. the embedded-credentials rejection) is unit-tested at

@@ -335,7 +335,7 @@ pub async fn run_audit(
                 }
                 let last_sign_in = ctx.last_sign_in_for(&app.app_id);
                 let result = score_one(&ctx, &app, last_sign_in).await;
-                let (done, in_flight_cap) = ticker.tick().await;
+                let (done, in_flight_cap) = ticker.tick();
                 let progress = AuditProgress {
                     done,
                     total,
@@ -401,9 +401,10 @@ pub async fn run_audit(
     // tenant-wide, so `score_sp_only` is pure scoring — no per-item Graph
     // traffic, no fan-out needed.
     if !cancelled_before_all_dispatched && !cancel.is_cancelled() {
-        let mut done_count = meter.done().await;
         let now = chrono::Utc::now();
-        for sp in sp_candidates {
+        // `done` continues from the fan-out's completion count; each scored SP
+        // is one more item done.
+        for (done_count, sp) in (meter.done() + 1..).zip(sp_candidates) {
             if cancel.is_cancelled() {
                 break;
             }
@@ -415,7 +416,6 @@ pub async fn run_audit(
                 &ews_full_access_sps,
                 now,
             );
-            done_count += 1;
             emit_progress(
                 &app_handle,
                 "audit-progress",

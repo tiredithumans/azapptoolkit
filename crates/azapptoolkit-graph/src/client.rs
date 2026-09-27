@@ -259,12 +259,36 @@ impl GraphClient {
         format!("{}|{}|lean", self.tenant_id, app_id)
     }
 
+    /// Installs `observer` as the client's single throttle observer. The slot
+    /// holds one observer, so a second fan-out attaching on the same per-tenant
+    /// client displaces the first (logged): the earlier run then finishes at a
+    /// fixed cap, with the per-request `Retry-After` handling still in force.
     pub fn set_throttle_observer(&self, observer: Arc<dyn ThrottleObserver>) {
-        *self.throttle_observer.write() = Some(observer);
+        let prev = self.throttle_observer.write().replace(observer.clone());
+        if let Some(prev) = prev
+            && !Arc::ptr_eq(&prev, &observer)
+        {
+            tracing::warn!(
+                tenant = %self.tenant_id,
+                "throttle: replacing a live observer; concurrent fan-outs on one tenant share a single slot"
+            );
+        }
     }
 
-    pub fn clear_throttle_observer(&self) {
-        *self.throttle_observer.write() = None;
+    /// Detaches `observer` only if it is the one currently installed, returning
+    /// whether it did. A run whose observer was displaced by a concurrent
+    /// fan-out must not wipe that run's tracker on its way out — that would
+    /// leave the survivor running with a fixed cap and no back-off for the rest
+    /// of its life.
+    pub fn clear_throttle_observer(&self, observer: &Arc<dyn ThrottleObserver>) -> bool {
+        let mut slot = self.throttle_observer.write();
+        match slot.as_ref() {
+            Some(cur) if Arc::ptr_eq(cur, observer) => {
+                *slot = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     // --------- SharePoint Sites.Selected ---------

@@ -246,7 +246,7 @@ pub async fn bulk_remove_expired_credentials(
                     }
                 }
 
-                let (done, in_flight_cap) = ticker.tick().await;
+                let (done, in_flight_cap) = ticker.tick();
                 let progress = BulkProgress {
                     done,
                     total,
@@ -342,7 +342,7 @@ pub async fn bulk_delete_applications(
             let session = session.clone();
             Some(tokio::spawn(async move {
                 let result = client.delete_application(&id).await;
-                let (done, in_flight_cap) = ticker.tick().await;
+                let (done, in_flight_cap) = ticker.tick();
                 let progress = BulkProgress {
                     done,
                     total,
@@ -442,7 +442,7 @@ pub async fn bulk_grant_permissions(
             let session = session.clone();
             Some(tokio::spawn(async move {
                 let res = super::permissions::grant_admin_consent_core(&client, &id).await;
-                let (done, in_flight_cap) = ticker.tick().await;
+                let (done, in_flight_cap) = ticker.tick();
                 let progress = BulkProgress {
                     done,
                     total,
