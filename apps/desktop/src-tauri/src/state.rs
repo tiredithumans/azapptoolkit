@@ -584,9 +584,12 @@ impl AppState {
 
     /// Shared core for every `ensure_*_token` probe below: pre-acquires (and
     /// caches) the token for `scopes` so a not-yet-consented scope surfaces as
-    /// the typed [`AuthError::ConsentRequired`] (the UI offers a "Grant consent"
-    /// button) instead of being flattened to a generic `token_error` deep inside
-    /// a `ScopedTokenAdapter`/`BearerProvider` boundary. On success the token is
+    /// the typed [`AuthError::ConsentRequired`] BEFORE the command does any
+    /// side-effecting work, and binds the command's specific consent feature
+    /// (the UI's "Grant consent" button for that feature). `consent_required`
+    /// also crosses the `BearerProvider` boundary on its own now
+    /// (`core::reauth::passthrough_code`), but only at the point the scoped call
+    /// is made — possibly after earlier writes landed. On success the token is
     /// cached and the subsequent client call reuses it, so the happy path costs
     /// no extra round trip.
     ///
@@ -615,11 +618,11 @@ impl AppState {
     }
 
     /// Acquires (and caches) the ARM token up front, surfacing a *typed* auth
-    /// error — notably [`AuthError::ConsentRequired`] — before any ARM call.
-    /// The `BearerProvider` boundary flattens errors to `String`, so a command
-    /// that wants the UI to distinguish "needs consent" must probe here first;
-    /// on success the token is cached and the subsequent `ArmClient` call reuses
-    /// it, so the happy path costs no extra round trip. Non-CAE (like the ARM adapter).
+    /// error — notably [`AuthError::ConsentRequired`] — before any ARM call, so
+    /// the command fails before any side effect and can bind the `arm` consent
+    /// feature for the UI's button; on success the token is cached and the
+    /// subsequent `ArmClient` call reuses it, so the happy path costs no extra
+    /// round trip. Non-CAE (like the ARM adapter).
     pub async fn ensure_arm_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
         let scopes = EntraAuthService::resource_default_scopes(self.auth.cloud().arm_resource());
         self.ensure_scoped_token(tenant_id, scopes, false).await
@@ -628,11 +631,9 @@ impl AppState {
     /// Acquires (and caches) the claims-mapping policy token
     /// (`Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All`)
     /// up front, surfacing a *typed* auth error — notably
-    /// [`AuthError::ConsentRequired`] — before any claims-mapping write. The
-    /// `ScopedTokenAdapter` boundary flattens errors to `String` (a
-    /// `consent_required` raised inside a scoped Graph call would reach the UI as
-    /// a generic `token_error`), so an SSO command that wants the UI to show a
-    /// "Grant consent" button must probe here first. On success the token is
+    /// [`AuthError::ConsentRequired`] — before any claims-mapping write, so an
+    /// SSO command fails before its first side effect and the UI's "Grant
+    /// consent" button binds the `policy_write` feature. On success the token is
     /// cached and the subsequent claims Graph call reuses it. CAE (Graph adapter).
     pub async fn ensure_policy_write_token(
         &self,
@@ -644,9 +645,9 @@ impl AppState {
 
     /// Acquires (and caches) the `Sites.FullControl.All` token up front, so a
     /// missing-consent rejection surfaces as the typed
-    /// [`AuthError::ConsentRequired`] (the SharePoint site access section offers a "Grant
-    /// consent" button) instead of being flattened to a generic `token_error`
-    /// inside the scoped SharePoint Graph call. CAE (Graph adapter).
+    /// [`AuthError::ConsentRequired`] before any SharePoint work, bound to the
+    /// `sharepoint` feature the site access section's "Grant consent" button
+    /// requests. CAE (Graph adapter).
     pub async fn ensure_sharepoint_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
         let scopes = self.auth.default_graph_sharepoint_scopes();
         self.ensure_scoped_token(tenant_id, scopes, true).await
@@ -654,10 +655,9 @@ impl AppState {
 
     /// Acquires (and caches) the `GroupMember.ReadWrite.All` token up front, so
     /// a not-yet-consented scope surfaces as the typed
-    /// [`AuthError::ConsentRequired`] (the group-membership panel offers a
-    /// "Grant consent" button) instead of being flattened to a generic
-    /// `token_error` inside the scoped Graph call. CAE, matching the `new_cae`
-    /// adapter that consumes this scope set.
+    /// [`AuthError::ConsentRequired`] before any membership change, bound to the
+    /// `group_membership` feature the panel's "Grant consent" button requests.
+    /// CAE, matching the `new_cae` adapter that consumes this scope set.
     pub async fn ensure_group_member_token(
         &self,
         tenant_id: &str,
@@ -682,10 +682,9 @@ impl AppState {
 
     /// Acquires (and caches) the `outlook.office365.com/Exchange.Manage` token
     /// up front, so a not-yet-consented Exchange scope surfaces as the typed
-    /// [`AuthError::ConsentRequired`] (the Exchange/Permissions views offer a
-    /// "Grant consent" button) instead of being flattened to a generic
-    /// `token_error` inside the `ScopedTokenAdapter`'s `bearer()` call. The
-    /// cached token is reused by the subsequent Exchange admin-API call, so the
+    /// [`AuthError::ConsentRequired`] before any Exchange work (a grant must not
+    /// half-land), bound to the `exchange` feature the Exchange/Permissions
+    /// views' "Grant consent" button requests. The cached token is reused by the subsequent Exchange admin-API call, so the
     /// happy path costs no extra round trip. Note a *consented-but-RBAC-blocked*
     /// user still passes this (a token is issued) and instead gets a 403 from the
     /// admin API. Non-CAE (like the Exchange adapter).

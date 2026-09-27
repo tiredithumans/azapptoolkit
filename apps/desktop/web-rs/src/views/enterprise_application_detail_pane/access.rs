@@ -401,7 +401,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                     reload.update(|n| *n += 1);
                 }
                 Err(e) => {
-                    if e.code == "consent_required" {
+                    if e.is_consent_required() {
                         retry_op.set(Some((add, group_id)));
                     }
                     error.set(Some(e));
@@ -536,7 +536,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
             error
                 .get()
                 .map(|e| {
-                    if e.code == "consent_required" {
+                    if e.is_consent_required() {
                         view! {
                             <Callout tone="warn">
                                 <Body1>

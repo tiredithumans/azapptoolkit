@@ -60,6 +60,9 @@ pub fn ScopeMailboxButton(
     let open = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
+    // Set when the grant failed on a missing Exchange admin-API consent: the
+    // primary action becomes "Grant consent" (mirrors `ScopeSharePointButton`).
+    let needs_consent = RwSignal::new(false);
     // A grant that came back with warnings — shown in the modal until read.
     let warned: RwSignal<Option<ExchangeAccessResult>> = RwSignal::new(None);
     let groups_text = RwSignal::new(String::new());
@@ -118,6 +121,7 @@ pub fn ScopeMailboxButton(
             match outcome {
                 Ok(res) if res.warnings.is_empty() => {
                     open.set(false);
+                    needs_consent.set(false);
                     session.toast_success(format!(
                         "Scoped mailbox access — removed {} org-wide grant(s). Re-run the audit to refresh scores.",
                         res.removed_entra_grants.len()
@@ -130,7 +134,40 @@ pub fn ScopeMailboxButton(
                 // requested were NOT applied, so a success toast would read a
                 // no-op as done. Same rule as the Exchange scoping section's
                 // `grant_result`.
-                Ok(res) => warned.set(Some(res)),
+                Ok(res) => {
+                    needs_consent.set(false);
+                    warned.set(Some(res));
+                }
+                // Both entry points pre-acquire the Exchange token
+                // (`exchange_client_checked`), so a missing consent arrives
+                // typed, before anything was granted or stripped.
+                Err(e) if e.is_consent_required() => {
+                    needs_consent.set(true);
+                    error.set(Some(
+                        "Scoping mailbox access needs the Exchange admin-API scope (Exchange.Manage). Grant consent, then try again.".into(),
+                    ));
+                }
+                Err(e) => error.set(Some(e.message)),
+            }
+            busy.set(false);
+        });
+    });
+
+    let grant_consent = Callback::new(move |()| {
+        if busy.get() {
+            return;
+        }
+        let Some(t) = tenant.get() else {
+            return;
+        };
+        busy.set(true);
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            match auth::request_scope_consent(&t.tenant_id, "exchange").await {
+                Ok(()) => {
+                    needs_consent.set(false);
+                    session.toast_success("Consent granted — select Scope access to continue.");
+                }
                 Err(e) => error.set(Some(e.message)),
             }
             busy.set(false);
@@ -210,20 +247,37 @@ pub fn ScopeMailboxButton(
                             >
                                 "Cancel"
                             </Button>
-                            <Button
-                                appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                on_click=Box::new(move |_| confirm.run(()))
-                                disabled=Signal::derive(move || busy.get())
-                            >
-                                {move || {
-                                    if busy.get() {
-                                        view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
-                                            .into_any()
-                                    } else {
-                                        view! { "Scope access" }.into_any()
+                            <Show
+                                when=move || needs_consent.get()
+                                fallback=move || {
+                                    view! {
+                                        <Button
+                                            appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                            on_click=Box::new(move |_| confirm.run(()))
+                                            disabled=Signal::derive(move || busy.get())
+                                        >
+                                            {move || {
+                                                if busy.get() {
+                                                    view! {
+                                                        <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                    }
+                                                        .into_any()
+                                                } else {
+                                                    view! { "Scope access" }.into_any()
+                                                }
+                                            }}
+                                        </Button>
                                     }
-                                }}
-                            </Button>
+                                }
+                            >
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                    on_click=Box::new(move |_| grant_consent.run(()))
+                                    disabled=Signal::derive(move || busy.get())
+                                >
+                                    "Grant consent"
+                                </Button>
+                            </Show>
                         </div>
                     </div>
                 </div>
@@ -312,7 +366,7 @@ pub fn ScopeSharePointButton(
                         ));
                         on_done.run(target.row_id());
                     }
-                    Err(e) if e.code == "consent_required" => {
+                    Err(e) if e.is_consent_required() => {
                         needs_consent.set(true);
                         error.set(Some(
                             "Granting per-site access needs the SharePoint admin scope (Sites.FullControl.All). Grant consent, then try again.".into(),

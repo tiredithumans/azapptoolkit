@@ -113,11 +113,11 @@ fn dedupe_targets(urls: &[String]) -> Vec<String> {
 
 /// Pre-acquires the `Sites.FullControl.All` token with a typed call — so a
 /// not-yet-consented SharePoint scope surfaces as `consent_required` (the tab
-/// shows a "Grant consent" button) instead of a generic `token_error` from deep
-/// inside the scoped Graph call — then returns the tenant's Graph client.
-/// Mirrors `exchange_client_checked`; every SharePoint command routes its
-/// pre-acquire through here so the "consent_required survives the BearerProvider"
-/// contract lives in one place.
+/// shows a "Grant consent" button for the `sharepoint` feature) before any
+/// SharePoint work starts, rather than partway through it — then returns the
+/// tenant's Graph client. Mirrors `exchange_client_checked`; every SharePoint
+/// command routes its pre-acquire through here so the "consent is checked
+/// before side effects" contract lives in one place.
 async fn sharepoint_client_checked(
     state: &AppState,
     tenant_id: &str,

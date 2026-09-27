@@ -25,11 +25,13 @@
 ///
 /// Generates the ten common variants, `is_retryable` (delegating to
 /// [`crate::http_retry::is_retryable_code`]) and `ui_code` (the single
-/// variant-to-wire-code table). The `Token` arm passes an auth classification
-/// through via [`crate::reauth::passthrough_code`] rather than flattening it —
-/// flattening is what once made `is_reauth_fatal` unfirable for every client
-/// call, so a fan-out warned its way through a dead session and returned a
-/// partial result the UI presented as complete.
+/// variant-to-wire-code table). The `Token` arm passes every classified auth
+/// code through via [`crate::reauth::passthrough_code`] rather than flattening
+/// it — only the re-auth-fatal ones halt a fan-out; the rest (`consent_required`,
+/// a refresh-time `network_error`) reach the UI's recovery action or the retry
+/// policy. Flattening is what once made `is_reauth_fatal` unfirable for every
+/// client call, so a fan-out warned its way through a dead session and returned
+/// a partial result the UI presented as complete.
 ///
 /// `ui_hint` is deliberately NOT generated: it is the one method that genuinely
 /// differs per crate (each names a different Azure RBAC role from the
@@ -129,8 +131,9 @@ macro_rules! http_error_enum {
                     $name::Server { .. } => "server_error",
                     $name::Network(_) => "network_error",
                     $name::Deserialize(_) => "deserialize_error",
-                    // Pass an auth classification through instead of flattening
-                    // it: `is_reauth_fatal` is what stops a long-running fan-out.
+                    // Pass every classified auth code through instead of
+                    // flattening it: the fatal ones stop a long-running fan-out,
+                    // the rest reach their recovery action / the retry policy.
                     $name::Token(t) => {
                         $crate::reauth::passthrough_code(&t.code).unwrap_or("token_error")
                     }

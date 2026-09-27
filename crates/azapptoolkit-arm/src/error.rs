@@ -30,8 +30,9 @@ impl ArmError {
                     .map(|c| c.remediation)
             }
             ArmError::Unauthorized => Some(
-                "Your Azure Resource Manager token was rejected. Sign out and back in; if it \
-                 persists, confirm the app has consented the management.azure.com scope.",
+                "Your Azure Resource Manager token was rejected. Use \"Refresh token\" (next to \
+                 Sign out), then retry; if it persists, confirm the app has consented the \
+                 management.azure.com scope.",
             ),
             _ => None,
         }
@@ -124,7 +125,13 @@ mod tests {
             .ui_hint()
             .expect("forbidden has a hint");
         assert!(f.contains("Reader"));
-        assert!(ArmError::Unauthorized.ui_hint().is_some());
+        // A 401 points at the in-place lever, never at signing out (which
+        // would drop every data cache).
+        let u = ArmError::Unauthorized
+            .ui_hint()
+            .expect("unauthorized has a hint");
+        assert!(u.contains("Refresh token"), "{u}");
+        assert!(!u.contains("Sign out and back in"), "{u}");
         // Non-authz variants carry no role hint.
         assert!(ArmError::NotFound(String::new()).ui_hint().is_none());
         assert!(ArmError::Token("x".into()).ui_hint().is_none());

@@ -78,8 +78,9 @@ impl ExchangeError {
             ExchangeError::Api { .. } => "exchange_error",
             ExchangeError::Network(_) => "network_error",
             ExchangeError::Deserialize(_) => "deserialize_error",
-            // Pass an auth classification through instead of flattening it:
-            // `is_reauth_fatal` is what stops a long-running fan-out.
+            // Pass every classified auth code through instead of flattening
+            // it: the fatal ones stop a long-running fan-out, the rest reach
+            // their recovery action / the retry policy.
             ExchangeError::Token(t) => {
                 azapptoolkit_core::reauth::passthrough_code(&t.code).unwrap_or("token_error")
             }
@@ -129,9 +130,9 @@ impl ExchangeError {
                  account holds the \"Role Management\" role (e.g. Organization Management).",
             ),
             ExchangeError::Unauthorized => Some(
-                "Your Exchange admin-API token was rejected. Sign out and back in; if it persists, \
-                 confirm the app registration has the delegated \"Office 365 Exchange Online → \
-                 Exchange.Manage\" permission with admin consent.",
+                "Your Exchange admin-API token was rejected. Use \"Refresh token\" (next to Sign \
+                 out), then retry; if it persists, confirm the app registration has the delegated \
+                 \"Office 365 Exchange Online → Exchange.Manage\" permission with admin consent.",
             ),
             _ => None,
         }
@@ -267,5 +268,15 @@ mod tests {
         assert!(no_diag.contains("stale"));
         assert!(no_diag.contains("propagat"));
         assert!(no_diag.contains("Role Management"));
+    }
+
+    #[test]
+    fn unauthorized_hint_points_at_refresh_token_not_sign_out() {
+        let u = ExchangeError::Unauthorized
+            .ui_hint()
+            .expect("unauthorized has a hint");
+        assert!(u.contains("Refresh token"), "{u}");
+        assert!(!u.contains("Sign out and back in"), "{u}");
+        assert!(u.contains("Exchange.Manage"), "{u}");
     }
 }

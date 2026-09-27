@@ -720,15 +720,37 @@ mod tests {
 
     #[test]
     fn report_command_error_plain_toast_for_other_codes() {
+        // A failure with no out-of-band recovery — a transient one the caller
+        // re-runs itself (the sink never holds the closure to replay it), or a
+        // permanent one no single round trip fixes — stays a plain toast.
+        for code in ["network", "network_error", "forbidden", "token_error"] {
+            with_session(|session| {
+                session.report_command_error(&UiError::new(code, "down", true));
+                session.toasts.with_untracked(|list| {
+                    assert_eq!(list.len(), 1);
+                    let t = &list[0];
+                    assert!(matches!(t.kind, ToastKind::Error));
+                    assert_eq!(t.message, "down");
+                    assert!(
+                        t.action_label.is_none(),
+                        "`{code}`: a failure with no out-of-band recovery gets a plain toast"
+                    );
+                    assert!(t.action.is_none());
+                });
+            });
+        }
+        // The counter-case: a rejected token (401) used to land here too, as a
+        // bare "unauthorized (401)" with no way forward. It now has a lever.
         with_session(|session| {
-            session.report_command_error(&UiError::new("network", "down", true));
+            session.report_command_error(&UiError::new(
+                "unauthorized",
+                "unauthorized (401)",
+                false,
+            ));
             session.toasts.with_untracked(|list| {
                 assert_eq!(list.len(), 1);
-                let t = &list[0];
-                assert!(matches!(t.kind, ToastKind::Error));
-                assert_eq!(t.message, "down");
-                assert!(t.action_label.is_none(), "non-auth error needs no action");
-                assert!(t.action.is_none());
+                assert_eq!(list[0].action_label.as_deref(), Some("Refresh token"));
+                assert!(list[0].action.is_some());
             });
         });
     }

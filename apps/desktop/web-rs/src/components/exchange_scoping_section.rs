@@ -684,7 +684,7 @@ pub fn ExchangeScopingSection(
                                                 .into_any()
                                         }
                                         Err(e) => {
-                                            let needs_consent = e.code == "consent_required";
+                                            let needs_consent = e.is_consent_required();
                                             view! {
                                                 <Callout tone="warn">
                                                     <Body1>{e.message}</Body1>

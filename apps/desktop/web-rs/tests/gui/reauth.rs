@@ -65,3 +65,63 @@ async fn non_auth_error_shows_plain_toast_without_reauth_action() {
         "a non-session error must not offer a re-authenticate action",
     );
 }
+
+/// A rejected access token (`unauthorized`, a client 401 — e.g. a CAE claims
+/// challenge the silent re-mint couldn't satisfy) used to be a bare
+/// "unauthorized (401)" toast. It now offers the top bar's "Refresh token" lever
+/// in place, which re-mints silently for the active tenant.
+#[wasm_bindgen_test]
+async fn unauthorized_error_offers_refresh_token_action() {
+    ts::reset();
+    ts::mock_ok("refresh_session", &());
+    let m = ts::mount_view(|| view! { <ToastHost /> });
+
+    m.session
+        .report_command_error(&fixtures::ui_error("unauthorized", "unauthorized (401)"));
+
+    ts::wait_for(|| ts::query(".toast__action").is_some()).await;
+    assert_eq!(ts::text(".toast__action"), "Refresh token");
+
+    ts::click(".toast__action");
+    ts::wait_for(|| ts::call_count("refresh_session") == 1).await;
+    let call = ts::last_call("refresh_session").expect("refresh_session called");
+    assert_eq!(
+        call.arg_str("tenantId").as_deref(),
+        Some("test-tenant"),
+        "the refresh must target the active tenant",
+    );
+    ts::wait_for(|| ts::body_contains("Token refreshed")).await;
+    assert_eq!(
+        ts::call_count("reauthenticate"),
+        0,
+        "a successful silent refresh needs no interactive round trip",
+    );
+}
+
+/// The 401 toast shares `Session::refresh_token_in_place` with the top bar, so
+/// a refresh that finds the session dead falls back to ONE interactive
+/// re-authentication in place — never a sign-out.
+#[wasm_bindgen_test]
+async fn unauthorized_refresh_falls_back_to_reauth_on_a_dead_session() {
+    ts::reset();
+    ts::mock_err(
+        "refresh_session",
+        &fixtures::ui_error("refresh_missing", "gone"),
+    );
+    ts::mock_ok(
+        "reauthenticate",
+        &SignInOutcome {
+            tenant: ts::test_tenant(),
+        },
+    );
+    let m = ts::mount_view(|| view! { <ToastHost /> });
+
+    m.session
+        .report_command_error(&fixtures::ui_error("unauthorized", "unauthorized (401)"));
+
+    ts::wait_for(|| ts::query(".toast__action").is_some()).await;
+    ts::click(".toast__action");
+    ts::wait_for(|| ts::call_count("reauthenticate") == 1).await;
+    assert_eq!(ts::call_count("refresh_session"), 1);
+    assert_eq!(ts::call_count("sign_out"), 0, "never a sign-out");
+}

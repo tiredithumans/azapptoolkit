@@ -57,7 +57,7 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
             match usage::get_app_graph_usage(&t.tenant_id, &app_id, 90).await {
                 Ok(r) => result.set(Some(r)),
                 Err(e) => {
-                    consent_needed.set(e.code == "consent_required");
+                    consent_needed.set(e.is_consent_required());
                     unavailable.set(e.code == "usage_unavailable");
                     error.set(Some(e.message));
                 }

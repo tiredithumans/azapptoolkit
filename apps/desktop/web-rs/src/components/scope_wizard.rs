@@ -628,7 +628,7 @@ pub fn ScopeWizard(
                     close();
                 }
                 Err(e) => {
-                    if e.code == "consent_required" {
+                    if e.is_consent_required() {
                         needs_consent.set(true);
                     }
                     error.set(Some(e.message));

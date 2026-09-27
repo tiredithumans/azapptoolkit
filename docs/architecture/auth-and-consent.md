@@ -72,16 +72,23 @@ that seeds the token cache so the next silent acquisition succeeds. The UI reach
 
 **The front-end has one shared fallback.** `Session::report_consent_required` is the consent twin of
 `report_if_session_dead`: any command failing `consent_required` raises a toast offering the grant,
-so a missing consent is recoverable even where no bespoke button exists. `CommandState` carries the
+so a missing consent is recoverable even where no bespoke button exists — from the toast path
+(`run_toast_err`) and the inline-error path (`run`, which keeps its inline text too) alike, both via
+`Session::report_recovery_action`. `CommandState` carries the
 scope set to offer as `consent_feature`, defaulting to `"write"` — the Graph write scopes, which are
 consented lazily on first write and which, before this, had no grant path anywhere in the UI. A
 component whose mutations ride an on-demand feature scope overrides it
 (`use_command().with_consent_feature("exchange")`); offering the wrong set is a real bug this repo
 has shipped, when the scope wizard offered the Exchange scopes for a failed org-wide Graph grant.
 
-**Pre-acquire typed tokens so `consent_required` survives to the UI.** The `BearerProvider`
-boundary flattens errors to `String`, so a command that wants the UI to show a "Grant consent"
-button must pre-acquire the token with a typed call (e.g. `AppState::ensure_arm_token`,
+**`consent_required` crosses the `BearerProvider` boundary; pre-acquire anyway where it matters.**
+`token_adapter::token_error` carries the classification as `TokenError { code }`, and every client's
+`Token` arm passes it through (`core::reauth::passthrough_code` — the re-auth-fatal codes plus the
+non-fatal `PASSTHROUGH_NON_FATAL_CODES`: `consent_required`, and `network_error` for a refresh that
+couldn't reach the token endpoint, which so stays retryable). So the shared toast fallback fires for
+any command whose scoped call hits a missing consent. Pre-acquire the token with a typed call anyway
+when the command has side effects before the scoped call (a grant must not half-land before it
+discovers the gap) or needs a specific feature's button (e.g. `AppState::ensure_arm_token`,
 `ensure_policy_write_token`, `ensure_sharepoint_token`, `ensure_audit_log_token`,
 `ensure_exchange_token`, `ensure_group_member_token`, or `ensure_log_analytics_token`). Examples:
 
@@ -110,13 +117,20 @@ which a sign-out/sign-in cycle would.
 
 - It takes the full `TenantContext`, not a bare tenant id, because `InvalidGrant` purges
   `known_tenants` — the front-end still holds the context in `active_tenant`.
-- Front-end wiring: the top-bar **Refresh Token** button (`shell.rs`, next to the tenant chip)
-  tries silent `refresh_session` first, then falls back to `reauthenticate` on those two codes.
-  `Session::report_command_error(&UiError)` — the central error sink;
-  `use_command::run_toast_err` routes through it — shows a **Re-authenticate** toast action keyed
-  on the same two codes, else a plain error toast.
-- **Adding a new re-auth-fatal code → extend BOTH `matches!` sets** (`state.rs` + `shell.rs`);
-  they must stay in lockstep or the button and the toast disagree.
+- Front-end wiring: `Session::refresh_token_in_place` tries silent `refresh_session` first, then
+  falls back to `reauthenticate` on those two codes. It is shared by the top-bar **Refresh token**
+  button (`shell.rs`, next to the tenant chip) and the 401 toast below.
+  `Session::report_recovery_action` is the one ordering of the recovery toasts — dead session
+  (**Re-authenticate**) → rejected token (**Refresh token**) → missing consent (**Grant consent**) —
+  used by both `report_command_error_for` (the central sink behind `run_toast_err`; anything else
+  is a plain error toast) and `CommandState::run` (inline-error surfaces, which keep their inline
+  text as well).
+- `unauthorized` (a client 401 — a revoked token, or a CAE claims challenge the silent re-mint
+  couldn't satisfy) gets the **Refresh token** action but is deliberately NOT re-auth-fatal: one
+  401 doesn't prove the session dead, so a fan-out keeps going. The Exchange/Key Vault/ARM 401
+  hints and `premium_feature_err` point at the same control, never at signing out.
+- **Adding a new re-auth-fatal code → add it to `core::reauth::REAUTH_FATAL_CODES`, nothing
+  else**; every predicate and client pass-through reads that slice.
 
 ## Capability catalog — role/scope feedback rides one source of truth
 

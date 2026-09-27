@@ -354,7 +354,7 @@ pub fn ManagedIdentityDetailPane(
                         // The signed-in user (or tenant admin) hasn't
                         // consented to ARM yet. Offer to run interactive
                         // incremental consent, then the resource re-runs.
-                        Err(e) if e.code == "consent_required" => {
+                        Err(e) if e.is_consent_required() => {
                             let on_consent = move |_| {
                                 if consenting.get() {
                                     return;

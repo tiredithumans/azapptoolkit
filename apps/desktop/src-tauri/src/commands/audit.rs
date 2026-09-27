@@ -1295,7 +1295,7 @@ async fn prefetch_sign_in_activity(
         },
         Err(err) => {
             let ui = UiError::from(err);
-            let consent_required = ui.code == "consent_required";
+            let consent_required = ui.is_consent_required();
             tracing::info!(
                 code = %ui.code,
                 "AuditLog.Read.All token unavailable; skipping unused-app detection"

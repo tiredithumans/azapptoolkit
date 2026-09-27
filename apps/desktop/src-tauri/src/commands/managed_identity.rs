@@ -197,10 +197,10 @@ pub async fn list_managed_identity_azure_roles(
     principal_id: String,
 ) -> Result<AzureRolesResult, UiError> {
     // Acquire the ARM token up front so a missing-consent rejection surfaces as
-    // the typed `consent_required` code (the UI offers an interactive consent
-    // button) instead of being flattened to a generic `token_error` deep inside
-    // the ARM client. On success the token is cached and the call below reuses
-    // it — no extra round trip on the happy path.
+    // the typed `consent_required` code before any ARM call, bound to the `arm`
+    // feature the UI's interactive consent button requests. On success the
+    // token is cached and the call below reuses it — no extra round trip on the
+    // happy path.
     state
         .ensure_arm_token(&tenant_id)
         .await

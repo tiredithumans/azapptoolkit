@@ -86,7 +86,9 @@ pub(crate) fn premium_feature_err(
         ),
         GraphError::Unauthorized => msg(
             false,
-            format!("Your session expired. Sign in again to view {feature}."),
+            format!(
+                "Your access token was rejected. Use \"Refresh token\" (next to Sign out), then reopen {feature}."
+            ),
         ),
         GraphError::Throttled { .. } | GraphError::Server { .. } | GraphError::Network(_) => msg(
             true,
@@ -157,5 +159,18 @@ mod tests {
         );
         assert!(transient.retryable);
         assert!(!transient.message.contains("secret-internal"));
+    }
+
+    #[test]
+    fn a_rejected_token_points_at_refresh_token_not_sign_in() {
+        let e = premium_feature_err(
+            "ca_unavailable",
+            "Conditional Access",
+            "Conditional Access",
+            "Policy.Read.All",
+            GraphError::Unauthorized,
+        );
+        assert!(e.message.contains("Refresh token"), "{}", e.message);
+        assert!(!e.message.contains("Sign in again"), "{}", e.message);
     }
 }

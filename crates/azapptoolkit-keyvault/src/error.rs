@@ -33,8 +33,9 @@ impl KeyVaultError {
                     .map(|c| c.remediation)
             }
             KeyVaultError::Unauthorized => Some(
-                "Your Key Vault token was rejected. Sign out and back in; if it persists, confirm \
-                 the app has consented the vault.azure.net scope.",
+                "Your Key Vault token was rejected. Use \"Refresh token\" (next to Sign out), \
+                 then retry; if it persists, confirm the app has consented the vault.azure.net \
+                 scope.",
             ),
             _ => None,
         }
@@ -52,7 +53,13 @@ mod tests {
             .ui_hint()
             .expect("forbidden has a hint");
         assert!(f.contains("Key Vault Secrets Officer"));
-        assert!(KeyVaultError::Unauthorized.ui_hint().is_some());
+        // A 401 points at the in-place lever, never at signing out (which
+        // would drop every data cache).
+        let u = KeyVaultError::Unauthorized
+            .ui_hint()
+            .expect("unauthorized has a hint");
+        assert!(u.contains("Refresh token"), "{u}");
+        assert!(!u.contains("Sign out and back in"), "{u}");
         // Non-authz variants carry no role hint.
         assert!(KeyVaultError::NotFound(String::new()).ui_hint().is_none());
         assert!(KeyVaultError::InvalidName("x".into()).ui_hint().is_none());

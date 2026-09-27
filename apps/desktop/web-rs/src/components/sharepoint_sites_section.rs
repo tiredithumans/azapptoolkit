@@ -70,7 +70,7 @@ pub fn SharePointSitesSection(
             let r = sharepoint::list_site_permissions(&t.tenant_id, &url).await;
             match &r {
                 Ok(_) => needs_consent.set(false),
-                Err(e) if e.code == "consent_required" => needs_consent.set(true),
+                Err(e) if e.is_consent_required() => needs_consent.set(true),
                 Err(_) => {}
             }
             r
@@ -110,7 +110,7 @@ pub fn SharePointSitesSection(
                 reload.update(|n| *n += 1);
             },
             move |e| {
-                if e.code == "consent_required" {
+                if e.is_consent_required() {
                     needs_consent.set(true);
                 }
                 cmd.error.set(Some(e.message));
@@ -151,7 +151,7 @@ pub fn SharePointSitesSection(
                 reload.update(|n| *n += 1);
             },
             move |e| {
-                if e.code == "consent_required" {
+                if e.is_consent_required() {
                     needs_consent.set(true);
                 }
                 cmd.error.set(Some(e.message));
@@ -314,7 +314,7 @@ pub fn SharePointSitesSection(
                                         }
                                         // Consent is surfaced by the banner above; don't also
                                         // echo the raw 403 body here.
-                                        Err(e) if e.code == "consent_required" => ().into_any(),
+                                        Err(e) if e.is_consent_required() => ().into_any(),
                                         Err(e) => {
                                             view! { <Body1 class="form-error">{e.message}</Body1> }
                                                 .into_any()

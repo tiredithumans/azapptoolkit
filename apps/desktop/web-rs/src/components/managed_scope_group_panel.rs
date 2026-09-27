@@ -253,7 +253,7 @@ pub fn ManagedScopeGroupPanel(
                 match group_state.get() {
                     None => view! { <Body1 class="hint">"Loading…"</Body1> }.into_any(),
                     Some(Err(e)) => {
-                        let needs_consent = e.code == "consent_required";
+                        let needs_consent = e.is_consent_required();
                         view! {
                             <Callout tone="warn">
                                 <Body1>{e.message}</Body1>

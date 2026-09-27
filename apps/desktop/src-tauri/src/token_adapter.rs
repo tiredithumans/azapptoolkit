@@ -9,23 +9,41 @@ use async_trait::async_trait;
 use azapptoolkit_auth::{AuthError, EntraAuthService};
 use azapptoolkit_core::token::{BearerProvider, TokenError};
 
-/// Carries the auth classification across the `BearerProvider` boundary.
+use crate::dto::UiError;
+
+/// Carries the auth classification across the `BearerProvider` boundary — the
+/// sole mapping from `AuthError` to `TokenError`.
 ///
 /// This is the ONLY place that knows both `AuthError` and `TokenError`, and it
-/// is what lets a client call report a dead session: without it every token
-/// failure reached the command layer as the undifferentiated `token_error`, so
+/// is what lets a client call report a dead session (and a missing consent, and
+/// a refresh-time network outage): without it every token failure reached the
+/// command layer as the undifferentiated `token_error`, so
 /// `UiError::is_reauth_fatal` never fired for a Graph/Exchange/Key Vault/ARM
 /// call and long-running fan-outs warned their way through a session that was
-/// already gone. The codes must match `UiError`'s — `From<AuthError> for
-/// UiError` is the source of truth for the mapping.
+/// already gone.
+///
+/// It no longer keeps its own code table: `From<AuthError> for UiError` is the
+/// one classification, and this only translates its auth-plane code into the
+/// client plane ([`client_plane_code`]). The message is unchanged — that
+/// conversion builds it from `err.to_string()`.
 fn token_error(err: AuthError) -> TokenError {
-    let code = match &err {
-        AuthError::NotSignedIn => "not_signed_in",
-        AuthError::RefreshTokenMissing(_) | AuthError::InvalidGrant(_) => "refresh_missing",
-        AuthError::ConsentRequired(_) => "consent_required",
-        _ => "token_error",
-    };
-    TokenError::new(code, err.to_string())
+    let ui = UiError::from(err);
+    TokenError::new(client_plane_code(&ui.code), ui.message)
+}
+
+/// Auth-plane `UiError` code → the code a client's `Token` arm understands
+/// (`core::reauth::passthrough_code`); anything unclassified is `token_error`.
+///
+/// `TokenExchange` (auth-plane `token_exchange`) deliberately stays
+/// `token_error`: `post_token` reports every unrecognised non-2xx — 4xx
+/// included — that way, so calling it transient would retry permanent failures.
+fn client_plane_code(auth_code: &str) -> &'static str {
+    match auth_code {
+        // The auth plane spells a transport failure `network` (From<AuthError>:
+        // Http); the client plane and `http_retry` spell it `network_error`.
+        "network" => "network_error",
+        c => azapptoolkit_core::reauth::passthrough_code(c).unwrap_or("token_error"),
+    }
 }
 
 pub struct ScopedTokenAdapter {
@@ -96,5 +114,99 @@ impl BearerProvider for ScopedTokenAdapter {
             .await
             .map_err(token_error)?;
         Ok(std::mem::take(&mut token.token))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use azapptoolkit_graph::GraphError;
+
+    /// Every constructible `AuthError` (the same cases as dto's
+    /// `auth_error_maps_to_stable_code_and_retryable`) and the code it must
+    /// carry across the `BearerProvider` boundary. `AuthError` isn't `Clone`,
+    /// so each case is a constructor.
+    /// A constructor for one `AuthError` case and its boundary code.
+    type Case = (fn() -> AuthError, &'static str);
+
+    fn cases() -> Vec<Case> {
+        vec![
+            (|| AuthError::NotSignedIn, "not_signed_in"),
+            (
+                || AuthError::RefreshTokenMissing("tenant".into()),
+                "refresh_missing",
+            ),
+            (
+                || AuthError::InvalidGrant("invalid_grant".into()),
+                "refresh_missing",
+            ),
+            (
+                || AuthError::ConsentRequired("AADSTS65001".into()),
+                "consent_required",
+            ),
+            (
+                || AuthError::TokenExchange("HTTP 400".into()),
+                "token_error",
+            ),
+            (|| AuthError::Authorization("boom".into()), "token_error"),
+            (|| AuthError::Loopback("boom".into()), "token_error"),
+            (|| AuthError::StateMismatch, "token_error"),
+            (|| AuthError::Cancelled, "token_error"),
+            (|| AuthError::Keyring("locked".into()), "token_error"),
+            (
+                || AuthError::Url(reqwest::Url::parse("http://[bad").unwrap_err()),
+                "token_error",
+            ),
+            (
+                || AuthError::Serde(serde_json::from_str::<i32>("nope").unwrap_err()),
+                "token_error",
+            ),
+            (
+                || AuthError::Io(std::io::Error::other("disk")),
+                "token_error",
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_classified_auth_error_crosses_the_boundary_with_its_code() {
+        for (make, code) in cases() {
+            let tok = token_error(make());
+            assert_eq!(tok.code, code, "boundary code for {:?}", make());
+            // Derived from the one classification table, not a copy of it.
+            assert_eq!(tok.code, client_plane_code(&UiError::from(make()).code));
+            assert_eq!(tok.message, make().to_string(), "message unchanged");
+        }
+    }
+
+    #[test]
+    fn a_network_failure_during_refresh_stays_retryable() {
+        assert_eq!(client_plane_code("network"), "network_error");
+
+        // reqwest defers an unparseable URL to `build()`, which is the one
+        // public way to get a `reqwest::Error` without a live socket.
+        let http = reqwest::Client::new()
+            .get("not a url")
+            .build()
+            .expect_err("an unparseable URL fails to build");
+        let tok = token_error(AuthError::Http(http));
+        assert_eq!(tok.code, "network_error");
+        assert!(GraphError::Token(tok.clone()).is_retryable());
+        let ui = UiError::from(GraphError::Token(tok));
+        assert_eq!(ui.code, "network_error");
+        assert!(ui.retryable);
+    }
+
+    #[test]
+    fn the_three_client_facing_codes_survive_into_a_graph_error() {
+        let makers: [fn() -> AuthError; 3] = [
+            || AuthError::NotSignedIn,
+            || AuthError::InvalidGrant("invalid_grant".into()),
+            || AuthError::ConsentRequired("AADSTS65001".into()),
+        ];
+        for make in makers {
+            let through_graph = UiError::from(GraphError::Token(token_error(make())));
+            assert_eq!(through_graph.code, UiError::from(make()).code);
+        }
     }
 }

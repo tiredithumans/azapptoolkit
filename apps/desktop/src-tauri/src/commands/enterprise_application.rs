@@ -261,8 +261,9 @@ pub async fn list_sp_group_memberships(
 
 /// Adds the service principal as a member of `group_id`. Pre-acquires the
 /// `GroupMember.ReadWrite.All` token with a typed call so a not-yet-consented
-/// scope reaches the UI as `consent_required` (the panel offers "Grant
-/// consent & retry") instead of a flattened `token_error`.
+/// scope reaches the UI as `consent_required` before the membership write,
+/// bound to the `group_membership` feature the panel's "Grant consent & retry"
+/// requests.
 #[tauri::command]
 pub async fn add_sp_to_group(
     state: State<'_, AppState>,

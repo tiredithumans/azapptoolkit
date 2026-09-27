@@ -23,15 +23,17 @@ pub fn ScopeUnavailableBanner(
     #[prop(into)]
     on_retry: Callback<()>,
 ) -> impl IntoView {
-    let cmd = use_command();
-    let needs_consent = error.code == "consent_required";
+    // The feature key is stated once: it is both what this banner's button
+    // consents and what `cmd.run`'s own recovery toast would offer.
+    let cmd = use_command().with_consent_feature("exchange");
+    let needs_consent = error.is_consent_required();
     let message = error.message.clone();
 
     let on_consent = move |_| {
         cmd.run(
             move |()| on_retry.run(()),
             move |tenant_id| async move {
-                auth::request_scope_consent(&tenant_id, "exchange").await
+                auth::request_scope_consent(&tenant_id, cmd.consent_feature).await
             },
         );
     };

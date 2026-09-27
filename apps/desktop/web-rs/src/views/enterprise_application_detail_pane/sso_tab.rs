@@ -668,7 +668,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 reload.update(|n| *n = n.wrapping_add(1));
             },
             move |e| {
-                if e.code == "consent_required" {
+                if e.is_consent_required() {
                     needs_consent.set(true);
                 }
                 session.report_command_error(&e);

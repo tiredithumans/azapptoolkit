@@ -97,10 +97,9 @@ pub fn AppShell(children: Children) -> impl IntoView {
 
     // Re-mints the session's tokens in place (no sign-out) so a role activated
     // after sign-in — e.g. an "Exchange Administrator" PIM role — takes effect.
-    // Tries the silent refresh first; if the session is dead (an expired/revoked
-    // or missing refresh token, surfaced as `refresh_missing`/`not_signed_in`),
-    // it falls back to one interactive browser round trip — still no sign-out, so
-    // the cached lists + audit run survive. The in-flight guard prevents a
+    // `Session::refresh_token_in_place` tries the silent refresh first and, on a
+    // dead session, falls back to one interactive browser round trip — still no
+    // sign-out, so the cached lists + audit run survive. The in-flight guard prevents a
     // double-click from racing two refreshes; `reauthing` flips the label while
     // the browser flow is open.
     let refreshing = RwSignal::new(false);
@@ -113,39 +112,8 @@ pub fn AppShell(children: Children) -> impl IntoView {
         if let Some(t) = tenant.get() {
             refreshing.set(true);
             leptos::task::spawn_local(async move {
-                match crate::bindings::auth::refresh_session(&t.tenant_id).await {
-                    Ok(()) => {
-                        // Re-applied roles may change access, so re-run a mounted
-                        // Access Readiness checklist (this is its only re-check).
-                        session.bump_readiness_reload();
-                        session.toast_success(
-                            "Token refreshed — roles activated since sign-in now apply. \
-                             Retry the action that failed.",
-                        );
-                    }
-                    Err(e) if e.is_reauth_fatal() => {
-                        // Silent re-mint can't fix a dead refresh token; re-auth
-                        // interactively in place rather than dumping the user to
-                        // the sign-in screen.
-                        reauthing.set(true);
-                        match crate::bindings::auth::reauthenticate(&t).await {
-                            Ok(_) => {
-                                session.bump_readiness_reload();
-                                session.toast_success(
-                                    "Re-authenticated — retry the action that failed.",
-                                )
-                            }
-                            Err(e) => session.toast_error(
-                                format!("Couldn't re-authenticate: {}", e.message),
-                                None,
-                            ),
-                        };
-                        reauthing.set(false);
-                    }
-                    Err(e) => {
-                        session.toast_error(format!("Couldn't refresh token: {}", e.message), None);
-                    }
-                }
+                // One implementation, shared with the 401 toast's action.
+                session.refresh_token_in_place(t, Some(reauthing)).await;
                 refreshing.set(false);
             });
         }

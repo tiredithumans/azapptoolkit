@@ -104,8 +104,9 @@ pub(crate) fn exchange_client(
 
 /// Like [`exchange_client`] but first pre-acquires the `Exchange.Manage` token
 /// with a typed call, so a not-yet-consented Exchange scope surfaces as the
-/// typed `consent_required` (the UI offers a "Grant consent" button) instead of
-/// being flattened to a generic `token_error` deep inside the admin-API call.
+/// typed `consent_required` (the UI offers a "Grant consent" button for the
+/// `exchange` feature) before any admin-API work — a multi-step grant must not
+/// half-land before the scoped call discovers the missing consent.
 /// Mirrors the SharePoint/ARM/audit `ensure_*_token` pre-acquire pattern. A
 /// *consented-but-RBAC-blocked* user passes this and instead gets an actionable
 /// 403 from the admin API (see `ExchangeError::ui_hint`).

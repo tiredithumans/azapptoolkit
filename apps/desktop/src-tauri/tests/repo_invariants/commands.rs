@@ -73,6 +73,70 @@ fn inline_notice_markup_lives_only_in_the_callout_primitive() {
     );
 }
 
+/// A missing consent is recognised by ONE predicate, `UiError::is_consent_required`.
+///
+/// Twenty-odd surfaces compared `e.code == "consent_required"` by hand, so the
+/// literal was restated at every consumer — the drift `core::reauth` exists to
+/// prevent for the re-auth-fatal codes. The helper reads the one literal in
+/// `core::reauth::CONSENT_REQUIRED`; a hand-rolled compare in the frontend or
+/// the command layer is the bypass. (A `match` arm on the code, as the sign-in
+/// hint table uses, is not a compare and is not matched.)
+#[test]
+fn consent_required_is_recognised_only_through_the_ui_error_helper() {
+    let desktop = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("apps/desktop");
+    let roots = [
+        desktop.join("web-rs/src"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/commands"),
+    ];
+    let mut scanned = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+    for root in roots {
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let Ok(src) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                scanned += 1;
+                let squashed: String = src.split_whitespace().collect();
+                if squashed.contains("==\"consent_required\"")
+                    || squashed.contains("!=\"consent_required\"")
+                {
+                    offenders.push(
+                        path.strip_prefix(desktop)
+                            .unwrap_or(&path)
+                            .display()
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        scanned > 50,
+        "the scan found almost no sources ({scanned}) — wrong root?"
+    );
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "hand-rolled `consent_required` compares: {offenders:#?}\n\
+         Use `UiError::is_consent_required()` (one literal, in core::reauth::CONSENT_REQUIRED)."
+    );
+}
+
 /// A scope remediation must be gated on a POSITIVE "this resource can be
 /// confined" test, never on the negation of a legacy/unscopable test.
 ///

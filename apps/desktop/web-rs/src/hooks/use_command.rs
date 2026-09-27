@@ -77,11 +77,15 @@ impl CommandState {
     /// Run a mutating command, storing any error message in `error` (cleared at
     /// start). On `Ok` runs `on_ok(value)`. The common case.
     ///
-    /// A missing admin consent additionally raises the shared sink's "Grant
-    /// consent" toast: it is the one failure the inline message can never
-    /// resolve — the scope exists only after an interactive round trip — so
-    /// leaving it as `error` text alone is a dead end, which is exactly what
-    /// every write-scope failure used to be.
+    /// Three failures additionally raise the shared sink's recovery toast
+    /// (`Session::report_recovery_action`): a dead session ("Re-authenticate"),
+    /// a rejected token ("Refresh token") and a missing admin consent ("Grant
+    /// consent"). The inline message can never resolve any of them — each needs
+    /// an out-of-band round trip — so leaving them as `error` text alone is a
+    /// dead end, which is exactly what every expired session and write-scope
+    /// failure used to be here. It follows the sink's own rule
+    /// (`report_if_session_dead`: surfaces with their own error affordance call
+    /// it first). See [`fail_inline`](Self::fail_inline).
     pub fn run<T, Fut>(
         &self,
         on_ok: impl FnOnce(T) + 'static,
@@ -90,18 +94,19 @@ impl CommandState {
         Fut: std::future::Future<Output = Result<T, azapptoolkit_dto::UiError>> + 'static,
         T: 'static,
     {
-        let error = self.error;
-        let session = self.session;
-        let feature = self.consent_feature;
-        error.set(None);
-        self.run_with(
-            on_ok,
-            move |e| {
-                session.report_consent_required(&e, feature);
-                error.set(Some(e.message));
-            },
-            op,
-        );
+        let this = *self;
+        self.error.set(None);
+        self.run_with(on_ok, move |e| this.fail_inline(e), op);
+    }
+
+    /// The inline-error failure path of [`run`](Self::run): the recovery toast
+    /// (dead session → rejected token → consent) when one applies — never a
+    /// plain toast, the inline `error` IS this surface's message — and always
+    /// the inline text. Synchronous so it is testable without spawning.
+    pub(crate) fn fail_inline(self, e: azapptoolkit_dto::UiError) {
+        self.session
+            .report_recovery_action(&e, self.consent_feature);
+        self.error.set(Some(e.message));
     }
 
     /// Like [`run`](Self::run) but reports failures via a `toast_error` instead
@@ -195,5 +200,52 @@ mod tests {
                 "exchange"
             );
         });
+    }
+
+    fn inline_failure(
+        code: &str,
+        cmd: impl FnOnce() -> CommandState,
+    ) -> (Vec<Option<String>>, Option<String>) {
+        Owner::new().with(|| {
+            provide_session();
+            let cmd = cmd();
+            cmd.fail_inline(azapptoolkit_dto::UiError::new(code, "gone", false));
+            let labels = use_session()
+                .toasts
+                .with_untracked(|list| list.iter().map(|t| t.action_label.clone()).collect());
+            (labels, cmd.error.get_untracked())
+        })
+    }
+
+    #[test]
+    fn an_inline_failure_on_a_dead_session_offers_reauthenticate() {
+        let (labels, error) = inline_failure("refresh_missing", use_command);
+        assert_eq!(labels, vec![Some("Re-authenticate".to_string())]);
+        assert_eq!(error.as_deref(), Some("gone"), "the inline text stays");
+    }
+
+    #[test]
+    fn an_inline_failure_on_a_rejected_token_offers_refresh() {
+        let (labels, error) = inline_failure("unauthorized", use_command);
+        assert_eq!(labels, vec![Some("Refresh token".to_string())]);
+        assert_eq!(error.as_deref(), Some("gone"));
+    }
+
+    #[test]
+    fn an_inline_consent_failure_uses_the_handles_feature() {
+        let (labels, error) = inline_failure("consent_required", || {
+            use_command().with_consent_feature("exchange")
+        });
+        assert_eq!(labels, vec![Some("Grant consent".to_string())]);
+        assert_eq!(error.as_deref(), Some("gone"));
+    }
+
+    #[test]
+    fn an_ordinary_inline_failure_raises_no_toast() {
+        // The inline `error` is this surface's message: an ordinary failure
+        // must not also be reported as a toast.
+        let (labels, error) = inline_failure("forbidden", use_command);
+        assert!(labels.is_empty(), "no double report: {labels:?}");
+        assert_eq!(error.as_deref(), Some("gone"));
     }
 }

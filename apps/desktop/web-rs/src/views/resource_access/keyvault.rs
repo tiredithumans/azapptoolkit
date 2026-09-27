@@ -209,7 +209,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
             match keyvault_rbac::sweep_key_vault_access(&t.tenant_id).await {
                 Ok(r) => result.set(Some(r)),
                 Err(e) => {
-                    consent_required.set(e.code == "consent_required");
+                    consent_required.set(e.is_consent_required());
                     error.set(Some(e.message));
                 }
             }

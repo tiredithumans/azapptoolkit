@@ -99,6 +99,18 @@ impl UiError {
         azapptoolkit_core::reauth::is_reauth_fatal(&self.code)
     }
 
+    /// True when the failure is a missing admin/user consent for one resource
+    /// (`consent_required`, from `AuthError::ConsentRequired` — AADSTS65001/65004),
+    /// read from the one literal in [`azapptoolkit_core::reauth::CONSENT_REQUIRED`].
+    ///
+    /// Not re-auth-fatal (the session is fine, a fan-out carries on) and not
+    /// retryable (a silent grant cannot obtain consent): the recovery is the
+    /// interactive `request_scope_consent`, which is what every "Grant consent"
+    /// affordance branches on this to offer.
+    pub fn is_consent_required(&self) -> bool {
+        self.code == azapptoolkit_core::reauth::CONSENT_REQUIRED
+    }
+
     /// (De)serialization error: fixed `serde` code, never retryable.
     pub fn serde(message: impl Into<String>) -> Self {
         UiError::new("serde", message, false)
@@ -245,8 +257,52 @@ mod backend_conv {
                 assert!(!ui.message.is_empty(), "empty message for `{code}`");
             }
             // `AuthError::Http(reqwest::Error)` is the only variant omitted —
-            // `reqwest::Error` has no public constructor — but its arm maps to
-            // ("network", true).
+            // `reqwest::Error` has no public constructor and this crate has no
+            // reqwest dependency — but its arm maps to ("network", true).
+            // `token_adapter`'s tests in the desktop crate construct one and pin
+            // it end to end (auth-plane `network` → client-plane `network_error`).
+        }
+
+        /// A classified `TokenError` crossing a client's `Token` arm keeps its
+        /// code — and its retryability — in every client's `UiError`. Before,
+        /// only the re-auth-fatal codes survived: `consent_required` became a
+        /// generic `token_error` (so no "Grant consent" action could appear) and
+        /// a refresh-time network outage became a non-retryable `token_error`.
+        #[test]
+        fn classified_token_codes_survive_every_client_error() {
+            use azapptoolkit_core::token::TokenError;
+
+            let cases: [(TokenError, &str, bool); 5] = [
+                (
+                    TokenError::new("refresh_missing", "m"),
+                    "refresh_missing",
+                    false,
+                ),
+                (
+                    TokenError::new("not_signed_in", "m"),
+                    "not_signed_in",
+                    false,
+                ),
+                (
+                    TokenError::new("consent_required", "m"),
+                    "consent_required",
+                    false,
+                ),
+                (TokenError::new("network_error", "m"), "network_error", true),
+                (TokenError::opaque("m"), "token_error", false),
+            ];
+            for (tok, code, retryable) in cases {
+                let uis = [
+                    UiError::from(GraphError::Token(tok.clone())),
+                    UiError::from(ExchangeError::Token(tok.clone())),
+                    UiError::from(ArmError::Token(tok.clone())),
+                    UiError::from(KeyVaultError::Token(tok.clone())),
+                ];
+                for ui in uis {
+                    assert_eq!(ui.code, code, "code for token `{code}`");
+                    assert_eq!(ui.retryable, retryable, "retryable for token `{code}`");
+                }
+            }
         }
     }
 }
@@ -293,6 +349,19 @@ mod reauth_agreement_tests {
         ] {
             assert!(!UiError::new(code, "m", true).is_reauth_fatal());
             assert!(!TokenError::new(code, "m").is_reauth_fatal());
+        }
+    }
+
+    #[test]
+    fn consent_required_is_its_own_non_fatal_class() {
+        let consent = UiError::new("consent_required", "needs consent", false);
+        assert!(consent.is_consent_required());
+        assert!(!consent.is_reauth_fatal());
+        for code in ["refresh_missing", "token_error", "forbidden"] {
+            assert!(
+                !UiError::new(code, "m", false).is_consent_required(),
+                "{code} is not a missing consent"
+            );
         }
     }
 }

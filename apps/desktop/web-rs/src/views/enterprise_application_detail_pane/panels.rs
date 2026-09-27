@@ -36,7 +36,7 @@ pub(super) fn ProvisioningContent(
                     // a license". Swallowing EVERY error into that message told
                     // an operator hitting a transient 429 to go grant a scope
                     // they already have, with no way to retry.
-                    Err(e) if e.code == "forbidden" || e.code == "consent_required" => {
+                    Err(e) if e.code == "forbidden" || e.is_consent_required() => {
                         view! {
                             <Callout tone="warn">
                                 "Provisioning status is unavailable. It needs admin consent to Synchronization.Read.All and an Entra ID P1/P2 license."

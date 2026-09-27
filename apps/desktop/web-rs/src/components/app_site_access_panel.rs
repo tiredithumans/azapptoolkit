@@ -112,7 +112,7 @@ pub fn AppSiteAccessPanel(
                     checked.set(true);
                 }
                 Err(e) => {
-                    consent_required.set(e.code == "consent_required");
+                    consent_required.set(e.is_consent_required());
                     error.set(Some(e.message));
                 }
             }

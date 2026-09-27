@@ -180,6 +180,41 @@ async fn sp_mailbox_fix_routes_to_the_sp_only_command() {
     );
 }
 
+/// A missing Exchange admin-API consent used to leave the mailbox Fix with a
+/// raw message and no way forward, while its SharePoint twin offered consent.
+/// It now swaps the primary action for "Grant consent" on the `exchange`
+/// feature, and the modal stays open for the retry.
+#[wasm_bindgen_test]
+async fn sp_mailbox_fix_offers_exchange_consent_on_consent_required() {
+    let m = mount_security().await;
+    ts::mock_err(
+        "grant_managed_identity_scoped_exchange_access",
+        &fixtures::ui_error("consent_required", "consent required (AADSTS65001)"),
+    );
+    ts::mock_ok("request_scope_consent", &());
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("orgwide_mailbox".to_string()));
+    ts::wait_for(|| ts::body_contains("Scope 1 mailbox permission")).await;
+
+    click_button("Scope 1 mailbox permission to specific mailboxes");
+    ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
+    ts::set_textarea_value(".modal textarea", "Sales Team");
+    click_button("Scope access");
+    ts::wait_for(|| ts::body_contains("Exchange.Manage")).await;
+
+    click_button("Grant consent");
+    ts::wait_for(|| ts::call_count("request_scope_consent") == 1).await;
+    let call = ts::last_call("request_scope_consent").unwrap();
+    assert_eq!(call.arg_str("feature").as_deref(), Some("exchange"));
+    assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
+    assert!(
+        ts::query(".modal").is_some(),
+        "the modal stays open so the operator can retry the scoping"
+    );
+}
+
 /// A grant Exchange answered with a warning did not necessarily do what was
 /// asked (the common one: an existing scope with a different group set, so the
 /// requested groups were NOT applied). The modal stays open with the notes and

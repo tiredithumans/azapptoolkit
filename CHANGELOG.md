@@ -2,6 +2,30 @@
 
 ### Fixed
 
+- **A rejected access token now offers "Refresh token" instead of telling you to sign out.** When
+  Microsoft Graph, Exchange, Key Vault or Azure rejected the app's token (for example after a
+  Conditional Access re-check the app couldn't satisfy silently), the error read "unauthorized
+  (401)" with no way forward, and the Exchange, Key Vault and Azure messages said to sign out and
+  back in, which also clears every cached list and the last audit run. The error now carries a
+  "Refresh token" action that re-mints the token in place and falls back to re-authenticating if
+  the session has expired. The messages point to the same control.
+
+- **Forms and dialogs now offer "Re-authenticate" when your session has expired.** Most edit
+  dialogs and tab actions showed an expired session only as red text under the form. They now
+  raise the same Re-authenticate action the rest of the app uses, and keep the message where it
+  was.
+
+- **A missing admin consent now offers "Grant consent" wherever it occurs.** When a permission the
+  tenant hadn't consented to was needed partway through an operation, the error reached the screen
+  as a generic token failure, so the "Grant consent" action never appeared. It now does. The
+  Security tab's "Scope mailbox access" Fix also gets the "Grant consent" button its SharePoint
+  counterpart already had.
+
+- **A network drop while the app refreshes its token is reported as a network error you can
+  retry.** A network failure during the hourly token refresh was reported as a permanent token
+  error, while the same outage a moment later was reported as a retryable network error. Both are
+  now treated as network errors.
+
 - **An unexpected reply from the app's backend no longer freezes the window.** If a request was ever
   rejected with something other than the app's usual error — for example a request the window built
   in the wrong shape, or a permission the app is not allowed to use — the whole window stopped
