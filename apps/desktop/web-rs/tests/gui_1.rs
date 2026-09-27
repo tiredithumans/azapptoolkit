@@ -29,6 +29,8 @@ mod enterprise_application_list;
 mod federated_tab;
 #[path = "gui/open_items_dock.rs"]
 mod open_items_dock;
+#[path = "gui/provisioning_tab.rs"]
+mod provisioning_tab;
 #[path = "gui/sso_claims.rs"]
 mod sso_claims;
 #[path = "gui/sso_rollover.rs"]

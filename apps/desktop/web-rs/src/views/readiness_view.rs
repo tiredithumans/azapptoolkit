@@ -95,7 +95,25 @@ fn verdict_row(axis: &'static str, verdict: Verdict, detail: String) -> impl Int
     }
 }
 
-fn item_card(item: ReadinessItem) -> impl IntoView {
+/// `pim_url` is the report's cloud-correct PIM "My roles" link: shown under a
+/// role that reads Missing, since that covers an eligible-but-inactive role
+/// (only the backend's directory-role rows ever read Missing).
+fn item_card(item: ReadinessItem, pim_url: Option<String>) -> impl IntoView {
+    let pim_link = (item.role_verdict == Verdict::Missing)
+        .then_some(pim_url)
+        .flatten()
+        .map(|url| {
+            view! {
+                <a
+                    class="link-btn readiness__pim-link"
+                    href=url
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >
+                    "Open PIM (My roles)"
+                </a>
+            }
+        });
     // The remediation is only useful when at least one half is unmet.
     let show_remediation =
         item.role_verdict != Verdict::Have || item.scope_verdict != Verdict::Have;
@@ -109,6 +127,7 @@ fn item_card(item: ReadinessItem) -> impl IntoView {
                 <span class="readiness__desc">{item.description.clone()}</span>
             </div>
             {verdict_row("Role", item.role_verdict, item.role_detail.clone())}
+            {pim_link}
             {verdict_row("Scope", item.scope_verdict, item.scope_detail.clone())}
             {remediation}
         </div>
@@ -117,6 +136,7 @@ fn item_card(item: ReadinessItem) -> impl IntoView {
 
 fn render_report(rep: ReadinessReport) -> impl IntoView {
     let indeterminate = rep.directory_roles_indeterminate;
+    let pim_url = rep.pim_activation_url.clone();
     let banner = indeterminate.then(|| {
         view! {
             <Callout tone="warn">
@@ -145,7 +165,10 @@ fn render_report(rep: ReadinessReport) -> impl IntoView {
     let groups = gaps_first(group_by_plane(rep.items))
         .into_iter()
         .map(|(plane_label, items)| {
-            let cards = items.into_iter().map(item_card).collect_view();
+            let cards = items
+                .into_iter()
+                .map(|item| item_card(item, pim_url.clone()))
+                .collect_view();
             view! {
                 <section class="readiness__group">
                     <h3 class="readiness__group-title">{plane_label}</h3>
@@ -186,8 +209,9 @@ pub fn ReadinessView() -> impl IntoView {
                 "azapptoolkit acts with your delegated rights across three independent \
                  authorization planes — there is no single role that unlocks everything. This \
                  checks what you currently hold against what each feature needs. A PIM role you \
-                 haven't activated shows as Missing; activate it, then use \"Refresh token\" \
-                 (top right) — that re-applies your roles and re-runs this check."
+                 haven't activated shows as Missing — use \"Open PIM\" under it to activate, \
+                 then \"Refresh token\" (top right) — that re-applies your roles and re-runs \
+                 this check."
             </Body1>
             // Local boundary only: the three-plane check is slow (Entra + Azure
             // RBAC + Exchange), and without one this page sat blank while it ran.

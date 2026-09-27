@@ -30,6 +30,7 @@ use claims::{build_claims_definition, parse_claims_definition};
 use crate::commands::applications::{
     augment_with_object_id, invalidate_app_details, invalidate_app_lists,
 };
+use crate::commands::graph_err::forbidden_remediation;
 use crate::dto::UiError;
 use crate::dto::sso::{
     ClaimsPolicyDto, MetadataProbeDto, OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput,
@@ -1730,6 +1731,18 @@ pub async fn set_claims_mapping(
         &policy,
     )
     .await
+    .map_err(claims_policy_err)
+}
+
+/// Appends the `sso_claims_mapping` catalog remediation to a 403 from a claims
+/// save — which role can manage application policies. Spliced at the command,
+/// not in the core: the core's error stays the plain Graph classification its
+/// tests assert on.
+fn claims_policy_err(mut err: UiError) -> UiError {
+    if let Some(remediation) = forbidden_remediation(&err, "sso_claims_mapping") {
+        err.message = format!("{} {remediation}", err.message);
+    }
+    err
 }
 
 /// The handler body, taking `&AppState` so a test can drive it against a mock
@@ -2336,6 +2349,24 @@ mod handler_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claims_policy_403_names_the_claims_roles() {
+        let forbidden = UiError {
+            code: "forbidden".into(),
+            message: "graph said no".into(),
+            retryable: false,
+        };
+        let err = claims_policy_err(forbidden);
+        assert!(err.message.starts_with("graph said no "));
+        assert!(err.message.contains("Application Administrator"));
+        let other = UiError {
+            code: "graph_error".into(),
+            message: "boom".into(),
+            retryable: false,
+        };
+        assert_eq!(claims_policy_err(other).message, "boom");
+    }
 
     #[test]
     fn a_claims_save_plan_never_edits_or_deletes_a_shared_policy() {

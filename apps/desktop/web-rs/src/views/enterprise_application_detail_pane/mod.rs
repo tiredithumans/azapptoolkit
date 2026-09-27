@@ -40,7 +40,9 @@ mod app_roles;
 mod credentials;
 mod overview;
 mod owners;
-mod panels;
+// `pub` for the same reason as `sso_tab`: the GUI tests mount the Provisioning
+// tab directly to drive its consent round trip.
+pub mod panels;
 mod permissions;
 // `pub` so the GUI tests can mount the SSO tab (and its rollover panel)
 // directly, the same way `AuthenticationTab` is mounted — driving the pane to a

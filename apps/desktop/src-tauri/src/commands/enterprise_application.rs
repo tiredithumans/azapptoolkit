@@ -332,15 +332,21 @@ fn map_group_membership(g: azapptoolkit_core::models::GroupSummary) -> GroupMemb
 }
 
 /// Returns the enterprise application's SCIM provisioning job status (best
-/// effort). An empty list means provisioning isn't configured (Graph 404); a
-/// hard error means the `Synchronization.Read.All` scope / license is missing,
-/// which the UI surfaces as a graceful "unavailable" message.
+/// effort). An empty list means provisioning isn't configured (Graph 404). The
+/// `Synchronization.Read.All` token is pre-acquired, so a missing consent
+/// arrives typed as `consent_required` and the Provisioning tab offers its
+/// "Grant consent & retry" button; a 403 (no role that can read provisioning, or
+/// no P1/P2 license) carries the `provisioning_read` catalog remediation.
 #[tauri::command]
 pub async fn get_enterprise_app_provisioning(
     state: State<'_, AppState>,
     tenant_id: String,
     service_principal_id: String,
 ) -> Result<Vec<ProvisioningJobDto>, UiError> {
+    state
+        .ensure_sync_token(&tenant_id)
+        .await
+        .map_err(UiError::from)?;
     let client = state.graph_for(&tenant_id);
     match client
         .list_synchronization_jobs(&service_principal_id)
@@ -349,8 +355,19 @@ pub async fn get_enterprise_app_provisioning(
         Ok(jobs) => Ok(jobs.into_iter().map(map_provisioning_job).collect()),
         // Not configured for this SP — surface as "no provisioning", not an error.
         Err(GraphError::NotFound(_)) => Ok(Vec::new()),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(provisioning_err(e)),
     }
+}
+
+/// Maps a provisioning-read Graph failure to a `UiError`, appending the
+/// `provisioning_read` catalog remediation to a 403 (the
+/// [`group_membership_err`] shape).
+fn provisioning_err(e: GraphError) -> UiError {
+    let mut err = UiError::from(e);
+    if let Some(remediation) = forbidden_remediation(&err, "provisioning_read") {
+        err.message = format!("{} {remediation}", err.message);
+    }
+    err
 }
 
 /// Hides or shows the enterprise application on the My Apps portal by toggling
@@ -588,6 +605,23 @@ mod tests {
         SynchronizationExecution, SynchronizationQuarantine, SynchronizationStatus,
     };
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn provisioning_403_appends_the_catalog_remediation() {
+        let err = provisioning_err(GraphError::Forbidden("x".into()));
+        assert_eq!(err.code, "forbidden");
+        assert!(
+            err.message.contains("Hybrid Identity Administrator"),
+            "{}",
+            err.message
+        );
+        // Anything but a 403 is left alone.
+        let err = provisioning_err(GraphError::Api {
+            status: 500,
+            body: "boom".into(),
+        });
+        assert!(!err.message.contains("Hybrid Identity Administrator"));
+    }
 
     #[test]
     fn maps_a_fully_populated_provisioning_job() {

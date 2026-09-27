@@ -1,7 +1,25 @@
 ## [Unreleased]
 
+### Added
+
+- **Access Readiness now covers SCIM provisioning and SAML claims mapping.** Both features need
+  their own consented scope (`Synchronization.Read.All`, `Policy.ReadWrite.ApplicationConfiguration`)
+  and an app-management role, but the checklist didn't list them, so it couldn't show why the
+  Provisioning tab or a custom-claims save failed. Each now has a row with its roles and scopes, and
+  a 403 when saving claims or reading provisioning now names the role to activate.
+- **The Provisioning tab offers "Grant consent & retry".** It used to name
+  `Synchronization.Read.All` and stop there. It now runs the consent round trip and reloads, as the
+  Group memberships section does, and shows which roles can read provisioning.
+
 ### Fixed
 
+- **Access Readiness no longer reports Application Administrator or Cloud Application Administrator
+  as missing for admin consent.** Those roles can grant consent for any API except Microsoft Graph
+  (and Azure AD Graph) application roles, which still need Privileged Role Administrator or Global
+  Administrator. The row now says so.
+- **A directory role you don't hold now links to PIM.** A missing role now says to activate it in
+  PIM if you're eligible, or to request an assignment otherwise, and "Open PIM (My roles)" opens the
+  activation page in your cloud's Entra admin center.
 - **A multi-factor prompt required for Azure, Exchange or Log Analytics no longer signs you out of
   everything.** When a Conditional Access policy required extra verification for one service, the
   app threw away your whole session. Every view, including browsing Entra ID, then needed

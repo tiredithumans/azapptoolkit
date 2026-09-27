@@ -120,6 +120,7 @@ const TID_SHAREPOINT_ADMIN: &str = "f28a1f50-f6e7-4571-818b-6a12f2af6b6c";
 const TID_GROUPS_ADMIN: &str = "fdd7a751-b60b-444a-984c-02652fe8fa1c";
 const TID_USER_ADMIN: &str = "fe930be7-5e62-47db-91af-98c3a49a38b1";
 const TID_EXCHANGE_ADMIN: &str = "29232cdf-9323-42fd-ade2-1d097af3e4de";
+const TID_HYBRID_IDENTITY_ADMIN: &str = "8ac3fc64-6eca-42ea-9e69-59f4c7b60eb2";
 
 /// The catalog. Derived from `docs/operator-rbac/OPERATOR-ROLES.md`.
 pub static CAPABILITIES: &[Capability] = &[
@@ -177,13 +178,28 @@ pub static CAPABILITIES: &[Capability] = &[
         key: "admin_consent",
         plane: Plane::EntraDirectory,
         label: "Admin consent for API permissions",
-        description: "Grant tenant-wide admin consent to delegated scopes and application roles.",
+        // The Graph gate lives in the *description*, not only the remediation:
+        // the checklist hides a remediation once both halves read "have", and an
+        // active Cloud Application Administrator reads "have" here yet still
+        // can't grant Microsoft Graph app roles.
+        description: "Grant tenant-wide admin consent to delegated scopes and application roles. \
+                      Application Administrator or Cloud Application Administrator can consent \
+                      for any API except Microsoft Graph (and Azure AD Graph) application roles, \
+                      which need Privileged Role Administrator or Global Administrator.",
+        // Privileged Role Administrator stays first: `RequiresRole` shows the
+        // first role as its label, and it is the one role that covers the Graph
+        // app roles the Permissions tab grants most.
         directory_roles_any: &[
             (
                 "Privileged Role Administrator",
                 Some(TID_PRIVILEGED_ROLE_ADMIN),
             ),
             ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
+            ("Application Administrator", Some(TID_APPLICATION_ADMIN)),
+            (
+                "Cloud Application Administrator",
+                Some(TID_CLOUD_APPLICATION_ADMIN),
+            ),
         ],
         role_detect: RoleDetect::DirectoryRole,
         scopes: &[
@@ -191,10 +207,11 @@ pub static CAPABILITIES: &[Capability] = &[
             "AppRoleAssignment.ReadWrite.All",
         ],
         scope_feature: Some("write"),
-        remediation: "Granting admin consent — especially to high-privilege Graph permissions \
-                      like Application.ReadWrite.All — requires the Privileged Role Administrator \
-                      or Global Administrator role. A custom or Cloud Application Administrator \
-                      role is not sufficient for sensitive permissions.",
+        remediation: "Granting admin consent needs Application Administrator or Cloud \
+                      Application Administrator for most APIs, but Microsoft Graph (and Azure AD \
+                      Graph) application roles — like Application.ReadWrite.All — need Privileged \
+                      Role Administrator or Global Administrator. A custom role is not sufficient \
+                      for sensitive Graph permissions.",
     },
     Capability {
         key: "audit_reports",
@@ -313,6 +330,63 @@ pub static CAPABILITIES: &[Capability] = &[
                       service principal as a member), consented on first use. \
                       Dynamic-membership groups can't be modified directly (membership is \
                       rule-based).",
+    },
+    Capability {
+        key: "provisioning_read",
+        plane: Plane::EntraDirectory,
+        label: "SCIM provisioning status (read)",
+        description: "Read an enterprise application's SCIM provisioning jobs and their last run \
+                      (Provisioning tab).",
+        // Learn "List synchronization jobs": supported roles.
+        directory_roles_any: &[
+            ("Application Administrator", Some(TID_APPLICATION_ADMIN)),
+            (
+                "Cloud Application Administrator",
+                Some(TID_CLOUD_APPLICATION_ADMIN),
+            ),
+            (
+                "Hybrid Identity Administrator",
+                Some(TID_HYBRID_IDENTITY_ADMIN),
+            ),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
+        ],
+        role_detect: RoleDetect::DirectoryRole,
+        scopes: &["Synchronization.Read.All"],
+        scope_feature: Some("sync"),
+        remediation: "Provisioning status needs the Synchronization.Read.All delegated scope \
+                      (admin consent, granted on first use) and a role that can read provisioning \
+                      — Application Administrator, Cloud Application Administrator or Hybrid \
+                      Identity Administrator (Global Administrator also works). The provisioning \
+                      service also needs an Entra ID P1 or P2 license.",
+    },
+    Capability {
+        key: "sso_claims_mapping",
+        plane: Plane::EntraDirectory,
+        label: "SAML claims mapping",
+        description: "Create, edit and assign the claims-mapping policy that customises an SSO \
+                      app's token claims.",
+        directory_roles_any: &[
+            ("Application Administrator", Some(TID_APPLICATION_ADMIN)),
+            (
+                "Cloud Application Administrator",
+                Some(TID_CLOUD_APPLICATION_ADMIN),
+            ),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
+        ],
+        role_detect: RoleDetect::DirectoryRole,
+        // One token (`default_graph_policy_write_scopes`): the policy object
+        // needs the Policy scope, the service-principal `$ref` assign/list/remove
+        // need both.
+        scopes: &[
+            "Policy.ReadWrite.ApplicationConfiguration",
+            "Application.ReadWrite.All",
+        ],
+        scope_feature: Some("policy_write"),
+        remediation: "Custom claims need an Entra role that can manage application policies — \
+                      Application Administrator or Cloud Application Administrator (Global \
+                      Administrator also works) — plus the \
+                      Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All \
+                      delegated scopes, consented on first use.",
     },
     Capability {
         key: "keyvault_secrets",
@@ -469,6 +543,63 @@ mod tests {
             &["GroupMember.ReadWrite.All", "Application.ReadWrite.All"]
         );
         assert!(c.remediation.contains("Application.ReadWrite.All"));
+    }
+
+    #[test]
+    fn entra_planes_are_contiguous() {
+        // The readiness view groups rows by plane in catalog order, so each
+        // plane must appear as one contiguous run or it renders twice.
+        let mut seen: Vec<Plane> = Vec::new();
+        for c in CAPABILITIES {
+            if seen.last() != Some(&c.plane) {
+                assert!(
+                    !seen.contains(&c.plane),
+                    "{}: plane {:?} reappears after another plane",
+                    c.key,
+                    c.plane
+                );
+                seen.push(c.plane);
+            }
+        }
+    }
+
+    #[test]
+    fn claims_mapping_and_provisioning_rows_bind_their_consent_features() {
+        assert_eq!(
+            capability("sso_claims_mapping").and_then(|c| c.scope_feature),
+            Some("policy_write")
+        );
+        assert_eq!(
+            capability("provisioning_read").and_then(|c| c.scope_feature),
+            Some("sync")
+        );
+        assert_eq!(
+            capability("provisioning_read").map(|c| c.scopes),
+            Some(&["Synchronization.Read.All"][..])
+        );
+    }
+
+    #[test]
+    fn admin_consent_accepts_app_admins_and_states_the_graph_gate() {
+        let cap = capability("admin_consent").unwrap();
+        assert_eq!(
+            matched_directory_role(
+                cap,
+                &[active_role(
+                    "Cloud Application Administrator",
+                    TID_CLOUD_APPLICATION_ADMIN
+                )]
+            ),
+            Some("Cloud Application Administrator")
+        );
+        // The proactive label reads the first role; it must stay the one that
+        // covers Graph app roles.
+        assert_eq!(
+            cap.role_names().next(),
+            Some("Privileged Role Administrator")
+        );
+        assert!(cap.description.contains("Microsoft Graph"));
+        assert!(cap.remediation.contains("Privileged Role Administrator"));
     }
 
     #[test]

@@ -362,8 +362,9 @@ pub async fn grant_admin_consent(
 /// Builds a grant-failure message from a Graph error, appending the admin-consent
 /// role guidance when the failure is a 403. A forbidden on a *grant* operation
 /// means the signed-in user lacks the directory role to consent (the
-/// `admin_consent` capability — Privileged Role Administrator / Global
-/// Administrator for high-privilege permissions), not that the permission itself
+/// `admin_consent` capability — Application / Cloud Application Administrator
+/// for most APIs, Privileged Role Administrator / Global Administrator for
+/// Microsoft Graph and Azure AD Graph app roles), not that the permission itself
 /// is wrong, so the hint points there.
 fn grant_failure_message(err: &azapptoolkit_graph::GraphError) -> String {
     let base = err.to_string();

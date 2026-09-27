@@ -77,7 +77,7 @@ Administrator or Global Administrator), then make it PIM-eligible in **Entra PIM
 | App owners | `applications/owners/update` |
 | Enterprise apps create/read/update | `servicePrincipals/create`, `.../allProperties/read`, `.../basic/update` |
 | Assign users/groups to app roles | `servicePrincipals/appRoleAssignedTo/update` |
-| SCIM provisioning tab | `servicePrincipals/synchronization/standard/read` |
+| SCIM provisioning tab | `servicePrincipals/synchronization/standard/read` (built-in alternative: **Hybrid Identity Administrator**) |
 | **Admin consent** (delegated + app-role grants) | `servicePrincipals/managePermissionGrantsForAll.<consentPolicyId>` |
 | Owner/assignee pickers, org header | `users/standard/read`, `groups/standard/read`, `organization/standard/read` |
 | Activity tab | `auditLogs/allProperties/read` |
@@ -135,6 +135,9 @@ then sign out and back in so a fresh token is issued.
    Graph `Application.ReadWrite.All`) still requires **Privileged Role Administrator** or **Global
    Administrator** — no custom role substitutes. If operators must grant arbitrary high-privilege
    consent, plan a PIM-eligible **Privileged Role Administrator** assignment for that path.
+   **Application Administrator / Cloud Application Administrator** can grant consent for any API
+   except Microsoft Graph (and Azure AD Graph) app roles — so they cover grants to the tenant's own
+   APIs, SharePoint or Exchange Online, and the readiness checklist accepts them for `admin_consent`.
 
 2. **SharePoint `Sites.Selected` grants** (the `Sites.FullControl.All` write path,
    `POST /sites/{id}/permissions`) are governed by SharePoint, not a clean `microsoft.directory/*`

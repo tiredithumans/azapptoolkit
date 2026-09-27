@@ -51,4 +51,9 @@ pub struct ReadinessReport {
     /// directory-role verdict is `Unknown`), so the UI can show one banner
     /// instead of N "?"s.
     pub directory_roles_indeterminate: bool,
+    /// The cloud-correct PIM "My roles" link (`CloudEnvironment::pim_my_roles_url`),
+    /// shown under a directory-role row that reads Missing so an eligible
+    /// operator can activate in one click. `None` from an older backend.
+    #[serde(default)]
+    pub pim_activation_url: Option<String>,
 }

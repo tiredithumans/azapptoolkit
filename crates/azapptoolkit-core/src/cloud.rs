@@ -171,6 +171,29 @@ impl CloudEnvironment {
             Self::China => "https://api.loganalytics.azure.cn",
         }
     }
+
+    /// Microsoft Entra admin center origin for this cloud — the three hosts in
+    /// Learn's Entra FAQ firewall allow-list (`entra.microsoft.com`,
+    /// `entra.microsoft.us`, `entra.microsoftonline.cn`). DoD shares the US
+    /// Government admin center, as it does the login authority.
+    /// <https://learn.microsoft.com/entra/fundamentals/faq>
+    pub fn entra_admin_center(&self) -> &'static str {
+        match self {
+            Self::Commercial => "https://entra.microsoft.com",
+            Self::UsGov | Self::UsGovDod => "https://entra.microsoft.us",
+            Self::China => "https://entra.microsoftonline.cn",
+        }
+    }
+
+    /// PIM "My roles → Microsoft Entra roles" in this cloud's admin center —
+    /// where an operator activates an eligible directory role. The readiness
+    /// checklist links it under a role that reads Missing.
+    pub fn pim_my_roles_url(&self) -> String {
+        format!(
+            "{}/#view/Microsoft_Azure_PIMCommon/ActivationMenuBlade/~/aadmigratedroles",
+            self.entra_admin_center()
+        )
+    }
 }
 
 /// Serialized as [`CloudEnvironment::as_str`] — the one wire vocabulary for a
@@ -221,6 +244,23 @@ mod tests {
             c.log_analytics_resource(),
             "https://api.loganalytics.azure.com"
         );
+    }
+
+    #[test]
+    fn pim_link_stays_in_each_clouds_admin_center() {
+        for (cloud, host) in [
+            (CloudEnvironment::Commercial, "https://entra.microsoft.com/"),
+            (CloudEnvironment::UsGov, "https://entra.microsoft.us/"),
+            (CloudEnvironment::UsGovDod, "https://entra.microsoft.us/"),
+            (CloudEnvironment::China, "https://entra.microsoftonline.cn/"),
+        ] {
+            let url = cloud.pim_my_roles_url();
+            assert!(url.starts_with(host), "{cloud:?}: {url}");
+            assert!(
+                url.contains("Microsoft_Azure_PIMCommon"),
+                "{cloud:?}: {url}"
+            );
+        }
     }
 
     #[test]

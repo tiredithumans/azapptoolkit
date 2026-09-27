@@ -215,6 +215,68 @@ where
     }
 }
 
+/// One on-demand consent feature: an admin-consent / premium scope set that
+/// rides its own `ScopedTokenAdapter`, never the sign-in bundle. The wire key
+/// ([`Self::as_str`]) is what `request_scope_consent` receives from the UI and
+/// what a capability's `scope_feature` names; [`AppState::feature_scopes`] maps
+/// it to the scope set. Every variant has a capabilities-catalog row (pinned by
+/// `every_consent_feature_has_a_catalog_row`), so the readiness checklist and
+/// the 403 hints cover each feature the app can request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConsentFeature {
+    Write,
+    Sync,
+    AuditLog,
+    Policy,
+    PolicyWrite,
+    SharePoint,
+    GroupMembership,
+    Exchange,
+    KeyVault,
+    Arm,
+    LogAnalytics,
+}
+
+impl ConsentFeature {
+    pub(crate) const ALL: [Self; 11] = [
+        Self::Write,
+        Self::Sync,
+        Self::AuditLog,
+        Self::Policy,
+        Self::PolicyWrite,
+        Self::SharePoint,
+        Self::GroupMembership,
+        Self::Exchange,
+        Self::KeyVault,
+        Self::Arm,
+        Self::LogAnalytics,
+    ];
+
+    /// The stable wire key (`request_scope_consent`'s `feature`, a capability's
+    /// `scope_feature`).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Write => "write",
+            Self::Sync => "sync",
+            Self::AuditLog => "audit_log",
+            Self::Policy => "policy",
+            Self::PolicyWrite => "policy_write",
+            Self::SharePoint => "sharepoint",
+            Self::GroupMembership => "group_membership",
+            Self::Exchange => "exchange",
+            Self::KeyVault => "keyvault",
+            Self::Arm => "arm",
+            Self::LogAnalytics => "log_analytics",
+        }
+    }
+
+    /// The feature for a wire key, or `None` for an unknown one — the inverse
+    /// of [`Self::as_str`], so the keys have one spelling.
+    pub(crate) fn parse(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.as_str() == key)
+    }
+}
+
 pub struct AppState {
     pub auth: Arc<EntraAuthService>,
     /// The resolved client/tenant IDs the auth service signs in with, kept so
@@ -612,30 +674,39 @@ impl AppState {
         })
     }
 
-    /// Scopes requested for interactive incremental consent for `feature`, or
-    /// `None` for an unknown feature key. Resolves the cloud-correct resource
-    /// audiences via the auth service (single source) rather than spreading host
-    /// constants across command handlers; the `request_scope_consent` command
-    /// maps a UI feature name to a scope set.
-    pub fn consent_scopes_for(&self, feature: &str) -> Option<Vec<String>> {
-        Some(match feature {
-            "write" => self.auth.default_graph_write_scopes(),
-            "sync" => self.auth.default_graph_sync_scopes(),
-            "audit_log" => self.auth.default_graph_audit_log_scopes(),
-            "policy" => self.auth.default_graph_policy_scopes(),
-            "policy_write" => self.auth.default_graph_policy_write_scopes(),
-            "sharepoint" => self.auth.default_graph_sharepoint_scopes(),
-            "group_membership" => self.auth.default_graph_group_member_scopes(),
-            "exchange" => self.auth.default_exchange_scopes(),
-            "keyvault" => {
+    /// Scopes for one on-demand consent feature — the single table behind
+    /// interactive consent ([`Self::consent_scopes_for`]), the `ensure_*`
+    /// pre-acquisitions and the readiness probe. Resolves the cloud-correct
+    /// resource audiences via the auth service (single source) rather than
+    /// spreading host constants across command handlers. Exhaustive, so a new
+    /// [`ConsentFeature`] can't be added without its scope set.
+    pub(crate) fn feature_scopes(&self, feature: ConsentFeature) -> Vec<String> {
+        match feature {
+            ConsentFeature::Write => self.auth.default_graph_write_scopes(),
+            ConsentFeature::Sync => self.auth.default_graph_sync_scopes(),
+            ConsentFeature::AuditLog => self.auth.default_graph_audit_log_scopes(),
+            ConsentFeature::Policy => self.auth.default_graph_policy_scopes(),
+            ConsentFeature::PolicyWrite => self.auth.default_graph_policy_write_scopes(),
+            ConsentFeature::SharePoint => self.auth.default_graph_sharepoint_scopes(),
+            ConsentFeature::GroupMembership => self.auth.default_graph_group_member_scopes(),
+            ConsentFeature::Exchange => self.auth.default_exchange_scopes(),
+            ConsentFeature::KeyVault => {
                 EntraAuthService::resource_default_scopes(&self.auth.cloud().keyvault_resource())
             }
-            "arm" => EntraAuthService::resource_default_scopes(self.auth.cloud().arm_resource()),
-            "log_analytics" => EntraAuthService::resource_default_scopes(
+            ConsentFeature::Arm => {
+                EntraAuthService::resource_default_scopes(self.auth.cloud().arm_resource())
+            }
+            ConsentFeature::LogAnalytics => EntraAuthService::resource_default_scopes(
                 self.auth.cloud().log_analytics_resource(),
             ),
-            _ => return None,
-        })
+        }
+    }
+
+    /// Scopes requested for interactive incremental consent for `feature`, or
+    /// `None` for an unknown feature key. The `request_scope_consent` command
+    /// maps a UI feature name to a scope set through this.
+    pub fn consent_scopes_for(&self, feature: &str) -> Option<Vec<String>> {
+        ConsentFeature::parse(feature).map(|f| self.feature_scopes(f))
     }
 
     /// Shared core for every `ensure_*_token` probe below: pre-acquires (and
@@ -649,20 +720,20 @@ impl AppState {
     /// cached and the subsequent client call reuses it, so the happy path costs
     /// no extra round trip.
     ///
-    /// `cae` should match the CAE-ness of the adapter that later consumes the
-    /// same scope set: the token cache keys on CAE-ness, so a mismatched pre-warm
-    /// can no longer serve a wrong token, but it lands in the other slot and the
-    /// adapter pays one extra silent refresh instead of reusing it. The Graph
-    /// scopes ride `new_cae` (cae = true); ARM / Exchange / Log Analytics stay
-    /// non-CAE (cae = false). This is the CAE/adapter pairing each wrapper's doc
-    /// comment cross-references — keeping the branch in one place.
+    /// CAE-ness must match the adapter that later consumes the same scope set:
+    /// the token cache keys on CAE-ness, so a mismatched pre-warm lands in the
+    /// other slot and the adapter pays one extra silent refresh instead of
+    /// reusing it. It is derived here from the scope set
+    /// (`EntraAuthService::is_graph_scope_set` — the same rule the consent and
+    /// step-up flows use), never passed by hand: every Graph set rides a
+    /// `new_cae` adapter in [`Self::graph_for`], while ARM / Exchange / Key
+    /// Vault / Log Analytics stay non-CAE.
     async fn ensure_scoped_token(
         &self,
         tenant_id: &str,
         scopes: Vec<String>,
-        cae: bool,
     ) -> azapptoolkit_auth::Result<()> {
-        if cae {
+        if self.auth.is_graph_scope_set(&scopes) {
             self.auth
                 .access_token_for_scopes_cae(tenant_id, &scopes, None)
                 .await?;
@@ -674,6 +745,19 @@ impl AppState {
         Ok(())
     }
 
+    /// Silently acquires (and caches) the token for one consent feature's scope
+    /// set — the core the `ensure_*` wrappers below and the readiness scope
+    /// probe share, so a readiness pre-warm and the feature's own adapter always
+    /// agree on the scope set and its CAE-ness.
+    pub(crate) async fn ensure_feature_token(
+        &self,
+        tenant_id: &str,
+        feature: ConsentFeature,
+    ) -> azapptoolkit_auth::Result<()> {
+        self.ensure_scoped_token(tenant_id, self.feature_scopes(feature))
+            .await
+    }
+
     /// Acquires (and caches) the ARM token up front, surfacing a *typed* auth
     /// error — notably [`AuthError::ConsentRequired`] — before any ARM call, so
     /// the command fails before any side effect and can bind the `arm` consent
@@ -681,8 +765,8 @@ impl AppState {
     /// subsequent `ArmClient` call reuses it, so the happy path costs no extra
     /// round trip. Non-CAE (like the ARM adapter).
     pub async fn ensure_arm_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
-        let scopes = EntraAuthService::resource_default_scopes(self.auth.cloud().arm_resource());
-        self.ensure_scoped_token(tenant_id, scopes, false).await
+        self.ensure_feature_token(tenant_id, ConsentFeature::Arm)
+            .await
     }
 
     /// Acquires (and caches) the claims-mapping policy token
@@ -696,8 +780,8 @@ impl AppState {
         &self,
         tenant_id: &str,
     ) -> azapptoolkit_auth::Result<()> {
-        let scopes = self.auth.default_graph_policy_write_scopes();
-        self.ensure_scoped_token(tenant_id, scopes, true).await
+        self.ensure_feature_token(tenant_id, ConsentFeature::PolicyWrite)
+            .await
     }
 
     /// Acquires (and caches) the `Sites.FullControl.All` token up front, so a
@@ -706,8 +790,8 @@ impl AppState {
     /// `sharepoint` feature the site access section's "Grant consent" button
     /// requests. CAE (Graph adapter).
     pub async fn ensure_sharepoint_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
-        let scopes = self.auth.default_graph_sharepoint_scopes();
-        self.ensure_scoped_token(tenant_id, scopes, true).await
+        self.ensure_feature_token(tenant_id, ConsentFeature::SharePoint)
+            .await
     }
 
     /// Acquires (and caches) the `GroupMember.ReadWrite.All` +
@@ -720,8 +804,19 @@ impl AppState {
         &self,
         tenant_id: &str,
     ) -> azapptoolkit_auth::Result<()> {
-        let scopes = self.auth.default_graph_group_member_scopes();
-        self.ensure_scoped_token(tenant_id, scopes, true).await
+        self.ensure_feature_token(tenant_id, ConsentFeature::GroupMembership)
+            .await
+    }
+
+    /// Acquires (and caches) the `Synchronization.Read.All` token up front, so a
+    /// not-yet-consented scope surfaces as the typed
+    /// [`AuthError::ConsentRequired`] before the provisioning read, bound to the
+    /// `sync` feature the Provisioning tab's "Grant consent & retry" button
+    /// requests (otherwise the missing consent reads as a bare 403). CAE,
+    /// matching the `new_cae` `sync_token` adapter that consumes this scope set.
+    pub async fn ensure_sync_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
+        self.ensure_feature_token(tenant_id, ConsentFeature::Sync)
+            .await
     }
 
     /// Acquires (and caches) the `AuditLog.Read.All` token up front, so the audit
@@ -734,8 +829,8 @@ impl AppState {
     /// already advertises cp1); the cached token is reused by the subsequent
     /// sign-in activity fetch, so the happy path costs no extra round trip.
     pub async fn ensure_audit_log_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
-        let scopes = self.auth.default_graph_audit_log_scopes();
-        self.ensure_scoped_token(tenant_id, scopes, true).await
+        self.ensure_feature_token(tenant_id, ConsentFeature::AuditLog)
+            .await
     }
 
     /// Acquires (and caches) the `outlook.office365.com/Exchange.Manage` token
@@ -748,8 +843,8 @@ impl AppState {
     /// token is issued) and instead gets a 403 from the admin API. Non-CAE (like
     /// the Exchange adapter).
     pub async fn ensure_exchange_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
-        let scopes = self.auth.default_exchange_scopes();
-        self.ensure_scoped_token(tenant_id, scopes, false).await
+        self.ensure_feature_token(tenant_id, ConsentFeature::Exchange)
+            .await
     }
 
     /// Acquires (and caches) the Log Analytics query token up front
@@ -761,9 +856,8 @@ impl AppState {
         &self,
         tenant_id: &str,
     ) -> azapptoolkit_auth::Result<()> {
-        let scopes =
-            EntraAuthService::resource_default_scopes(self.auth.cloud().log_analytics_resource());
-        self.ensure_scoped_token(tenant_id, scopes, false).await
+        self.ensure_feature_token(tenant_id, ConsentFeature::LogAnalytics)
+            .await
     }
 
     /// Returns a cached Azure Monitor Logs query client for `tenant_id`,
@@ -904,5 +998,73 @@ mod tests {
         f.cancel();
         let run = f.claim();
         assert!(!run.is_cancelled());
+    }
+
+    mod consent_features {
+        use super::super::{AppState, ConsentFeature};
+        use azapptoolkit_core::capabilities::CAPABILITIES;
+
+        #[test]
+        fn consent_feature_keys_round_trip() {
+            for f in ConsentFeature::ALL {
+                assert_eq!(ConsentFeature::parse(f.as_str()), Some(f));
+            }
+            assert_eq!(ConsentFeature::parse("nope"), None);
+        }
+
+        #[test]
+        fn every_catalog_scope_feature_is_a_consent_feature() {
+            // A catalog row naming an unknown feature would probe as "?" forever
+            // and its "Grant consent" button would fail with an unknown feature.
+            for c in CAPABILITIES {
+                if let Some(key) = c.scope_feature {
+                    assert!(
+                        ConsentFeature::parse(key).is_some(),
+                        "{}: scope_feature {key:?} is not a consent feature",
+                        c.key
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn every_consent_feature_has_a_catalog_row() {
+            // The other direction: a feature the app can request but the
+            // catalog doesn't list gets no readiness row, no "Requires:" label
+            // and no 403 remediation (how `sync` and `policy_write` went unlisted).
+            for f in ConsentFeature::ALL {
+                assert!(
+                    CAPABILITIES
+                        .iter()
+                        .any(|c| c.scope_feature == Some(f.as_str())),
+                    "consent feature {:?} has no capabilities-catalog row",
+                    f.as_str()
+                );
+            }
+        }
+
+        #[test]
+        fn graph_features_are_the_cae_ones() {
+            // `ensure_scoped_token` derives CAE-ness from the scope set; this
+            // pins the classification per feature against the adapters
+            // `graph_for` builds (every Graph set `new_cae`) and the resource
+            // clients (ARM / Exchange / Key Vault / Log Analytics, non-CAE).
+            let state = AppState::for_test("t", "http://127.0.0.1:9");
+            for f in ConsentFeature::ALL {
+                let graph = !matches!(
+                    f,
+                    ConsentFeature::Exchange
+                        | ConsentFeature::KeyVault
+                        | ConsentFeature::Arm
+                        | ConsentFeature::LogAnalytics
+                );
+                assert_eq!(
+                    state.auth.is_graph_scope_set(&state.feature_scopes(f)),
+                    graph,
+                    "{}",
+                    f.as_str()
+                );
+            }
+        }
     }
 }

@@ -223,6 +223,10 @@ pub fn readiness_report() -> ReadinessReport {
             },
         ],
         directory_roles_indeterminate: false,
+        pim_activation_url: Some(
+            "https://entra.microsoft.com/#view/Microsoft_Azure_PIMCommon/ActivationMenuBlade/~/aadmigratedroles"
+                .to_string(),
+        ),
     }
 }
 

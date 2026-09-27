@@ -4061,6 +4061,13 @@ h3 {
   color: var(--text-muted);
   font-size: var(--text-sm);
 }
+/* PIM activation link under a Missing role: indented to the detail column so it
+   reads as that row's next step. */
+.readiness__pim-link {
+  display: inline-block;
+  margin-left: calc(56px + var(--space-2));
+  font-size: var(--text-sm);
+}
 .readiness__remediation {
   margin-top: var(--space-2);
   color: var(--text-muted);

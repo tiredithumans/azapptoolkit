@@ -23,7 +23,7 @@ use azapptoolkit_core::models::ActiveDirectoryRole;
 
 use crate::dto::UiError;
 use crate::dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
-use crate::state::AppState;
+use crate::state::{AppState, ConsentFeature};
 
 /// Max concurrent ARM calls for the per-subscription role-assignment sweep.
 /// Matches the Key Vault / managed-identity sweeps so a large estate stays
@@ -119,6 +119,7 @@ pub async fn check_readiness(
     Ok(ReadinessReport {
         items,
         directory_roles_indeterminate,
+        pim_activation_url: Some(state.auth.cloud().pim_my_roles_url()),
     })
 }
 
@@ -144,12 +145,17 @@ fn role_for(
             // Matched by roleTemplateId (with a name fallback) — a name-only
             // match reported active roles as missing in tenants whose
             // directoryRole objects carry legacy display names.
+            // Missing covers two states `/me` can't tell apart: PIM-eligible
+            // (activate it) and not assigned (ask for an assignment). Telling
+            // them apart needs `RoleEligibilitySchedule.Read.Directory`, a scope
+            // the app deliberately doesn't request, so the text names both.
             match matched_directory_role(cap, active_roles) {
                 Some(matched) => (Verdict::Have, format!("Active role: {matched}.")),
                 None => (
                     Verdict::Missing,
                     format!(
-                        "Activate one of: {}.",
+                        "Not active. If you're eligible in PIM, activate one of: {}. Otherwise \
+                         ask your role administrator for an assignment.",
                         cap.role_names().collect::<Vec<_>>().join(", ")
                     ),
                 ),
@@ -266,25 +272,17 @@ fn scope_detail_text(cap: &Capability, verdict: Verdict) -> String {
 /// ([`Verdict::Missing`]); anything else ⇒ indeterminate ([`Verdict::Unknown`]).
 /// This is a *silent* refresh-token acquisition — it never prompts and never
 /// purges the refresh token on a `consent_required` (the AGENTS.md invariant), so
-/// probing an un-consented optional scope is side-effect-free. Graph scopes use
-/// the CAE path (matching the Graph adapter) so the cached token is reused;
-/// resource audiences (ARM / Key Vault / Exchange) don't.
+/// probing an un-consented optional scope is side-effect-free. It goes through
+/// [`AppState::ensure_feature_token`] — the same [`ConsentFeature`] scope set and
+/// CAE derivation the `ensure_*` wrappers use — so a readiness pre-warm can
+/// never seed a token in a different CAE slot from the adapter that later reuses
+/// it (a hand-kept feature list here once probed `group_membership` non-CAE).
 async fn probe_scope(state: &AppState, tenant_id: &str, feature: &str) -> Verdict {
-    let Some(scopes) = state.consent_scopes_for(feature) else {
+    let Some(feature) = ConsentFeature::parse(feature) else {
         return Verdict::Unknown;
     };
-    // Derived from the scope set, not a hand-kept feature list: every Graph set
-    // rides a `new_cae` adapter (the list used to omit `group_membership`).
-    let result = if state.auth.is_graph_scope_set(&scopes) {
-        state
-            .auth
-            .access_token_for_scopes_cae(tenant_id, &scopes, None)
-            .await
-    } else {
-        state.auth.access_token_for_scopes(tenant_id, &scopes).await
-    };
-    match result {
-        Ok(_) => Verdict::Have,
+    match state.ensure_feature_token(tenant_id, feature).await {
+        Ok(()) => Verdict::Have,
         Err(AuthError::ConsentRequired(_)) => Verdict::Missing,
         Err(_) => Verdict::Unknown,
     }
@@ -353,6 +351,15 @@ mod tests {
         );
         assert_eq!(v, Verdict::Missing);
         assert!(detail.contains("Cloud Application Administrator"));
+    }
+
+    #[test]
+    fn missing_role_detail_covers_eligible_and_unassigned() {
+        let (v, detail) = role_for(capability("provisioning_read").unwrap(), &[], false, None);
+        assert_eq!(v, Verdict::Missing);
+        assert!(detail.contains("PIM"), "{detail}");
+        assert!(detail.contains("assignment"), "{detail}");
+        assert!(detail.contains("Hybrid Identity Administrator"), "{detail}");
     }
 
     #[test]

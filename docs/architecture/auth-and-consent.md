@@ -114,7 +114,11 @@ any command whose scoped call hits a missing consent. Pre-acquire the token with
 when the command has side effects before the scoped call (a grant must not half-land before it
 discovers the gap) or needs a specific feature's button (e.g. `AppState::ensure_arm_token`,
 `ensure_policy_write_token`, `ensure_sharepoint_token`, `ensure_audit_log_token`,
-`ensure_exchange_token`, `ensure_group_member_token`, or `ensure_log_analytics_token`). Examples:
+`ensure_exchange_token`, `ensure_group_member_token`, `ensure_sync_token`, or
+`ensure_log_analytics_token`). Each wrapper is a one-liner over `AppState::ensure_feature_token`,
+which reads the scope set from the `ConsentFeature` table (`AppState::feature_scopes` — the same
+table `consent_scopes_for` serves) and derives CAE-ness from it via `is_graph_scope_set`, so no
+caller picks the CAE slot by hand. Examples:
 
 - `list_managed_identity_azure_roles` (ARM)
 - `commands::sso::create_saml_sso_application` / `set_claims_mapping` (policy write)
@@ -124,6 +128,9 @@ discovers the gap) or needs a specific feature's button (e.g. `AppState::ensure_
   the attempted change and offers "Grant consent & retry", replaying it after the grant
 - the `commands::exchange` commands — they build their client via `exchange_client_checked` →
   `ensure_exchange_token`, so the Exchange/Permissions tabs can offer "Grant consent & retry"
+- `get_enterprise_app_provisioning` (`ensure_sync_token`) — the Provisioning tab turns
+  `consent_required` into "Grant consent & retry" for the `sync` feature and reloads; a 403 keeps
+  a role/license message instead
 - `run_audit` — pre-acquires the `AuditLog.Read.All` token so the Security-audit view can offer a
   "Grant consent & re-run" button that enables the **Unused** tab. The sign-in activity report
   behind it is gated on that scope + Entra ID P1/P2;
@@ -221,8 +228,9 @@ Three surfaces read it so the guidance never drifts:
 
 1. **Reactive 403 hints** — `ArmError`/`KeyVaultError::ui_hint()` (appended in the dto `From<…>`
    impls, like Exchange) and command-level `forbidden` overrides (`permissions.rs`
-   `grant_failure_message`, `managed_identity.rs`, `sharepoint.rs` `sharepoint_err`) pull
-   `remediation`. There is deliberately no blanket `GraphError::ui_hint` — a Graph 403 is too
+   `grant_failure_message`, `managed_identity.rs`, `sharepoint.rs` `sharepoint_err`,
+   `enterprise_application.rs` `group_membership_err` / `provisioning_err` → `provisioning_read`,
+   `sso::set_claims_mapping`'s `claims_policy_err` → `sso_claims_mapping`) pull `remediation`. There is deliberately no blanket `GraphError::ui_hint` — a Graph 403 is too
    ambiguous to name a role.
 2. **Proactive `RequiresRole` label** (`web-rs/components/requires_role.rs`, on the privileged
    tabs/actions).
@@ -231,9 +239,20 @@ Three surfaces read it so the guidance never drifts:
    scope — "Two halves, both required"):
    - role half via `GraphClient::me_active_directory_roles`
      (`/me/transitiveMemberOf/...directoryRole`, **active-only by design** so a
-     PIM-eligible-but-inactive role reads as missing — the nudge to activate);
-   - scope half via a **silent token probe** per audience (`access_token_for_scopes[_cae]`:
-     `Ok`=Have, `consent_required`=Missing, else Unknown).
+     PIM-eligible-but-inactive role reads as missing — the nudge to activate). A Missing row says
+     "activate if eligible, otherwise request an assignment" and links the cloud-correct PIM
+     "My roles" page (`ReadinessReport.pim_activation_url` from
+     `CloudEnvironment::pim_my_roles_url`). Telling eligible from unassigned would need
+     `RoleEligibilitySchedule.Read.Directory`, deliberately not requested;
+   - scope half via a **silent token probe** per audience (`AppState::ensure_feature_token` over
+     `ConsentFeature` — the same scope-set + CAE derivation the `ensure_*` wrappers use, so a probe
+     can never seed a token in a different CAE slot from the adapter that reuses it; `Ok`=Have,
+     `consent_required`=Missing, else Unknown).
+
+   Every `ConsentFeature` has a catalog row and every catalog `scope_feature` is a
+   `ConsentFeature` (pinned by `every_consent_feature_has_a_catalog_row` /
+   `every_catalog_scope_feature_is_a_consent_feature` in `state.rs`), so each on-demand scope the
+   app can request shows up on the checklist.
 
    `check_readiness` is **never cached** (freshness after a PIM activation is the point); the Azure
    and Exchange *role* halves are deliberately `Unknown` (not per-user enumerable — verify in PIM /
