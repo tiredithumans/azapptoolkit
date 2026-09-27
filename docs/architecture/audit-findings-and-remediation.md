@@ -360,8 +360,12 @@ foreign-tenant (OIDC/multi-tenant) enterprise apps, managed identities, orphaned
 - **Zero extra per-item Graph traffic.** Phase 2 reuses the run's tenant-wide reads — the Graph
   `appRoleAssignedTo` matrix (now fetched regardless of Exchange availability; its mail-scopable
   subset still feeds `score_one`'s reconciliation) and the `oauth2PermissionGrants` read (which now
-  also keeps AllPrincipals scope strings per client for Rule 13). Scoring is pure CPU — a plain
-  sequential loop, no `dispatch_capped` fan-out.
+  also keeps AllPrincipals scope strings per client for Rule 13). Phase 1 uses the same map: an app
+  row's broad-prefix delegated scopes (`Mail.`, `Files.`, `Sites.`, …) are reported by Rule 13 only
+  when they are in its SP's AllPrincipals set (`AppPermissions::admin_consented_scopes`), falling
+  back to the declared scopes when the grants read failed; the ported pair
+  (`Directory.AccessAsUser.All`, `user_impersonation`) is reported whenever requested. Scoring is
+  pure CPU — a plain sequential loop, no `dispatch_capped` fan-out.
 - **Applicable rules only**: permission risk (1 & 2), admin consent (3), disabled SP (4),
   mailbox/SharePoint advisories (11, 12), high-risk delegated (13), plus the sign-in post-pass.
   Credential rules (5–9) and manifest rules (10, 14–18, downgrades) are deliberately absent —

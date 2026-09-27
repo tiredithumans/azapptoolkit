@@ -110,7 +110,7 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
     GroupSpec {
         key: "high_risk_delegated",
         title: "High-risk delegated permissions",
-        blurb: "Admin-consented delegated scopes with broad reach. Review on the principal's Permissions tab; delegated scopes are requested by name, so removal is admin-judged.",
+        blurb: "Delegated scopes that let the app act as a signed-in user (Directory.AccessAsUser.All, user_impersonation), and broad-reach scopes (mail, files, directory, sites…) an admin consented to for every user. If the tenant's consent grants couldn't be read, requested broad scopes are listed too. Review on the principal's Permissions tab; delegated scopes are requested by name, so removal is admin-judged.",
         tab: "permissions",
         section: GroupSection::Actionable,
     },

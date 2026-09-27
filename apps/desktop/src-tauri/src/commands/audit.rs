@@ -263,7 +263,7 @@ pub async fn run_audit(
     // capped at MAX_APPS_PER_RUN has not seen every app, so "no findings" from
     // it is "nothing found YET", exactly like a cancelled run.
     let (apps, truncated) = apps?;
-    let (admin_consent_clients, delegated_scopes_by_client) = consent_grants;
+    let (admin_consent_clients, delegated_scopes_by_client, consent_grants_read) = consent_grants;
     let (sign_in_available, sign_in_consent_required, sign_in_map) = sign_in;
     let (legacy_policies, legacy_read_failed) = legacy_policies;
     // Third way a run can be partial, alongside `cancelled` and `truncated`:
@@ -284,6 +284,7 @@ pub async fn run_audit(
     client.seed_lean_sps_from_index(&app_ids, &sp_index);
 
     let admin_consent_clients = Arc::new(admin_consent_clients);
+    let delegated_scopes_by_client = Arc::new(delegated_scopes_by_client);
     let legacy_policies = Arc::new(legacy_policies);
     let orgwide_mail_by_sp = Arc::new(derive_orgwide_mail_scopes(
         &graph_roles_by_sp,
@@ -330,6 +331,8 @@ pub async fn run_audit(
         resolver: Arc::new(ResourceResolver::new(client.clone())),
         exo,
         admin_consent_clients,
+        admin_consented_scopes_by_client: consent_grants_read
+            .then(|| delegated_scopes_by_client.clone()),
         orgwide_mail_by_sp,
         legacy_policies,
         exo_tripped,
@@ -941,6 +944,13 @@ struct ScoreCtx {
     /// every mail permission to full org-wide weight.
     exo: Option<Arc<ExchangeClient>>,
     admin_consent_clients: Arc<HashSet<String>>,
+    /// `spObjectId -> AllPrincipals delegated scope values`, the same map the
+    /// SP-only phase scores from. Phase 1 copies an app's entry into
+    /// `AppPermissions::admin_consented_scopes` so Rule 13 reports a broad
+    /// delegated scope only when an admin consented to it for every user.
+    /// `None` = the tenant-wide grants read failed: consent is unknown, and
+    /// Rule 13 falls back to the declared scopes rather than hiding them.
+    admin_consented_scopes_by_client: Option<Arc<HashMap<String, Vec<String>>>>,
     orgwide_mail_by_sp: Arc<HashMap<String, HashSet<String>>>,
     /// `appId -> Scoped { LegacyApplicationAccessPolicy }` for every app a
     /// `RestrictAccess` Application Access Policy confines, from the run's one
@@ -987,13 +997,15 @@ fn audit_exchange_client(state: &AppState, tenant_id: &str) -> Option<Arc<Exchan
 }
 
 /// ONE tenant-wide `oauth2PermissionGrants` read → (AllPrincipals client ids,
-/// per-client delegated scope values). The scope strings are kept per client so
-/// the SP-only phase can score high-risk delegated permissions (an SP has no
-/// manifest to resolve them from). Best-effort: on failure no principal gets the
-/// admin-consent flag and the audit proceeds.
+/// per-client delegated scope values, whether the read succeeded). The scope
+/// strings are kept per client so the SP-only phase can score high-risk
+/// delegated permissions (an SP has no manifest to resolve them from), and so
+/// phase 1 can tell an admin-consented scope from a merely declared one.
+/// Best-effort: on failure no principal gets the admin-consent flag, the flag
+/// is `false` (consent unknown, not "none") and the audit proceeds.
 async fn prefetch_admin_consent_grants(
     client: &GraphClient,
-) -> (HashSet<String>, HashMap<String, Vec<String>>) {
+) -> (HashSet<String>, HashMap<String, Vec<String>>, bool) {
     match client.list_all_oauth2_grants().await {
         Ok(grants) => {
             let mut clients: HashSet<String> = HashSet::new();
@@ -1008,14 +1020,14 @@ async fn prefetch_admin_consent_grants(
                     .extend(g.scope.split_whitespace().map(str::to_string));
                 clients.insert(g.client_id);
             }
-            (clients, scopes)
+            (clients, scopes, true)
         }
         Err(err) => {
             tracing::info!(
                 ?err,
                 "audit: tenant-wide grants read failed; admin-consent flags unavailable"
             );
-            (HashSet::new(), HashMap::new())
+            (HashSet::new(), HashMap::new(), false)
         }
     }
 }
@@ -1350,6 +1362,9 @@ fn score_sp_only(
             .cloned()
             .unwrap_or_default(),
         has_admin_consent: ctx.admin_consent_clients.contains(&sp.id),
+        // The SP scorer treats `scope_values` (already the AllPrincipals set)
+        // as the consented set, so this per-scope copy would be redundant.
+        admin_consented_scopes: None,
         mail_scopes: HashMap::new(),
     };
     let granted_grants = perms.app_role_grants.clone();
@@ -1601,6 +1616,19 @@ async fn score_one(
     if let Some(ref sp) = sp {
         perms.has_admin_consent = ctx.admin_consent_clients.contains(&sp.id);
     }
+    // Per-scope consent state for Rule 13: the scopes this app's SP holds under
+    // AllPrincipals grants. An app with no SP can hold no grant (`Some(empty)`);
+    // a failed grants read leaves it `None` (unknown — Rule 13 falls back to the
+    // declared scopes rather than hiding them).
+    perms.admin_consented_scopes = ctx
+        .admin_consented_scopes_by_client
+        .as_ref()
+        .map(|by_client| {
+            sp.as_ref()
+                .and_then(|sp| by_client.get(&sp.id))
+                .cloned()
+                .unwrap_or_default()
+        });
 
     // Resolve effective Exchange mailbox scoping so a mail permission confined to
     // specific mailboxes scores below an org-wide one. Skips the Exchange round
@@ -2180,6 +2208,7 @@ mod tests {
             tenant_id: "tenant-test".to_string(),
             exo: None,
             admin_consent_clients: Arc::default(),
+            admin_consented_scopes_by_client: None,
             orgwide_mail_by_sp: Arc::default(),
             legacy_policies: Arc::default(),
             exo_tripped: Arc::new(AtomicBool::new(false)),
@@ -2309,6 +2338,97 @@ mod tests {
             "the Graph index must resolve, or the flag proves nothing"
         );
         assert!(ctx.mail_scoping_unresolved.load(Ordering::Acquire));
+    }
+
+    async fn mock_grants(server: &wiremock::MockServer, response: wiremock::ResponseTemplate) {
+        use wiremock::matchers::{method, path};
+        wiremock::Mock::given(method("GET"))
+            .and(path("/oauth2PermissionGrants"))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_grants_read_reports_consent_as_unknown() {
+        let server = wiremock::MockServer::start().await;
+        mock_grants(&server, wiremock::ResponseTemplate::new(403)).await;
+        let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+
+        let (clients, scopes, read) = prefetch_admin_consent_grants(&ctx.client).await;
+        // Empty maps alone read as "nothing admin-consented"; the flag is what
+        // lets Rule 13 fall back to the declared scopes instead of hiding them.
+        assert!(
+            !read,
+            "a failed read must not claim the consent state is known"
+        );
+        assert!(clients.is_empty() && scopes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_grants_read_keeps_only_all_principals_scopes() {
+        let server = wiremock::MockServer::start().await;
+        mock_grants(
+            &server,
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    {"id": "g1", "clientId": "sp-1", "resourceId": "graph-sp",
+                     "consentType": "AllPrincipals", "principalId": null,
+                     "scope": "Mail.Read  User.Read"},
+                    {"id": "g2", "clientId": "sp-1", "resourceId": "graph-sp",
+                     "consentType": "Principal", "principalId": "user-1",
+                     "scope": "Files.ReadWrite.All"},
+                    {"id": "g3", "clientId": "sp-2", "resourceId": "graph-sp",
+                     "consentType": "Principal", "principalId": "user-1",
+                     "scope": "Mail.ReadWrite"},
+                ]
+            })),
+        )
+        .await;
+        let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+
+        let (clients, scopes, read) = prefetch_admin_consent_grants(&ctx.client).await;
+        assert!(read);
+        assert_eq!(clients, HashSet::from(["sp-1".to_string()]));
+        assert_eq!(
+            scopes.len(),
+            1,
+            "a user-consented grant is not admin consent"
+        );
+        assert_eq!(
+            scopes["sp-1"],
+            vec!["Mail.Read".to_string(), "User.Read".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn score_one_hands_rule_13_the_apps_admin_consented_scopes() {
+        let server = wiremock::MockServer::start().await;
+        mock_sp_lookup(
+            &server,
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{"id": "sp-1", "appId": "app-1", "accountEnabled": true}]
+            })),
+        )
+        .await;
+        let mut ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+        ctx.admin_consented_scopes_by_client = Some(Arc::new(HashMap::from([(
+            "sp-1".to_string(),
+            vec!["Mail.ReadWrite".to_string()],
+        )])));
+
+        // The app declares nothing, so the only way the broad scope can reach
+        // Rule 13 is through its SP's AllPrincipals grant (dynamic consent).
+        let item = score_one(&ctx, &bare_app(), None).await.expect("scores");
+        assert!(
+            item.issues.iter().any(|i| i
+                == &format!(
+                    "{} Mail.ReadWrite",
+                    azapptoolkit_core::audit::issue::HIGH_RISK_DELEGATED_PERMS
+                )),
+            "{:?}",
+            item.issues
+        );
     }
 
     #[tokio::test]

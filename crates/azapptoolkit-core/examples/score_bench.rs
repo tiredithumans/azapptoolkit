@@ -20,6 +20,7 @@ fn main() {
         ],
         scope_values: vec!["User.Read".into(), "Directory.AccessAsUser.All".into()],
         has_admin_consent: true,
+        admin_consented_scopes: None,
         mail_scopes: Default::default(),
     };
     let app = Application {

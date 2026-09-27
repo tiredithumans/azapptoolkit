@@ -392,29 +392,115 @@ fn admin_consent_delegated_adds_five() {
 
 #[test]
 fn high_risk_delegated_permissions_surface_without_score() {
-    // Rule 13, ported from `Constants.ps1:104-130`. High-risk delegated
-    // scopes are advisory: they add an issue but no score (the legacy module
-    // weighted delegated perms only via the admin-consent check). Each row
-    // is (scope value, expect_issue).
-    let cases = [
-        ("Directory.AccessAsUser.All", true),
-        ("user_impersonation", true),
-        ("User.Read", false),
+    // Rule 13. The pair `Directory.AccessAsUser.All` / `user_impersonation` is
+    // ported from `Constants.ps1:104-130` and reported whenever requested. The
+    // broad-reach prefixes (`Mail.`, `Files.`, `Sites.`, `Group.`, …) are
+    // net-new (no PowerShell origin) and reported only when an admin consented
+    // to the scope for every user — a user-consented delegated scope reaches
+    // only that user's data. Consent unknown (`None`: the grants read failed)
+    // falls back to the declared scopes rather than hiding them. Advisory only:
+    // the legacy module weighted delegated perms only via the admin-consent
+    // check (Rule 3), so no row adds score.
+    //
+    // Each row: (declared scopes, admin-consented scopes, scope, expect_issue).
+    type Row = (
+        &'static [&'static str],
+        Option<&'static [&'static str]>,
+        &'static str,
+        bool,
+    );
+    let cases: &[Row] = &[
+        // Consent unknown — the ported pair and the declared fallback.
+        (
+            &["Directory.AccessAsUser.All"],
+            None,
+            "Directory.AccessAsUser.All",
+            true,
+        ),
+        (&["user_impersonation"], None, "user_impersonation", true),
+        (&["User.Read"], None, "User.Read", false),
+        (&["Mail.Read"], None, "Mail.Read", true),
+        (&["Files.ReadWrite.All"], None, "Files.ReadWrite.All", true),
+        (&["Sites.Read.All"], None, "Sites.Read.All", true),
+        // The least-privilege SharePoint scope is never risky.
+        (&["Sites.Selected"], None, "Sites.Selected", false),
+        // Consent known, nothing admin-consented: broad scopes are only
+        // declared (user-consentable), the ported pair still surfaces.
+        (&["Mail.Read"], Some(&[]), "Mail.Read", false),
+        (
+            &["Files.ReadWrite.All"],
+            Some(&[]),
+            "Files.ReadWrite.All",
+            false,
+        ),
+        (
+            &["Directory.AccessAsUser.All"],
+            Some(&[]),
+            "Directory.AccessAsUser.All",
+            true,
+        ),
+        (
+            &["user_impersonation"],
+            Some(&[]),
+            "user_impersonation",
+            true,
+        ),
+        // Admin-consented.
+        (&["Mail.Read"], Some(&["Mail.Read"]), "Mail.Read", true),
+        (
+            &["Group.ReadWrite.All"],
+            Some(&["Group.ReadWrite.All"]),
+            "Group.ReadWrite.All",
+            true,
+        ),
+        (
+            &["Sites.Selected"],
+            Some(&["Sites.Selected"]),
+            "Sites.Selected",
+            false,
+        ),
+        (&["User.Read"], Some(&["User.Read"]), "User.Read", false),
+        // Consented but not declared (dynamic consent) still surfaces.
+        (&[], Some(&["Mail.ReadWrite"]), "Mail.ReadWrite", true),
     ];
-    for (scope, expect_issue) in cases {
+    for (declared, consented, scope, expect_issue) in cases {
         let perms = AppPermissions {
-            scope_values: vec![scope.into()],
+            scope_values: declared.iter().map(|v| v.to_string()).collect(),
+            admin_consented_scopes: consented
+                .map(|set| set.iter().map(|v| v.to_string()).collect()),
             ..Default::default()
         };
         let item = score_application(&base_app(), Some(true), &perms, now());
         // Advisory only — never changes the score.
-        assert_eq!(item.risk_score, 0, "{scope} must not add score");
+        assert_eq!(
+            item.risk_score, 0,
+            "{scope} ({consented:?}) must not add score"
+        );
         let surfaced = item
             .issues
             .iter()
-            .any(|i| i.starts_with("High-risk delegated permissions:") && i.contains(scope));
-        assert_eq!(surfaced, expect_issue, "issue mismatch for {scope}");
+            .any(|i| i.starts_with(issue::HIGH_RISK_DELEGATED_PERMS) && i.contains(scope));
+        assert_eq!(
+            surfaced, *expect_issue,
+            "issue mismatch for {scope} declared={declared:?} consented={consented:?}: {:?}",
+            item.issues
+        );
     }
+
+    // An SP-only row's `scope_values` ARE its AllPrincipals grant set, so a
+    // broad scope surfaces there without any `admin_consented_scopes`.
+    let sp = AppPermissions {
+        scope_values: vec!["Mail.Read".into()],
+        ..Default::default()
+    };
+    let item = score_service_principal(&base_sp(), &sp, now());
+    assert!(
+        item.issues
+            .iter()
+            .any(|i| i == &format!("{} Mail.Read", issue::HIGH_RISK_DELEGATED_PERMS)),
+        "{:?}",
+        item.issues
+    );
 }
 
 /// Rules 19 & 20 — external exposure. Table-driven over the axes that decide
@@ -468,6 +554,14 @@ fn external_exposure_scores_only_reachable_multitenant_apps() {
             credentials: false,
             expect_audience_issue: true,
         },
+        // Personal accounts only still reaches principals outside this directory.
+        Case {
+            name: "personal Microsoft accounts only",
+            audience: Some("PersonalMicrosoftAccount"),
+            app_perms: true,
+            credentials: false,
+            expect_audience_issue: true,
+        },
         // An unrecognised audience must never INFLATE a score.
         Case {
             name: "unknown audience",
@@ -513,6 +607,68 @@ fn external_exposure_scores_only_reachable_multitenant_apps() {
             fired, case.expect_audience_issue,
             "{}: expected audience issue = {}, got {issues:?}",
             case.name, case.expect_audience_issue
+        );
+    }
+}
+
+/// Rule 19's wording names only the population the audience actually opens:
+/// `PersonalMicrosoftAccount` is personal Microsoft accounts ONLY (no other
+/// Entra directory can consent), so it must not claim "any Entra tenant". The
+/// score is the same for all three — the grant is reachable from outside this
+/// directory either way.
+#[test]
+fn external_exposure_names_only_the_population_the_audience_opens() {
+    let cases: &[(&str, &str, Option<&str>, &str)] = &[
+        (
+            "AzureADMultipleOrgs",
+            "from any Entra tenant,",
+            Some("personal"),
+            "Confirm this app is intended to be multi-tenant.",
+        ),
+        (
+            "AzureADandPersonalMicrosoftAccount",
+            "from any Entra tenant and personal Microsoft accounts",
+            None,
+            "Confirm this app is intended to be multi-tenant.",
+        ),
+        (
+            "PersonalMicrosoftAccount",
+            "from personal Microsoft accounts,",
+            Some("Entra tenant"),
+            "Confirm this app is intended to accept personal Microsoft accounts.",
+        ),
+    ];
+    let perms = AppPermissions {
+        app_role_grants: vec![ResourcePermission::graph("User.Read.All")],
+        ..Default::default()
+    };
+    for (audience, must_contain, must_not_contain, recommendation) in cases {
+        let mut app = base_app();
+        app.sign_in_audience = Some(audience.to_string());
+        let item = score_application(&app, Some(true), &perms, now());
+        let line = item
+            .issues
+            .iter()
+            .find(|i| i.starts_with(issue::MULTITENANT_AUDIENCE))
+            .unwrap_or_else(|| panic!("{audience}: no audience issue in {:?}", item.issues));
+        assert!(line.contains(must_contain), "{audience}: {line}");
+        if let Some(absent) = must_not_contain {
+            assert!(
+                !line.contains(absent),
+                "{audience} must not mention {absent}: {line}"
+            );
+        }
+        assert!(
+            item.recommendations
+                .iter()
+                .any(|r| r.starts_with(recommendation)),
+            "{audience}: {:?}",
+            item.recommendations
+        );
+        assert_eq!(
+            item.risk_score,
+            PTS_MULTITENANT_EXPOSURE + PTS_UNVERIFIED_PUBLISHER + PTS_MEDIUM_RISK_APP_PERM,
+            "{audience}: the wording changes, the score does not"
         );
     }
 }
@@ -1088,6 +1244,55 @@ fn newer_rbac_scopable_mailbox_grants_are_scored_and_offered_the_scope_fix() {
 }
 
 #[test]
+fn graph_calendar_contacts_and_mailbox_settings_grants_raise_the_mailbox_finding() {
+    // Rule 11, ported from `Resource-Analysis.ps1::Add-ExchangePermissionAnalysis`,
+    // end to end through `score_application`. A narrower `Mail.` /
+    // `MailboxSettings.`-only name test once dropped Graph `Calendars.*` and
+    // `Contacts.*` grants out of the mailbox advisory entirely (see the
+    // `scoping.rs` role-map doc); that regression was pinned only there.
+    // Weights: `Calendars.*` is the ported medium tier (`Constants.ps1:123-130`);
+    // `Contacts.Read` / `MailboxSettings.Read` are the net-new medium read halves
+    // of the high-weighted `Contacts.ReadWrite` / `MailboxSettings.ReadWrite`.
+    let cases: &[(&str, u32)] = &[
+        ("Calendars.Read", PTS_MEDIUM_RISK_APP_PERM),
+        ("Calendars.ReadWrite", PTS_MEDIUM_RISK_APP_PERM),
+        ("Contacts.Read", PTS_MEDIUM_RISK_APP_PERM),
+        ("Contacts.ReadWrite", PTS_HIGH_RISK_APP_PERM),
+        ("MailboxSettings.Read", PTS_MEDIUM_RISK_APP_PERM),
+        ("MailboxSettings.ReadWrite", PTS_HIGH_RISK_APP_PERM),
+    ];
+    for (value, points) in cases {
+        let perms = AppPermissions {
+            app_role_grants: vec![ResourcePermission::graph(*value)],
+            ..Default::default()
+        };
+        let item = score_application(&base_app(), Some(true), &perms, now());
+        assert_eq!(item.risk_score, *points, "{value} weight");
+        assert!(
+            item.issues
+                .iter()
+                .any(|i| i.starts_with(issue::ORG_WIDE_MAILBOX)),
+            "{value} must raise the org-wide mailbox finding: {:?}",
+            item.issues
+        );
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|i| i.starts_with(issue::UNCONFINABLE_MAILBOX)),
+            "{value} on Graph IS confinable by RBAC for Applications: {:?}",
+            item.issues
+        );
+        let fix = item
+            .remediations
+            .iter()
+            .find(|r| r.kind == RemediationKind::ScopeMailboxAccess)
+            .unwrap_or_else(|| panic!("{value} must offer the ScopeMailboxAccess fix"));
+        assert_eq!(fix.targets, vec![*value]);
+    }
+}
+
+#[test]
 fn newer_rbac_scopable_mailbox_grants_earn_the_reduced_scoped_weight() {
     // Once confined, the newer roles take the same scoped path as `Mail.Send`.
     let mut mail_scopes = HashMap::new();
@@ -1462,6 +1667,8 @@ fn characterizes_full_output_for_a_rich_app() {
     let item = score_application(&rich_app(), Some(false), &rich_perms(), now());
     assert_eq!(item.risk_score, 56);
     assert_eq!(item.risk_level, RiskLevel::Critical);
+    // The exported column: 5 app roles + 1 delegated scope.
+    assert_eq!(item.permission_count, 6);
     assert_eq!(
         as_strs(&item.issues),
         vec![
@@ -2061,6 +2268,131 @@ fn certificates_do_not_trip_long_lived_when_no_dates() {
     assert_eq!(item.certificates[0].status, CredentialStatus::Unknown);
 }
 
+/// Rules 5/6 for a certificate: the expired-credential rules and their
+/// remediation are kind-agnostic, and the Remove fix's handler deletes expired
+/// certificates as well as secrets.
+#[test]
+fn expired_certificate_is_all_expired_and_offers_remove_fix() {
+    let mut app = base_app();
+    // Under a year of lifetime, so Rule 7 stays out of the score.
+    app.key_credentials = vec![KeyCredential {
+        key_id: "c1".into(),
+        display_name: Some("cert".into()),
+        start_date_time: Some(now() - Duration::days(200)),
+        end_date_time: Some(now() - Duration::days(10)),
+        ..Default::default()
+    }];
+    let item = score_application(&app, Some(true), &AppPermissions::default(), now());
+    assert_eq!(item.risk_score, PTS_ALL_CREDS_EXPIRED);
+    assert_eq!(item.credential_status, CredentialStatus::Expired);
+    assert!(
+        item.issues
+            .iter()
+            .any(|i| i.starts_with("All credentials expired: cert")),
+        "{:?}",
+        item.issues
+    );
+    let fix = item
+        .remediations
+        .iter()
+        .find(|r| r.kind == RemediationKind::RemoveExpiredCredentials)
+        .expect("an expired certificate is offered the Remove fix");
+    assert!(fix.detail.contains("cert"), "{}", fix.detail);
+}
+
+/// Rule 7 (`Credential-Analysis.ps1:169`) checks secrets and certificates
+/// alike against the one-year threshold, scores `PTS_LONG_LIVED` flat and once
+/// whatever the mix, and names each kind on its own line — a multi-year
+/// certificate is not a "long-lived secret".
+#[test]
+fn long_lived_credentials_are_named_by_kind() {
+    fn secret(days: i64) -> PasswordCredential {
+        let start = now() - Duration::days(10);
+        PasswordCredential {
+            key_id: "k1".into(),
+            display_name: Some("s".into()),
+            start_date_time: Some(start),
+            end_date_time: Some(start + Duration::days(days)),
+            ..Default::default()
+        }
+    }
+    fn cert(days: i64) -> KeyCredential {
+        let start = now() - Duration::days(10);
+        KeyCredential {
+            key_id: "c1".into(),
+            display_name: Some("c".into()),
+            start_date_time: Some(start),
+            end_date_time: Some(start + Duration::days(days)),
+            ..Default::default()
+        }
+    }
+    const SECRETS: &str = "Long-lived secrets (>1 year): ";
+    const CERTS: &str = "Long-lived certificates (>1 year): ";
+    // (name, secrets, certificates, expected secret line, expected cert line, score)
+    type Row = (
+        &'static str,
+        Vec<PasswordCredential>,
+        Vec<KeyCredential>,
+        Option<&'static str>,
+        Option<&'static str>,
+        u32,
+    );
+    let cases: Vec<Row> = vec![
+        (
+            "400-day secret",
+            vec![secret(400)],
+            vec![],
+            Some("s"),
+            None,
+            PTS_LONG_LIVED,
+        ),
+        (
+            "400-day certificate",
+            vec![],
+            vec![cert(400)],
+            None,
+            Some("c"),
+            PTS_LONG_LIVED,
+        ),
+        // The threshold is strict `>`: exactly a year is not long-lived.
+        ("365-day secret", vec![secret(365)], vec![], None, None, 0),
+        (
+            "long-lived secret and certificate",
+            vec![secret(400)],
+            vec![cert(400)],
+            Some("s"),
+            Some("c"),
+            PTS_LONG_LIVED,
+        ),
+    ];
+    for (name, secrets, certs, secret_line, cert_line, score) in cases {
+        let mut app = base_app();
+        app.password_credentials = secrets;
+        app.key_credentials = certs;
+        let item = score_application(&app, Some(true), &AppPermissions::default(), now());
+        let line = |prefix: &str| {
+            item.issues
+                .iter()
+                .find(|i| i.starts_with(prefix))
+                .map(|i| i[prefix.len()..].to_string())
+        };
+        assert_eq!(
+            line(SECRETS).as_deref(),
+            secret_line,
+            "{name}: {:?}",
+            item.issues
+        );
+        assert_eq!(
+            line(CERTS).as_deref(),
+            cert_line,
+            "{name}: {:?}",
+            item.issues
+        );
+        // Rules 15/17 add advisories here but no points.
+        assert_eq!(item.risk_score, score, "{name}: {:?}", item.issues);
+    }
+}
+
 #[test]
 fn worst_case_combines_multiple_rules() {
     // 2 high-risk app perms (+20) + admin consent (+5) + disabled SP (+2)
@@ -2206,6 +2538,11 @@ fn a_duplicated_grant_does_not_score_twice() {
         score_application(&base_app(), Some(true), &twice, now()).risk_score,
         score_application(&base_app(), Some(true), &once, now()).risk_score,
         "a grant listed twice must score once"
+    );
+    // `permission_count` is taken after the dedupe too.
+    assert_eq!(
+        score_application(&base_app(), Some(true), &twice, now()).permission_count,
+        1
     );
     // Same rule for an SP's granted roles.
     assert_eq!(

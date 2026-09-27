@@ -268,6 +268,16 @@ pub struct AppPermissions {
     /// True if at least one `oauth2PermissionGrants` row has
     /// `consentType=AllPrincipals` (admin-consented delegated permission).
     pub has_admin_consent: bool,
+    /// Delegated scope values this app's service principal holds under an
+    /// AllPrincipals (tenant-wide admin-consent) grant — the per-scope consent
+    /// state Rule 13 needs on an app row, whose `scope_values` are merely
+    /// DECLARED. `None` = unknown (the tenant-wide grants read failed or was not
+    /// resolved): Rule 13 falls back to the declared scopes, over-reporting
+    /// rather than hiding. `Some(vec![])` = read, nothing admin-consented.
+    /// Ignored by `score_service_principal`, whose `scope_values` already ARE
+    /// that set.
+    #[serde(default)]
+    pub admin_consented_scopes: Option<Vec<String>>,
     /// Effective Exchange-mailbox scoping per scopable mail permission `value`.
     /// Empty (the default) means scoping was not resolved — every mail
     /// permission is then scored at its full org-wide weight, i.e. exactly the
@@ -327,6 +337,7 @@ impl AppPermissions {
             app_role_grants,
             scope_values,
             has_admin_consent: self.has_admin_consent,
+            admin_consented_scopes: self.admin_consented_scopes.clone(),
             mail_scopes: self.mail_scopes.clone(),
         }
     }

@@ -2,6 +2,34 @@
 
 ### Fixed
 
+- **The audit now scores the read-only halves of permission families it already scores high.**
+  Org-wide application grants of `Contacts.Read`, `MailboxSettings.Read`, `Notes.Read.All`,
+  `Device.Read.All`, `Application.Read.All`, `GroupMember.Read.All` and
+  `RoleManagement.Read.Directory` scored zero, while `Mail.Read` and `Calendars.Read` scored as
+  medium risk. `Contacts.Read` and `MailboxSettings.Read` already raised "Organization-wide mailbox
+  access" yet added nothing, so an app holding both could rank Low. They now score as medium risk
+  like the other tenant-wide reads, and permission risk badges show them as medium. A mailbox grant
+  confined through RBAC for Applications keeps the reduced scoped weight. **This shifts risk
+  ranking** for any app holding these grants.
+- **"High-risk delegated permissions" now lists broad delegated scopes only when an admin
+  consented to them for all users.** Any app registration that merely requested a delegated scope
+  such as `Mail.Read` or `Files.Read` joined the finding, whose description says the scopes are
+  admin-consented, although a scope a user consents to reaches only that user's data. The audit now
+  checks the tenant's admin-consent grants for each scope. `Directory.AccessAsUser.All` and
+  `user_impersonation` are still listed whenever an app requests them. If the consent grants can't
+  be read, requested broad scopes are still listed rather than hidden. This finding adds no points,
+  so scores are unchanged.
+- **A certificate valid for more than a year is no longer reported as a "long-lived secret".** The
+  rule checks secrets and certificates alike, but the finding always said "Long-lived secrets (>1
+  year)", so replacing a secret with a normal two-year certificate, as the audit recommends, filed
+  it under secrets. Certificates now get their own "Long-lived certificates (>1 year)" line. The
+  score is unchanged.
+- **An app for personal Microsoft accounts only is no longer described as reachable from any Entra
+  tenant.** For the `PersonalMicrosoftAccount` audience, the finding said the app "can be consented
+  to from any Entra tenant and personal Microsoft accounts". It now names personal Microsoft
+  accounts only, and the recommendation asks whether the app is meant to accept them. The score is
+  unchanged.
+
 - **Apps with a flexible federated credential now open their Federated credentials tab, and DR
   backups include them.** A flexible credential (one that matches a claims expression instead of a
   single subject, as GitHub recommends for pull-request and branch workflows) has no subject, and
