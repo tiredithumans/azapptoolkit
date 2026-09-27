@@ -2,7 +2,8 @@
 //! Two stages: **browse** (debounced search of `applicationTemplates` → pick a
 //! template) and **confirm** (name the instance → create). Creating calls
 //! `create_gallery_application`, which instantiates the gallery template into a
-//! paired app + service principal; SSO is then finished on the app's SSO tab.
+//! paired app + service principal, then opens the new enterprise app on its SSO
+//! tab, where SSO is finished.
 //!
 //! Matching happens backend-side in memory over the cached gallery, so a query
 //! hits anywhere in a name or publisher ("force" → Salesforce) rather than only
@@ -16,7 +17,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 
 use crate::bindings::enterprise_application::{
-    self, ApplicationTemplateDto, GallerySearchResultsDto,
+    self, ApplicationTemplateDto, GalleryAppSummary, GallerySearchResultsDto,
 };
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
@@ -104,8 +105,12 @@ pub fn GalleryDialog(
         let template_id = tpl.id.clone();
         let display_name = name.get().trim().to_string();
         cmd.run(
-            move |_| {
+            move |s: GalleryAppSummary| {
                 on_created.run(());
+                session.toast_success(format!("{} created.", s.display_name));
+                // Straight to where the hint below says the work continues.
+                // Before `on_close`: closing unmounts this dialog.
+                session.open_enterprise_on_tab(s.service_principal_id, "sso");
                 on_close.run(());
             },
             move |tenant_id| {
@@ -156,7 +161,8 @@ pub fn GalleryDialog(
                                     </Field>
                                     <Body1 class="hint">
                                         "This creates the enterprise application from the gallery \
-                                         template. Finish single sign-on on its SSO tab afterward."
+                                         template. The new application then opens on its SSO tab \
+                                         to finish single sign-on."
                                     </Body1>
                                     {move || {
                                         cmd.error

@@ -35,3 +35,5 @@ mod provisioning_tab;
 mod sso_claims;
 #[path = "gui/sso_rollover.rs"]
 mod sso_rollover;
+#[path = "gui/sso_wizard.rs"]
+mod sso_wizard;

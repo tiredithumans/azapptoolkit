@@ -9,7 +9,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 use wasm_bindgen_futures::JsFuture;
 
 use crate::bindings::sso::{OidcSsoSummary, SamlSsoSummary};
-use crate::components::ui::CopyIconButton;
+use crate::components::ui::{Callout, CopyIconButton};
 
 /// One labelled value in an app-owner summary.
 ///
@@ -150,6 +150,9 @@ fn CopyBlock(
 #[component]
 pub fn SamlSummaryView(summary: SamlSsoSummary) -> impl IntoView {
     let cert = summary.signing_cert_base64.clone();
+    // Best-effort create steps that did not land. Shown to the operator only —
+    // they are not part of the "Copy all details" text for the app owner.
+    let warnings = summary.warnings.clone();
     let fields = vec![
         f(
             "Microsoft Entra Identifier (Issuer)",
@@ -184,6 +187,22 @@ pub fn SamlSummaryView(summary: SamlSsoSummary) -> impl IntoView {
     let all_text = owner_summary_text("SAML single sign-on details", &text_fields, None);
     view! {
         <div class="sso-summary">
+            {(!warnings.is_empty())
+                .then(|| {
+                    view! {
+                        <Callout tone="warn" role="status">
+                            <Body1>
+                                "The application was created, but not everything you asked for was applied:"
+                            </Body1>
+                            <ul class="warnings">
+                                {warnings
+                                    .into_iter()
+                                    .map(|w| view! { <li>{w}</li> })
+                                    .collect_view()}
+                            </ul>
+                        </Callout>
+                    }
+                })}
             <Body1 class="hint">
                 "Share these values with the application owner to finish the SAML integration."
             </Body1>

@@ -237,6 +237,11 @@ pub struct SamlSsoSummary {
     pub signing_cert_expiry: Option<String>,
     /// Set when a custom claims-mapping policy was created and assigned.
     pub claims_policy_id: Option<String>,
+    /// Best-effort create steps that did not land (custom claims, notification
+    /// emails), as operator-facing messages. Empty on success and always empty
+    /// from `get_sso_summary`.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// App-owner output summary for an OIDC SSO integration. Also the result of
@@ -621,5 +626,29 @@ mod tests {
         let back: OidcSsoSummary =
             serde_json::from_str(&serde_json::to_string(&oidc).unwrap()).unwrap();
         assert_eq!(back.client_id, "c");
+    }
+
+    /// `warnings` is additive on the wire: a summary serialized without it
+    /// (an older backend, a hand-written fixture) still deserializes, and a
+    /// populated list survives the round trip.
+    #[test]
+    fn saml_summary_warnings_default_and_round_trip() {
+        let bare: SamlSsoSummary = serde_json::from_value(serde_json::json!({
+            "object_id": "o", "service_principal_id": "s", "app_id": "a",
+            "entity_id_issuer": "", "login_url": "", "logout_url": "",
+            "federation_metadata_url": "", "sp_entity_id": "", "reply_url": "",
+            "signing_cert_base64": null, "signing_cert_thumbprint": null,
+            "signing_cert_expiry": null, "claims_policy_id": null
+        }))
+        .unwrap();
+        assert!(bare.warnings.is_empty());
+
+        let saml = SamlSsoSummary {
+            warnings: vec!["x".into()],
+            ..Default::default()
+        };
+        let back: SamlSsoSummary =
+            serde_json::from_str(&serde_json::to_string(&saml).unwrap()).unwrap();
+        assert_eq!(back.warnings, vec!["x".to_string()]);
     }
 }

@@ -11,7 +11,8 @@
 //! template ([`CloudEnvironment::custom_app_template_id`]) so a paired service
 //! principal (the Enterprise App)
 //! always appears in the list. The multi-step Graph flow races against directory
-//! replication, so the PATCH steps right after instantiate are wrapped in
+//! replication, so every write against the freshly created app/SP (steps 2–5b,
+//! and the OIDC redirect/secret writes) is wrapped in
 //! [`with_replication_retry`] (retries `NotFound` only).
 
 use std::future::Future;
@@ -262,7 +263,9 @@ pub async fn create_saml_sso_application(
 }
 
 /// Steps 2–6 of the SAML flow, factored out so the caller can always invalidate
-/// caches once instantiate succeeded.
+/// caches once instantiate succeeded. Steps 5b (notification emails) and 6
+/// (custom claims) are best-effort: non-fatal, reported in `warnings` so the
+/// summary never reads as a clean success when one of them did not land.
 async fn configure_saml(
     client: &GraphClient,
     cloud: CloudEnvironment,
@@ -272,6 +275,8 @@ async fn configure_saml(
     app_id: &str,
     input: &SamlSsoConfigInput,
 ) -> Result<SamlSsoSummary, UiError> {
+    let mut warnings: Vec<String> = Vec::new();
+
     // 2. SSO mode = saml.
     let sso_mode_body = ServicePrincipalSsoModePatch {
         preferred_single_sign_on_mode: "saml".to_string(),
@@ -302,22 +307,20 @@ async fn configure_saml(
         .unwrap_or_else(|| format!("CN={}", input.display_name));
     let days = resolve_cert_lifetime_days(input.cert_lifetime_days)?;
     let end = chrono::Utc::now() + chrono::Duration::days(days as i64);
-    let cert = client
-        .add_token_signing_certificate(sp_id, &subject, end)
-        .await?;
+    // Retrying the POST on NotFound is safe: NotFound means nothing was minted.
+    let cert =
+        with_replication_retry(|| client.add_token_signing_certificate(sp_id, &subject, end))
+            .await?;
 
     // 5. Activate it as the preferred signing key.
-    client
-        .patch_service_principal(
-            sp_id,
-            &ServicePrincipalSigningKeyPatch {
-                preferred_token_signing_key_thumbprint: cert.thumbprint.clone(),
-            },
-        )
-        .await?;
+    let signing_key_body = ServicePrincipalSigningKeyPatch {
+        preferred_token_signing_key_thumbprint: cert.thumbprint.clone(),
+    };
+    with_replication_retry(|| client.patch_service_principal(sp_id, &signing_key_body)).await?;
 
     // 5b. Optional SAML cert-expiry notification recipients. Best-effort —
-    // Entra already seeds the creating admin, so a failure here isn't fatal.
+    // Entra already seeds the creating admin — so a failure is non-fatal,
+    // reported in `warnings`.
     let emails = sanitize_notification_emails(&input.notification_emails);
     if !emails.is_empty() {
         let body = serde_json::json!({ "notificationEmailAddresses": emails });
@@ -325,12 +328,17 @@ async fn configure_saml(
             with_replication_retry(|| client.patch_service_principal(sp_id, &body)).await
         {
             tracing::warn!(?err, "failed to set notification emails on new SSO app");
+            warnings.push(format!(
+                "Certificate-expiry notification emails were not saved: {} Add them on the \
+                 app's SSO tab (Save notification emails).",
+                UiError::from(err).message
+            ));
         }
     }
 
-    // 6. Optional custom claims. A failure here is non-fatal: the SSO app is
-    // already usable, so we degrade to "no custom claims" rather than failing
-    // the whole create.
+    // 6. Optional custom claims. Non-fatal, reported in `warnings`: the SSO
+    // app is already usable, so we degrade to "no custom claims" rather than
+    // failing the whole create.
     let claims_policy_id = match &input.claims_policy {
         Some(policy) if !policy.is_empty() => {
             match apply_claims_policy(
@@ -347,6 +355,11 @@ async fn configure_saml(
                         ?err,
                         "claims-mapping policy failed; SSO app created without it"
                     );
+                    warnings.push(format!(
+                        "Custom claims were not applied: {} Open the app's SSO tab and \
+                         select Save claims to retry.",
+                        claims_policy_err(UiError::from(err)).message
+                    ));
                     None
                 }
             }
@@ -370,6 +383,7 @@ async fn configure_saml(
         signing_cert_thumbprint: Some(cert.thumbprint.clone()),
         signing_cert_expiry: cert.end_date_time.map(|d| d.to_rfc3339()),
         claims_policy_id,
+        warnings,
     })
 }
 
@@ -1028,35 +1042,7 @@ pub async fn retire_saml_signing_certificate(
     )
     .await?;
 
-    let target = before
-        .certs
-        .iter()
-        .find(|c| c.key_id == key_id)
-        .ok_or_else(|| {
-            UiError::validation(
-                "cert_not_found",
-                "That certificate is no longer on the service principal.",
-            )
-        })?;
-    if target.is_active {
-        // An expired-but-still-nominated certificate isn't signing anything —
-        // Entra already promoted the staged one — but removing it while
-        // `preferredTokenSigningKeyThumbprint` still points at it would leave
-        // the nomination dangling. Same guard, honest message.
-        let message = if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Expired) {
-            "That certificate has expired but is still nominated as the signing key. \
-             Activate its replacement first — then it can be removed."
-        } else {
-            "That certificate is signing assertions right now. Activate its replacement first."
-        };
-        return Err(UiError::validation("cert_is_active", message));
-    }
-    if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Staged) {
-        return Err(UiError::validation(
-            "cert_is_staged",
-            "That certificate is staged for the next rollover, not retired. Activate it or let it expire.",
-        ));
-    }
+    retire_target(&before, &key_id)?;
 
     client
         .remove_service_principal_key_credential(&service_principal_id, &key_id)
@@ -1341,33 +1327,18 @@ async fn set_preferred_signing_key(
     )
     .await?;
 
-    let target = before
-        .certs
-        .iter()
-        .find(|c| c.thumbprint.eq_ignore_ascii_case(&thumbprint))
-        .ok_or_else(|| {
-            UiError::validation(
-                "cert_not_staged",
-                "That certificate is no longer on the service principal — stage a new one.",
-            )
-        })?;
-    if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Expired) {
-        return Err(UiError::validation(
-            "cert_expired",
-            "That certificate has expired. Entra won't sign with it — stage a new one instead.",
-        ));
-    }
-    // Idempotent: a double-click shouldn't read as a failure.
-    if target.is_active {
-        return Ok(before);
-    }
+    let thumb = match activation_target(&before, &thumbprint)? {
+        // Idempotent: a double-click shouldn't read as a failure.
+        None => return Ok(before),
+        Some(target) => target.thumbprint.clone(),
+    };
 
     state
         .graph_for(&tenant_id)
         .patch_service_principal(
             &service_principal_id,
             &ServicePrincipalSigningKeyPatch {
-                preferred_token_signing_key_thumbprint: target.thumbprint.clone(),
+                preferred_token_signing_key_thumbprint: thumb,
             },
         )
         .await?;
@@ -1726,6 +1697,87 @@ fn build_rollover(
     }
 }
 
+/// The **retire** guard (see *Guards* in `docs/architecture/auth-and-consent.md`):
+/// picks the certificate `key_id` names out of the live rollover, refusing one
+/// that is gone (`cert_not_found`), the nominated one (`cert_is_active` — with an
+/// honest message when it has expired but is still nominated) and the staged
+/// one (`cert_is_staged`, a pending rollover rather than a leftover). An expired,
+/// non-nominated certificate passes — that is the per-row Remove.
+///
+/// Pure, so every code is table-tested; [`retire_saml_signing_certificate`] is
+/// its only caller.
+fn retire_target<'a>(
+    roll: &'a SigningCertRolloverDto,
+    key_id: &str,
+) -> Result<&'a azapptoolkit_dto::sso::SigningCertDto, UiError> {
+    let target = roll
+        .certs
+        .iter()
+        .find(|c| c.key_id == key_id)
+        .ok_or_else(|| {
+            UiError::validation(
+                "cert_not_found",
+                "That certificate is no longer on the service principal.",
+            )
+        })?;
+    if target.is_active {
+        // An expired-but-still-nominated certificate isn't signing anything —
+        // Entra already promoted the staged one — but removing it while
+        // `preferredTokenSigningKeyThumbprint` still points at it would leave
+        // the nomination dangling. Same guard, honest message.
+        let message = if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Expired) {
+            "That certificate has expired but is still nominated as the signing key. \
+             Activate its replacement first — then it can be removed."
+        } else {
+            "That certificate is signing assertions right now. Activate its replacement first."
+        };
+        return Err(UiError::validation("cert_is_active", message));
+    }
+    if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Staged) {
+        return Err(UiError::validation(
+            "cert_is_staged",
+            "That certificate is staged for the next rollover, not retired. Activate it or let it expire.",
+        ));
+    }
+    Ok(target)
+}
+
+/// The **activate / revert** guard (see *Guards* in
+/// `docs/architecture/auth-and-consent.md`): resolves `thumbprint`
+/// (case-insensitively) against the live rollover, refusing one that is gone
+/// (`cert_not_staged`) or expired (`cert_expired` — checked before the no-op,
+/// so an expired-but-nominated certificate is refused rather than "already
+/// active"). `Ok(None)` means it is already the active key: activating it again
+/// is a no-op, not an error.
+///
+/// Pure, so every code is table-tested; [`set_preferred_signing_key`] is its
+/// only caller.
+fn activation_target<'a>(
+    roll: &'a SigningCertRolloverDto,
+    thumbprint: &str,
+) -> Result<Option<&'a azapptoolkit_dto::sso::SigningCertDto>, UiError> {
+    let target = roll
+        .certs
+        .iter()
+        .find(|c| c.thumbprint.eq_ignore_ascii_case(thumbprint))
+        .ok_or_else(|| {
+            UiError::validation(
+                "cert_not_staged",
+                "That certificate is no longer on the service principal — stage a new one.",
+            )
+        })?;
+    if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Expired) {
+        return Err(UiError::validation(
+            "cert_expired",
+            "That certificate has expired. Entra won't sign with it — stage a new one instead.",
+        ));
+    }
+    if target.is_active {
+        return Ok(None);
+    }
+    Ok(Some(target))
+}
+
 /// Saves the claims-mapping policy of an existing app. When this SP is the
 /// policy's only subject the definition is PATCHed in place (no unassign window,
 /// no new object); when the policy is shared with other apps, this app gets a
@@ -2018,6 +2070,7 @@ pub async fn get_sso_summary(
             signing_cert_thumbprint: config.signing_cert_thumbprint,
             signing_cert_expiry: config.signing_cert_expiry,
             claims_policy_id: config.claims_policy_id,
+            warnings: Vec::new(),
         };
         serde_json::to_value(summary).map_err(|e| UiError::serde(e.to_string()))
     }
@@ -2369,6 +2422,202 @@ mod handler_tests {
         .await
         .expect("the mocked unassign succeeds");
         assert_eq!(id, None);
+    }
+
+    // ---- SAML create orchestration (`configure_saml`, steps 2–6) ----
+
+    const CERT_PATH: &str = "/v1.0/servicePrincipals/sp-1/addTokenSigningCertificate";
+
+    /// Mounts the always-succeeding writes of a SAML create: both PATCHes and
+    /// the certificate mint. Individual tests layer higher-priority failures on
+    /// top.
+    async fn mount_saml_create(server: &MockServer) {
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/servicePrincipals/{SP}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(CERT_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "thumbprint": "C2DDD8044C956ACD0269A75A64B7862DB9DDAC3E",
+                "key": "MIIC-test",
+                "endDateTime": "2027-01-01T00:00:00Z"
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// Mounts a claims-policy create + assign that succeed.
+    async fn mount_claims_create_ok(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/v1.0/policies/claimsMappingPolicies"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "pol-new", "displayName": "Contoso claims", "definition": ["{}"]
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/v1.0/servicePrincipals/{SP}/claimsMappingPolicies/$ref"
+            )))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+    }
+
+    fn saml_input() -> SamlSsoConfigInput {
+        SamlSsoConfigInput {
+            display_name: "Contoso".into(),
+            entity_id: "https://sp.example".into(),
+            reply_url: "https://sp.example/acs".into(),
+            claims_policy: Some(claims_policy()),
+            notification_emails: vec!["ops@example.com".into()],
+            ..Default::default()
+        }
+    }
+
+    async fn run_saml_create(server: &MockServer) -> Result<SamlSsoSummary, UiError> {
+        let state = AppState::for_test(TENANT, &server.uri());
+        let client = state.graph_for(TENANT);
+        configure_saml(
+            &client,
+            CloudEnvironment::Commercial,
+            OBJECT,
+            SP,
+            TENANT,
+            "app-1",
+            &saml_input(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_clean_saml_create_has_no_warnings() {
+        let server = MockServer::start().await;
+        mount_saml_create(&server).await;
+        mount_claims_create_ok(&server).await;
+
+        let summary = run_saml_create(&server).await.expect("every step succeeds");
+        assert!(summary.warnings.is_empty(), "{:?}", summary.warnings);
+        assert_eq!(summary.claims_policy_id.as_deref(), Some("pol-new"));
+        assert_eq!(summary.signing_cert_base64.as_deref(), Some("MIIC-test"));
+    }
+
+    #[tokio::test]
+    async fn a_saml_create_reports_a_failed_claims_step_as_a_warning() {
+        let server = MockServer::start().await;
+        mount_saml_create(&server).await;
+        // 403, not 5xx: `http_retry` would retry a 5xx.
+        Mock::given(method("POST"))
+            .and(path("/v1.0/policies/claimsMappingPolicies"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(&server)
+            .await;
+
+        let summary = run_saml_create(&server)
+            .await
+            .expect("the claims step is best-effort; the create still succeeds");
+        assert_eq!(summary.claims_policy_id, None);
+        assert_eq!(summary.warnings.len(), 1, "{:?}", summary.warnings);
+        let w = &summary.warnings[0];
+        assert!(w.starts_with("Custom claims were not applied"), "{w}");
+        // The 403 carries the role remediation, like the SSO tab's save.
+        assert!(w.contains("Application Administrator"), "{w}");
+        assert!(w.contains("Save claims"), "{w}");
+    }
+
+    #[tokio::test]
+    async fn a_saml_create_reports_failed_notification_emails_as_a_warning() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/servicePrincipals/{SP}")))
+            .and(wiremock::matchers::body_string_contains(
+                "notificationEmailAddresses",
+            ))
+            .respond_with(ResponseTemplate::new(400).set_body_string("Invalid address"))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_saml_create(&server).await;
+        mount_claims_create_ok(&server).await;
+
+        let summary = run_saml_create(&server)
+            .await
+            .expect("the email step is best-effort; the create still succeeds");
+        assert_eq!(summary.warnings.len(), 1, "{:?}", summary.warnings);
+        assert!(
+            summary.warnings[0]
+                .starts_with("Certificate-expiry notification emails were not saved"),
+            "{}",
+            summary.warnings[0]
+        );
+        assert_eq!(summary.claims_policy_id.as_deref(), Some("pol-new"));
+    }
+
+    #[tokio::test]
+    async fn a_lagging_replica_at_certificate_mint_is_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(CERT_PATH))
+            .respond_with(ResponseTemplate::new(404))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_saml_create(&server).await;
+        mount_claims_create_ok(&server).await;
+
+        let summary = run_saml_create(&server)
+            .await
+            .expect("a NotFound right after instantiate is replication lag");
+        assert!(summary.warnings.is_empty(), "{:?}", summary.warnings);
+        let mints = server
+            .received_requests()
+            .await
+            .expect("request recording is on")
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == CERT_PATH)
+            .count();
+        assert_eq!(mints, 2, "one 404, then the retry that landed");
+    }
+
+    #[tokio::test]
+    async fn a_lagging_replica_at_certificate_activation_is_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/servicePrincipals/{SP}")))
+            .and(wiremock::matchers::body_string_contains(
+                "preferredTokenSigningKeyThumbprint",
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_saml_create(&server).await;
+        mount_claims_create_ok(&server).await;
+
+        run_saml_create(&server)
+            .await
+            .expect("the activation PATCH waits out replication lag");
+        let activations = server
+            .received_requests()
+            .await
+            .expect("request recording is on")
+            .iter()
+            .filter(|r| {
+                r.method.as_str() == "PATCH"
+                    && String::from_utf8_lossy(&r.body)
+                        .contains("preferredTokenSigningKeyThumbprint")
+            })
+            .count();
+        assert_eq!(activations, 2, "one 404, then the retry that landed");
     }
 }
 
@@ -3095,5 +3344,123 @@ mod tests {
         assert_eq!(thumbprint, None);
         assert_eq!(expiry, None);
         assert!(emails.is_empty());
+    }
+
+    // ---------------- rollover guards ----------------
+
+    fn roll(preferred: &str, creds: Vec<serde_json::Value>) -> SigningCertRolloverDto {
+        build_rollover(
+            &sp_with(Some(preferred), creds),
+            "sp-1",
+            "tid",
+            CloudEnvironment::Commercial,
+            now(),
+        )
+    }
+
+    /// A preferred and valid, B newer and not yet nominated.
+    fn staged() -> SigningCertRolloverDto {
+        roll(
+            A_HEX,
+            vec![
+                cred("k1", A_B64, "2026-06-01T00:00:00Z", "Verify"),
+                cred("k2", B_B64, "2029-01-01T00:00:00Z", "Verify"),
+            ],
+        )
+    }
+
+    /// A still nominated but expired; B valid.
+    fn expired_active() -> SigningCertRolloverDto {
+        roll(
+            A_HEX,
+            vec![
+                cred("k1", A_B64, "2025-06-01T00:00:00Z", "Verify"),
+                cred("k2", B_B64, "2029-01-01T00:00:00Z", "Verify"),
+            ],
+        )
+    }
+
+    /// B activated, A still valid — the rollback.
+    fn pending_retire() -> SigningCertRolloverDto {
+        roll(
+            B_HEX,
+            vec![
+                cred("k1", A_B64, "2026-06-01T00:00:00Z", "Verify"),
+                cred("k2", B_B64, "2029-01-01T00:00:00Z", "Verify"),
+            ],
+        )
+    }
+
+    /// B nominated, A expired and no longer nominated.
+    fn expired_leftover() -> SigningCertRolloverDto {
+        roll(
+            B_HEX,
+            vec![
+                cred("k1", A_B64, "2025-06-01T00:00:00Z", "Verify"),
+                cred("k2", B_B64, "2029-01-01T00:00:00Z", "Verify"),
+            ],
+        )
+    }
+
+    #[test]
+    fn retire_guard_refuses_the_active_the_staged_and_a_missing_certificate() {
+        let r = staged();
+        let err = retire_target(&r, "k1").expect_err("the active cert signs today");
+        assert_eq!(err.code, "cert_is_active");
+        assert!(
+            err.message.contains("signing assertions right now"),
+            "{}",
+            err.message
+        );
+        let err = retire_target(&r, "k2").expect_err("the staged cert is a pending rollover");
+        assert_eq!(err.code, "cert_is_staged");
+        let err = retire_target(&r, "nope").expect_err("a vanished cert");
+        assert_eq!(err.code, "cert_not_found");
+
+        // Expired but still nominated: same code, the honest message.
+        let r = expired_active();
+        let err = retire_target(&r, "k1").expect_err("the nomination would dangle");
+        assert_eq!(err.code, "cert_is_active");
+        assert!(
+            err.message.contains("has expired but is still nominated"),
+            "{}",
+            err.message
+        );
+
+        // The superseded certificate after activation is what retire is for.
+        let r = pending_retire();
+        assert_eq!(retire_target(&r, "k1").expect("superseded").key_id, "k1");
+
+        // An expired, non-nominated certificate passes — the per-row Remove.
+        let r = expired_leftover();
+        assert_eq!(
+            retire_target(&r, "k1").expect("expired leftover").key_id,
+            "k1"
+        );
+    }
+
+    #[test]
+    fn activation_guard_refuses_missing_and_expired_and_is_a_no_op_when_active() {
+        let r = staged();
+        let hit = activation_target(&r, B_HEX).expect("staged cert activates");
+        assert_eq!(hit.map(|c| c.key_id.as_str()), Some("k2"));
+        let hit = activation_target(&r, &B_HEX.to_ascii_lowercase())
+            .expect("the thumbprint match is case-insensitive");
+        assert_eq!(hit.map(|c| c.key_id.as_str()), Some("k2"));
+        // Idempotent: activating the active key is a no-op, not an error.
+        assert!(activation_target(&r, A_HEX).expect("no-op").is_none());
+        let err = activation_target(&r, "DEADBEEF").expect_err("not on the SP");
+        assert_eq!(err.code, "cert_not_staged");
+
+        // Revert: the superseded certificate can be re-nominated.
+        let r = pending_retire();
+        let hit = activation_target(&r, A_HEX).expect("revert");
+        assert_eq!(hit.map(|c| c.key_id.as_str()), Some("k1"));
+
+        // Expired wins over the "already active" no-op.
+        let err = activation_target(&expired_active(), A_HEX).expect_err("expired + nominated");
+        assert_eq!(err.code, "cert_expired");
+        let err = activation_target(&expired_leftover(), A_HEX).expect_err("expired");
+        assert_eq!(err.code, "cert_expired");
     }
 }

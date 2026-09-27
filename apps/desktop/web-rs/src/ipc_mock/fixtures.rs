@@ -489,6 +489,21 @@ pub fn saml_sso_summary(object_id: &str, app_id: &str) -> SamlSsoSummary {
         signing_cert_thumbprint: Some("A1B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
         signing_cert_expiry: Some("2027-04-30".to_string()),
         claims_policy_id: None,
+        warnings: Vec::new(),
+    }
+}
+
+/// [`saml_sso_summary`] as `create_saml_sso_application` returns it when a
+/// best-effort step (here: the custom claims) did not land — the app exists,
+/// but the summary must not read as a clean success.
+pub fn saml_sso_summary_partial(object_id: &str, app_id: &str) -> SamlSsoSummary {
+    SamlSsoSummary {
+        warnings: vec![
+            "Custom claims were not applied: Insufficient privileges to complete the operation. \
+             Open the app's SSO tab and select Save claims to retry."
+                .into(),
+        ],
+        ..saml_sso_summary(object_id, app_id)
     }
 }
 

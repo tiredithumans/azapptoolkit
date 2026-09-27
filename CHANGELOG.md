@@ -15,9 +15,19 @@
   China with nothing set on each workstation. Previously every recipient had to set the variable,
   or the app used the commercial endpoints and sign-in failed with an Entra error. A variable set on
   the workstation still overrides the baked-in value.
+- **Creating an app from the gallery or the New SSO application wizard now takes you to it.** A
+  gallery app opens on its SSO tab, where its own hint says to finish single sign-on. The wizard's
+  summary has an Open application button. Before, the dialog just closed, and you had to find the
+  new app in the list.
 
 ### Fixed
 
+- **A SAML app whose custom claims or notification emails couldn't be saved no longer looks fully
+  set up.** The New SSO application wizard treats those two steps as best-effort. When one failed,
+  the wizard still showed the same success screen, so the missing claims only came to light at the
+  first federated sign-in. The summary now lists what wasn't applied and where to retry it on the
+  app's SSO tab. The certificate and activation steps now also wait out Entra's replication delay,
+  like the steps before them, instead of leaving a half-configured app.
 - **Creating an SSO application now works in US Gov and China tenants, and the URLs it gives app
   owners point at your cloud.** The New SSO application wizard always used the global cloud's
   custom-application template, which US Gov and 21Vianet tenants don't have, so creating a SAML or

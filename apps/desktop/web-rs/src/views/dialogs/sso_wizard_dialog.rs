@@ -136,7 +136,8 @@ pub fn SsoWizardDialog(
         if is_saml {
             // Validate notification emails up front (same rule as the backend's
             // `set_notification_emails`) so the create flow — where the step is
-            // best-effort and swallows errors — gives the user feedback.
+            // best-effort and reports a failure as a warning — gives the user
+            // feedback before anything is created.
             let emails = lines_to_vec(&notification_emails.get_untracked());
             if emails.len() > 5 {
                 error.set(Some(
@@ -232,6 +233,26 @@ pub fn SsoWizardDialog(
                 }
             }
         });
+    };
+
+    // Step 3's "Open application": the new enterprise app, on the tab where its
+    // setup continues. SAML lands on SSO (where a warned-about claims or email
+    // step is retried); OIDC on Overview, since `configure_oidc` never sets
+    // `preferredSingleSignOnMode` and the SSO tab would read "not configured".
+    // Reads the result before `close()`, whose `reset()` clears it.
+    let open_created = move |_| {
+        let target = saml_result
+            .get_untracked()
+            .map(|s| (s.service_principal_id, "sso"))
+            .or_else(|| {
+                oidc_result
+                    .get_untracked()
+                    .map(|s| (s.service_principal_id, "overview"))
+            });
+        if let Some((sp, tab)) = target {
+            session.open_enterprise_on_tab(sp, tab);
+        }
+        close();
     };
 
     // Step-1 "Next" is allowed when the protocol-specific required fields are set.
@@ -419,7 +440,14 @@ pub fn SsoWizardDialog(
                             }
                         }>
                             <Button
+                                class="sso-wizard-open"
                                 appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                on_click=Box::new(open_created)
+                            >
+                                "Open application"
+                            </Button>
+                            <Button
+                                appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                 on_click=Box::new(move |_| close())
                             >
                                 "Done"
