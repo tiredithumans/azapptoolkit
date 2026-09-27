@@ -37,6 +37,13 @@
 
 ### Fixed
 
+- **A sign-in Entra refuses in the browser now shows the step that fixes it, and a stray request
+  can no longer cancel a sign-in.** When you declined consent (AADSTS65004) or a Conditional Access
+  policy blocked you (AADSTS53003), the sign-in card showed only the generic "declined" hint,
+  because the Entra error code was dropped. The code is now kept, so the card shows the specific
+  step. While the app waited for your browser, any program on the machine, or any web page open in
+  your browser, could send a fake reply to its sign-in port. That ended the sign-in with an error
+  of its choosing. Those requests are now ignored, and the real sign-in still completes.
 - **The permission picker no longer tells you to scope Office 365 Exchange Online mail permissions
   to specific mailboxes.** Picking `Mail.Read` or another mail, calendar or contacts permission on
   Office 365 Exchange Online showed "Scope to specific mailboxes (Exchange RBAC)". RBAC for

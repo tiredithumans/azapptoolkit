@@ -50,6 +50,10 @@ pub enum AuthError {
     #[error("loopback listener failed: {0}")]
     Loopback(String),
 
+    /// The loopback listener no longer produces this: a redirect with a
+    /// foreign or missing `state` is answered 400 and ignored rather than
+    /// ending the sign-in. Kept for the public, `non_exhaustive` API and its
+    /// DTO mapping.
     #[error("state mismatch on redirect — possible CSRF")]
     StateMismatch,
 

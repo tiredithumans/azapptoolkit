@@ -10,7 +10,7 @@
 //! Service — and are shared across audiences for the same account.
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use zeroize::{Zeroize, Zeroizing};
@@ -249,20 +249,16 @@ fn split_into_chunks(token: &str) -> Vec<&str> {
 /// A single global mutex rather than a per-account map: these are OS keyring
 /// syscalls on a blocking thread, contention is a handful of writers, and a map
 /// is one more thing to get wrong for no measurable gain.
-static CHUNK_SET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Takes [`CHUNK_SET_LOCK`], recovering from poisoning.
 ///
-/// A panic mid-write leaves the store possibly torn — which is the state the
-/// load path already fails closed on — so refusing every later read and write
-/// would turn a recoverable "sign in again" into a permanently broken keyring.
-fn chunk_set_guard() -> std::sync::MutexGuard<'static, ()> {
-    CHUNK_SET_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
+/// `parking_lot`, so no poisoning — which is correct here: a panic mid-write
+/// leaves the store possibly torn, the state the load path already fails
+/// closed on, so later reads and writes proceed instead of turning a
+/// recoverable "sign in again" into a permanently broken keyring.
+static CHUNK_SET_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn save_refresh_token(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
     ensure_keyring_store()?;
-    let _guard = chunk_set_guard();
+    let _guard = CHUNK_SET_LOCK.lock();
     // A refresh token is stored across N keyring entries, and `load` simply
     // concatenates entries 0, 1, 2, … until one is missing. There is no length,
     // no checksum, and nothing marking where this token ends — so a write that
@@ -294,11 +290,13 @@ fn write_chunks(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
         // set from a torn one. Written FIRST, so a crash part-way through leaves
         // a count that exceeds what is actually stored — which fails closed —
         // rather than a plausible-looking short set.
-        let value = if idx == 0 {
+        // Wiped once written, mirroring `load_chunks`: each chunk copy is
+        // plaintext token material.
+        let value = Zeroizing::new(if idx == 0 {
             encode_chunk_zero(chunks.len(), chunk)
         } else {
             (*chunk).to_string()
-        };
+        });
         keyring_core::Entry::new(KEYRING_SERVICE, &account)?.set_password(&value)?;
     }
     let mut idx = chunks.len();
@@ -328,7 +326,7 @@ pub fn load_refresh_token(tenant_id: &str, account_oid: &str) -> Result<Option<Z
     ensure_keyring_store()?;
     // Held for the read too: without it a load can observe a half-written set
     // and return a splice of two tokens as though it were one.
-    let _guard = chunk_set_guard();
+    let _guard = CHUNK_SET_LOCK.lock();
     load_chunks(tenant_id, account_oid)
 }
 
@@ -394,7 +392,7 @@ fn load_chunks(tenant_id: &str, account_oid: &str) -> Result<Option<Zeroizing<St
 
 pub fn delete_refresh_token(tenant_id: &str, account_oid: &str) -> Result<()> {
     ensure_keyring_store()?;
-    let _guard = chunk_set_guard();
+    let _guard = CHUNK_SET_LOCK.lock();
     delete_chunks(tenant_id, account_oid)
 }
 
@@ -424,7 +422,7 @@ pub fn delete_refresh_token_if_current(
     rejected: &str,
 ) -> Result<PurgeOutcome> {
     ensure_keyring_store()?;
-    let _guard = chunk_set_guard();
+    let _guard = CHUNK_SET_LOCK.lock();
     match load_chunks(tenant_id, account_oid)? {
         Some(current) if current.as_str() != rejected => Ok(PurgeOutcome::Superseded),
         Some(_) => {

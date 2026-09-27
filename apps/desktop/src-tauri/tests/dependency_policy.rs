@@ -156,3 +156,129 @@ fn machete_ignores_are_only_the_macro_expanded_thiserror() {
         "expected the arm/graph/keyvault ignores; found {with_ignores:?} — the scan broke"
     );
 }
+
+/// The synchronous-lock spellings [`sync_locks_are_parking_lot`] rejects, found
+/// in one source text: a path through `std::sync::` naming `Mutex` / `RwLock`
+/// (and their guards), or a `use std::sync::{…}` group importing one.
+fn std_sync_locks_in(src: &str) -> Vec<String> {
+    const LOCKS: [&str; 5] = [
+        "Mutex",
+        "MutexGuard",
+        "RwLock",
+        "RwLockReadGuard",
+        "RwLockWriteGuard",
+    ];
+    let mut out = Vec::new();
+    for token in [
+        "std::sync::Mutex",
+        "std::sync::RwLock",
+        "std::sync::MutexGuard",
+    ] {
+        if src.contains(token) {
+            out.push(token.to_string());
+        }
+    }
+    let mut rest = src;
+    while let Some(at) = rest.find("std::sync::{") {
+        let group = &rest[at + "std::sync::{".len()..];
+        // Balanced to the group's own `}` (a nested `atomic::{…}` is allowed).
+        let mut depth = 1usize;
+        let end = group
+            .char_indices()
+            .find(|&(_, c)| {
+                match c {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+                depth == 0
+            })
+            .map_or(group.len(), |(i, _)| i);
+        let items = &group[..end];
+        if items
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|ident| LOCKS.contains(&ident))
+        {
+            out.push(format!("use std::sync::{{{items}}}"));
+        }
+        rest = &group[end..];
+    }
+    out
+}
+
+#[test]
+fn the_std_lock_detector_sees_the_import_forms() {
+    assert!(!std_sync_locks_in("use std::sync::{Arc, Mutex};").is_empty());
+    assert!(!std_sync_locks_in("use std::sync::{\n    Arc,\n    RwLock,\n};").is_empty());
+    assert!(!std_sync_locks_in("static L: std::sync::Mutex<()> = todo!();").is_empty());
+    assert!(
+        !std_sync_locks_in("use std::sync::{atomic::{AtomicUsize, Ordering}, Mutex as M};")
+            .is_empty()
+    );
+    // Not a lock, or not std's.
+    assert!(std_sync_locks_in("use std::sync::{Arc, OnceLock};").is_empty());
+    assert!(std_sync_locks_in("use std::sync::{atomic::{AtomicBool, Ordering}, Arc};").is_empty());
+    assert!(std_sync_locks_in("use tokio::sync::{Mutex, RwLock};").is_empty());
+    assert!(std_sync_locks_in("use parking_lot::{Mutex, RwLock};").is_empty());
+}
+
+/// Synchronous locks are `parking_lot` (no poisoning, a const `new` for
+/// statics); a lock held across `.await` is `tokio::sync`. The std pair used to
+/// sit beside `parking_lot` in the same files, each with a paragraph of
+/// poison-recovery code `parking_lot` makes moot. Production code only: each
+/// file is cut at its first `#[cfg(test)]`, and `tests.rs` files are skipped.
+/// `web-rs` (wasm, its own lockfile) is out of scope.
+#[test]
+fn sync_locks_are_parking_lot() {
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && path.file_name().is_some_and(|n| n != "tests.rs")
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root");
+    let mut files = Vec::new();
+    let crates = std::fs::read_dir(root.join("crates")).expect("crates/ is readable");
+    for krate in crates.flatten() {
+        rust_files(&krate.path().join("src"), &mut files);
+    }
+    rust_files(&root.join("apps/desktop/src-tauri/src"), &mut files);
+    files.sort();
+
+    let mut offenders = Vec::new();
+    for path in &files {
+        let src = std::fs::read_to_string(path).expect("source is readable");
+        let production = src.split("#[cfg(test)]").next().unwrap_or(&src);
+        for hit in std_sync_locks_in(production) {
+            offenders.push(format!(
+                "{}: {hit}",
+                path.strip_prefix(&root).unwrap_or(path).display()
+            ));
+        }
+    }
+
+    assert!(
+        files.len() > 50,
+        "the walk found only {} .rs files — the root is wrong and the rule passes vacuously",
+        files.len()
+    );
+    assert!(
+        offenders.is_empty(),
+        "use `parking_lot::Mutex` / `RwLock` for a synchronous lock (no poisoning, const \
+         `new`), or `tokio::sync` for one held across `.await`:\n  {}",
+        offenders.join("\n  ")
+    );
+}

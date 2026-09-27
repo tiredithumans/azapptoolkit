@@ -27,8 +27,8 @@ pub const GRAPH_WRITE_SCOPES: &[&str] = &[
     "DelegatedPermissionGrant.ReadWrite.All",
 ];
 
-/// Exchange Online Admin API delegated scope. The audience is
-/// `outlook.office365.com` (not Graph), so this token is acquired separately
+/// Exchange Online Admin API delegated scope. The audience is Exchange Online
+/// (commercial `outlook.office365.com`, not Graph), so this token is acquired separately
 /// from the Graph read/write tokens. Used for RBAC for Applications —
 /// registering service principals, management scopes, and role assignments
 /// that scope mailbox access. Requires admin consent on the tenant and an
@@ -41,7 +41,10 @@ pub const GRAPH_WRITE_SCOPES: &[&str] = &[
 /// Admin API (`/adminapi/v2.0/<tenant>/<Cmdlet>`, allow-listed cmdlets, not
 /// enabled in all tenants). A `ManageV2` token at the InvokeCommand gateway is
 /// rejected with a bodyless 403 (no `x-ms-diagnostics`) before RBAC evaluation.
-pub const EXCHANGE_SCOPES: &[&str] = &["https://outlook.office365.com/Exchange.Manage"];
+///
+/// Bare permission: `EntraAuthService::default_exchange_scopes` prefixes the
+/// selected cloud's Exchange resource (commercial `https://outlook.office365.com`).
+pub const EXCHANGE_SCOPES: &[&str] = &["Exchange.Manage"];
 
 /// Cache TTLs and entry caps. These are the runtime-tunable defaults seeded
 /// into [`crate::cache::CacheConfig`]; every kind defaults to a 60-minute TTL.

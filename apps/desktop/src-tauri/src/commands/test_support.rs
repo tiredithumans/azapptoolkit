@@ -23,8 +23,9 @@
 //! anything those rules key on: no commands, no cache invalidations or pinned
 //! index writes, no fan-out drivers.
 
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Application, ServicePrincipal};
@@ -183,29 +184,20 @@ pub(crate) struct Recorder(Mutex<Vec<(&'static str, serde_json::Value)>>);
 impl ProgressSink for Recorder {
     fn emit_event<P: Serialize + Clone>(&self, event: &'static str, payload: P) {
         let value = serde_json::to_value(&payload).expect("progress payloads serialize");
-        self.0
-            .lock()
-            .expect("recorder lock poisoned")
-            .push((event, value));
+        self.0.lock().push((event, value));
     }
 }
 
 impl Recorder {
     /// Every event name, in emission order.
     pub(crate) fn names(&self) -> Vec<&'static str> {
-        self.0
-            .lock()
-            .expect("recorder lock poisoned")
-            .iter()
-            .map(|(name, _)| *name)
-            .collect()
+        self.0.lock().iter().map(|(name, _)| *name).collect()
     }
 
     /// The payloads emitted on `event`, in order, decoded as `T`.
     pub(crate) fn payloads<T: DeserializeOwned>(&self, event: &str) -> Vec<T> {
         self.0
             .lock()
-            .expect("recorder lock poisoned")
             .iter()
             .filter(|(name, _)| *name == event)
             .map(|(_, value)| {

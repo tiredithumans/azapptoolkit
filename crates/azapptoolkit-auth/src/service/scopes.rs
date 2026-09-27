@@ -3,7 +3,7 @@
 //! vs on-demand incremental consent) — consumed exclusively by the desktop
 //! backend's `AppState` client factories.
 
-use azapptoolkit_core::constants::{GRAPH_READ_SCOPES, GRAPH_WRITE_SCOPES};
+use azapptoolkit_core::constants::{EXCHANGE_SCOPES, GRAPH_READ_SCOPES, GRAPH_WRITE_SCOPES};
 
 use super::EntraAuthService;
 
@@ -127,19 +127,24 @@ impl EntraAuthService {
         scopes
     }
 
-    /// Exchange Online Admin API scopes (`EXCHANGE_SCOPES` plus
-    /// `offline_access`), for managing RBAC for Applications. The audience is
-    /// `outlook.office365.com`, so this is a distinct token from the Graph
-    /// read/write tokens; it is redeemed on demand from the sign-in refresh
-    /// token the first time an Exchange operation runs.
+    /// Exchange Online Admin API scopes: each `EXCHANGE_SCOPES` permission
+    /// prefixed with this cloud's Exchange resource
+    /// ([`CloudEnvironment::exchange_resource`](azapptoolkit_core::cloud::CloudEnvironment::exchange_resource);
+    /// commercial `https://outlook.office365.com`), plus `offline_access`, for
+    /// managing RBAC for Applications. A distinct audience, so a distinct token
+    /// from the Graph read/write tokens; it is redeemed on demand from the
+    /// sign-in refresh token the first time an Exchange operation runs.
     pub fn default_exchange_scopes(&self) -> Vec<String> {
-        vec![
-            // Classic scope — the InvokeCommand gateway rejects `ManageV2`
-            // (preview per-cmdlet API only) with a bodyless 403. See
-            // `azapptoolkit_core::constants::EXCHANGE_SCOPES`.
-            format!("{}/Exchange.Manage", self.cloud.exchange_resource()),
-            "offline_access".to_string(),
-        ]
+        // `EXCHANGE_SCOPES` is the classic `Exchange.Manage` — the
+        // InvokeCommand gateway rejects `ManageV2` (preview per-cmdlet API
+        // only) with a bodyless 403; its doc has the detail.
+        let resource = self.cloud.exchange_resource();
+        let mut scopes: Vec<String> = EXCHANGE_SCOPES
+            .iter()
+            .map(|s| format!("{resource}/{s}"))
+            .collect();
+        scopes.push("offline_access".to_string());
+        scopes
     }
 
     /// Scopes to request for a non-Graph audience. Every Entra-secured
@@ -157,6 +162,7 @@ impl EntraAuthService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use azapptoolkit_core::cloud::CloudEnvironment;
 
     #[test]
     fn read_scopes_are_read_only_with_offline_access() {
@@ -277,6 +283,23 @@ mod tests {
         assert!(scopes.iter().any(|s| s == "offline_access"));
         // Must not leak any Graph scope into the Exchange token request.
         assert!(!scopes.iter().any(|s| s.contains("graph.microsoft.com")));
+    }
+
+    #[test]
+    fn exchange_scopes_follow_the_selected_cloud() {
+        let scopes = EntraAuthService::new_in_cloud("c", "t", CloudEnvironment::UsGov)
+            .default_exchange_scopes();
+        assert!(
+            scopes
+                .iter()
+                .any(|s| s == "https://outlook.office365.us/Exchange.Manage"),
+            "{scopes:?}"
+        );
+        assert!(scopes.iter().any(|s| s == "offline_access"));
+        assert!(
+            !scopes.iter().any(|s| s.contains("office365.com")),
+            "{scopes:?}"
+        );
     }
 
     #[test]

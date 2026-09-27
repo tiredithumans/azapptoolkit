@@ -38,6 +38,15 @@ timing out, or Entra redirecting `access_denied` with `error_subcode=cancel` or 
 in its description, is `AuthError::Cancelled`. A coded `access_denied` (AADSTS65004, a declined
 consent) stays `authorization`.
 
+**Only the pending `state` ends the redirect wait.** The loopback port is reachable by any local
+process and by a blind cross-origin request from any page in the browser, so a request whose `state`
+is missing or foreign (a bare `error=` included) is answered 400, logged at warn (which parameters
+were present, never their values) and ignored; a non-`GET` (a CORS/PNA preflight) gets a 404. The
+trade-off is deliberate: a genuinely mismatched redirect now waits out `REDIRECT_WAIT` and surfaces as
+`cancelled` rather than failing fast as `StateMismatch`. A matching `error=` redirect keeps its
+OAuth code (gated to `[a-z_]`) and the AADSTS code from `error_description`, redacted by the same
+`wire::redact_aad_error` as a `/token` error, so the sign-in card's AADSTS hint fires.
+
 **Launch restore.** The keyring entry is keyed `{tenant}:{oid}`, and the oid used to live only in
 memory — so nothing could read the refresh token back at startup, and every launch showed the
 sign-in card and a `prompt=select_account` browser bounce. `UserSettings.last_account` now persists

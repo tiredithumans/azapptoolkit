@@ -6,8 +6,9 @@
 //!      `azapptoolkit_core::constants::GRAPH_READ_SCOPES` plus `offline_access`),
 //!      open it in the system browser. Write scopes are consented incrementally
 //!      the first time a mutating Graph call needs them.
-//!   3. Accept requests on the listener until the OAuth redirect arrives,
-//!      pull `code` + `state`, reply with a success page, shut down.
+//!   3. Accept requests on the listener until a redirect carrying the pending
+//!      `state` arrives (others are answered 400 and ignored), pull `code`,
+//!      reply with a result page, shut down.
 //!   4. Exchange the code at `/token` with our own reqwest call so we can read
 //!      `id_token` from the response.
 //!   5. Resolve tenant id + account oid from the ID token claims.
@@ -27,12 +28,13 @@ mod scopes;
 mod wire;
 
 use chrono::{Duration, Utc};
-use oauth2::{CsrfToken, PkceCodeChallenge, PkceCodeVerifier};
+use oauth2::{CsrfToken, PkceCodeChallenge};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
+use zeroize::Zeroizing;
 
 use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_core::http_retry::{
@@ -222,7 +224,7 @@ impl EntraAuthService {
         url: &str,
         params: &[(&str, &str)],
     ) -> Attempt<TokenResponse, AuthError> {
-        let resp = match self.http.post(url).form(params).send().await {
+        let mut resp = match self.http.post(url).form(params).send().await {
             Ok(resp) => resp,
             Err(e) if e.is_timeout() => return Attempt::Done(Err(e.into())),
             Err(e) => {
@@ -249,14 +251,25 @@ impl EntraAuthService {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
-        let bytes = match resp.bytes().await {
-            Ok(bytes) => bytes,
-            Err(e) => return Attempt::Done(Err(e.into())),
-        };
-        if status.is_success() {
-            return Attempt::Done(serde_json::from_slice(&bytes).map_err(Into::into));
+        // The success body carries the access, refresh and id tokens, so it is
+        // read into one owned, wiped buffer rather than `resp.bytes()`, whose
+        // `Bytes` would be freed un-wiped. Pre-sized from `Content-Length` so
+        // the usual body lands without a realloc stranding a copy.
+        let capacity = resp
+            .content_length()
+            .map_or(8 * 1024, |n| n.min(64 * 1024) as usize);
+        let mut body = Zeroizing::new(Vec::with_capacity(capacity));
+        loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+                Ok(None) => break,
+                Err(e) => return Attempt::Done(Err(e.into())),
+            }
         }
-        let err = if let Ok(err_body) = serde_json::from_slice::<TokenErrorBody>(&bytes) {
+        if status.is_success() {
+            return Attempt::Done(serde_json::from_slice(&body).map_err(Into::into));
+        }
+        let err = if let Ok(err_body) = serde_json::from_slice::<TokenErrorBody>(&body) {
             // Log the OAuth error code, the AADSTS numeric code, and the
             // correlation id for operators, but never the raw
             // error_description: it routinely embeds tenant/user GUIDs and
@@ -281,7 +294,7 @@ impl EntraAuthService {
             tracing::warn!(
                 target: "auth",
                 %status,
-                bytes = bytes.len(),
+                bytes = body.len(),
                 content_type = content_type.as_deref().unwrap_or("<none>"),
                 "AAD token endpoint returned non-success without TokenErrorBody"
             );
@@ -428,8 +441,11 @@ impl EntraAuthService {
         .await
         .map_err(|_| AuthError::Cancelled)??;
 
-        let verifier_secret =
-            zeroize::Zeroizing::new(PkceCodeVerifier::secret(&pkce_verifier).to_string());
+        // Moved, not copied: this is the only verifier string, and it is wiped
+        // on drop. (oauth2 has no zeroize, so the random pre-image inside its
+        // `new_random_len` is freed un-wiped — outside our control, and useful
+        // only alongside the single-use code redeemed moments later.)
+        let verifier_secret = Zeroizing::new(pkce_verifier.into_secret());
         let mut params = vec![
             ("client_id", self.client_id.as_str()),
             ("grant_type", "authorization_code"),
@@ -442,7 +458,7 @@ impl EntraAuthService {
             params.push(("claims", claims));
         }
         let token = self.post_token(&authority, &params).await?;
-        let claims = parse_id_token(token.id_token.as_deref())?;
+        let claims = parse_id_token(token.id_token.as_deref().map(String::as_str))?;
         // Bind the id_token to THIS request: its `nonce` must equal the value we
         // sent. An absent/mismatched nonce means the token isn't ours — reject it.
         if claims.nonce.as_deref() != Some(nonce.secret().as_str()) {
@@ -685,18 +701,21 @@ impl EntraAuthService {
         cache_scopes: &[String],
         scope_fallback: &[String],
         cae: bool,
-        token: TokenResponse,
+        mut token: TokenResponse,
     ) -> Result<AccessToken> {
         let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
         let scopes = parse_scopes(token.scope.as_deref(), scope_fallback);
-        if let Some(refresh) = token.refresh_token {
+        // `refresh` is `Zeroizing`: wiped when the blocking closure drops it.
+        if let Some(refresh) = token.refresh_token.take() {
             let (t, oid) = (tenant_id.to_string(), account_oid.to_string());
             tokio::task::spawn_blocking(move || save_refresh_token(&t, &oid, &refresh))
                 .await
                 .map_err(|e| AuthError::Keyring(format!("keyring write task failed: {e}")))??;
         }
         let access = AccessToken {
-            token: token.access_token,
+            // Moves the buffer out without a copy: `AccessToken` wipes it on
+            // drop, and the emptied `Zeroizing` left behind wipes nothing.
+            token: std::mem::take(&mut *token.access_token),
             expires_at,
             scopes,
         };
@@ -964,17 +983,14 @@ impl EntraAuthService {
         )
         .await?;
         // Restore the (validated) context: a prior `InvalidGrant` removed it, and
-        // `tenants()` / consent lookups read `known_tenants`.
+        // `tenant_context()` and every token lookup (`access_token_inner`) read
+        // `known_tenants`.
         self.known_tenants
             .lock()
             .insert(tenant.tenant_id.clone(), tenant.clone());
         Ok(SignInOutcome {
             tenant: tenant.clone(),
         })
-    }
-
-    pub async fn tenants(&self) -> Vec<TenantContext> {
-        self.known_tenants.lock().values().cloned().collect()
     }
 
     /// Synchronous lookup of a single signed-in tenant's context. Returns
@@ -987,7 +1003,7 @@ impl EntraAuthService {
 }
 
 /// Keyring delete on the blocking pool — the same per-chunk OS round trips as
-/// save/load, and it takes the std `CHUNK_SET_LOCK`, so never inline on a
+/// save/load, and it takes `CHUNK_SET_LOCK`, so never inline on a
 /// tokio worker.
 async fn delete_refresh_token_off_worker(tenant_id: &str, account_oid: &str) -> Result<()> {
     let (t, oid) = (tenant_id.to_string(), account_oid.to_string());
@@ -1525,7 +1541,7 @@ mod tests {
     }
 
     /// Every keyring call in the service runs on the blocking pool: they are
-    /// OS round trips per chunk and take a std mutex, so an inline one parks a
+    /// OS round trips per chunk and take a blocking mutex, so an inline one parks a
     /// tokio worker (often while holding a refresh lock). The call must sit on
     /// the `spawn_blocking` line or, where rustfmt wraps the closure, the line
     /// right below it.

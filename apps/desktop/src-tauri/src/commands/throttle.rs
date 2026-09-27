@@ -49,7 +49,7 @@ struct Marks {
 struct ThrottleInner {
     current: AtomicUsize,
     max: usize,
-    marks: std::sync::Mutex<Marks>,
+    marks: parking_lot::Mutex<Marks>,
 }
 
 /// Adjusts a fan-out's in-flight concurrency cap in response to Graph's 429s.
@@ -71,7 +71,7 @@ impl ConcurrencyThrottle {
         let inner = Arc::new(ThrottleInner {
             current: AtomicUsize::new(initial.max(MIN_CONCURRENCY)),
             max: initial,
-            marks: std::sync::Mutex::new(Marks {
+            marks: parking_lot::Mutex::new(Marks {
                 last_throttle: None,
                 last_halved: None,
             }),
@@ -83,10 +83,11 @@ impl ConcurrencyThrottle {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(RECOVERY_SECS)).await;
                 let Some(inner) = weak.upgrade() else { break };
+                // The guard is a temporary of this statement, so it is never
+                // held across the `.await` above.
                 let quiet = inner
                     .marks
                     .lock()
-                    .expect("tracker mutex poisoned")
                     .last_throttle
                     .is_some_and(|t| t.elapsed().as_secs() >= RECOVERY_SECS);
                 if quiet {
@@ -117,7 +118,7 @@ impl ThrottleObserver for ConcurrencyThrottle {
         // The whole decision runs under the one lock (no await inside): check
         // the window, halve, re-anchor. Held apart, two lanes throttled on the
         // same instant would both pass the window check and halve 8→2.
-        let mut marks = self.inner.marks.lock().expect("tracker mutex poisoned");
+        let mut marks = self.inner.marks.lock();
         marks.last_throttle = Some(now);
         if marks
             .last_halved

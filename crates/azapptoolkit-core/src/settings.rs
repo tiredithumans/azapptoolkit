@@ -127,11 +127,10 @@ impl UserSettings {
         config_dir: &Path,
         f: impl FnOnce(&mut Self) -> T,
     ) -> std::io::Result<(T, Self)> {
-        static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        // A poisoned lock means a previous writer panicked mid-mutation. The
-        // file itself is still consistent (the write is atomic), so recovering
-        // and carrying on beats refusing every subsequent save.
-        let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        static SETTINGS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+        // parking_lot has no poisoning; a writer that panicked left the file
+        // consistent (the write is atomic), so later saves proceed.
+        let _guard = SETTINGS_LOCK.lock();
         // The OS lock comes SECOND: two opens of the same lock file in one
         // process conflict with each other, so the Mutex above is what keeps
         // in-process callers from contending on it.

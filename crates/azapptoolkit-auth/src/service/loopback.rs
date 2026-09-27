@@ -24,7 +24,20 @@ const PER_CONNECTION_READ_TIMEOUT_SECS: u64 = 5;
 /// servers — with a single `accept()`, one of those consumes the slot and the
 /// real redirect is lost until the caller's timeout ("sign-in hangs"). So this
 /// loops: a connection that closes without sending, or whose request carries
-/// none of `code`/`state`/`error`, gets a 404 and the listener keeps waiting.
+/// none of `code`/`state`/`error`, or that is not a `GET` (a CORS/PNA
+/// `OPTIONS` preflight), gets a 404 and the listener keeps waiting.
+///
+/// Only a redirect carrying the pending `state` ends the wait. Any local
+/// process — or any web page open in the operator's browser, via a blind
+/// cross-origin request — can reach the ephemeral port, so a request whose
+/// `state` is missing or foreign (including a bare `error=`) is answered 400
+/// with a neutral page, logged at warn, and ignored: it can neither abort the
+/// sign-in nor choose the error text the app shows. The consequence is
+/// deliberate: a genuinely mismatched redirect no longer fails fast as
+/// [`AuthError::StateMismatch`]; it waits out the caller's `REDIRECT_WAIT` and
+/// surfaces as [`AuthError::Cancelled`]. The browser page is written only after
+/// `state` validates, and says what is true at that point (the code exchange
+/// still follows).
 pub(super) async fn listen_for_code(listener: TcpListener, expected_state: &str) -> Result<String> {
     loop {
         let (mut socket, _peer) = listener
@@ -55,7 +68,7 @@ pub(super) async fn listen_for_code(listener: TcpListener, expected_state: &str)
 
         let first_line = request.lines().next().unwrap_or_default();
         let mut parts = first_line.split_whitespace();
-        let _method = parts.next();
+        let method = parts.next().unwrap_or("");
         let path = parts.next().unwrap_or("");
 
         let query = path.split('?').nth(1).unwrap_or("");
@@ -75,44 +88,85 @@ pub(super) async fn listen_for_code(listener: TcpListener, expected_state: &str)
             }
         }
 
-        // Not the OAuth redirect (favicon probe, unrelated request): answer
-        // and keep waiting for the real one.
-        if code.is_none() && state.is_none() && error.is_none() {
-            let _ = socket
-                .write_all(
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .await;
-            let _ = socket.shutdown().await;
+        // Not the OAuth redirect (favicon probe, unrelated request, a CORS/PNA
+        // preflight): answer and keep waiting for the real one.
+        if method != "GET" || (code.is_none() && state.is_none() && error.is_none()) {
+            respond(&mut socket, "404 Not Found", "").await;
             continue;
         }
 
-        let body = if error.is_some() {
-            "<html><body><h2>Sign-in failed.</h2><p>You can close this window.</p></body></html>"
-        } else {
-            "<html><body><h2>azapptoolkit sign-in complete.</h2><p>You can close this window.</p></body></html>"
+        // A request that does not carry the pending `state` is not our
+        // redirect, whatever else it claims: ignore it rather than let it end
+        // the wait. Never log the values — only which parameters were present.
+        if state.as_deref() != Some(expected_state) {
+            tracing::warn!(
+                target: "auth",
+                has_code = code.is_some(),
+                has_error = error.is_some(),
+                "ignoring a loopback request whose state does not match the pending sign-in"
+            );
+            respond(
+                &mut socket,
+                "400 Bad Request",
+                "<html><body><h2>This request doesn't match a pending azapptoolkit sign-in.</h2><p>You can close this window.</p></body></html>",
+            )
+            .await;
+            continue;
+        }
+
+        let outcome = match (error, code) {
+            (Some(err), _) => Err(redirect_error(
+                &err,
+                error_subcode.as_deref(),
+                error_description.as_deref(),
+            )),
+            (None, Some(code)) => Ok(code),
+            (None, None) => Err(AuthError::Authorization("no code returned".into())),
         };
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let _ = socket.write_all(response.as_bytes()).await;
-        let _ = socket.shutdown().await;
-
-        if let Some(err) = error {
-            if is_user_cancel(&err, error_subcode.as_deref(), error_description.as_deref()) {
-                return Err(AuthError::Cancelled);
-            }
-            return Err(AuthError::Authorization(err));
-        }
-
-        let got_state = state.ok_or(AuthError::StateMismatch)?;
-        if got_state != expected_state {
-            return Err(AuthError::StateMismatch);
-        }
-        return code.ok_or_else(|| AuthError::Authorization("no code returned".into()));
+        let body = if outcome.is_ok() {
+            "<html><body><h2>azapptoolkit received your sign-in.</h2><p>You can close this window and return to the app.</p></body></html>"
+        } else {
+            "<html><body><h2>Sign-in failed.</h2><p>You can close this window.</p></body></html>"
+        };
+        respond(&mut socket, "200 OK", body).await;
+        return outcome;
     }
+}
+
+/// Writes one complete `Connection: close` response and shuts the socket down.
+/// Best effort: the browser may already have gone, which changes nothing here.
+async fn respond(socket: &mut TcpStream, status: &str, body: &str) {
+    let content_type = if body.is_empty() {
+        ""
+    } else {
+        "Content-Type: text/html; charset=utf-8\r\n"
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\n{content_type}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = socket.write_all(response.as_bytes()).await;
+    let _ = socket.shutdown().await;
+}
+
+/// The [`AuthError`] for an `error=` redirect whose `state` matched. A user
+/// cancel is [`AuthError::Cancelled`]; anything else keeps the OAuth error code
+/// and the AADSTS code from `error_description` (redacted exactly like a
+/// `/token` error, so the sign-in card's AADSTS hint fires). The error value is
+/// gated to `[a-z_]{1,64}` — every OAuth/Entra code has that shape, so a new
+/// code still passes, while anything else is never echoed into the UI.
+fn redirect_error(error: &str, subcode: Option<&str>, description: Option<&str>) -> AuthError {
+    if is_user_cancel(error, subcode, description) {
+        return AuthError::Cancelled;
+    }
+    let well_formed = (1..=64).contains(&error.len())
+        && error.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+    let gated = if well_formed {
+        error
+    } else {
+        "unrecognized_error"
+    };
+    AuthError::Authorization(super::wire::redact_aad_error(gated, description))
 }
 
 /// Whether an `error=` redirect is the operator walking away at Entra rather
@@ -216,9 +270,10 @@ mod tests {
         assert_eq!(code, "c0de");
     }
 
-    /// Sends one raw redirect `query` to a fresh listener and returns what
-    /// `listen_for_code` made of it.
-    async fn redirect_outcome(query: &str) -> Result<String> {
+    /// Sends one raw redirect `query` to a fresh listener (expecting state
+    /// `"s"`) and returns what `listen_for_code` made of it, plus the response
+    /// the browser saw.
+    async fn redirect_exchange(query: &str) -> (Result<String>, String) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let wait = tokio::spawn(async move { listen_for_code(listener, "s").await });
@@ -226,7 +281,17 @@ mod tests {
         s.write_all(format!("GET /?{query} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
             .await
             .unwrap();
-        wait.await.unwrap()
+        let mut resp = Vec::new();
+        let _ = s.read_to_end(&mut resp).await;
+        (
+            wait.await.unwrap(),
+            String::from_utf8_lossy(&resp).into_owned(),
+        )
+    }
+
+    /// [`redirect_exchange`] without the response text.
+    async fn redirect_outcome(query: &str) -> Result<String> {
+        redirect_exchange(query).await.0
     }
 
     #[tokio::test]
@@ -249,7 +314,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(&out, Err(AuthError::Authorization(e)) if e == "access_denied"),
+            matches!(&out, Err(AuthError::Authorization(e)) if e == "access_denied (AADSTS65004)"),
             "{out:?}"
         );
         let out = redirect_outcome("error=invalid_request&state=s").await;
@@ -259,17 +324,110 @@ mod tests {
         );
     }
 
+    /// The AADSTS code survives (so the sign-in hint fires); the rest of the
+    /// description — trace ids, prose — does not.
     #[tokio::test]
-    async fn state_mismatch_is_rejected() {
+    async fn a_redirect_error_keeps_only_its_aadsts_code() {
+        let out = redirect_outcome(
+            "error=access_denied&error_description=AADSTS53003%3A%20Access%20blocked%20by%20CA%20Trace%20ID%3A%20abc&state=s",
+        )
+        .await;
+        assert!(
+            matches!(&out, Err(AuthError::Authorization(e)) if e == "access_denied (AADSTS53003)"),
+            "{out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unrecognised_error_value_is_not_echoed() {
+        let too_long = "a".repeat(65);
+        for query in [
+            "error=%3Cb%3Ex%3C%2Fb%3E&state=s".to_string(),
+            format!("error={too_long}&state=s"),
+        ] {
+            let out = redirect_outcome(&query).await;
+            assert!(
+                matches!(&out, Err(AuthError::Authorization(e)) if e == "unrecognized_error"),
+                "{query}: {out:?}"
+            );
+        }
+    }
+
+    /// The page is written after `state` validates and matches the outcome.
+    #[tokio::test]
+    async fn the_browser_page_matches_the_outcome() {
+        let (out, page) = redirect_exchange("code=c0de&state=s").await;
+        assert_eq!(out.unwrap(), "c0de");
+        assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+        assert!(page.contains("received your sign-in"), "{page}");
+
+        let (out, page) = redirect_exchange("error=invalid_request&state=s").await;
+        assert!(out.is_err());
+        assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+        assert!(page.contains("Sign-in failed"), "{page}");
+        assert!(!page.contains("received your sign-in"), "{page}");
+    }
+
+    /// Any local process (or a web page's blind cross-origin request) can hit
+    /// the port. A request without the pending `state` must neither end the
+    /// wait nor get the success page — and the real redirect still lands.
+    #[tokio::test]
+    async fn a_forged_redirect_is_ignored_and_the_real_one_still_lands() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let wait = tokio::spawn(async move { listen_for_code(listener, "expected").await });
 
+        for forged in [
+            "code=c0de&state=forged",
+            "error=access_denied&state=forged",
+            "error=boom",
+            "code=c0de",
+        ] {
+            let mut s = TcpStream::connect(addr).await.unwrap();
+            s.write_all(format!("GET /?{forged} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut resp = Vec::new();
+            let _ = s.read_to_end(&mut resp).await;
+            let resp = String::from_utf8_lossy(&resp);
+            assert!(resp.starts_with("HTTP/1.1 400"), "{forged}: {resp}");
+            assert!(!resp.contains("received your sign-in"), "{forged}: {resp}");
+            assert!(!wait.is_finished(), "{forged} ended the wait");
+        }
+
         let mut s = TcpStream::connect(addr).await.unwrap();
-        s.write_all(b"GET /?code=c0de&state=forged HTTP/1.1\r\nHost: x\r\n\r\n")
+        s.write_all(b"GET /?code=real&state=expected HTTP/1.1\r\nHost: x\r\n\r\n")
             .await
             .unwrap();
+        assert_eq!(wait.await.unwrap().unwrap(), "real");
+    }
 
-        assert!(matches!(wait.await.unwrap(), Err(AuthError::StateMismatch)));
+    /// A CORS/PNA preflight carrying redirect-shaped parameters is not the
+    /// redirect: 404, and the loop keeps waiting.
+    #[tokio::test]
+    async fn a_non_get_request_is_not_the_redirect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let wait = tokio::spawn(async move { listen_for_code(listener, "expected").await });
+
+        {
+            let mut s = TcpStream::connect(addr).await.unwrap();
+            s.write_all(b"OPTIONS /?error=x&state=expected HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+            let mut resp = Vec::new();
+            let _ = s.read_to_end(&mut resp).await;
+            assert!(
+                String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 404"),
+                "a preflight should get a 404"
+            );
+            assert!(!wait.is_finished(), "a preflight ended the wait");
+        }
+
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /?code=c&state=expected HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        assert_eq!(wait.await.unwrap().unwrap(), "c");
     }
 }

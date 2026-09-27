@@ -388,6 +388,12 @@ Invariants every change must preserve (the audit/review baseline for auth-adjace
   (`Zeroize` on `AccessToken` in `azapptoolkit-auth/src/token_cache.rs`); their `Debug` impl prints
   `<redacted>`. Refresh tokens go to the OS keyring — chunked across numbered entries because
   Windows Credential Manager caps a blob at 2560 UTF-16 bytes (don't collapse the chunking).
+  Exactly what is wiped from the heap: `AccessToken` on drop; the refresh token on load (each
+  keyring chunk and the combined buffer) and on save (each chunk string); the `/token` response
+  body buffer and the parsed access/refresh/id tokens (`TokenResponse`'s token fields are
+  `Zeroizing`); and the PKCE verifier (moved into `Zeroizing`, never copied). Not wiped, and outside
+  our control: transport buffers inside hyper/rustls, serde_json's scratch space for escaped strings
+  (tokens carry none), and oauth2's random verifier pre-image.
 - **Build-time baking is for non-secrets only.** `src-tauri/build.rs` bakes `AZAPPTOOLKIT_CLIENT_ID`
   / `_TENANT_ID` (public-client identifiers) and `_CLOUD` (a cloud name, not a secret). Never route
   a credential through `build.rs` or `.env`.
@@ -411,6 +417,9 @@ Invariants every change must preserve (the audit/review baseline for auth-adjace
 1. Run `just setup` once on a fresh clone (install `just` first — see Prerequisites).
 2. `just fmt` before submitting.
 3. `just verify` must pass — it runs the CI gates, in CI order.
+4. Synchronous locks are `parking_lot` (`Mutex`/`RwLock`: no poisoning, const `new` for statics);
+   a lock held across `.await` is `tokio::sync`. `std::sync::Mutex`/`RwLock` are kept out of the
+   root workspace by `apps/desktop/src-tauri/tests/dependency_policy.rs`.
 
 Changes that port behavior from the legacy PowerShell module should
 reference the source file and line range in the commit message or PR
