@@ -16,8 +16,8 @@ use azapptoolkit_core::models::{
     ResolvedSharePointResource, SelectedPermission, Site, SitePermission,
 };
 use azapptoolkit_core::scoping::{
-    MICROSOFT_GRAPH_APP_ID, SelectedScopeLevel, is_sharepoint_orgwide, selected_scope_accepts,
-    selected_scope_level_for,
+    MICROSOFT_GRAPH_APP_ID, SP_SITES_SELECTED, SelectedScopeLevel, is_sharepoint_orgwide,
+    selected_scope_accepts, selected_scope_level_for,
 };
 
 use crate::commands::applications::{invalidate_app_detail_state, invalidate_app_lists};
@@ -291,7 +291,7 @@ pub async fn convert_site_access_to_selected(
     // Reverse-lookup the Sites.Selected appRole id so we can grant it.
     let sites_selected_id = role_value_by_id
         .iter()
-        .find(|(_, value)| value.as_str() == "Sites.Selected")
+        .find(|(_, value)| value.as_str() == SP_SITES_SELECTED)
         .map(|(id, _)| id.clone())
         .ok_or_else(|| {
             UiError::not_found(

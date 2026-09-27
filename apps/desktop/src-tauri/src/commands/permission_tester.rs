@@ -34,7 +34,8 @@ use azapptoolkit_core::models::{
     AppRoleAssignment, ResolvedSharePointResource, SelectedPermission,
 };
 use azapptoolkit_core::scoping::{
-    MICROSOFT_GRAPH_APP_ID, SelectedScopeLevel, is_scopable_exchange_resource_permission,
+    MICROSOFT_GRAPH_APP_ID, SP_FILES_SELECTED, SP_LIST_ITEMS_SELECTED, SP_LISTS_SELECTED,
+    SP_SITES_SELECTED, SelectedScopeLevel, is_scopable_exchange_resource_permission,
     is_sharepoint_orgwide, selected_scope_accepts, selected_scope_level_for,
 };
 use azapptoolkit_exchange::ExchangeClient;
@@ -1292,10 +1293,10 @@ fn level_noun(level: SelectedScopeLevel) -> &'static str {
 /// The Selected scope an entry at `level` needs in the token to take effect.
 fn required_scope_for(level: SelectedScopeLevel) -> &'static str {
     match level {
-        SelectedScopeLevel::Site => "Sites.Selected",
-        SelectedScopeLevel::List => "Lists.SelectedOperations.Selected",
-        SelectedScopeLevel::ListItem => "ListItems.SelectedOperations.Selected",
-        SelectedScopeLevel::File => "Files.SelectedOperations.Selected",
+        SelectedScopeLevel::Site => SP_SITES_SELECTED,
+        SelectedScopeLevel::List => SP_LISTS_SELECTED,
+        SelectedScopeLevel::ListItem => SP_LIST_ITEMS_SELECTED,
+        SelectedScopeLevel::File => SP_FILES_SELECTED,
     }
 }
 

@@ -10,6 +10,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Input, Select, Spinner, SpinnerSize};
 
 use azapptoolkit_core::audit::MailPermissionScope;
+use azapptoolkit_core::scoping::SP_SITES_SELECTED;
 
 use crate::bindings::TenantContext;
 use crate::bindings::auth as auth_bindings;
@@ -279,7 +280,7 @@ pub fn ManagedIdentityDetailPane(
                             // and enterprise surfaces.
                             let sharepoint_section = list
                                 .iter()
-                                .any(|p| p.app_role_value.as_deref() == Some("Sites.Selected"))
+                                .any(|p| p.app_role_value.as_deref() == Some(SP_SITES_SELECTED))
                                 .then(|| {
                                     view! {
                                         <CollapsibleScopingSection

@@ -18,6 +18,9 @@ use tauri::{AppHandle, State};
 use azapptoolkit_core::audit::{
     HIGH_RISK_APP_PERMISSIONS, MEDIUM_RISK_APP_PERMISSIONS, is_risky_delegated_scope,
 };
+use azapptoolkit_core::scoping::{
+    MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+};
 
 use crate::commands::applications::sp_index_cached;
 use crate::commands::export::csv_field;
@@ -29,9 +32,9 @@ use crate::state::AppState;
 /// grants. Microsoft Graph dominates, but Exchange Online and SharePoint also
 /// expose powerful app-only permissions.
 const SCANNED_RESOURCE_APP_IDS: &[&str] = &[
-    "00000003-0000-0000-c000-000000000000", // Microsoft Graph
-    "00000002-0000-0ff1-ce00-000000000000", // Office 365 Exchange Online
-    "00000003-0000-0ff1-ce00-000000000000", // Office 365 SharePoint Online
+    MICROSOFT_GRAPH_APP_ID,
+    OFFICE365_EXCHANGE_ONLINE_APP_ID,
+    OFFICE365_SHAREPOINT_ONLINE_APP_ID,
 ];
 
 /// Classifies a resolved application-permission value as `high` / `medium` /

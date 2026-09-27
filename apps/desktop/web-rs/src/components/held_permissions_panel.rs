@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use azapptoolkit_core::audit::{
     MailPermissionScope, ResourcePermission, classify_app_permission_risk,
 };
-use azapptoolkit_core::scoping::resource_label;
+use azapptoolkit_core::scoping::{is_scopable_sharepoint_resource_permission, resource_label};
 use azapptoolkit_dto::managed_identity::AppRoleGrantDto;
 use azapptoolkit_dto::permissions::PermissionKind;
 use leptos::prelude::*;
@@ -26,22 +26,24 @@ use crate::components::icon::IconName;
 use crate::components::legacy_exchange_grants_callout::{
     AppPermissionRow, LegacyExchangeGrantsCallout,
 };
-use crate::components::permission_picker::{MICROSOFT_GRAPH_APP_ID, PickerSelection};
-use crate::components::scope_badge::{
-    app_permission_risk_badge, is_sharepoint_orgwide, permission_scope_cell,
-};
+use crate::components::permission_picker::PickerSelection;
+use crate::components::scope_badge::{app_permission_risk_badge, permission_scope_cell};
 use crate::components::ui::{Callout, DataTable, IconButton};
 
 /// Whether an already-held permission can be restricted in place *per row* (and so
-/// should offer a "Scope…" action): an org-wide `Sites.*` (excluding
-/// `Sites.Selected`, which is already scoped). Mail/calendar/contacts are
-/// deliberately excluded — Exchange RBAC scoping is **app-wide** (a single
+/// should offer a "Scope…" action): an org-wide `Sites.*` **on Microsoft Graph**
+/// (excluding `Sites.Selected`, which is already scoped).
+///
+/// Resource-aware, and Graph-only, because the wizard's site conversion
+/// (`convert_site_access_to_selected`) grants `Sites.Selected` and strips the
+/// org-wide grant on Graph: the same value held on Office 365 SharePoint Online
+/// would be seeded into a wizard that cannot honour it. Mail/calendar/contacts
+/// are deliberately excluded — Exchange RBAC scoping is **app-wide** (a single
 /// management scope binds the whole principal's mail roles, not one permission),
 /// so it's driven by the app-wide "Exchange scoping" section, never a per-row
-/// button. Mirrors the per-row `existing_scope_kind_for` / `row_scope_kind`
-/// restrict classifiers.
-fn is_held_scopable(value: &str) -> bool {
-    is_sharepoint_orgwide(value)
+/// button. Mirrors the SharePoint arm of `permissions_tab::row_scope_kind`.
+fn is_held_scopable(resource_app_id: Option<&str>, value: &str) -> bool {
+    is_scopable_sharepoint_resource_permission(resource_app_id, value)
 }
 
 #[component]
@@ -159,14 +161,12 @@ pub fn HeldPermissionsPanel(
         let row_resource_app_id = scope_resource.clone();
         let scope_btn = on_scope.and_then(|cb| {
             let v = value.clone()?;
-            is_held_scopable(&v).then(|| {
-                // Seed from the row's OWN resource, falling back to Microsoft Graph
-                // for a row whose resource wasn't resolved (a `Sites.*` role is
-                // always Graph's, so the fallback can't misattribute one).
+            // Seed from the row's OWN resource; an unresolved one is never
+            // scopable, so there is nothing to fall back to.
+            let resource = row_resource_app_id.clone()?;
+            is_held_scopable(Some(&resource), &v).then(|| {
                 let sel = PickerSelection {
-                    resource_app_id: row_resource_app_id
-                        .clone()
-                        .unwrap_or_else(|| MICROSOFT_GRAPH_APP_ID.to_string()),
+                    resource_app_id: resource.clone(),
                     kind: PermissionKind::Application,
                     permission_id: app_role_id.clone(),
                     permission_value: v.clone(),
@@ -242,4 +242,31 @@ pub fn HeldPermissionsPanel(
         />
     }
     .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use azapptoolkit_core::scoping::{MICROSOFT_GRAPH_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID};
+
+    #[test]
+    fn only_a_graph_org_wide_sites_row_is_held_scopable() {
+        assert!(is_held_scopable(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Sites.Read.All"
+        ));
+        // The site conversion grants and strips on Graph; seeding the wizard
+        // with an SPO-resource row would hand it a grant it cannot confine.
+        assert!(!is_held_scopable(
+            Some(OFFICE365_SHAREPOINT_ONLINE_APP_ID),
+            "Sites.Read.All"
+        ));
+        assert!(!is_held_scopable(None, "Sites.Read.All"));
+        // Already scoped, and mail scoping is app-wide, not per row.
+        assert!(!is_held_scopable(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Sites.Selected"
+        ));
+        assert!(!is_held_scopable(Some(MICROSOFT_GRAPH_APP_ID), "Mail.Read"));
+    }
 }

@@ -12,7 +12,8 @@ use azapptoolkit_core::audit::{
     downgrade_alternatives, is_risky_delegated_scope, least_privilege_alternative,
 };
 use azapptoolkit_core::scoping::{
-    SP_FILES_SELECTED, SP_LIST_ITEMS_SELECTED, SP_LISTS_SELECTED, is_sharepoint_orgwide,
+    SP_FILES_SELECTED, SP_LIST_ITEMS_SELECTED, SP_LISTS_SELECTED, SP_SITES_SELECTED,
+    is_sharepoint_orgwide,
 };
 use leptos::prelude::*;
 use thaw::{Body1, Input};
@@ -26,9 +27,10 @@ use crate::components::ui::{Badge, Card, DetailLoadError, TabBar, TabBarItem};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 
-/// Microsoft Graph's first-party app id — the natural default for both
-/// the App Registration and Managed Identity grant flows.
-pub const MICROSOFT_GRAPH_APP_ID: &str = "00000003-0000-0000-c000-000000000000";
+// Microsoft Graph's first-party app id — the natural default for both the App
+// Registration and Managed Identity grant flows. Re-exported from its one
+// definition in `azapptoolkit_core::scoping`, never re-spelled here.
+pub use azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerMode {
@@ -261,7 +263,7 @@ pub fn PermissionPicker(
 /// grant time: flags tenant-wide reach and points at the scoped alternative
 /// (Rule 11/12). Advisory only — the Grant button is never blocked.
 fn scope_hint(value: &str) -> AnyView {
-    if value == "Sites.Selected" {
+    if value == SP_SITES_SELECTED {
         return view! {
             <span class="permission-picker__row-note permission-picker__row-note--ok">
                 "Scoped — per-site access (least privilege)"
@@ -340,7 +342,7 @@ fn delegated_risk_badge(value: &str) -> AnyView {
 /// mailbox-scoping pointer is application-permission-only, so it is not shown
 /// for delegated scopes — only the name-based `Sites.Selected` guidance is.)
 fn delegated_scope_hint(value: &str) -> AnyView {
-    if value == "Sites.Selected" {
+    if value == SP_SITES_SELECTED {
         return view! {
             <span class="permission-picker__row-note permission-picker__row-note--ok">
                 "Scoped — per-site access (least privilege)"

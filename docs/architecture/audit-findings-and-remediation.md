@@ -104,10 +104,12 @@ migration finding raised for the very same permission.
 
 Scoping is a **family of independent authorities**, unified behind one classifier and one UI shell:
 
-- **Registry** (`azapptoolkit-core::scoping`): `ScopeKind` (Exchange / SharePoint, room to grow) +
-  `scope_kind(value) -> Option<ScopeKind>` (the single "what mechanism, if any?" decision) + metadata
-  (`target_noun` / `capability_key` / `admin_applicable`). `admin_applicable() == false` is the seam
-  for future owner-consented mechanisms (Teams/Chat RSC) — the UI renders guidance, not an apply.
+- **Registry** (`azapptoolkit-core::scoping`): `ScopeKind` (Exchange / SharePoint / SharePointItem,
+  room to grow) + `scope_kind_for(resource, value) -> Option<ScopeKind>` (the single, resource-aware
+  "what mechanism, if any?" decision) + metadata (`capability_key` / `admin_applicable`).
+  `admin_applicable() == false` is reserved as the seam for future owner-consented mechanisms
+  (Teams/Chat RSC), where the UI should render guidance instead of an apply — **the wizard does not
+  read it yet**, so a mechanism that returns `false` must wire that in first.
 - **Wizard** (`web-rs/components/scope_wizard.rs`) — the single **"Grant access"** button on every
   principal's Permissions surface. It **subsumes the old inline "Add permission" picker** — there is
   no separate single-grant picker. Uniform shell: **select permissions → choose access → review &
@@ -144,8 +146,24 @@ Per-mechanism apply (each does grant-before-strip, so a failure never strands th
 
 Graph appRole id↔value resolution lives in `commands::graph_roles::graph_role_index` (shared by
 exchange + sharepoint); SharePoint org-wide detection is name-based (`is_sharepoint_orgwide`, defined
-once in `azapptoolkit-core::scoping`). **To teach the app a new mechanism**: add a `ScopeKind` variant
-+ a target panel + a Step-3 apply arm — nothing else branches on the concrete mechanism.
+once in `azapptoolkit-core::scoping`).
+
+**To teach the app a new mechanism**, touch:
+
+1. **Core** — the `ScopeKind` variant, its arms in `capability_key` / `admin_applicable`, its
+   predicate in `scope_kind_for`, and a capabilities-catalog entry for its key.
+2. **Wizard** — the `ScopeMode` variant(s) and the `mode_options` row(s). The first row is the
+   mechanism's default; org-wide is appended for every mechanism, so no choice is a one-way door.
+   Everything that describes or runs the grant reads `effective_mode`, which forces org-wide when
+   the cart has no mechanism.
+3. **Compiler-enforced** — every per-mechanism branch in `scope_wizard.rs` is an exhaustive match
+   with no `_` arm, so the compiler then demands `mode_panel` (the target panel), the `Plan` arm in
+   `run_apply`, `consent_scope`, and `targets_label` / `review_targets` / `strip_warning` /
+   `review_line`.
+4. **Not compiler-checked** — the step-2 "can't be scoped together" hint and the step-1 intro copy;
+   mechanism-specific cart state in `anchor` / `reset` (like the SharePoint read/write default);
+   and the per-row "Scope…" entry gates `permissions_tab::row_scope_kind` and
+   `held_permissions_panel::is_held_scopable`.
 
 **Discoverability**: the enterprise-app and managed-identity Permissions tabs render the shared
 `OrgwideScopeCallout` (`web-rs/components/orgwide_scope_callout.rs`) above the held-permissions

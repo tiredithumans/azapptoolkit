@@ -4,8 +4,12 @@
 //! grant this app per-site access via the `Sites.Selected` model, list a
 //! site's app permissions, and revoke them.
 //!
-//! Callers render this only when the principal declares/holds a `Sites.*`
-//! permission. No `on_changed` callback: site grants live on the SharePoint
+//! Callers render this only when the principal declares/holds a permission
+//! `azapptoolkit_core::scoping::is_sharepoint_site_access_permission` accepts —
+//! an org-wide `Sites.*` or `Sites.Selected` on Microsoft Graph **or** Office 365
+//! SharePoint Online (a per-site grant is one object on the site, honoured by
+//! both APIs, so this list describes either), never on a bare `Sites.` value
+//! from some other resource. No `on_changed` callback: site grants live on the SharePoint
 //! site (not the Entra grant list), and the `Sites.*` Scope badges above are
 //! name-derived — nothing in the permissions table changes, so inline result
 //! notes survive.
@@ -193,19 +197,22 @@ pub fn SharePointSitesSection(
                                 />
                             </Field>
                             <div class="actions-row">
+                                // Read is the Primary, last of the grant pair, as in
+                                // `views/dialogs/scope_remediation.rs`: the emphasized
+                                // default must not be the broader role.
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                    on_click=Box::new(move |_| do_grant("write"))
+                                    disabled=Signal::derive(move || cmd.busy.get())
+                                >
+                                    "Grant write"
+                                </Button>
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                                     on_click=Box::new(move |_| do_grant("read"))
                                     disabled=Signal::derive(move || cmd.busy.get())
                                 >
                                     "Grant read"
-                                </Button>
-                                <Button
-                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                    on_click=Box::new(move |_| do_grant("write"))
-                                    disabled=Signal::derive(move || cmd.busy.get())
-                                >
-                                    "Grant write"
                                 </Button>
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)

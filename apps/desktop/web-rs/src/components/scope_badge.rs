@@ -32,6 +32,7 @@ use crate::components::ui::Badge;
 // the row's own resource (`None` for one the backend didn't resolve ⇒ not
 // scopable). The value-only core predicate stays available to the *backend*, whose
 // audit gate legitimately scans a flattened value list.
+use azapptoolkit_core::scoping::SP_SITES_SELECTED;
 pub use azapptoolkit_core::scoping::is_scopable_exchange_resource_permission as is_exchange_scopable_on;
 pub use azapptoolkit_core::scoping::{
     is_scoped_sharepoint_item_resource_permission, is_sharepoint_orgwide,
@@ -113,7 +114,7 @@ fn scope_cell_for(
         };
     }
     match value {
-        Some("Sites.Selected") => ScopeCell::SitesSelected,
+        Some(SP_SITES_SELECTED) => ScopeCell::SitesSelected,
         Some(v) if is_sharepoint_orgwide(v) => ScopeCell::SitesOrgWide,
         // Resource-aware, unlike the two name-derived arms above: a
         // `Files.SelectedOperations.Selected` on Office 365 SharePoint Online

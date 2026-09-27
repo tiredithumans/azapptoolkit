@@ -280,7 +280,7 @@ pub fn is_risky_delegated_scope(scope: &str) -> bool {
     if HIGH_RISK_DELEGATED_PERMISSIONS.contains(&scope) {
         return true;
     }
-    if scope == "Sites.Selected" {
+    if scope == crate::scoping::SP_SITES_SELECTED {
         return false;
     }
     scope.starts_with("Sites.")
@@ -328,7 +328,7 @@ pub fn least_privilege_alternative_for(
 ) -> Option<&'static str> {
     if crate::scoping::is_sharepoint_orgwide(value) {
         // Every broad `Sites.*` has the scoped `Sites.Selected` model (Rule 12).
-        Some("Sites.Selected")
+        Some(crate::scoping::SP_SITES_SELECTED)
     } else if crate::scoping::is_scopable_exchange_resource_permission(resource_app_id, value) {
         // Mail/calendar/contacts can be confined to mailboxes via Exchange RBAC.
         Some("Scope to specific mailboxes (Exchange RBAC)")

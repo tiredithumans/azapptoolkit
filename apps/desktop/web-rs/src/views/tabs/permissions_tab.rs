@@ -21,8 +21,7 @@ use crate::components::legacy_exchange_grants_callout::{
 use crate::components::permission_picker::PickerSelection;
 use crate::components::requires_role::RequiresRole;
 use crate::components::scope_badge::{
-    is_exchange_scopable_on, is_sharepoint_orgwide, permission_scope_cell,
-    permission_scope_reach_is_unstated,
+    is_exchange_scopable_on, permission_scope_cell, permission_scope_reach_is_unstated,
 };
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
@@ -38,7 +37,7 @@ use crate::views::tabs::usage_panel::UsagePanel;
 use azapptoolkit_core::audit::{MailPermissionScope, downgrade_alternatives};
 use azapptoolkit_core::scoping::{
     ScopeKind, is_scopable_sharepoint_resource_permission,
-    is_scoped_sharepoint_item_resource_permission,
+    is_scoped_sharepoint_item_resource_permission, is_sharepoint_site_access_permission,
 };
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::permissions::{PermissionKind, ResolvedPermission};
@@ -819,9 +818,9 @@ pub fn PermissionsTab(
             {move || {
                 let has_sites = detail.with(|d| {
                     d.resolved_permissions.iter().any(|p| {
-                        p.permission_value
-                            .as_deref()
-                            .is_some_and(|v| v == "Sites.Selected" || is_sharepoint_orgwide(v))
+                        p.permission_value.as_deref().is_some_and(|v| {
+                            is_sharepoint_site_access_permission(Some(&p.resource_app_id), v)
+                        })
                     })
                 });
                 has_sites

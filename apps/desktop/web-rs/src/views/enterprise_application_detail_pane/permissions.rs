@@ -7,12 +7,13 @@ use crate::components::exchange_scoping_section::ExchangeScopingSection;
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
 use crate::components::orgwide_scope_callout::OrgwideScopeCallout;
 use crate::components::permission_picker::PickerSelection;
-use crate::components::scope_badge::{is_exchange_scopable_on, is_sharepoint_orgwide};
+use crate::components::scope_badge::is_exchange_scopable_on;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::hooks::use_command::use_command;
 use azapptoolkit_core::audit::MailPermissionScope;
+use azapptoolkit_core::scoping::is_sharepoint_site_access_permission;
 use std::collections::HashMap;
 
 #[component]
@@ -254,7 +255,10 @@ pub(super) fn PermissionsContent(
                                 p.app_role_value
                                     .as_deref()
                                     .is_some_and(|v| {
-                                        v == "Sites.Selected" || is_sharepoint_orgwide(v)
+                                        is_sharepoint_site_access_permission(
+                                            p.resource_app_id.as_deref(),
+                                            v,
+                                        )
                                     })
                             });
                             let exchange_section = (!mail_values.is_empty()).then(|| {

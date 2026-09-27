@@ -461,8 +461,10 @@ pub fn ScopeSharePointButton(
                                     // equivalent paths already default to read
                                     // (the wizard's `SiteSelectionPanel` starts
                                     // `write=false`; the bulk bar's checkbox is
-                                    // labelled "default: read"), so this also
-                                    // stops the three surfaces disagreeing.
+                                    // labelled "default: read"; the SharePoint
+                                    // site access section's "Grant read" is its
+                                    // Primary), so this also stops the four
+                                    // surfaces disagreeing.
                                     view! {
                                         <Button
                                             appearance=Signal::derive(|| ButtonAppearance::Secondary)

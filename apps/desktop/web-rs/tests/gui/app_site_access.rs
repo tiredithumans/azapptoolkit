@@ -208,3 +208,21 @@ async fn picking_a_site_loads_it_into_the_per_site_flow() {
         Some("https://contoso.sharepoint.com/sites/Marketing")
     );
 }
+
+#[wasm_bindgen_test]
+async fn grant_read_is_the_emphasized_default_not_grant_write() {
+    // Least privilege: the Primary button is the narrower role, as in the
+    // audit's Scope dialog — an operator clicking the highlighted button must
+    // not be handing out write.
+    let _m = mount_with(None).await;
+    let class_of = |label: &str| {
+        ts::query_all("button")
+            .into_iter()
+            .find(|el| el.text_content().unwrap_or_default().trim() == label)
+            .unwrap_or_else(|| panic!("no button labelled `{label}`"))
+            .class_name()
+    };
+    ts::wait_for(|| ts::body_contains("Grant read")).await;
+    assert!(class_of("Grant read").contains("thaw-button--primary"));
+    assert!(class_of("Grant write").contains("thaw-button--secondary"));
+}

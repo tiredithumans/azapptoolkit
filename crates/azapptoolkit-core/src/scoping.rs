@@ -294,6 +294,12 @@ pub fn is_mailbox_reaching_permission(resource_app_id: Option<&str>, value: &str
     }
 }
 
+/// `Sites.Selected` — the **site-collection** member of the Selected family: an
+/// app holding it reaches only the sites it has been granted per site. Exposed
+/// by both Microsoft Graph and Office 365 SharePoint Online, so the value alone
+/// never names the API surface; the gates below pair it with a resource.
+pub const SP_SITES_SELECTED: &str = "Sites.Selected";
+
 /// `Lists.SelectedOperations.Selected` — Microsoft Graph's Selected scope for a
 /// single **list**. A document library is a list, so this is the level that
 /// confines an app to one library.
@@ -323,8 +329,9 @@ pub const SP_FILES_SELECTED: &str = "Files.SelectedOperations.Selected";
 ///
 /// Source: <https://learn.microsoft.com/graph/permissions-selected-overview>
 ///
-/// Serializes as its [`SelectedScopeLevel::key`] — one spelling on the wire, in
-/// the backend, and in the frontend.
+/// Serializes in snake_case (`site`, `list`, `list_item`, `file`) via serde —
+/// the one wire spelling; the backend and the frontend share this enum rather
+/// than re-spelling it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelectedScopeLevel {
@@ -347,17 +354,6 @@ pub enum SelectedScopeLevel {
 }
 
 impl SelectedScopeLevel {
-    /// Stable wire key — one spelling shared by the backend, the DTOs and the
-    /// frontend, in the spirit of [`ScopeKind::capability_key`].
-    pub fn key(self) -> &'static str {
-        match self {
-            SelectedScopeLevel::Site => "site",
-            SelectedScopeLevel::List => "list",
-            SelectedScopeLevel::ListItem => "list_item",
-            SelectedScopeLevel::File => "file",
-        }
-    }
-
     /// Operator-facing noun for the securable this level grants against. Used
     /// wherever a level mismatch has to be explained in words.
     pub fn label(self) -> &'static str {
@@ -397,7 +393,7 @@ pub fn selected_scope_level_for(
         return None;
     }
     match value {
-        "Sites.Selected" => Some(SelectedScopeLevel::Site),
+        SP_SITES_SELECTED => Some(SelectedScopeLevel::Site),
         SP_LISTS_SELECTED => Some(SelectedScopeLevel::List),
         SP_LIST_ITEMS_SELECTED => Some(SelectedScopeLevel::ListItem),
         SP_FILES_SELECTED => Some(SelectedScopeLevel::File),
@@ -450,7 +446,7 @@ pub fn selected_scope_accepts(scope: SelectedScopeLevel, resolved: SelectedScope
 /// classify and [`is_scopable_sharepoint_resource_permission`] to decide
 /// whether a fix may be offered.
 pub fn is_sharepoint_orgwide(value: &str) -> bool {
-    value.starts_with("Sites.") && value != "Sites.Selected"
+    value.starts_with("Sites.") && value != SP_SITES_SELECTED
 }
 
 /// True when a grant reaches SharePoint site content org-wide, on either
@@ -463,6 +459,25 @@ pub fn is_sharepoint_orgwide_permission(resource_app_id: Option<&str>, value: &s
         }
         // Some other resource that happens to expose a `Sites.`-prefixed role
         // is not SharePoint site access.
+        Some(_) => false,
+    }
+}
+
+/// True when a grant reaches SharePoint *sites* — an org-wide `Sites.*` or
+/// [`SP_SITES_SELECTED`] — on either SharePoint resource: the gate for showing
+/// the per-site "SharePoint site access" section.
+///
+/// Deliberately wider than the Graph-only fix gate
+/// ([`is_scopable_sharepoint_resource_permission`]): a per-site grant is one
+/// object on the site, honoured by Graph and the SharePoint REST APIs alike, so
+/// the section's list describes an Office 365 SharePoint Online grant too. Any
+/// other resource's `Sites.`-prefixed role is not SharePoint. `None` falls back
+/// to the name, like [`is_sharepoint_orgwide_permission`].
+pub fn is_sharepoint_site_access_permission(resource_app_id: Option<&str>, value: &str) -> bool {
+    match resource_app_id {
+        Some(MICROSOFT_GRAPH_APP_ID) | Some(OFFICE365_SHAREPOINT_ONLINE_APP_ID) | None => {
+            value == SP_SITES_SELECTED || is_sharepoint_orgwide(value)
+        }
         Some(_) => false,
     }
 }
@@ -512,14 +527,15 @@ pub fn is_scoped_sharepoint_resource_permission(
     resource_app_id: Option<&str>,
     value: &str,
 ) -> bool {
-    resource_app_id == Some(MICROSOFT_GRAPH_APP_ID) && value == "Sites.Selected"
+    resource_app_id == Some(MICROSOFT_GRAPH_APP_ID) && value == SP_SITES_SELECTED
 }
 
 /// Which scoping *authority* can confine a Graph application permission. Each
 /// mechanism has its own target type and apply strategy, but the scope UX shell
 /// (pick permission → choose targets → review) is uniform across them — this enum
-/// is the dispatch key. Add a variant (plus a target panel + apply arm) to teach
-/// the app a new mechanism; nothing else branches on the concrete mechanism.
+/// is the dispatch key. Teaching the app a new mechanism touches the places listed
+/// in `docs/architecture/audit-findings-and-remediation.md` ("To teach the app a
+/// new mechanism") — most of them compiler-enforced exhaustive matches.
 ///
 /// Distinct from [`crate::audit::ScopeMechanism`], which is the Exchange-*internal*
 /// detail (RBAC vs legacy Application Access Policy) of how mail is confined.
@@ -1253,6 +1269,60 @@ mod tests {
             Some(OFFICE365_EXCHANGE_ONLINE_APP_ID),
             "Sites.Read.All"
         ));
+    }
+
+    #[test]
+    fn the_site_access_section_gate_is_both_sharepoint_resources_and_nothing_else() {
+        // Wider than the Graph-only fix gate on purpose: a per-site grant is one
+        // object on the site, so the section describes an SPO-resource grant too.
+        for resource in [MICROSOFT_GRAPH_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID] {
+            for value in ["Sites.Read.All", "Sites.Selected"] {
+                assert!(
+                    is_sharepoint_site_access_permission(Some(resource), value),
+                    "{value} on {resource} reaches SharePoint sites"
+                );
+            }
+        }
+        // A third-party API exposing a `Sites.`-prefixed role is not SharePoint.
+        let third_party = "11111111-2222-3333-4444-555555555555";
+        for value in ["Sites.Read.All", "Sites.Selected"] {
+            assert!(!is_sharepoint_site_access_permission(
+                Some(third_party),
+                value
+            ));
+        }
+        // Other Selected levels and non-site permissions never open the section.
+        assert!(!is_sharepoint_site_access_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Files.SelectedOperations.Selected"
+        ));
+        assert!(!is_sharepoint_site_access_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Mail.Read"
+        ));
+        // An unresolved resource falls back to the name, reporting reach.
+        assert!(is_sharepoint_site_access_permission(None, "Sites.Selected"));
+    }
+
+    #[test]
+    fn selected_scope_levels_serialize_as_their_snake_case_wire_names() {
+        // The one wire spelling — the backend and the frontend share the enum,
+        // so a variant rename must not silently change what crosses IPC.
+        for (level, wire) in [
+            (SelectedScopeLevel::Site, "site"),
+            (SelectedScopeLevel::List, "list"),
+            (SelectedScopeLevel::ListItem, "list_item"),
+            (SelectedScopeLevel::File, "file"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(level).unwrap(),
+                serde_json::json!(wire)
+            );
+            assert_eq!(
+                serde_json::from_value::<SelectedScopeLevel>(serde_json::json!(wire)).unwrap(),
+                level
+            );
+        }
     }
 
     #[test]

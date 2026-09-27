@@ -32,6 +32,17 @@
 
 ### Fixed
 
+- **Choosing "Org-wide" in the Grant access wizard no longer strands a SharePoint grant.** For a
+  SharePoint site permission, or a library, folder or file permission, picking "Org-wide — no
+  scoping" hid the site or item picker, and nothing on that step brought it back: you had to go
+  back and pick the permission again. These permissions now have a "Specific sites" or "Specific
+  libraries, folders & files" option above the picker, as mailbox permissions already did.
+- **"Grant read" is now the highlighted button in the SharePoint site access section.** "Grant
+  write" was highlighted too, so the broader role looked like the default. It now uses the plain
+  style the audit's Scope fix already gives write access.
+- **The SharePoint site access section no longer opens for a `Sites.*` permission on a
+  non-SharePoint API.** It is shown only for Microsoft Graph or Office 365 SharePoint Online
+  permissions, whose per-site grants it can list.
 - **Adding or removing an Application ID URI no longer undoes a change someone else made.** The
   Expose an API tab saved the list of URIs it loaded when it opened, with your change applied. So a
   URI added since then, by another admin or in the Entra portal, was silently deleted. The app now

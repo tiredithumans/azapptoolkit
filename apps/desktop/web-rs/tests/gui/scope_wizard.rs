@@ -18,7 +18,11 @@
 //!   mechanisms — or two *levels* of the Selected family — hides scoping
 //!   entirely and grants org-wide.
 //! - **Pre-seed:** opening with a permission pre-selected jumps to the
-//!   choose-access step.
+//!   choose-access step; a preseed the wizard cannot scope (e.g. `Sites.*` on
+//!   Office 365 SharePoint Online) is described and granted org-wide.
+//! - **Reversible:** every mechanism offers a scoped radio above its target
+//!   panel, so picking "Org-wide" on a SharePoint or item cart can be undone on
+//!   the same step.
 //! - **Review:** step 3 names the principal, the resolved targets and the
 //!   org-wide grants the apply will strip — before it runs.
 #![cfg(target_arch = "wasm32")]
@@ -566,4 +570,94 @@ async fn the_review_step_names_the_principal_the_targets_and_what_gets_removed()
     ));
     // The strip, stated before the grant rather than reported after it.
     assert!(ts::body_contains("REMOVES any org-wide"));
+}
+
+/// The step-2 access-mode radios only — the site and item panels carry their own
+/// read/write `.radio-row` radios, so counting rows would mix the two.
+fn scope_mode_radios() -> Vec<web_sys::HtmlElement> {
+    ts::query_all("input[name='scope-mode']")
+        .into_iter()
+        .map(|el| el.unchecked_into())
+        .collect()
+}
+
+#[wasm_bindgen_test]
+async fn orgwide_is_reversible_on_a_sharepoint_cart() {
+    // The org-wide radio used to be the only one on a SharePoint cart: once
+    // clicked, the site panel vanished and nothing on the step brought it back.
+    let _m = mount_wizard(None);
+
+    ts::wait_for(|| ts::body_contains("Sites.Read.All")).await;
+    select_permission("Sites.Read.All");
+    ts::wait_for(next_enabled).await;
+    click_button("Next");
+
+    ts::wait_for(|| ts::body_contains("Site URLs")).await;
+    assert_eq!(scope_mode_radios().len(), 2);
+    assert!(ts::body_contains("Specific sites"));
+
+    scope_mode_radios().last().unwrap().click();
+    ts::tick().await;
+    assert!(!ts::body_contains("Site URLs"));
+    assert!(ts::body_contains("reach every resource"));
+
+    scope_mode_radios()[0].click();
+    ts::wait_for(|| ts::body_contains("Site URLs")).await;
+    ts::set_textarea_value(
+        ".modal textarea",
+        "https://contoso.sharepoint.com/sites/Marketing",
+    );
+    click_button("Next");
+    ts::wait_for(|| ts::body_contains("not have org-wide site access")).await;
+}
+
+#[wasm_bindgen_test]
+async fn orgwide_is_reversible_on_an_item_cart() {
+    let _m = mount_wizard(None);
+
+    ts::wait_for(|| ts::body_contains("Files.SelectedOperations.Selected")).await;
+    select_permission("Files.SelectedOperations.Selected");
+    ts::wait_for(next_enabled).await;
+    click_button("Next");
+
+    ts::wait_for(|| ts::body_contains("Library, folder or file URLs")).await;
+    assert_eq!(scope_mode_radios().len(), 2);
+    assert!(ts::body_contains("Specific libraries, folders & files"));
+
+    scope_mode_radios().last().unwrap().click();
+    ts::tick().await;
+    assert!(!ts::body_contains("Library, folder or file URLs"));
+    assert!(ts::body_contains("reach every resource"));
+
+    scope_mode_radios()[0].click();
+    ts::wait_for(|| ts::body_contains("Library, folder or file URLs")).await;
+}
+
+#[wasm_bindgen_test]
+async fn a_preseed_the_wizard_cannot_scope_is_granted_org_wide() {
+    // A `Sites.Read.All` held on Office 365 SharePoint Online is not something
+    // the site conversion can confine. Seeded anyway, it used to keep the scoped
+    // default: the review described a scoped grant and "Grant access" silently
+    // did nothing. It must read — and grant — as org-wide.
+    let _m = mount_wizard(Some(PickerSelection {
+        resource_app_id: azapptoolkit_core::scoping::OFFICE365_SHAREPOINT_ONLINE_APP_ID.to_string(),
+        kind: PermissionKind::Application,
+        permission_id: "spo-sites-read-all".to_string(),
+        permission_value: "Sites.Read.All".to_string(),
+    }));
+    ts::mock_ok("grant_single_permission", &fixtures::grant_result());
+
+    ts::wait_for(|| ts::body_contains("Step 2 of 3")).await;
+    assert!(ts::body_contains("can't be scoped together"));
+    assert!(!ts::body_contains("Site URLs"));
+    click_button("Next");
+
+    ts::wait_for(|| ts::body_contains("EVERY resource")).await;
+    assert!(
+        !ts::body_contains("REMOVES any org-wide"),
+        "an org-wide grant strips nothing, so the review must not say it does"
+    );
+    click_button("Grant access");
+    ts::wait_for(|| ts::call_count("grant_single_permission") == 1).await;
+    assert_eq!(ts::call_count("convert_site_access_to_selected"), 0);
 }
