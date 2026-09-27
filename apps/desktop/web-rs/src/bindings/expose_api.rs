@@ -1,9 +1,9 @@
 //! "Expose an API" IPC bindings: Application ID URIs, the delegated scopes the
 //! app defines, and pre-authorized client applications.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 use crate::bindings::ObjectIdArgs;
 pub use azapptoolkit_dto::expose_api::*;

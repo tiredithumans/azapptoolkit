@@ -83,8 +83,28 @@ pub(crate) fn command_modules() -> Vec<(String, String)> {
 pub(crate) struct Command {
     pub(crate) module: String,
     pub(crate) name: String,
+    /// The raw parameter list, the text between the signature's parens.
+    pub(crate) params: String,
+    /// The declared return type with the leading `->` removed and trimmed;
+    /// empty for a command that returns `()`.
+    pub(crate) ret: String,
     /// Brace-balanced function body, `{` to matching `}`.
     pub(crate) body: String,
+}
+
+/// Whether the `#[tauri::command]` found at byte `at` opens its own line, i.e.
+/// only whitespace sits between the previous newline (or the start of the
+/// file) and it.
+///
+/// A doc comment that merely *mentions* the attribute (`/// behind a
+/// `#[tauri::command]` …`) is otherwise read as a command: the extractor then
+/// takes the next `fn` — a private `*_core` helper — and every rule counts a
+/// phantom command no `generate_handler![]` could ever register. The advisory
+/// `command-parity-check.sh` hook learned the same lesson ("anchored to line
+/// start").
+pub(crate) fn command_attribute_at_line_start(src: &str, at: usize) -> bool {
+    let line_start = src[..at].rfind('\n').map_or(0, |n| n + 1);
+    src[line_start..at].trim().is_empty()
 }
 
 /// Extracts the brace-balanced block starting at the first `{` at or after
@@ -142,6 +162,9 @@ pub(crate) fn commands() -> Vec<Command> {
         while let Some(hit) = src[from..].find("#[tauri::command]") {
             let at = from + hit;
             from = at + "#[tauri::command]".len();
+            if !command_attribute_at_line_start(&src, at) {
+                continue;
+            }
             // Skip any further attributes, then read `fn <name>`.
             let Some(fn_at) = src[from..].find("fn ") else {
                 continue;
@@ -165,13 +188,25 @@ pub(crate) fn commands() -> Vec<Command> {
             let Some(params_end) = balanced_paren_end(&src, fn_at) else {
                 continue;
             };
+            let Some(params_open) = src[fn_at..params_end].find('(').map(|p| fn_at + p) else {
+                continue;
+            };
+            let params = src[params_open + 1..params_end - 1].to_string();
             let Some(body) = balanced_block(&src, params_end) else {
                 continue;
             };
-            from = params_end + body.len();
+            let body_open = params_end + src[params_end..].find('{').unwrap_or(0);
+            let ret = src[params_end..body_open]
+                .trim()
+                .trim_start_matches("->")
+                .trim()
+                .to_string();
+            from = body_open + body.len();
             out.push(Command {
                 module: module.clone(),
                 name,
+                params,
+                ret,
                 body,
             });
         }

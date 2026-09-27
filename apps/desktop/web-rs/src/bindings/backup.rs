@@ -2,9 +2,9 @@
 //! `bindings::events::backup_progress`. The restore side is added with the
 //! restore slices.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 // Re-export the manifest types (`TenantBackup`, …) for the DR view, and bring
 // them into scope for the signatures below.

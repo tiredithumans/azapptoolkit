@@ -2,6 +2,12 @@
 
 ### Fixed
 
+- **An unexpected reply from the app's backend no longer freezes the window.** If a request was ever
+  rejected with something other than the app's usual error — for example a request the window built
+  in the wrong shape, or a permission the app is not allowed to use — the whole window stopped
+  responding with no message. The failure now shows as an ordinary error on the action that caused
+  it.
+
 - **"Migrate to RBAC for Applications" on the Permissions tab no longer reports success when the
   legacy policy was kept.** When a grant can't be re-scoped, the migration keeps the app's
   Application Access Policy, because that policy is the only thing still confining it. The Exchange

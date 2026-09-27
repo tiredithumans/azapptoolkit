@@ -5,10 +5,10 @@
 //! capability catalog. Best-effort: anything unprovable comes back as
 //! `Verdict::Unknown`.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::readiness::ReadinessReport;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

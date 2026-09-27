@@ -1,8 +1,8 @@
 //! Auto-updater IPC bindings. Download progress streams live in
 //! `bindings::events::updater_progress`.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
-use tauri_sys::core::invoke_result;
 
 pub use azapptoolkit_dto::updater::{UpdateCheck, UpdateInfo, UpdateProgress, UpdatesDisabled};
 

@@ -58,7 +58,11 @@ accessors under a non-short-circuiting `join` so one unreadable index degrades o
 the corpus instead of blanking the results.
 
 Both are bounded at `APPS_MAX` / `SP_INDEX_MAX` (both 10 000). Those caps must not drift — a surface
-enumerating deeper than another silently knows about principals the other does not.
+enumerating deeper than another silently knows about principals the other does not. `APPS_MAX` is
+defined once, in `azapptoolkit_dto::applications`, so the App Registrations list's cap notice in the
+frontend reads the same constant as the backend's enumerations; the SP-index lists learn
+`SP_INDEX_MAX` at runtime from `get_directory_index_status` (`DirectoryIndexStatus`, also in the
+dto crate).
 
 ## Filtering happens in the frontend, on lean rows
 

@@ -1,7 +1,7 @@
 //! Conditional Access IPC bindings.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
-use tauri_sys::core::invoke_result;
 
 use crate::bindings::AppIdArgs;
 pub use azapptoolkit_dto::conditional_access::ConditionalAccessPolicyDto;

@@ -1,9 +1,9 @@
 //! Bulk-operation IPC bindings. Progress streams live in
 //! `bindings::events::bulk_progress`.
 
+use super::ipc::{invoke, invoke_result};
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::{invoke, invoke_result};
 
 pub use azapptoolkit_dto::bulk::*;
 

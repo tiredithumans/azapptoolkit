@@ -1,9 +1,10 @@
 //! Truncation notice for the surfaces built on the shared service-principal
 //! index.
 //!
-//! The App Registrations list detects its own cap with `total >= APPS_HARD_CAP`,
-//! because its rows *are* the capped set. The Enterprise Applications and
-//! Managed Identities lists cannot: both are filtered subsets of the SP index
+//! The App Registrations list detects its own cap with `total >= APPS_MAX` (the
+//! constant `azapptoolkit_dto` shares with the backend), because its rows *are*
+//! the capped set. The Enterprise Applications and Managed Identities lists
+//! cannot: both are filtered subsets of the SP index
 //! (one drops managed identities, the other keeps only them), so their row
 //! counts sit below the cap even on a tenant whose index truncated — a
 //! `len() >= cap` check there would never fire. They ask the backend instead.

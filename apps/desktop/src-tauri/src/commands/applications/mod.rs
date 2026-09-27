@@ -10,7 +10,7 @@ use azapptoolkit_graph::client::{AppListQuery, AppPatch, CreateApplicationReques
 use crate::dto::UiError;
 use crate::dto::applications::{
     ApplicationDetail, ApplicationListRowDto, CreateApplicationInput, CreateApplicationResult,
-    UpdateApplicationInput,
+    DirectoryIndexStatus, UpdateApplicationInput,
 };
 use crate::state::AppState;
 
@@ -65,34 +65,10 @@ fn list_row_select() -> Vec<&'static str> {
 
 /// Page size for the browse-list scan — the shared `/applications` maximum.
 const APPS_PAGE_SIZE: u32 = azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE;
-/// Safety cap on total apps materialized for the browse list, mirroring the
-/// audit/credential scans. Well above real-world app-registration counts.
-/// Shared by every tenant-wide enumeration so the caps can't drift: the browse
-/// list, the Enterprise Apps pairing join, the audit, and the credential sweep
-/// must all reach the same depth, or one view silently knows about apps another
-/// does not. (The Enterprise Apps join previously capped at 5000 and dropped
-/// pairings the App Registrations list had.)
-pub(crate) const APPS_MAX: usize = 10_000;
-
-/// Coverage of the shared per-tenant service-principal index, for the surfaces
-/// that render a filtered *subset* of it.
-///
-/// The App Registrations list can detect its own truncation (`total >=
-/// APPS_MAX`) because its rows ARE the capped set. The Enterprise Applications
-/// and Managed Identities lists cannot: both filter the SP index down (dropping
-/// managed identities / keeping only them), so their row counts sit below the
-/// cap even on a tenant whose index truncated — a `len() >= cap` check there
-/// would never fire. They ask this instead.
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DirectoryIndexStatus {
-    /// The SP index hit its row cap, so every surface reading it covers only
-    /// the first [`SP_INDEX_MAX`] service principals.
-    pub sp_index_truncated: bool,
-    /// The cap itself, so the notice can name the number without the frontend
-    /// keeping its own copy in sync.
-    pub sp_index_cap: usize,
-}
+/// Safety cap on total apps materialized for a tenant-wide enumeration. One
+/// definition, in `azapptoolkit_dto::applications` (see its doc), so the
+/// frontend's cap notice reads the same value.
+pub(crate) const APPS_MAX: usize = crate::dto::applications::APPS_MAX;
 
 /// Reports whether the shared SP index truncated for this tenant.
 ///

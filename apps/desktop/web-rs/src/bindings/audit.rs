@@ -1,10 +1,10 @@
 //! Audit IPC bindings: run, cancel, cached read, CSV export. Streamed
 //! progress events live in `bindings::events::audit_progress`.
 
+use super::ipc::{invoke, invoke_result};
 use azapptoolkit_core::audit::AuditItem;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::{invoke, invoke_result};
 
 use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::audit::{

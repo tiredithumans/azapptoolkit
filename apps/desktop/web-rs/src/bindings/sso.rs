@@ -1,8 +1,8 @@
 //! Single-sign-on (SAML / OIDC) setup IPC bindings.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 use crate::bindings::ServicePrincipalIdArgs;
 pub use azapptoolkit_dto::sso::*;

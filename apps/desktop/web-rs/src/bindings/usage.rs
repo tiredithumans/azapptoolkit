@@ -1,8 +1,8 @@
 //! Graph-activity usage IPC bindings (granted-vs-used analysis).
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 pub use azapptoolkit_dto::usage::*;
 

@@ -52,7 +52,7 @@ pub struct GlobalSearchResults {
     #[serde(default)]
     pub corpus_truncated: bool,
     /// The index cap itself, so the notice can name the number without the
-    /// frontend keeping its own copy in sync (mirroring `DirectoryIndexStatus`).
+    /// frontend keeping its own copy in sync (like [`crate::applications::DirectoryIndexStatus`]).
     #[serde(default)]
     pub corpus_cap: usize,
 }

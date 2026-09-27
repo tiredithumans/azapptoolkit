@@ -1,9 +1,9 @@
 //! Per-tenant operator-defaults IPC bindings. The payload types live in
 //! `azapptoolkit-core::defaults` (pure data, shared with the backend).
 
+use super::ipc::{invoke, invoke_result};
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::{invoke, invoke_result};
 
 pub use azapptoolkit_core::defaults::{
     AppRegistrationDefaults, AppVaultBinding, EnterpriseApplicationDefaults, StoredPrincipal,

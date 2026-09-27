@@ -1,8 +1,8 @@
 //! Consent / OAuth2 permission-grant audit IPC bindings.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};

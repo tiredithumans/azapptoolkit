@@ -22,7 +22,9 @@ use std::collections::HashMap;
 use azapptoolkit_core::audit::ListCredentialStatus;
 use azapptoolkit_core::identity::TenantContext;
 use azapptoolkit_core::models::{Application, KeyCredential, PasswordCredential};
-use azapptoolkit_dto::applications::{ApplicationDetail, ApplicationListRowDto};
+use azapptoolkit_dto::applications::{
+    ApplicationDetail, ApplicationListRowDto, DirectoryIndexStatus,
+};
 use azapptoolkit_dto::enterprise_application::EnterpriseApplicationDetail;
 use azapptoolkit_dto::exchange::MailScopeEntry;
 use azapptoolkit_dto::managed_identity::MiSubtype;
@@ -379,7 +381,10 @@ fn register_fixtures() {
     // fallback so the demo console stays clean.
     mock_ok(
         "get_directory_index_status",
-        &serde_json::json!({ "spIndexTruncated": false, "spIndexCap": 10_000 }),
+        &DirectoryIndexStatus {
+            sp_index_truncated: false,
+            sp_index_cap: 10_000,
+        },
     );
 
     let owners = vec![

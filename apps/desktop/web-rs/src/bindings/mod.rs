@@ -11,8 +11,15 @@
 //!   camelCase; the backend macro maps them to snake_case Rust params.
 //!
 //! Domain types (`Application`, `Organization`, `AuditItem`, etc.) come from
-//! `azapptoolkit_core::models` / `azapptoolkit_core::audit` directly. Boundary
-//! input/output structs are defined locally in each submodule.
+//! `azapptoolkit_core::models` / `azapptoolkit_core::audit` directly; output
+//! DTOs come from `azapptoolkit_dto`. Only argument structs are local to each
+//! submodule (shapes several share live in `common.rs`).
+//!
+//! Every IPC call goes through [`ipc`], which turns a rejection that is not a
+//! `UiError` (Tauri's own string errors) into `UiError { code: "ipc" }` instead
+//! of the panic upstream `tauri-sys` would raise. `repo_invariants/ipc.rs`
+//! pins the registry, the command literal, the arg keys and the return type of
+//! every binding against its `#[tauri::command]`.
 
 pub mod activity;
 pub mod applications;
@@ -32,6 +39,7 @@ pub mod events;
 pub mod exchange;
 pub mod expose_api;
 pub mod graph_roles;
+mod ipc;
 pub mod keyvault;
 pub mod keyvault_rbac;
 pub mod managed_identity;

@@ -1,9 +1,9 @@
 //! Permission-tester IPC bindings — "App → resource" effective-access checks
 //! against a specific Exchange mailbox or SharePoint site.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 pub use azapptoolkit_dto::permission_tester::{
     MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult, PermissionTestResult,

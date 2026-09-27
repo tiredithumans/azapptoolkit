@@ -10,6 +10,38 @@ use serde::{Deserialize, Serialize};
 
 use crate::permissions::ResolvedPermission;
 
+/// Safety cap on total apps materialized for the App Registrations browse list,
+/// mirroring the audit/credential scans. Well above real-world app-registration
+/// counts.
+///
+/// Shared by every tenant-wide enumeration so the caps can't drift: the browse
+/// list, the Enterprise Apps pairing join, the audit, the credential sweep and
+/// the backup must all reach the same depth, or one view silently knows about
+/// apps another does not. (The Enterprise Apps join previously capped at 5000
+/// and dropped pairings the App Registrations list had.) Defined here rather
+/// than in the backend so the frontend's cap notice reads the same constant.
+pub const APPS_MAX: usize = 10_000;
+
+/// Coverage of the shared per-tenant service-principal index, for the surfaces
+/// that render a filtered *subset* of it.
+///
+/// The App Registrations list can detect its own truncation (`total >=
+/// APPS_MAX`) because its rows ARE the capped set. The Enterprise Applications
+/// and Managed Identities lists cannot: both filter the SP index down (dropping
+/// managed identities / keeping only them), so their row counts sit below the
+/// cap even on a tenant whose index truncated — a `len() >= cap` check there
+/// would never fire. They ask this instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectoryIndexStatus {
+    /// The SP index hit its row cap, so every surface reading it covers only
+    /// the first `sp_index_cap` service principals (the graph client's
+    /// `SP_INDEX_MAX`).
+    pub sp_index_truncated: bool,
+    /// The cap itself, so the notice can name the number without the frontend
+    /// keeping its own copy in sync.
+    pub sp_index_cap: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplicationDetail {
     pub application: Application,
@@ -410,6 +442,22 @@ mod tests {
         assert_eq!(minimal.display_name, "Only");
         assert!(!minimal.create_service_principal);
         assert!(minimal.initial_owner_ids.is_empty());
+    }
+
+    #[test]
+    fn directory_index_status_is_snake_case_on_the_wire() {
+        let status = DirectoryIndexStatus {
+            sp_index_truncated: true,
+            sp_index_cap: 10_000,
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "sp_index_truncated": true, "sp_index_cap": 10_000 })
+        );
+        let back: DirectoryIndexStatus = serde_json::from_value(json).unwrap();
+        assert!(back.sp_index_truncated);
+        assert_eq!(back.sp_index_cap, 10_000);
     }
 
     #[test]

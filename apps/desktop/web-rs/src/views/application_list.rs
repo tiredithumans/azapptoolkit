@@ -17,7 +17,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
-use crate::bindings::applications::{self, ApplicationListRowDto};
+use crate::bindings::applications::{self, APPS_MAX, ApplicationListRowDto};
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::date_range_filter::DateRangeFilter;
@@ -442,10 +442,11 @@ fn LoadedApps(
         export_rows: None,
     });
 
-    // The backend paginates to completion (bounded by APPS_HARD_CAP). `total`
-    // is the full tenant count, taken before client-side filters shrink the view.
+    // The backend paginates to completion (bounded by the `APPS_MAX` it shares
+    // with this crate through azapptoolkit-dto). `total` is the full tenant
+    // count, taken before client-side filters shrink the view.
     let total = list.total;
-    let capped = total >= APPS_HARD_CAP;
+    let capped = total >= APPS_MAX;
     let shown = list.shown;
     let base_total = list.base_total();
     let active = list.count_of("active");
@@ -573,7 +574,7 @@ fn LoadedApps(
                 view! {
                     <Callout tone="warn" class="app-list__cap-notice">
                         {format!(
-                            "Loaded the first {APPS_HARD_CAP} apps — search and filters apply within this set.",
+                            "Loaded the first {APPS_MAX} apps — search and filters apply within this set.",
                         )}
                     </Callout>
                 }

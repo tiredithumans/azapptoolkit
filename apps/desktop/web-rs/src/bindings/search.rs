@@ -1,8 +1,8 @@
 //! Global-search IPC binding for the top-bar search.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 pub use azapptoolkit_dto::search::*;
 

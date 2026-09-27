@@ -1,8 +1,8 @@
 //! Audit remediation IPC bindings — one-click fixes invoked from the audit view.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 pub use azapptoolkit_dto::exchange::ExchangeAccessResult;
 pub use azapptoolkit_dto::remediation::{RedundantPermissionsOutcome, RemediationOutcome};

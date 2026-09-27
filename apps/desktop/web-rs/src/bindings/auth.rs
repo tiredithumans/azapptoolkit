@@ -4,9 +4,9 @@
 //! converts them to the snake_case Rust parameter names), so the `Args`
 //! structs use `#[serde(rename_all = "camelCase")]`.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 use super::{SignInOutcome, TenantContext};
 

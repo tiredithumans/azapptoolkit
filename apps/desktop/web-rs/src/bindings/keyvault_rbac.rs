@@ -3,8 +3,8 @@
 //! own Cancel, [`cancel_key_vault_sweep`], so it stops no other Resource Access
 //! scan and none of theirs stops it.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
-use tauri_sys::core::invoke_result;
 
 use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::keyvault::{

@@ -5,7 +5,7 @@
 //! rather than needing a shell script that `verify` could not portably call
 //! (recipe lines run under PowerShell on Windows).
 //!
-//! One binary, five concern modules. It was a single 940-line file, which made
+//! One binary, one module per concern. It was a single 940-line file, which made
 //! the rules hard to find and — more to the point — hid how coarse some of them
 //! were: the fan-out rule matched per *file*, so `commands/bulk.rs` satisfied it
 //! with a string that lived in an unrelated function while three of its
@@ -19,6 +19,8 @@
 //! - [`cache`] — invalidate-on-`Ok`, pinned indexes, watch-before-fetch
 //! - [`cancel`] — one `CancelToken` claim per long-running command
 //! - [`commands`] — whole-command-layer scans, and the shared source table
+//! - [`ipc`] — the IPC contract: handler registry ↔ commands ↔ bindings, arg
+//!   keys, return types, and the single tauri-sys door
 //! - [`release`] — version identity, CHANGELOG format, mirrored lint block, the
 //!   update gate, the Linux glibc floor and the NSIS install mode
 //! - [`trust`] — every path that mints an authentication trust validates it
@@ -31,6 +33,8 @@ mod cancel;
 mod commands;
 #[path = "repo_invariants/fanout.rs"]
 mod fanout;
+#[path = "repo_invariants/ipc.rs"]
+mod ipc;
 #[path = "repo_invariants/release.rs"]
 mod release;
 #[path = "repo_invariants/sources.rs"]

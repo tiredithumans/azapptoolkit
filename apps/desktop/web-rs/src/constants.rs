@@ -17,10 +17,6 @@ pub const RENDER_PAGE: usize = 200;
 /// "n more…" text.
 pub const ISSUES_INLINE: usize = 2;
 
-/// Backend safety cap on apps materialized for a list (see `APPS_MAX` in
-/// `commands/applications.rs`). Real tenants stay well under it.
-pub const APPS_HARD_CAP: usize = 10_000;
-
 /// List filter debounce in milliseconds. Filters run in-memory over cached
 /// rows, so the delay only smooths re-render — not network traffic.
 pub const LIST_FILTER_DEBOUNCE_MS: i32 = 300;

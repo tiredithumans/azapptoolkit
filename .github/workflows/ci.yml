@@ -219,6 +219,8 @@ jobs:
       # running Claude Code with hooks installed. Nothing referenced them from
       # CI, so `--no-verify`, a different editor, or the GitHub web UI bypassed
       # every rule they encode. shellcheck at least keeps them executable.
+      # (Command parity is also pinned in `cargo test` by
+      # repo_invariants/ipc.rs.)
       - name: shellcheck the hooks
         run: shellcheck --severity=warning .claude/hooks/*.sh
       # Pinned by version + checksum, same as actionlint above (no
