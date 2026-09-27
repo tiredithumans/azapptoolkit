@@ -646,9 +646,16 @@ mod cert_tests {
             key.to_string(),
             format!("{}{key}", c.cert_pem),
             format!("{key}{}", c.cert_pem),
-            "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----".to_string(),
-            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIB\n-----END ENCRYPTED PRIVATE KEY-----"
-                .to_string(),
+            // Armour built at runtime (like `refuses_other_pem_labels_…` below) so the
+            // whole-history secrets scan never sees a literal private-key block.
+            format!(
+                "-----BEGIN {l}-----\nMIIB\n-----END {l}-----",
+                l = "RSA PRIVATE KEY"
+            ),
+            format!(
+                "-----BEGIN {l}-----\nMIIB\n-----END {l}-----",
+                l = "ENCRYPTED PRIVATE KEY"
+            ),
         ];
         for paste in &cases {
             let err = parse_cert_upload(paste, now()).err().expect("refused");
