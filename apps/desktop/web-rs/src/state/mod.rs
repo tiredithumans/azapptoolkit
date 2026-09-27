@@ -357,9 +357,10 @@ pub struct Session {
     // first tab to hunt for it.
     pub settings_tab: RwSignal<String>,
     // Active sub-tab of the Security workbench ("findings" | "apps" |
-    // "credentials" | "sso-certificates" | "grants" | "app-permissions"). Lifted to the session so the Home cards and
-    // command palette can deep-link straight to a sub-tab, and so the choice
-    // survives navigating away and back.
+    // "credentials" | "sso-certificates" | "grants" | "app-permissions").
+    // Lifted to the session so the Home cards and command palette can
+    // deep-link straight to a sub-tab, and so the choice survives navigating
+    // away and back.
     pub security_tab: RwSignal<String>,
     // Active tab of the Resource Access reverse lookups ("mailboxes" | "sites"
     // | "keyvault"). Lifted to the session for the same reason `security_tab`

@@ -337,8 +337,8 @@ workstation reuses the same client id and tenant id.
 
 On first launch, azapptoolkit opens a loopback listener, pops your default
 browser for the Entra sign-in, and persists the resulting refresh token in the
-OS keyring (Windows Credential Manager / macOS Keychain / the Secret Service on Linux). Access
-tokens are refreshed lazily and never written to disk.
+OS keyring (Windows Credential Manager / macOS Keychain / the Secret Service on
+Linux). Access tokens are refreshed lazily and never written to disk.
 
 ### Permissions
 
@@ -484,9 +484,9 @@ Defensive choices worth knowing:
   for the WASM frontend
 - [reqwest](https://github.com/seanmonstar/reqwest) /
   [rustls](https://github.com/rustls/rustls) for HTTPS
-- [oauth2](https://github.com/ramosbugs/oauth2-rs) and the OS keyring
-  via [`keyring-core`](https://crates.io/crates/keyring-core) with the platform-native
-  stores (Secret Service over zbus on Linux)
+- [oauth2](https://github.com/ramosbugs/oauth2-rs) and the OS keyring via
+  [`keyring_core`](https://crates.io/crates/keyring_core) with the
+  platform-native stores (Secret Service over zbus on Linux)
 
 ## Contributing
 
