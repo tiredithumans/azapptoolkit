@@ -9,7 +9,7 @@ use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
 
-use super::{SignInOutcome, TenantContext};
+use super::{SignInOutcome, TenantArg, TenantContext};
 
 pub async fn sign_in() -> Result<SignInOutcome, UiError> {
     invoke_result("sign_in", ()).await
@@ -35,18 +35,12 @@ pub async fn sign_out(tenant: &TenantContext) -> Result<(), UiError> {
     invoke_result("sign_out", SignOutArgs { tenant }).await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RefreshSessionArgs<'a> {
-    tenant_id: &'a str,
-}
-
 /// Re-mints the signed-in account's tokens in place — drops the cached access
 /// tokens and re-acquires them via the stored refresh token — so a role
 /// activated after sign-in (e.g. a PIM "Exchange Administrator" role) takes
 /// effect without a full sign-out/sign-in. The session (refresh token) is kept.
 pub async fn refresh_session(tenant_id: &str) -> Result<(), UiError> {
-    invoke_result("refresh_session", RefreshSessionArgs { tenant_id }).await
+    invoke_result("refresh_session", TenantArg { tenant_id }).await
 }
 
 /// Interactively re-authenticates the signed-in account in place — one browser
@@ -87,10 +81,4 @@ pub async fn request_scope_consent(tenant_id: &str, feature: &str) -> Result<(),
 /// dropped. Takes the same feature keys as [`request_scope_consent`].
 pub async fn request_scope_step_up(tenant_id: &str, feature: &str) -> Result<(), UiError> {
     invoke_result("request_scope_step_up", ConsentArgs { tenant_id, feature }).await
-}
-
-/// Cheap probe used by the App shell to short-circuit when the WASM bundle is
-/// loaded outside the Tauri webview (e.g. during a `trunk serve` smoke run).
-pub fn is_tauri_runtime() -> bool {
-    tauri_sys::core::is_tauri()
 }

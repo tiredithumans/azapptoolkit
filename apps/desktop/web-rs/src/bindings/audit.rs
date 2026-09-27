@@ -34,11 +34,6 @@ pub async fn get_cached_audit_summary(tenant_id: &str) -> Option<CachedAuditSumm
 }
 
 #[derive(Serialize)]
-struct ExportArgs<'a> {
-    items: &'a [AuditItem],
-}
-
-#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SaveArgs<'a> {
     tenant_id: &'a str,

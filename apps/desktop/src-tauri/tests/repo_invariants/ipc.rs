@@ -432,6 +432,19 @@ fn struct_literal_name(args: &str) -> Option<&str> {
     (!name.is_empty() && name.bytes().all(is_ident)).then_some(name)
 }
 
+/// The names of the private (non-`pub`) named-field structs declared in `src`:
+/// the local argument structs a binding file defines for itself.
+fn local_struct_names(src: &str) -> Vec<&str> {
+    src.lines()
+        .filter_map(|line| {
+            let rest = line.trim_start().strip_prefix("struct ")?;
+            let end = rest.bytes().position(|b| !is_ident(b))?;
+            let (name, tail) = rest.split_at(end);
+            (!name.is_empty() && (tail.starts_with('<') || tail.starts_with(" {"))).then_some(name)
+        })
+        .collect()
+}
+
 /// Every binding call outside the wrapper module, as (file, call).
 fn all_calls() -> Vec<(String, Call)> {
     binding_files()
@@ -701,6 +714,86 @@ fn bindings_reach_tauri_sys_only_through_the_ipc_module() {
     );
 }
 
+/// The bindings keep the compiler's dead-code lint, and a local argument
+/// struct never restates a shape `bindings/common.rs` already defines.
+///
+/// A module-wide `#![allow(dead_code)]` once sat on `bindings/mod.rs`, and
+/// behind it the argument structs of removed commands (`kv_set_secret`,
+/// `resolve_permission`, `update_required_resource_access`, the
+/// `export_audit_csv` registration) outlived them, along with a dozen
+/// field-for-field copies of `TenantArg` / `ObjectIdArgs` / `AppIdArgs`.
+/// `pub` items are exempt from the lint anyway, so the allow only ever hid
+/// private leftovers.
+#[test]
+fn bindings_keep_the_dead_code_lint_and_reuse_the_common_arg_shapes() {
+    let files = binding_files();
+    let mut allows = Vec::new();
+    for (file, src) in &files {
+        for (n, line) in src.lines().enumerate() {
+            let t = line.trim_start();
+            if !t.starts_with("//") && t.contains("allow(dead_code)") {
+                allows.push(format!("bindings/{file}:{}: {t}", n + 1));
+            }
+        }
+    }
+    assert!(
+        allows.is_empty(),
+        "`allow(dead_code)` in the bindings hid the argument structs of removed commands \
+         (`kv_set_secret`, `resolve_permission`, ...) — delete the leftover instead of allowing \
+         it:\n{}",
+        allows.join("\n")
+    );
+
+    let common = &files
+        .iter()
+        .find(|(f, _)| f == "common.rs")
+        .expect("bindings/common.rs")
+        .1;
+    let shapes: Vec<(&str, BTreeSet<String>)> = common
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix("pub struct "))
+        .filter_map(|rest| {
+            rest.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+        })
+        .map(|name| {
+            let keys = struct_wire_keys(name, common, "")
+                .unwrap_or_else(|| panic!("common.rs: cannot read `{name}`"));
+            (name, keys)
+        })
+        .collect();
+    assert!(
+        shapes.len() >= 5,
+        "read only {} shapes from bindings/common.rs — the scan is broken",
+        shapes.len()
+    );
+
+    let mut compared = 0usize;
+    let mut duplicates = Vec::new();
+    for (file, src) in files.iter().filter(|(f, _)| f != "common.rs") {
+        for name in local_struct_names(src) {
+            let keys = struct_wire_keys(name, src, "")
+                .unwrap_or_else(|| panic!("bindings/{file}: cannot read struct `{name}`"));
+            if let Some((shared, _)) = shapes.iter().find(|(_, k)| *k == keys) {
+                duplicates.push(format!(
+                    "bindings/{file}: `{name}` sends {keys:?} — use `crate::bindings::{shared}`"
+                ));
+            }
+            compared += 1;
+        }
+    }
+    assert!(
+        compared >= 40,
+        "compared only {compared} local argument structs — the scan is broken"
+    );
+    assert!(
+        duplicates.is_empty(),
+        "these argument structs restate a shape bindings/common.rs defines — reuse the shared \
+         struct so the wire format has one definition:\n{}",
+        duplicates.join("\n")
+    );
+}
+
 /// The regression guard for the guard: each shape below exists in the tree.
 #[test]
 fn the_ipc_scanners_read_the_shapes_the_tree_uses() {
@@ -752,6 +845,10 @@ fn the_ipc_scanners_read_the_shapes_the_tree_uses() {
         Some(BTreeSet::from(["tenantId".to_string(), "ids".to_string()]))
     );
     assert_eq!(struct_wire_keys("Missing", "", common), None);
+
+    // Only private named-field structs are local argument structs.
+    let decls = "#[derive(Serialize)]\nstruct A<'a> {\n    t: &'a str,\n}\nstruct B {\n}\npub struct C {}\npub struct D(pub String);\nstruct Ab;\n";
+    assert_eq!(local_struct_names(decls), vec!["A", "B"]);
 
     // A doc comment that mentions the attribute is not a command.
     let doc = "/// behind a #[tauri::command] wrapper\nfn helper() {}\n    #[tauri::command]\nasync fn real() {}\n";

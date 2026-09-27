@@ -6,8 +6,8 @@
 //! [`azapptoolkit_core::BearerProvider`] so the desktop layer wires one token
 //! adapter across audiences.
 //!
-//! Only the operations the desktop Key Vault view needs are implemented:
-//! `list_secrets`, `get_secret`, `set_secret`, `delete_secret`.
+//! Only the operations the desktop app needs are implemented: `list_secrets`
+//! and `get_secret` (the Key Vault view) and `set_secret` (credential rotation).
 
 pub mod client;
 pub mod error;

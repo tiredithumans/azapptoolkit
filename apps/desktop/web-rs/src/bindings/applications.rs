@@ -66,14 +66,6 @@ pub async fn invalidate_application_detail(
     .await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ResolvePermissionArgs<'a> {
-    tenant_id: &'a str,
-    resource_app_id: &'a str,
-    permission_id: &'a str,
-}
-
 // ---------------- Mutations ----------------
 
 #[derive(Serialize)]
@@ -397,20 +389,13 @@ pub async fn set_application_authentication(
 
 // ---------------- Federated identity credentials ----------------
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FederatedListArgs<'a> {
-    tenant_id: &'a str,
-    object_id: &'a str,
-}
-
 pub async fn list_federated_credentials(
     tenant_id: &str,
     object_id: &str,
 ) -> Result<Vec<FederatedCredentialDto>, UiError> {
     invoke_result(
         "list_federated_credentials",
-        FederatedListArgs {
+        ObjectIdArgs {
             tenant_id,
             object_id,
         },

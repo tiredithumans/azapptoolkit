@@ -1,11 +1,10 @@
 //! Permissions catalog & admin-consent IPC bindings.
 
 use super::ipc::invoke_result;
-use azapptoolkit_core::models::RequiredResourceAccess;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
 
-use crate::bindings::TenantArg;
+use crate::bindings::{ObjectIdArgs, TenantArg};
 pub use azapptoolkit_dto::permissions::*;
 
 pub async fn list_catalog_resources() -> Result<Vec<CatalogResourceSummary>, UiError> {
@@ -50,25 +49,10 @@ pub async fn list_resource_permissions(
     .await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateRequiredResourceArgs<'a> {
-    tenant_id: &'a str,
-    object_id: &'a str,
-    required_resource_access: &'a [RequiredResourceAccess],
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GrantConsentArgs<'a> {
-    tenant_id: &'a str,
-    object_id: &'a str,
-}
-
 pub async fn grant_admin_consent(tenant_id: &str, object_id: &str) -> Result<GrantResult, UiError> {
     invoke_result(
         "grant_admin_consent",
-        GrantConsentArgs {
+        ObjectIdArgs {
             tenant_id,
             object_id,
         },

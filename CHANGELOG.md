@@ -685,6 +685,11 @@
 
 ### Changed
 
+- **The sample Azure custom role no longer grants deleting Key Vault secrets.**
+  `docs/operator-rbac/azure-custom-role.json` included
+  `Microsoft.KeyVault/vaults/secrets/deleteSecret/action`, but the app never deletes a secret: it
+  lists and reads secrets and writes a new version when it rotates a credential. If you created the
+  role from that file, you can remove that permission.
 - **Audit CSV exports put a service principal's home tenant in its own column.** For enterprise
   apps with no local registration, and for managed identities, the Publisher column held the owning
   tenant's ID. App registrations put their publisher domain there, so filtering or sorting on

@@ -4,7 +4,7 @@ use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
 
-use crate::bindings::ServicePrincipalIdArgs;
+use crate::bindings::{AppIdArgs, ServicePrincipalIdArgs, TenantArg};
 pub use azapptoolkit_dto::sso::*;
 
 #[derive(Serialize)]
@@ -175,17 +175,11 @@ pub async fn stage_saml_signing_certificate(
     .await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TenantArgs<'a> {
-    tenant_id: &'a str,
-}
-
 /// Tenant-wide SAML signing-certificate expiry board, soonest first.
 pub async fn list_sso_certificate_expirations(
     tenant_id: &str,
 ) -> Result<Vec<SsoCertificateRowDto>, UiError> {
-    invoke_result("list_sso_certificate_expirations", TenantArgs { tenant_id }).await
+    invoke_result("list_sso_certificate_expirations", TenantArg { tenant_id }).await
 }
 
 #[derive(Serialize)]
@@ -207,23 +201,12 @@ pub async fn save_sso_certificates_to_file(
     .await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProbeMetadataArgs<'a> {
-    tenant_id: &'a str,
-    app_id: &'a str,
-}
-
 /// Phase 2 — reads what the app's federation metadata endpoint publishes.
 pub async fn probe_federation_metadata(
     tenant_id: &str,
     app_id: &str,
 ) -> Result<MetadataProbeDto, UiError> {
-    invoke_result(
-        "probe_federation_metadata",
-        ProbeMetadataArgs { tenant_id, app_id },
-    )
-    .await
+    invoke_result("probe_federation_metadata", AppIdArgs { tenant_id, app_id }).await
 }
 
 #[derive(Serialize)]

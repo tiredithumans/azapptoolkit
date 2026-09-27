@@ -132,14 +132,6 @@ impl ApplicationListRowDto {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PermissionDescriptor {
-    pub display_name: String,
-    pub kind: String,
-    pub resource_display_name: String,
-    pub source: String,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateApplicationInput {

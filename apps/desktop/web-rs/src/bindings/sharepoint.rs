@@ -5,7 +5,7 @@ use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
 
-use crate::bindings::TenantArg;
+use crate::bindings::{AppIdArgs, TenantArg};
 pub use azapptoolkit_dto::sharepoint::*;
 
 #[derive(Serialize)]
@@ -57,13 +57,6 @@ pub async fn get_cached_site_sweep(tenant_id: &str) -> Result<Option<SiteSweepRe
     invoke_result("get_cached_site_sweep", TenantArg { tenant_id }).await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AppSiteAccessArgs<'a> {
-    tenant_id: &'a str,
-    app_id: &'a str,
-}
-
 /// The sites this principal can reach under `Sites.Selected`, with the roles it
 /// holds on each — projected backend-side out of the cached tenant sweep, so
 /// this stays a small payload. `None` = no completed sweep is cached; the caller
@@ -73,11 +66,7 @@ pub async fn get_app_site_access(
     tenant_id: &str,
     app_id: &str,
 ) -> Result<Option<AppSiteAccessDto>, UiError> {
-    invoke_result(
-        "get_app_site_access",
-        AppSiteAccessArgs { tenant_id, app_id },
-    )
-    .await
+    invoke_result("get_app_site_access", AppIdArgs { tenant_id, app_id }).await
 }
 
 #[derive(Serialize)]

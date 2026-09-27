@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Typed wrappers over `tauri-sys` for every `#[tauri::command]` exposed by
 //! the backend, plus event-stream helpers. Components depend on this module
 //! instead of `tauri-sys` directly so the IPC layer stays swappable.

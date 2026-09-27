@@ -13,7 +13,7 @@ Graph, the Exchange Online Admin API, Azure Key Vault, and Azure Resource Manage
 | Plane | What it governs here | Role | PIM flavor | File |
 |---|---|---|---|---|
 | **Entra ID directory roles** | App registrations, enterprise apps, credentials, owners, API-permission **admin consent**, sign-in/audit reports, Conditional Access (read) | Custom directory role (`microsoft.directory/*`) | **PIM for Microsoft Entra roles** | [`entra-custom-role.ps1`](./entra-custom-role.ps1) |
-| **Azure RBAC** | ARM managed-identity role **reads** + **Key Vault secrets** CRUD | Custom Azure role (`Actions`/`DataActions`) | **PIM for Azure resources** | [`azure-custom-role.json`](./azure-custom-role.json) |
+| **Azure RBAC** | ARM managed-identity role **reads** + **Key Vault secrets** list/read/write (rotation) | Custom Azure role (`Actions`/`DataActions`) | **PIM for Azure resources** | [`azure-custom-role.json`](./azure-custom-role.json) |
 | **Exchange Online RBAC** | RBAC-for-Applications: mailbox access grants, management scopes/role assignments | Built-in **Exchange Administrator** | **PIM for Microsoft Entra roles** | (built-in — no file) |
 
 So: **two custom roles + one built-in role**.
@@ -28,8 +28,9 @@ So: **two custom roles + one built-in role**.
 ## 1. Azure RBAC custom role (ARM + Key Vault)
 
 ARM usage is **read-mostly** (subscriptions, role assignments, role definitions — the Managed Identity
-→ Azure-roles view); Key Vault is full secret CRUD (the credential-rotation feature). One ARM **write**
-path — assigning an Azure role to a managed identity — needs
+→ Azure-roles view); Key Vault lists and reads secrets and writes new secret versions (the
+credential-rotation feature); it never deletes a secret. One ARM **write** path — assigning an Azure
+role to a managed identity — needs
 `Microsoft.Authorization/roleAssignments/write`, which this least-privilege role deliberately **omits**;
 see caveat 4.
 
@@ -50,7 +51,6 @@ az role definition create --role-definition azure-custom-role.json
 | List secrets | `Microsoft.KeyVault/vaults/secrets/readMetadata/action` (DataAction) |
 | Read secret value | `Microsoft.KeyVault/vaults/secrets/getSecret/action` (DataAction) |
 | Create/update secret | `Microsoft.KeyVault/vaults/secrets/setSecret/action` (DataAction) |
-| Delete secret | `Microsoft.KeyVault/vaults/secrets/deleteSecret/action` (DataAction) |
 
 Notes:
 - **Key Vault must be in RBAC permission mode** (not legacy access policies) for `DataActions` to
@@ -59,7 +59,7 @@ Notes:
   `Microsoft.Authorization/roleAssignments/write` — grant a separate **User Access Administrator**
   (or **Owner**) on the target scope only for operators who use it (caveat 4).
 - Built-in equivalent if you'd rather not maintain a custom role: **Reader** + **Key Vault Secrets
-  Officer**.
+  Officer** (which also grants delete).
 
 ---
 
@@ -195,7 +195,7 @@ then sign out and back in so a fresh token is issued.
 ## Verification
 
 - **Azure role:** `az role definition create --role-definition azure-custom-role.json`, assign at a
-  test subscription, confirm Key Vault list/get/set/delete and the Managed-Identity Azure-roles view
+  test subscription, confirm Key Vault list/get/set and the Managed-Identity Azure-roles view
   work.
 - **Entra role:** run `entra-custom-role.ps1` against a test tenant, assign PIM-eligible to a
   non-admin test account, confirm app create/update/credential/owner flows and the

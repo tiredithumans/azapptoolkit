@@ -87,41 +87,6 @@ impl std::fmt::Debug for KvSecretValueDto {
     }
 }
 
-/// Returned by `kv_set_secret` — metadata only, never the secret value.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KvSecretMetadataDto {
-    pub name: String,
-    pub content_type: Option<String>,
-    pub expires: Option<String>,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KvSetSecretInput {
-    pub vault_name: String,
-    pub secret_name: String,
-    pub value: String,
-    pub content_type: Option<String>,
-    /// RFC3339 timestamp.
-    pub expires: Option<String>,
-}
-// Hand-written rather than derived: the workspace treats a derived `Debug` on
-// a secret as a defect, because any `?dto` in a `tracing` macro puts the
-// plaintext straight into the daily rolling log file. Mirrors
-// `dto::backup::RegeneratedSecret`, `core::models::PasswordCredential`,
-// `auth::AccessToken`, `keyvault::SecretValue` and `cert::GeneratedCert`.
-impl std::fmt::Debug for KvSetSecretInput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KvSetSecretInput")
-            .field("vault_name", &self.vault_name)
-            .field("secret_name", &self.secret_name)
-            .field("value", &"<redacted>")
-            .field("content_type", &self.content_type)
-            .field("expires", &self.expires)
-            .finish()
-    }
-}
-
 /// Input for rotating an application's client secret into Key Vault: mint a
 /// fresh app secret, store it as a new version of the named vault secret, then
 /// optionally remove the previous credential(s). An empty `remove_key_ids` is
@@ -177,15 +142,5 @@ mod tests {
         assert!(dbg.contains("<redacted>"), "{dbg}");
         // Non-secret fields stay useful for diagnosis.
         assert!(dbg.contains("app-secret"), "{dbg}");
-
-        let write = KvSetSecretInput {
-            vault_name: "kv-contoso".into(),
-            secret_name: "app-secret".into(),
-            value: "s3cr3t-value".into(),
-            ..Default::default()
-        };
-        let dbg = format!("{write:?}");
-        assert!(!dbg.contains("s3cr3t-value"), "{dbg}");
-        assert!(dbg.contains("kv-contoso"), "{dbg}");
     }
 }
