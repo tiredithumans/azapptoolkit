@@ -33,9 +33,9 @@ pub fn set_auth_config(client_id: String, tenant_id: String) -> Result<(), UiErr
     let (client_id, tenant_id) = validated_ids(&client_id, &tenant_id)?;
 
     let config_dir = crate::config_directory();
-    // Through `mutate`, not `stored` + `save`: three commands read-modify-write
-    // this file from different threads, and an interleaved pair silently drops
-    // one side's write.
+    // Every settings.json writer goes through `UserSettings::mutate`: several
+    // read-modify-write this file from different threads, and an interleaved
+    // pair silently drops one side's write.
     UserSettings::mutate(&config_dir, |settings| {
         settings.client_id = Some(client_id);
         settings.tenant_id = Some(tenant_id);

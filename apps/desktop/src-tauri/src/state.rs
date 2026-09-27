@@ -374,8 +374,8 @@ impl AppState {
     ///
     /// Best-effort by design: an unwritable settings file costs the operator one
     /// extra sign-in next launch and must never fail the sign-in that just
-    /// succeeded. Goes through `mutate` like every other writer — three commands
-    /// read-modify-write this file from different threads.
+    /// succeeded. Every settings.json writer goes through `UserSettings::mutate`;
+    /// several read-modify-write this file from different threads.
     pub fn remember_account(&self, tenant: &TenantContext) {
         let tenant = tenant.clone();
         if let Err(e) = UserSettings::mutate(&crate::config_directory(), |settings| {

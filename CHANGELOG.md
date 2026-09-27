@@ -26,8 +26,8 @@
   file), the next sign-in, Settings save or secret rotation replaced it with a fresh file,
   permanently losing your tenant defaults and the Key Vault each app's secret was rotated into.
   The app now leaves the file untouched and the save reports the problem ("Could not write
-  settings.json: …") so you can fix or remove it. Saves from two open app windows also no longer
-  overwrite each other.
+  settings.json: …") so you can fix or remove it. Saves from two running copies of the app also no
+  longer overwrite each other.
 
 - **A throttled request now tells you how long to wait.** When Microsoft Graph, Exchange, Key Vault
   or Azure kept throttling a request after the app's retries, the error read "throttled (429);

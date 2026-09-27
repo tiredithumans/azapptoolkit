@@ -115,7 +115,8 @@ impl UserSettings {
     /// Every writer must go through here. Paired with the atomic
     /// temp-and-rename in `private_file`, a concurrent *reader* also never sees
     /// a partial file. A second app instance is kept out by an OS advisory lock
-    /// on [`SETTINGS_LOCK_FILE`], taken inside the process lock.
+    /// on [`SETTINGS_LOCK_FILE`], taken inside the process lock (best-effort:
+    /// see [`Self::lock_across_instances`]).
     ///
     /// Refuses, rather than overwrites, a `settings.json` that exists but
     /// cannot be read or parsed (a hand-edit typo, a transient read failure):
@@ -135,22 +136,7 @@ impl UserSettings {
         // process conflict with each other, so the Mutex above is what keeps
         // in-process callers from contending on it.
         std::fs::create_dir_all(config_dir)?;
-        let lock_file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(config_dir.join(SETTINGS_LOCK_FILE))?;
-        match lock_file.lock() {
-            Ok(()) => {}
-            // A filesystem without advisory locks (some network homes): the
-            // process lock still serialises this instance, and refusing every
-            // write would be worse than the rare cross-instance race.
-            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
-                tracing::warn!(error = %e, "settings.lock unsupported; cross-instance writes are not serialised");
-            }
-            Err(e) => return Err(e),
-        }
+        let lock_file = Self::lock_across_instances(config_dir);
 
         let path = config_dir.join(SETTINGS_FILE);
         let mut settings = Self::read_file(&path)
@@ -169,6 +155,38 @@ impl UserSettings {
         // Held to here on purpose: dropping the file releases the OS lock.
         drop(lock_file);
         Ok((out, settings))
+    }
+
+    /// Take the cross-process advisory lock on [`SETTINGS_LOCK_FILE`], blocking
+    /// while another app instance holds it. Dropping the returned file
+    /// releases the lock.
+    ///
+    /// Best-effort by design: any failure to open or lock the file (a
+    /// filesystem without advisory locks, e.g. an NFS home with no lock
+    /// service returning `ENOLCK`; a stray unwritable `settings.lock`) is
+    /// logged and yields `None`. The process lock in [`Self::mutate`] still
+    /// serialises this instance, and refusing every settings write would be
+    /// far worse than the rare race between two running copies of the app.
+    fn lock_across_instances(config_dir: &Path) -> Option<std::fs::File> {
+        let lock_path = config_dir.join(SETTINGS_LOCK_FILE);
+        let locked = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .and_then(|file| file.lock().map(|()| file));
+        match locked {
+            Ok(file) => Some(file),
+            Err(e) => {
+                tracing::warn!(
+                    path = %lock_path.display(),
+                    error = %e,
+                    "could not take the settings lock; writes from another running instance are not serialised"
+                );
+                None
+            }
+        }
     }
 
     /// The write half of [`Self::mutate`]. Private so a caller cannot take the
@@ -674,6 +692,23 @@ mod tests {
         assert_eq!(
             UserSettings::stored(dir.path()).client_id.as_deref(),
             Some("x")
+        );
+    }
+
+    /// The cross-instance lock is best-effort: when it cannot be taken (here a
+    /// directory squats on `settings.lock`, so the open fails the way an NFS
+    /// home without a lock service fails the `flock`), the write still lands
+    /// under the process lock instead of being refused.
+    #[test]
+    fn mutate_still_writes_when_the_settings_lock_cannot_be_taken() {
+        let dir = tempdir();
+        std::fs::create_dir(dir.path().join(SETTINGS_LOCK_FILE)).unwrap();
+
+        UserSettings::mutate(dir.path(), |s| s.client_id = Some("c".into())).unwrap();
+
+        assert_eq!(
+            UserSettings::stored(dir.path()).client_id.as_deref(),
+            Some("c")
         );
     }
 }
