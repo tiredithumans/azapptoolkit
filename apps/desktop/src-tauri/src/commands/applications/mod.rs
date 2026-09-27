@@ -330,10 +330,22 @@ pub(crate) async fn create_application_core(
     client: &azapptoolkit_graph::GraphClient,
     input: CreateApplicationInput,
 ) -> Result<CreateApplicationResult, UiError> {
+    create_application_core_tagged(client, input, Vec::new()).await
+}
+
+/// [`create_application_core`] with `tags` written in the create POST itself.
+/// The DR restore uses it to stamp its restore marker, so no app it creates can
+/// exist untagged (a follow-up PATCH would leave that window open).
+pub(crate) async fn create_application_core_tagged(
+    client: &azapptoolkit_graph::GraphClient,
+    input: CreateApplicationInput,
+    tags: Vec<String>,
+) -> Result<CreateApplicationResult, UiError> {
     let body = CreateApplicationRequest {
         display_name: input.display_name,
         sign_in_audience: input.sign_in_audience,
         description: input.description,
+        tags,
     };
     let application = client.create_application(&body).await?;
 

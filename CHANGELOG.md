@@ -2,6 +2,23 @@
 
 ### Fixed
 
+- **Running a DR restore again no longer duplicates every app it already created.** The restore
+  report, and the expired-session notice in the Disaster Recovery view, told you to re-run the
+  restore — but each run created every app in the backup afresh, so a second run left a second copy
+  of the estate with new appIds, service principals and live secrets. Restored apps now carry an
+  `azapptoolkit:restoredFrom:<source appId>` tag, and a re-run recognises and finishes them instead
+  of creating them again: a secret that already exists is not re-issued, and an app whose tag is
+  ambiguous, or whose lookup fails, is listed for manual follow-up rather than created. After a
+  restore completes, the Restore button is withdrawn until you load a backup file again. Apps
+  restored by earlier versions carry no tag and are not recognised.
+- **A failed directory read during a restore is reported as a failure, not as a missing object.**
+  If listing the destination's managed identities failed, every managed identity was reported "not
+  found — recreate it via your infrastructure-as-code"; a failed service-principal read was reported
+  as "the app had none in the backup". Both now say the read failed, and a session that expires
+  during these steps stops the restore for re-sign-in.
+- **Restore no longer re-issues client secrets that had already expired when the backup was
+  taken.** Each one is named in the report and counted in the plan; a secret that expired after the
+  backup is still re-issued.
 - **A tenant backup no longer reads as complete when it could not read a managed identity's
   permissions or an enterprise app's assignments.** When Graph failed to return a managed
   identity's held app roles, or an enterprise app's assigned users/groups or group memberships, the

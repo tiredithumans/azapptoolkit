@@ -42,7 +42,9 @@ multi-authority auth.
    no value field, and that absence is the structural guarantee that secrets
    never reach the backup file. **Restore regenerates** fresh secrets/certs and
    emits a redistribution report. **Federated identity credentials** carry no
-   secret and so restore **verbatim** — the DR-friendly credential type.
+   secret, so they are the DR-friendly credential type — but restore still
+   validates each one through `core::federation` and reports every one it
+   creates (see below).
 
 2. **`appId`/`objectId` change in a new tenant** (Graph auto-assigns them).
    - First-party Microsoft resource appIds (Graph `00000003-…`) and their
@@ -147,8 +149,9 @@ confirms.
 `restore_tenant` replays **app registrations** in passes so inter-app
 dependencies resolve:
 
-1. **Create shells** — `create_application_core` per app (+ paired SP); build
-   the `source_app_id → new_app_id` remap.
+1. **Create shells** — `create_application_core_tagged` per app (+ paired SP),
+   or adoption of the app an earlier run created (below); build the
+   `source_app_id → new_app_id` remap.
 2. **Wire references** — declared permissions (`remap_required_resource_access`:
    first-party appIds survive, custom ones remapped, permission ids preserved),
    identifier URIs (`rewrite_identifier_uris`: `api://{old}` → `api://{new}`),
@@ -159,6 +162,38 @@ dependencies resolve:
    best-effort: a failure is a per-app warning, not a run failure.
 3. **Re-consent** — `grant_admin_consent_core` per app that had consent, run
    *after* all apps are wired so a custom resource's SP + scopes already exist.
+4. **Enterprise applications** and 5. **Managed identities** — below.
+
+**Re-running a restore adopts what an earlier run created.** Pass 1 has no
+natural key that survives the tenant move — the appId changes and `api://{new}`
+is not in the manifest — so every app is created with the tag
+`azapptoolkit:restoredFrom:<source appId>` (`restore_marker`), written in the
+create POST itself so no restored app can exist untagged. Before creating, Pass 1
+looks the tag up (`find_applications_by_tag`, a basic `tags/any` filter) and
+`adoption_for` decides:
+
+- **no hit** → create;
+- **exactly one hit with the manifest's exact display name** → adopt it: its
+  SP is ensured (the earlier run may have died between the two POSTs), it joins
+  the remap, and Pass 2 finishes it (`RestoredApp.adopted`);
+- **one renamed hit, or several** → a `ManualItem`, nothing created.
+
+A failed lookup **fails closed** into a `ManualItem` too — creating blind is how a
+re-run duplicates the estate. For an adopted app Pass 2 re-applies the
+full-replace PATCHes as-is and skips what is already there among the additive
+writes: federated credentials by name, owners by resolved id, secrets by display
+name (as a multiset). Pass 3 updates existing grants, so it needs nothing. Known
+limitation: Pass 4 does not de-duplicate, so a re-run's repeated app-role
+assignments and group memberships come back as per-app warnings. Apps restored by
+builds before the tag existed carry none and are not recognised.
+
+**Secrets already expired at backup time are not re-issued.** A backed-up secret
+whose `end_date_time` precedes `TenantBackup.created_at` (`expired_at_backup`)
+cannot have been in use, so Pass 2 names it in a warning instead of minting a
+fresh 180-day credential, and `plan_restore` counts it in
+`RestorePlan.expired_secrets_skipped`. The cutoff is the backup's time, never
+"now": a secret that expired during the outage is the one a recovering client
+still holds.
 
 **Federated identity credentials are the one thing a manifest can carry that
 grants standing access with no secret at all**: whoever controls the named
@@ -187,7 +222,7 @@ The remap helpers (`remap_required_resource_access`, `rewrite_identifier_uris`,
 `remap_pre_authorized`) are pure and unit-tested (first-party-survives vs
 custom-remap, the `api://` rewrite).
 
-**Enterprise applications** restore in Pass 5. For an SP that was recreated by
+**Enterprise applications** restore in Pass 4. For an SP that was recreated by
 its paired app registration (it's in the `app_id_remap` and not foreign), the
 restore re-applies settings (tags, `appRoleAssignmentRequired`), **app-role
 assignments** (each principal remapped by display name via `resolve_principal`;
@@ -200,18 +235,27 @@ aren't restored, so an assignment to an unmatched custom role is reported, not
 applied. The backup captures this detail in a bounded per-SP fan-out
 (`backup_one_enterprise_app`: full SP + `appRoleAssignedTo` + group memberships).
 
-**Managed identities** restore in Pass 6. MIs can't be created via Graph
+**Managed identities** restore in Pass 5. MIs can't be created via Graph
 (they're Azure resources), so `restore_managed_identities` matches each
 backed-up MI to one **already recreated** in the destination — by display name
 — and re-binds its held Graph app-roles to the new principal (grouped by
 resource appId, granted by value via the shared
 `grant_managed_identity_roles_core`). Two things are always runbook items
-(`ManualItem`): MIs not yet recreated (recreate via ARM/Bicep, then re-run), and
+(`ManualItem`): MIs not yet recreated (recreate via ARM/Bicep, then run the
+restore again with the same backup — the apps it already created are adopted by
+their restore tag, not duplicated), and
 **Azure RBAC** — source role scopes are subscription/resource-specific and don't
 exist in the destination, so the operator re-creates them at the equivalent
 scopes. The backup captures MI held Graph app-roles (resource-relative, via a
 cached `ResourceLookup`); it deliberately does **not** scan Azure RBAC (it's
 runbook-only and the MI detail view already surfaces it for DR planning).
+
+**A failed read in passes 4-5 is reported as a failure, not as an absence.** A
+failed destination MI listing becomes one `ManualItem` saying so — never a "not
+found" item per MI — and a failed SP read is not reported as "the app had none
+in the backup". Every failure in these passes is noted through `SessionDead`, as
+in Pass 2, so a session that dies there stops the restore with
+`session_expired` set.
 
 ### Security posture
 

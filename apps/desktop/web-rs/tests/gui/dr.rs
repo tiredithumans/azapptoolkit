@@ -17,7 +17,7 @@
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
-use azapptoolkit_dto::backup::{RestorePlan, RestoreReport, TenantBackup};
+use azapptoolkit_dto::backup::{RestorePlan, RestoreReport, RestoredApp, TenantBackup};
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::dr::DisasterRecoveryView;
 
@@ -66,6 +66,7 @@ fn plan() -> RestorePlan {
         destination_tenant_id: "test-tenant".to_string(),
         app_registrations_to_create: 2,
         secrets_to_regenerate: 0,
+        expired_secrets_skipped: 0,
         certificates_needing_manual_upload: 0,
         federated_credentials_to_restore: 0,
         owners_to_remap: 0,
@@ -120,6 +121,38 @@ async fn a_completed_restore_carries_no_partial_wording() {
     assert!(
         !body.contains("cancelled before completing") && !body.contains("session expired"),
         "a clean run must not be described as stopped: {body}"
+    );
+}
+
+/// Once a report renders, the Restore button is withdrawn: a second click would
+/// be a second restore, so running it again needs a deliberate re-load.
+#[wasm_bindgen_test]
+async fn the_restore_button_is_withdrawn_once_a_report_renders() {
+    let _m = run_restore(RestoreReport::default()).await;
+    assert!(
+        !has_button("Restore into this tenant…"),
+        "the restore must not be re-runnable with one click"
+    );
+    assert!(has_button("Load backup file…"), "re-loading stays possible");
+}
+
+/// An app a re-run recognised from an earlier run (by its restore tag) is
+/// labelled, so it does not read as a second, freshly created copy.
+#[wasm_bindgen_test]
+async fn an_app_recognised_from_an_earlier_run_is_labelled() {
+    let _m = run_restore(RestoreReport {
+        apps: vec![RestoredApp {
+            adopted: true,
+            display_name: "App A".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await;
+    assert!(
+        ts::body_contains("already restored"),
+        "an adopted app must be labelled: {}",
+        ts::body_text()
     );
 }
 

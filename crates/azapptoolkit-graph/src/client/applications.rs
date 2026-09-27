@@ -43,6 +43,12 @@ pub struct CreateApplicationRequest {
     pub sign_in_audience: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Free-form `tags` written at creation. The DR restore stamps its restore
+    /// marker here — in the create POST itself, so an app can never exist
+    /// without it — which is what lets a re-run find the apps it already
+    /// created ([`GraphClient::find_applications_by_tag`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// Partial update for `PATCH /applications/{id}`. Only fields set on the
@@ -473,6 +479,21 @@ impl GraphClient {
         let params: [(&str, &str); 2] = [("$filter", filter.as_str()), ("$top", "1")];
         let page: Paged<Application> = self.get_json("/applications", &params, false).await?;
         Ok(page.items.into_iter().next())
+    }
+
+    /// Applications carrying the exact `tag` (`tags/any(t:t eq '…')`, a basic
+    /// query — no `ConsistencyLevel` needed). One page capped at 10: callers use
+    /// this to find an app they tagged themselves, so more than one hit is
+    /// already an anomaly they must refuse, not something to page through.
+    pub async fn find_applications_by_tag(&self, tag: &str) -> Result<Vec<Application>> {
+        let filter = format!("tags/any(t:t eq '{}')", escape_odata(tag));
+        let params: [(&str, &str); 3] = [
+            ("$filter", filter.as_str()),
+            ("$select", "id,appId,displayName,passwordCredentials"),
+            ("$top", "10"),
+        ];
+        let page: Paged<Application> = self.get_json("/applications", &params, false).await?;
+        Ok(page.items)
     }
 
     /// GET `/applications/{id}` selecting only the SSO-relevant fields, as raw

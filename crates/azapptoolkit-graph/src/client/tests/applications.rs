@@ -215,10 +215,72 @@ async fn create_application_posts_body_and_returns_app() {
         display_name: "my-new-app".into(),
         sign_in_audience: Some("AzureADMyOrg".into()),
         description: None,
+        tags: Vec::new(),
     };
     let app = client.create_application(&req).await.unwrap();
     assert_eq!(app.id, "obj-99");
     assert_eq!(app.display_name, "my-new-app");
+}
+
+#[tokio::test]
+async fn create_application_sends_tags_in_the_create_body() {
+    // The DR restore marker must ride the POST itself: a follow-up PATCH would
+    // leave an untagged app behind if the run died in between.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/applications"))
+        .and(wiremock::matchers::body_json(serde_json::json!({
+            "displayName": "restored-app",
+            "tags": ["azapptoolkit:restoredFrom:x"]
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": "obj-1",
+            "appId": "app-1",
+            "displayName": "restored-app"
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let req = CreateApplicationRequest {
+        display_name: "restored-app".into(),
+        tags: vec!["azapptoolkit:restoredFrom:x".into()],
+        ..Default::default()
+    };
+    let app = client.create_application(&req).await.unwrap();
+    assert_eq!(app.id, "obj-1");
+}
+
+#[tokio::test]
+async fn find_applications_by_tag_filters_on_the_exact_tag() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/applications"))
+        .and(query_param(
+            "$filter",
+            "tags/any(t:t eq 'azapptoolkit:restoredFrom:o''brien')",
+        ))
+        .and(query_param("$top", "10"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "obj-1",
+                "appId": "app-1",
+                "displayName": "Restored",
+                "passwordCredentials": [{ "keyId": "k1", "displayName": "ci" }]
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let hits = client
+        .find_applications_by_tag("azapptoolkit:restoredFrom:o'brien")
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].app_id, "app-1");
+    assert_eq!(
+        hits[0].password_credentials[0].display_name.as_deref(),
+        Some("ci")
+    );
 }
 
 #[tokio::test]

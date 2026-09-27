@@ -166,6 +166,10 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                         secrets
                     ));
                     report.set(Some(r));
+                    // A second click would be a second restore, so running it
+                    // again requires deliberately re-loading the file.
+                    plan.set(None);
+                    loaded.set(None);
                 }
                 Err(e) => {
                     if !session.report_if_session_dead(&e) {
@@ -412,7 +416,9 @@ pub fn DisasterRecoveryView() -> impl IntoView {
             >
                 <p>
                     "This creates new app registrations in the current tenant and regenerates their \
-                     secrets. It does not overwrite or delete anything that already exists. The new \
+                     secrets. It does not overwrite or delete anything that already exists. Running \
+                     it again with the same file recognises the apps an earlier run created (by \
+                     their restore tag) and completes them instead of duplicating them. The new \
                      secret values are shown only once — save the report afterwards."
                 </p>
                 <div class="dr-view__actions">
@@ -453,8 +459,14 @@ fn RestorePlanView(plan: backup::RestorePlan) -> impl IntoView {
             <ul class="dr-view__plan-list">
                 <li>{format!("{} app registration(s) to create", plan.app_registrations_to_create)}</li>
                 <li>{format!("{} secret(s) to regenerate (new values issued)", plan.secrets_to_regenerate)}</li>
+                {(plan.expired_secrets_skipped > 0).then(|| view! {
+                    <li>{format!(
+                        "{} secret(s) had already expired when the backup was taken — not re-issued",
+                        plan.expired_secrets_skipped,
+                    )}</li>
+                })}
                 <li>{format!("{} certificate(s) need manual re-upload", plan.certificates_needing_manual_upload)}</li>
-                <li>{format!("{} federated credential(s) restored as-is", plan.federated_credentials_to_restore)}</li>
+                <li>{format!("{} federated credential(s) to restore (each validated and listed in the report)", plan.federated_credentials_to_restore)}</li>
                 <li>{format!("{} owner(s) to remap by name", plan.owners_to_remap)}</li>
             </ul>
         </div>
@@ -499,7 +511,7 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
             </p>
             <Show when=move || session_expired>
                 <Callout tone="warn">
-                    "The sign-in session expired part-way through this restore, so it stopped where it had got to rather than completing. Everything listed below was created and wired; anything absent was not attempted. Re-authenticate and run the restore again — it recreates only what is missing."
+                    "The sign-in session expired part-way through this restore, so it stopped where it had got to rather than completing. Everything listed below was created and wired; anything absent was not attempted. Re-authenticate and run the restore again with the same backup file — apps this restore already created carry a restore tag and are recognised and finished rather than created twice."
                 </Callout>
             </Show>
             <Show when=move || has_secrets>
@@ -524,6 +536,7 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
                                 <strong>{a.display_name}</strong>
                                 <span class="dr-view__report-id">{format!("new appId {}", a.new_app_id)}</span>
                                 {a.consent_granted.then(|| view! { <span class="dr-view__badge">"consent re-granted"</span> })}
+                                {a.adopted.then(|| view! { <span class="dr-view__badge">"already restored — completed"</span> })}
                             </div>
                             {(!secrets.is_empty()).then(|| view! {
                                 <ul class="dr-view__secrets">

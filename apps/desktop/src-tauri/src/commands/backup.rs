@@ -290,12 +290,16 @@ pub async fn save_backup_to_file(
             "tenant backup is JSON only",
         ));
     }
+    // Serialized up front so a failure is an error, never an empty `{}` written
+    // and reported as a saved backup.
+    let json = serde_json::to_string_pretty(&backup)
+        .map_err(|e| UiError::serde(format!("could not serialize the tenant backup: {e}")))?;
     super::export::save_export_via_dialog(
         &app_handle,
         "tenant-backup",
         "json",
         String::new, // unreachable: format is validated to "json" above
-        || serde_json::to_string_pretty(&backup).unwrap_or_else(|_| "{}".to_string()),
+        move || json,
     )
     .await
 }

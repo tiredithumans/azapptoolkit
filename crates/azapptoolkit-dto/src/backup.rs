@@ -371,8 +371,16 @@ pub struct RestorePlan {
     pub source_tenant_id: String,
     pub destination_tenant_id: String,
     pub app_registrations_to_create: usize,
-    /// Secrets that will be regenerated (their values can't be restored).
+    /// Secrets that will be regenerated (their values can't be restored). Only
+    /// those still valid when the backup was taken — see
+    /// [`Self::expired_secrets_skipped`].
     pub secrets_to_regenerate: usize,
+    /// Secrets that had already expired when the backup was taken (their
+    /// `end_date_time` precedes `TenantBackup.created_at`). Nothing could have
+    /// been using them, so restore does not re-issue them; each is named in the
+    /// report.
+    #[serde(default)]
+    pub expired_secrets_skipped: usize,
     /// Certificates needing manual re-upload (the private key is unavailable).
     pub certificates_needing_manual_upload: usize,
     pub federated_credentials_to_restore: usize,
@@ -481,6 +489,11 @@ pub struct RestoredApp {
     /// was still created.
     pub warnings: Vec<String>,
     pub consent_granted: bool,
+    /// The app was not created by this run: an earlier restore of the same
+    /// backup had already created it (it carries that run's restore tag), and
+    /// this run recognised it and finished wiring it instead of duplicating it.
+    #[serde(default)]
+    pub adopted: bool,
 }
 
 /// A regenerated client secret. `secret_value` is plaintext and shown once —
