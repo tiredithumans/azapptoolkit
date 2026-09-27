@@ -260,11 +260,16 @@ async fn find_applications_by_tag_filters_on_the_exact_tag() {
             "tags/any(t:t eq 'azapptoolkit:restoredFrom:o''brien')",
         ))
         .and(query_param("$top", "10"))
+        .and(query_param(
+            "$select",
+            "id,appId,displayName,createdDateTime,passwordCredentials",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "value": [{
                 "id": "obj-1",
                 "appId": "app-1",
                 "displayName": "Restored",
+                "createdDateTime": "2026-01-02T03:04:05Z",
                 "passwordCredentials": [{ "keyId": "k1", "displayName": "ci" }]
             }]
         })))
@@ -277,6 +282,11 @@ async fn find_applications_by_tag_filters_on_the_exact_tag() {
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].app_id, "app-1");
+    // The restore's provenance check compares this against the backup time.
+    assert_eq!(
+        hits[0].created_date_time.map(|t| t.to_rfc3339()).as_deref(),
+        Some("2026-01-02T03:04:05+00:00")
+    );
     assert_eq!(
         hits[0].password_credentials[0].display_name.as_deref(),
         Some("ci")

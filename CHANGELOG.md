@@ -25,9 +25,12 @@
   of the estate with new appIds, service principals and live secrets. Restored apps now carry an
   `azapptoolkit:restoredFrom:<source appId>` tag, and a re-run recognises and finishes them instead
   of creating them again: a secret that already exists is not re-issued, and an app whose tag is
-  ambiguous, or whose lookup fails, is listed for manual follow-up rather than created. After a
-  restore completes, the Restore button is withdrawn until you load a backup file again. Apps
-  restored by earlier versions carry no tag and are not recognised.
+  ambiguous, or whose lookup fails, is listed for manual follow-up rather than created. Because
+  anyone who can register apps could plant that tag, a tagged app is only taken over when it was
+  created after the backup and has no owner besides you and the backup's own owners; otherwise it
+  is listed, with the unexpected owners named, and is never granted the backup's permissions or
+  admin consent. After a restore completes, the Restore button is withdrawn until you load a
+  backup file again. Apps restored by earlier versions carry no tag and are not recognised.
 - **A failed directory read during a restore is reported as a failure, not as a missing object.**
   If listing the destination's managed identities failed, every managed identity was reported "not
   found — recreate it via your infrastructure-as-code"; a failed service-principal read was reported

@@ -15,7 +15,8 @@
 //!   manifest captures credential *metadata* ([`CredentialMeta`] — which has no
 //!   value field, by design) and restore *regenerates* fresh credentials,
 //!   emitting a redistribution report. Federated identity credentials carry no
-//!   secret and so restore verbatim — the DR-friendly credential type.
+//!   secret, so they are the DR-friendly credential type — restore validates
+//!   each through `core::federation` and reports every one it creates.
 //! - **`appId`/`objectId` are auto-assigned and change in a new tenant.**
 //!   First-party Microsoft resource appIds (Graph `00000003-…`) and their
 //!   permission GUIDs are stable and survive; everything else is captured by a

@@ -23,9 +23,12 @@
 //!
 //! **Re-running is safe for the apps a run created.** Every app is created with
 //! the tag `azapptoolkit:restoredFrom:<source appId>` in its create POST, so a
-//! re-run finds it and finishes wiring it rather than creating it twice; an
-//! ambiguous match, or a lookup that failed, is a runbook item and never a blind
-//! create.
+//! re-run finds it and finishes wiring it rather than creating it twice. The tag
+//! and the display name are both writable by anyone who may register apps, so a
+//! hit is adopted only once it is also provably this restore's: created after
+//! the backup, and owned by nobody but the operator and the manifest's owners.
+//! Anything else — an ambiguous or unprovable match, or a read that failed — is
+//! a runbook item and never a blind create.
 //!
 //! Secret/cert values can't be restored: secrets are regenerated (the show-once
 //! values land in the [`RestoreReport`] for redistribution) — except those that
@@ -43,7 +46,7 @@ use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_core::federation::validate_federated_credential;
-use azapptoolkit_core::models::Application;
+use azapptoolkit_core::models::{Application, DirectoryObject};
 use azapptoolkit_core::redirect::validate_redirect_uri;
 use azapptoolkit_core::restore_plan::{
     remap_pre_authorized, remap_required_resource_access, rewrite_identifier_uris,
@@ -139,13 +142,45 @@ enum Adoption {
     Refuse(String),
 }
 
-/// Pure Pass-1 decision. Adoption needs the tag **and** the exact display name:
-/// the tag alone could be on an app someone has since repurposed, and the name
-/// alone proves nothing. Anything else fails closed — never a second copy.
-fn adoption_for(app: &AppRegistrationBackup, hits: &[Application]) -> Adoption {
+/// Pure Pass-1 decision on the tag lookup. Adoption needs the tag, the exact
+/// display name **and** a creation time after the backup was taken: the tag
+/// alone could be on an app someone has since repurposed, the name alone proves
+/// nothing, and an app older than the backup cannot be one a restore of it
+/// created. Anything else fails closed — never a second copy. An `Adopt` here is
+/// still provisional: [`decide_adoption`] checks the hit's owners before Pass 1
+/// takes it.
+fn adoption_for(
+    app: &AppRegistrationBackup,
+    hits: &[Application],
+    taken_at: DateTime<Utc>,
+) -> Adoption {
     match hits {
         [] => Adoption::Create,
-        [hit] if hit.display_name == app.display_name => Adoption::Adopt {
+        [hit] if hit.display_name != app.display_name => Adoption::Refuse(format!(
+            "An app carrying the restore tag for source appId {} already exists as '{}' \
+             (appId {}), so this app was not created again. Reconcile it manually: rename it \
+             back to '{}' and run the restore again to finish it, or delete it to have the \
+             restore recreate it.",
+            app.source_app_id, hit.display_name, hit.app_id, app.display_name
+        )),
+        [hit] if !hit.created_date_time.is_some_and(|t| t >= taken_at) => {
+            let created = hit.created_date_time.map_or_else(
+                || "an unknown time".to_string(),
+                |t| t.format("%Y-%m-%d %H:%M UTC").to_string(),
+            );
+            Adoption::Refuse(format!(
+                "An app carrying the restore tag for source appId {} already exists as '{}' \
+                 (appId {}), but it was created at {created}, not after this backup was taken \
+                 ({}), so no restore of this backup can have created it. It was not adopted \
+                 (that would give it this app's permissions and admin consent) and not created \
+                 again. Find out who created it; delete it to have the restore recreate the app.",
+                app.source_app_id,
+                hit.display_name,
+                hit.app_id,
+                taken_at.format("%Y-%m-%d %H:%M UTC")
+            ))
+        }
+        [hit] => Adoption::Adopt {
             object_id: hit.id.clone(),
             app_id: hit.app_id.clone(),
             live_secret_names: hit
@@ -154,13 +189,6 @@ fn adoption_for(app: &AppRegistrationBackup, hits: &[Application]) -> Adoption {
                 .filter_map(|p| p.display_name.clone())
                 .collect(),
         },
-        [hit] => Adoption::Refuse(format!(
-            "An app carrying the restore tag for source appId {} already exists as '{}' \
-             (appId {}), so this app was not created again. Reconcile it manually: rename it \
-             back to '{}' and run the restore again to finish it, or delete it to have the \
-             restore recreate it.",
-            app.source_app_id, hit.display_name, hit.app_id, app.display_name
-        )),
         many => Adoption::Refuse(format!(
             "{} apps carry the restore tag for source appId {} ({}), so none was created again. \
              Delete the duplicates, then run the restore again.",
@@ -172,6 +200,105 @@ fn adoption_for(app: &AppRegistrationBackup, hits: &[Application]) -> Adoption {
                 .join(", ")
         )),
     }
+}
+
+/// The owners of an adoption candidate that neither the operator nor the
+/// manifest accounts for, labelled for the runbook item (UPN, else display
+/// name, else object id). `allowed` holds destination object ids.
+fn unexpected_owners(owners: &[DirectoryObject], allowed: &HashSet<String>) -> Vec<String> {
+    owners
+        .iter()
+        .filter(|o| !allowed.contains(&o.id))
+        .map(|o| {
+            o.user_principal_name
+                .clone()
+                .or_else(|| o.display_name.clone())
+                .unwrap_or_else(|| o.id.clone())
+        })
+        .collect()
+}
+
+/// The whole Pass-1 decision for one manifest app: tag lookup, [`adoption_for`],
+/// then the owner check that makes an adoption provable.
+///
+/// The tag and the display name are both writable by anyone allowed to register
+/// apps, and source appIds are not secret — so a pre-seeded app with the right
+/// tag and name would otherwise be adopted and then handed the manifest's
+/// permissions, fresh secrets and tenant-wide admin consent while keeping its
+/// planter as an owner. An app this restore created has no owners but the
+/// operator (`operator_oid`, the signed-in account in the destination) and the
+/// manifest's own owners (resolved through the run's `principals` memo, which
+/// Pass 2 then reuses), so any other owner is refused by name. Every read that
+/// fails refuses too: neither adopting nor creating blind is safe.
+async fn decide_adoption(
+    client: &GraphClient,
+    app: &AppRegistrationBackup,
+    taken_at: DateTime<Utc>,
+    operator_oid: Option<&str>,
+    principals: &mut HashMap<String, Option<String>>,
+    session: &SessionDead,
+) -> Adoption {
+    // Looked up by the restore tag, the only key that survives the tenant move
+    // — the appId changes, and `api://{new}` is not in the manifest.
+    let hits = match client
+        .find_applications_by_tag(&restore_marker(&app.source_app_id))
+        .await
+    {
+        Ok(hits) => hits,
+        Err(e) => {
+            session.note_code(e.ui_code());
+            return Adoption::Refuse(format!(
+                "Couldn't check whether an earlier restore already created this app ({e}); it \
+                 was NOT created, to avoid a duplicate. Run the restore again once the read \
+                 succeeds."
+            ));
+        }
+    };
+    let adoption = adoption_for(app, &hits, taken_at);
+    let Adoption::Adopt {
+        object_id, app_id, ..
+    } = &adoption
+    else {
+        return adoption;
+    };
+    let owners = match client.list_owners(object_id).await {
+        Ok(owners) => owners,
+        Err(e) => {
+            session.note_code(e.ui_code());
+            return Adoption::Refuse(format!(
+                "Couldn't read the owners of '{}' (appId {app_id}), which carries this app's \
+                 restore tag ({e}), so it was neither adopted nor created again. Run the restore \
+                 again once the read succeeds.",
+                app.display_name
+            ));
+        }
+    };
+    let mut allowed: HashSet<String> = operator_oid
+        .filter(|oid| !oid.is_empty())
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+    // Resolve the manifest's owners only when someone besides the operator owns it.
+    if owners.iter().any(|o| !allowed.contains(&o.id)) {
+        for owner in &app.owners {
+            if let Some(id) = resolve_principal(client, principals, owner).await {
+                allowed.insert(id);
+            }
+        }
+    }
+    let extra = unexpected_owners(&owners, &allowed);
+    if extra.is_empty() {
+        return adoption;
+    }
+    Adoption::Refuse(format!(
+        "'{}' (appId {app_id}) carries this app's restore tag, but it has owners this restore \
+         did not set: {}. Anyone who can register apps can write that tag and name, so it was \
+         not adopted (that would give it this app's permissions and admin consent) and not \
+         created again. Find out who created it: if it is legitimate, remove those owners and \
+         run the restore again; otherwise delete it to have the restore recreate the app.",
+        app.display_name,
+        extra.join(", ")
+    ))
 }
 
 /// Dry-run analysis of restoring `backup` into the current tenant — counts and
@@ -273,6 +400,9 @@ pub async fn restore_tenant(
     }
 
     let client = state.graph_for(&tenant_id);
+    // The signed-in account's object id in the destination: the one owner an
+    // app this restore created may have besides the manifest's own.
+    let operator_oid = state.auth.tenant_context(&tenant_id).map(|t| t.account_oid);
     let total = backup.app_registrations.len();
     emit(&app_handle, 0, total, None);
 
@@ -308,29 +438,20 @@ pub async fn restore_tenant(
             report.cancelled = true;
             break;
         }
-        // Has an earlier run of this restore already created it? Looked up by
-        // the restore tag, the only key that survives the tenant move — the
-        // appId changes, and `api://{new}` is not in the manifest. A failed
-        // lookup fails closed: creating blind is how a re-run duplicates apps.
-        let marker = restore_marker(&app.source_app_id);
-        let hits = match client.find_applications_by_tag(&marker).await {
-            Ok(hits) => hits,
-            Err(e) => {
-                session.note_code(e.ui_code());
-                report.manual_items.push(ManualItem {
-                    display_name: app.display_name.clone(),
-                    reason: format!(
-                        "Couldn't check whether an earlier restore already created this app \
-                         ({e}); it was NOT created, to avoid a duplicate. Run the restore again \
-                         once the read succeeds."
-                    ),
-                });
-                done += 1;
-                emit(&app_handle, done, total, Some(app.display_name.clone()));
-                continue;
-            }
-        };
-        match adoption_for(app, &hits) {
+        // Has an earlier run of this restore already created it? Every read
+        // failure and every unprovable match is refused into a runbook item:
+        // creating blind is how a re-run duplicates apps, and adopting blind
+        // would hand someone else's app this one's permissions and consent.
+        match decide_adoption(
+            &client,
+            app,
+            backup.created_at,
+            operator_oid.as_deref(),
+            &mut principals,
+            &session,
+        )
+        .await
+        {
             Adoption::Refuse(reason) => {
                 report.manual_items.push(ManualItem {
                     display_name: app.display_name.clone(),
@@ -380,6 +501,7 @@ pub async fn restore_tenant(
         };
         // The tag rides the create POST itself, so no app this restore creates
         // can exist without it — not even one whose SP create then failed.
+        let marker = restore_marker(&app.source_app_id);
         match create_application_core_tagged(&client, input, vec![marker]).await {
             Ok(res) => {
                 app_id_remap.insert(app.source_app_id.clone(), res.application.app_id.clone());
@@ -1456,15 +1578,18 @@ mod tests {
             source_app_id: "src-a".into(),
             ..Default::default()
         };
+        let taken_at = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
+        // Created after the backup was taken, as anything a restore of it made.
         let hit = |id: &str, name: &str| Application {
             id: format!("obj-{id}"),
             app_id: format!("app-{id}"),
             display_name: name.into(),
+            created_date_time: chrono::DateTime::from_timestamp(1_000_600, 0),
             ..Default::default()
         };
 
         // Nothing carries the tag: create.
-        assert_eq!(adoption_for(&app, &[]), Adoption::Create);
+        assert_eq!(adoption_for(&app, &[], taken_at), Adoption::Create);
 
         // One tagged app with the same name: an earlier run made it — adopt it,
         // carrying the names of the secrets it already holds.
@@ -1477,7 +1602,7 @@ mod tests {
             PasswordCredential::default(),
         ];
         assert_eq!(
-            adoption_for(&app, &[same]),
+            adoption_for(&app, &[same], taken_at),
             Adoption::Adopt {
                 object_id: "obj-1".into(),
                 app_id: "app-1".into(),
@@ -1486,17 +1611,60 @@ mod tests {
         );
 
         // Tagged but renamed: never adopted on the tag alone, never duplicated.
-        let Adoption::Refuse(reason) = adoption_for(&app, &[hit("2", "Renamed")]) else {
+        let Adoption::Refuse(reason) = adoption_for(&app, &[hit("2", "Renamed")], taken_at) else {
             panic!("a renamed tagged app must be refused");
         };
         assert!(reason.contains("Renamed") && reason.contains("app-2"));
 
         // Two tagged apps: ambiguous, so neither is taken and nothing is created.
-        let Adoption::Refuse(reason) = adoption_for(&app, &[hit("1", "App A"), hit("2", "App A")])
+        let Adoption::Refuse(reason) =
+            adoption_for(&app, &[hit("1", "App A"), hit("2", "App A")], taken_at)
         else {
             panic!("two tagged apps must be refused");
         };
         assert!(reason.starts_with("2 apps carry the restore tag"));
+
+        // Tag and name match, but the app predates the backup — or its creation
+        // time is unknown: no restore of this backup can be proven to have made
+        // it, so it is refused rather than handed this app's consent.
+        let mut older = hit("3", "App A");
+        older.created_date_time = chrono::DateTime::from_timestamp(999_000, 0);
+        let Adoption::Refuse(reason) = adoption_for(&app, &[older], taken_at) else {
+            panic!("an app older than the backup must be refused");
+        };
+        assert!(
+            reason.contains("not after this backup was taken"),
+            "{reason}"
+        );
+        let mut undated = hit("4", "App A");
+        undated.created_date_time = None;
+        let Adoption::Refuse(reason) = adoption_for(&app, &[undated], taken_at) else {
+            panic!("an app of unknown age must be refused");
+        };
+        assert!(reason.contains("an unknown time"), "{reason}");
+    }
+
+    #[test]
+    fn unexpected_owners_names_everyone_not_allowed() {
+        let owner = |id: &str, upn: Option<&str>, name: Option<&str>| DirectoryObject {
+            id: id.into(),
+            user_principal_name: upn.map(Into::into),
+            display_name: name.map(Into::into),
+            ..Default::default()
+        };
+        let owners = [
+            owner("op", Some("admin@contoso.com"), None),
+            owner("x1", Some("mallory@contoso.com"), Some("Mallory")),
+            owner("x2", None, Some("Some Group")),
+            owner("x3", None, None),
+        ];
+        let allowed = HashSet::from(["op".to_string()]);
+        assert_eq!(
+            unexpected_owners(&owners, &allowed),
+            ["mallory@contoso.com", "Some Group", "x3"]
+        );
+        let everyone = HashSet::from(["op", "x1", "x2", "x3"].map(String::from));
+        assert!(unexpected_owners(&owners, &everyone).is_empty());
     }
 
     /// A token provider whose refresh token is gone: every read fails with the
@@ -1624,6 +1792,153 @@ mod tests {
         assert!(!reason.contains("had none in the backup"), "{reason}");
         assert!(reason.contains("Couldn't read the restored service principal"));
         assert!(report.enterprise_apps.is_empty());
+    }
+
+    fn tagged_app_a() -> AppRegistrationBackup {
+        AppRegistrationBackup {
+            display_name: "App A".into(),
+            source_app_id: "src-a".into(),
+            ..Default::default()
+        }
+    }
+
+    /// Mounts the tag lookup answering one hit named "App A", created after
+    /// `taken_at` in [`decide`], and its owners.
+    async fn mount_tagged_hit(server: &wiremock::MockServer, owners: serde_json::Value) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("GET"))
+            .and(path("/applications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{
+                    "id": "obj-1",
+                    "appId": "app-1",
+                    "displayName": "App A",
+                    "createdDateTime": "2026-01-02T00:00:00Z"
+                }]
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/applications/obj-1/owners"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": owners })),
+            )
+            .mount(server)
+            .await;
+    }
+
+    async fn decide(client: &GraphClient, session: &SessionDead) -> Adoption {
+        let taken_at = "2026-01-01T00:00:00Z".parse().unwrap();
+        decide_adoption(
+            client,
+            &tagged_app_a(),
+            taken_at,
+            Some("operator-oid"),
+            &mut HashMap::new(),
+            session,
+        )
+        .await
+    }
+
+    // The fail-closed branch is the package's key safety property: a failed tag
+    // lookup must never fall through to a create.
+    #[tokio::test]
+    async fn a_failed_tag_lookup_refuses_instead_of_creating() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/applications"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let client = graph_over(&server, false);
+        let session = SessionDead::new();
+
+        let Adoption::Refuse(reason) = decide(&client, &session).await else {
+            panic!("a failed lookup must be refused");
+        };
+        assert!(reason.contains("it was NOT created"), "{reason}");
+        assert!(!session.is_dead(), "a 403 is not a dead session");
+    }
+
+    #[tokio::test]
+    async fn a_dead_session_during_the_tag_lookup_refuses_and_latches() {
+        let server = wiremock::MockServer::start().await;
+        let client = graph_over(&server, true);
+        let session = SessionDead::new();
+
+        assert!(matches!(
+            decide(&client, &session).await,
+            Adoption::Refuse(_)
+        ));
+        assert!(session.is_dead(), "a dead refresh token must latch");
+    }
+
+    // Anyone who may register apps can write the tag and the name, so a hit
+    // with an owner the restore did not set is someone else's app: adopting it
+    // would give them this app's permissions and admin consent.
+    #[tokio::test]
+    async fn a_tagged_app_with_a_foreign_owner_is_not_adopted() {
+        let server = wiremock::MockServer::start().await;
+        mount_tagged_hit(
+            &server,
+            serde_json::json!([
+                { "id": "operator-oid", "userPrincipalName": "admin@contoso.com" },
+                { "id": "mallory-oid", "userPrincipalName": "mallory@contoso.com" }
+            ]),
+        )
+        .await;
+        let client = graph_over(&server, false);
+
+        let Adoption::Refuse(reason) = decide(&client, &SessionDead::new()).await else {
+            panic!("a foreign owner must block adoption");
+        };
+        assert!(reason.contains("mallory@contoso.com"), "{reason}");
+        assert!(!reason.contains("admin@contoso.com"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_tagged_app_owned_only_by_the_operator_is_adopted() {
+        let server = wiremock::MockServer::start().await;
+        mount_tagged_hit(
+            &server,
+            serde_json::json!([{ "id": "operator-oid", "userPrincipalName": "admin@contoso.com" }]),
+        )
+        .await;
+        let client = graph_over(&server, false);
+
+        assert_eq!(
+            decide(&client, &SessionDead::new()).await,
+            Adoption::Adopt {
+                object_id: "obj-1".into(),
+                app_id: "app-1".into(),
+                live_secret_names: Vec::new(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_owner_read_refuses_the_adoption() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/applications/obj-1/owners"))
+            .respond_with(ResponseTemplate::new(403))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_tagged_hit(&server, serde_json::json!([])).await;
+        let client = graph_over(&server, false);
+
+        let Adoption::Refuse(reason) = decide(&client, &SessionDead::new()).await else {
+            panic!("an unreadable owner list must block adoption");
+        };
+        assert!(reason.contains("Couldn't read the owners"), "{reason}");
     }
 
     /// A manifest is untrusted input — the same premise the federated-credential

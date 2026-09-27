@@ -173,13 +173,29 @@ looks the tag up (`find_applications_by_tag`, a basic `tags/any` filter) and
 `adoption_for` decides:
 
 - **no hit** → create;
-- **exactly one hit with the manifest's exact display name** → adopt it: its
-  SP is ensured (the earlier run may have died between the two POSTs), it joins
-  the remap, and Pass 2 finishes it (`RestoredApp.adopted`);
-- **one renamed hit, or several** → a `ManualItem`, nothing created.
+- **one renamed hit, or several** → a `ManualItem`, nothing created;
+- **one hit whose `createdDateTime` is missing or precedes `TenantBackup.created_at`**
+  → a `ManualItem`: no restore of this backup can have created it;
+- **exactly one hit with the manifest's exact display name, created after the
+  backup** → a provisional adopt, which `decide_adoption` then checks.
 
-A failed lookup **fails closed** into a `ManualItem` too — creating blind is how a
-re-run duplicates the estate. For an adopted app Pass 2 re-applies the
+**Adoption must prove provenance, not just match.** The tag and the display name
+are both writable by anyone allowed to register apps (the tenant default), and
+source appIds are not secret — while an adopted app goes on to receive the
+manifest's `requiredResourceAccess`, fresh secrets and, in Pass 3, tenant-wide
+admin consent, and Pass 2 never removes owners. So `decide_adoption` reads the
+hit's owners and adopts only when every one is either the signed-in operator
+(`TenantContext.account_oid`) or one of the manifest's owners resolved in the
+destination (through the run's principal memo, which Pass 2 reuses). Any other
+owner is a `ManualItem` that names them; the operator removes them and re-runs,
+or deletes the app to have it recreated. A re-run by a *different* admin than the
+first run is refused the same way — fail closed, and the item says who owns it.
+Only then does the app join the remap: its SP is ensured (the earlier run may
+have died between the two POSTs) and Pass 2 finishes it (`RestoredApp.adopted`).
+
+A failed lookup — of the tag or of the owners — **fails closed** into a
+`ManualItem` too: creating blind is how a re-run duplicates the estate, and
+adopting blind is how someone else's app is granted this one's consent. For an adopted app Pass 2 re-applies the
 full-replace PATCHes as-is and skips what is already there among the additive
 writes: federated credentials by name, owners by resolved id, secrets by display
 name (as a multiset). Pass 3 updates existing grants, so it needs nothing. Known

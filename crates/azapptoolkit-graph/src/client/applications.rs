@@ -485,11 +485,15 @@ impl GraphClient {
     /// query — no `ConsistencyLevel` needed). One page capped at 10: callers use
     /// this to find an app they tagged themselves, so more than one hit is
     /// already an anomaly they must refuse, not something to page through.
+    /// Selects `createdDateTime` so a caller can prove a hit is its own.
     pub async fn find_applications_by_tag(&self, tag: &str) -> Result<Vec<Application>> {
         let filter = format!("tags/any(t:t eq '{}')", escape_odata(tag));
         let params: [(&str, &str); 3] = [
             ("$filter", filter.as_str()),
-            ("$select", "id,appId,displayName,passwordCredentials"),
+            (
+                "$select",
+                "id,appId,displayName,createdDateTime,passwordCredentials",
+            ),
             ("$top", "10"),
         ];
         let page: Paged<Application> = self.get_json("/applications", &params, false).await?;
