@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cache::CacheKind;
-use azapptoolkit_core::models::Organization;
+use azapptoolkit_core::models::{Application, Organization};
+use azapptoolkit_graph::GraphError;
 use azapptoolkit_graph::client::{AppListQuery, AppPatch, CreateApplicationRequest, SP_INDEX_MAX};
 
 use crate::dto::UiError;
@@ -11,6 +12,7 @@ use crate::dto::applications::{
     ApplicationDetail, ApplicationListRowDto, CreateApplicationInput, CreateApplicationResult,
     DirectoryIndexStatus, UpdateApplicationInput,
 };
+use crate::dto::credentials::CredentialRowDto;
 use crate::state::AppState;
 
 mod authentication;
@@ -91,94 +93,103 @@ pub async fn get_directory_index_status(
     })
 }
 
-/// Lean list-row variant of [`list_applications`]: each row is flattened to
-/// the scalars the list renders, with credential status/counts/soonest-expiry
-/// pre-computed here, and carries the paired Enterprise Application
-/// service-principal object id (when one exists in this tenant). The list's
-/// search/date/credential filters all run in the frontend over this result,
-/// so a search keystroke never re-enters Graph.
-///
-/// Follows `@odata.nextLink` to completion (bounded by [`APPS_MAX`]) so large
-/// tenants see every app, not just the first Graph page, then caches the whole
-/// joined result under `apps_pairing_key` — one paginated scan serves repeated
-/// browsing until the TTL. (Credential statuses are classified at fetch time,
-/// so within the TTL a row's bucket can lag reality by at most that long;
-/// Refresh re-classifies.)
-#[tauri::command]
-pub async fn list_applications_with_pairing(
-    state: State<'_, AppState>,
-    tenant_id: String,
-) -> Result<Vec<ApplicationListRowDto>, UiError> {
-    // The cache-HIT path below returns before any client is built, so the
-    // `graph_for` on the miss path is not a session proof for it.
-    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
-    let cache_key = apps_pairing_key(&tenant_id);
-    if let Some(cached) = state
-        .cache
-        .get::<Vec<ApplicationListRowDto>>(CacheKind::Lists, &cache_key)
-    {
-        tracing::debug!(
-            target: "azapptoolkit::cache",
-            kind = "Lists",
-            key = cache_key,
-            "hit"
-        );
-        return Ok(cached);
-    }
-    tracing::debug!(
-        target: "azapptoolkit::cache",
-        kind = "Lists",
-        key = cache_key,
-        "miss"
-    );
+/// One full `/applications` list scan, projected three ways. See
+/// [`scan_app_list`].
+pub(crate) struct AppListScan {
+    /// The App Registrations list rows (`apps_pairing`).
+    pub(crate) rows: Vec<ApplicationListRowDto>,
+    /// The tenant-wide credential-expiry roll-up (`credential_expirations`).
+    pub(crate) credentials: Vec<CredentialRowDto>,
+}
 
+/// The ONE full `/applications` list scan behind the App Registrations list,
+/// the credential-expiry roll-up and the app-name index.
+///
+/// [`list_row_select`] is a strict superset of both other projections, and all
+/// three keys are busted by the same mutation tiers, so a single paged scan
+/// seeds all three. Launch used to run three concurrent scans of the same
+/// collection (the Home App Registrations, Enterprise Apps and Credential
+/// health cards) — 18 serial round trips at 5,000 apps, two of them selecting
+/// the throttled `keyCredentials`.
+///
+/// Caller contract:
+/// - Hold [`app_scan_gate`] and re-check your own key before calling, so a
+///   concurrent reader queues behind this scan instead of starting another.
+/// - Never call `app_name_index_cached` or `indexes_cached` from here: both take
+///   the same gate, and tokio's `Mutex` is not re-entrant, so that would
+///   self-deadlock.
+/// - Lock order is scan gate, then the SP-index gate (`sp_index_cached`), never
+///   the reverse.
+///
+/// Each store has its own per-key watch, captured before the scan, so a
+/// credential write landing mid-scan drops only the two credential-bearing
+/// entries and leaves the two tenant-wide indexes this scan also produced.
+pub(crate) async fn scan_app_list(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<AppListScan, GraphError> {
+    let client = state.graph_for(tenant_id);
     let query = AppListQuery::default()
         .with_select(list_row_select())
         .with_top(APPS_PAGE_SIZE);
-    let client = state.graph_for(&tenant_id);
 
-    // Captured BEFORE the scans below — both this list and the SP index it
-    // seeds are PINNED, so a snapshot that loses the race to a mutation is not
-    // a stale read that ages out, it is out of LRU's reach for the full TTL.
-    let watch = state.cache.generation_for(CacheKind::Lists, &cache_key);
+    // Captured BEFORE the scan: all three entries are PINNED, so a snapshot that
+    // loses the race to a mutation is not a stale read that ages out, it is out
+    // of LRU's reach for the full TTL. Watches are per KEY — one per store.
+    let rows_watch = state
+        .cache
+        .generation_for(CacheKind::Lists, &apps_pairing_key(tenant_id));
+    let creds_watch = state
+        .cache
+        .generation_for(CacheKind::Lists, &credential_expirations_key(tenant_id));
+    let name_watch = state
+        .cache
+        .generation_for(CacheKind::Lists, &app_name_index_key(tenant_id));
 
-    // The pairing join reads the shared SP index. When it is already cached,
-    // just enumerate the apps; on a cold miss fetch both concurrently so the
-    // join's long pole is one directory scan, not two serial ones. Both sides
-    // follow `@odata.nextLink` to completion.
+    // The pairing join reads the shared SP index through its gated accessor
+    // (hit-check, single-flight, its own per-key watch), fetched concurrently
+    // with the app scan so a cold join waits on one directory scan, not two
+    // serial ones. Both sides follow `@odata.nextLink` to completion.
+    //
     // `_truncated`: the App Registrations list is a browse surface with its own
-    // "showing N of M" affordance; a capped scan shows fewer rows but claims
-    // nothing about completeness.
-    let ((apps, _truncated), sps) = match cache::sp_index_hit(&state.cache, &tenant_id) {
-        Some(cached_index) => (
-            client.list_applications_all(query, Some(APPS_MAX)).await?,
-            cached_index,
-        ),
-        None => {
-            // The SP index needs its OWN watch: watches are per KEY, and this
-            // store lands under `sp_index_key`, not `cache_key`. Sharing one
-            // watch across the two stores meant the second could never prove
-            // its key current, so it silently refused every time — the index
-            // this join exists to seed was never actually seeded from here.
-            let sp_watch = cache::sp_index_watch(&state.cache, &tenant_id);
-            let (apps, sps) = futures::future::try_join(
-                client.list_applications_all(query, Some(APPS_MAX)),
-                client.list_service_principals_index(),
-            )
-            .await?;
-            (
-                apps,
-                cache::sp_index_store_if_current(&state.cache, sps, sp_watch),
-            )
-        }
-    };
+    // "showing N of M" affordance, and the credential roll-up covers the first
+    // APPS_MAX registrations. A tenant past that cap loses the tail, which
+    // understates expiries — acceptable only because the same cap governs every
+    // other tenant-wide view, so the numbers shown are consistent with them
+    // rather than silently different.
+    let ((apps, _truncated), sps) = futures::future::try_join(
+        client.list_applications_all(query, Some(APPS_MAX)),
+        cache::sp_index_cached(state, &client, tenant_id),
+    )
+    .await?;
+
+    let now = chrono::Utc::now();
+
+    // The credential roll-up, pinned and guarded: a credential add/remove that
+    // raced this scan dropped the key, and the pre-mutation snapshot must not
+    // re-land for the full TTL.
+    let credentials = crate::commands::credentials::credential_rows(&apps, now);
+    state.cache.put_index_if_current(creds_watch, &credentials);
+
+    // The app-name index, stripped to the three fields it carries: six surfaces
+    // hold an `Arc` to this entry, and the credential arrays must not be pinned
+    // into it. Stored every time; the store is guarded, so a warm index is
+    // simply left as it is.
+    let lean: Vec<Application> = apps
+        .iter()
+        .map(|a| Application {
+            id: a.id.clone(),
+            app_id: a.app_id.clone(),
+            display_name: a.display_name.clone(),
+            ..Default::default()
+        })
+        .collect();
+    cache::app_name_index_store_if_current(&state.cache, lean, name_watch);
 
     let by_app_id: HashMap<&str, &str> = sps
         .iter()
         .map(|sp| (sp.app_id.as_str(), sp.id.as_str()))
         .collect();
-
-    let now = chrono::Utc::now();
     let rows: Vec<ApplicationListRowDto> = apps
         .into_iter()
         .map(|application| {
@@ -189,15 +200,38 @@ pub async fn list_applications_with_pairing(
         })
         .collect();
 
-    // Pinned: this is a tenant-wide index (one paginated scan over every app
+    // Pinned: a tenant-wide index (one paginated scan over every app
     // registration), not a per-object entry — it must not be evictable by the
-    // thousands of `app_detail|…` writes that share this bucket. Stored only if
-    // this key was not invalidated since `watch` was taken; the caller still
-    // gets these rows, it is only the *caching* of a snapshot that lost the
-    // race that is skipped.
-    state.cache.put_index_if_current(watch, &rows);
+    // thousands of `app_detail|…` writes that share this bucket. The caller
+    // still gets these rows; only the caching of a snapshot that lost the race
+    // is skipped.
+    state.cache.put_index_if_current(rows_watch, &rows);
 
-    Ok(rows)
+    Ok(AppListScan { rows, credentials })
+}
+
+/// Lean list-row variant of [`list_applications`]: each row is flattened to
+/// the scalars the list renders, with credential status/counts/soonest-expiry
+/// pre-computed here, and carries the paired Enterprise Application
+/// service-principal object id (when one exists in this tenant). The list's
+/// search/date/credential filters all run in the frontend over this result,
+/// so a search keystroke never re-enters Graph.
+///
+/// The rows come from the shared App Registrations scan ([`scan_app_list`]),
+/// which follows `@odata.nextLink` to completion (bounded by [`APPS_MAX`]) and
+/// also seeds the credential-expiry roll-up and the app-name index, so one
+/// paginated scan serves repeated browsing and the Home cards until the TTL.
+/// (Credential statuses are classified at fetch time, so within the TTL a row's
+/// bucket can lag reality by at most that long; Refresh re-classifies.)
+#[tauri::command]
+pub async fn list_applications_with_pairing(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<Vec<ApplicationListRowDto>, UiError> {
+    // The cache-HIT path returns before any client is built, so it needs its
+    // own session proof.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
+    Ok(cache::apps_pairing_cached(&state, &tenant_id).await?)
 }
 
 #[tauri::command]
@@ -617,6 +651,147 @@ mod handler_tests {
     };
 
     const TENANT: &str = "t1";
+
+    /// One app with a secret that has an end date, as the list scan returns it.
+    fn app_page() -> serde_json::Value {
+        serde_json::json!({ "value": [{
+            "id": "obj-1",
+            "appId": "app-1",
+            "displayName": "Demo App",
+            "passwordCredentials": [{
+                "keyId": "k1",
+                "displayName": "secret",
+                "endDateTime": "2099-01-01T00:00:00Z"
+            }],
+            "keyCredentials": []
+        }]})
+    }
+
+    /// The SP index: one principal paired with `app-1`.
+    async fn mount_sp_index(server: &MockServer, hits: u64) {
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "sp-1", "appId": "app-1", "displayName": "Demo App" }]
+            })))
+            .expect(hits)
+            .mount(server)
+            .await;
+    }
+
+    /// Three cold readers firing together (the Home App Registrations,
+    /// Credential health and Enterprise Apps cards) share ONE `/applications`
+    /// scan and one SP scan, and the name index it seeds is stripped to the
+    /// fields it carries.
+    #[tokio::test]
+    async fn one_scan_serves_the_list_the_credential_rollup_and_the_name_index() {
+        let (server, state) = mock_state(TENANT).await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(app_page()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_sp_index(&server, 1).await;
+        let client = state.graph_for(TENANT);
+
+        let (rows, creds, names) = tokio::join!(
+            apps_pairing_cached(&state, TENANT),
+            credential_expirations_cached(&state, TENANT),
+            app_name_index_cached(&state, &client, TENANT),
+        );
+        let rows = rows.expect("pairing rows");
+        let creds = creds.expect("credential roll-up");
+        let names = names.expect("name index");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].paired_service_principal_id.as_deref(), Some("sp-1"));
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].app_object_id, "obj-1");
+        assert_eq!(names.len(), 1);
+        let indexed = app_name_index_hit(&state.cache, TENANT).expect("name index seeded");
+        assert_eq!(indexed[0].app_id, "app-1");
+        assert!(indexed[0].password_credentials.is_empty());
+        assert!(indexed[0].key_credentials.is_empty());
+        server.verify().await;
+    }
+
+    /// Answers the `/applications` page after running a credential-only
+    /// invalidation, as if a secret were removed while the scan was in flight.
+    struct CredentialWriteMidScan(std::sync::Arc<Cache>);
+
+    impl wiremock::Respond for CredentialWriteMidScan {
+        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+            invalidate_app_credentials(&self.0, TENANT, "obj-1");
+            ResponseTemplate::new(200).set_body_json(app_page())
+        }
+    }
+
+    /// A credential write that lands mid-scan must not be re-pinned by the
+    /// scan's pre-write snapshot: the two credential-bearing entries refuse,
+    /// while the SP index and the name index — which the credential tier keeps
+    /// — still land, because every store watches its own key.
+    #[tokio::test]
+    async fn a_credential_write_mid_scan_is_not_re_pinned() {
+        let (server, state) = mock_state(TENANT).await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications"))
+            .respond_with(CredentialWriteMidScan(state.cache.clone()))
+            .mount(&server)
+            .await;
+        mount_sp_index(&server, 1).await;
+
+        let scan = scan_app_list(&state, TENANT).await.expect("scan");
+
+        assert_eq!(scan.rows.len(), 1, "the caller still gets its rows");
+        assert!(
+            state
+                .cache
+                .get::<Vec<CredentialRowDto>>(CacheKind::Lists, &credential_expirations_key(TENANT))
+                .is_none(),
+            "the credential roll-up re-pinned a pre-write snapshot"
+        );
+        assert!(
+            state
+                .cache
+                .get::<Vec<ApplicationListRowDto>>(CacheKind::Lists, &apps_pairing_key(TENANT))
+                .is_none(),
+            "the list rows re-pinned a pre-write snapshot"
+        );
+        assert!(sp_index_hit(&state.cache, TENANT).is_some());
+        assert!(app_name_index_hit(&state.cache, TENANT).is_some());
+    }
+
+    /// The roll-up is pinned like the other tenant-wide list caches: per-app
+    /// churn in its bucket cannot evict it. Mirrors
+    /// `per_app_churn_cannot_evict_the_index` in `cache.rs`.
+    #[tokio::test]
+    async fn the_credential_rollup_survives_per_app_churn() {
+        let (server, state) = mock_state(TENANT).await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(app_page()))
+            .mount(&server)
+            .await;
+        mount_sp_index(&server, 1).await;
+        state.cache.configure(None, None, None, None, None, Some(8));
+
+        scan_app_list(&state, TENANT).await.expect("scan");
+        for i in 0..200 {
+            state.cache.put(
+                CacheKind::Lists,
+                format!("{TENANT}|app_detail|{i}"),
+                &i.to_string(),
+            );
+        }
+
+        assert!(
+            state
+                .cache
+                .get::<Vec<CredentialRowDto>>(CacheKind::Lists, &credential_expirations_key(TENANT))
+                .is_some()
+        );
+    }
 
     /// The app POST lands (`obj-new` / `app-new`), no SP exists yet, and the
     /// SP POST is refused.

@@ -783,9 +783,11 @@ fn flatten_out_whitespace(body: &str) -> (String, Vec<usize>) {
 /// Module-level so `every_index_accessor_counts_as_a_cache_read` can hold it to
 /// the accessor definitions: a new `*_cached` / `*_hit` accessor that is missing
 /// here would make every command reading through it invisible to this rule.
-const CACHED_ACCESSORS: [&str; 8] = [
+const CACHED_ACCESSORS: [&str; 10] = [
     "sp_index_cached(",
     "app_name_index_cached(",
+    "apps_pairing_cached(",
+    "credential_expirations_cached(",
     "indexes_cached(",
     "sp_index_hit(",
     "app_name_index_hit(",
@@ -918,6 +920,54 @@ fn every_index_accessor_counts_as_a_cache_read() {
         missing.is_empty(),
         "these index accessors read the cache but are not in CACHED_ACCESSORS, so a command \
          reading through them escapes the session rule: {missing:?}"
+    );
+}
+
+/// A full `/applications` list scan has exactly one caching home:
+/// `applications::scan_app_list`, behind `app_scan_gate`.
+///
+/// Launch used to page the whole collection three times concurrently — the App
+/// Registrations list, the credential-expiry roll-up and the app-name index each
+/// ran their own scan, although one `$select` superset covers all three and the
+/// same mutation tiers bust them. The two other callers are deliberate: the
+/// audit run needs `$expand=owners`, and the expired-credential bulk sweep is a
+/// write path that caches nothing. Counted per module on non-comment lines; the
+/// total is asserted exactly so the rule cannot pass vacuously.
+#[test]
+fn the_full_application_list_scan_has_one_home() {
+    const EXPECTED: [(&str, usize); 3] = [
+        ("commands/applications/mod.rs", 1),
+        ("commands/audit.rs", 1),
+        ("commands/bulk.rs", 1),
+    ];
+    let mut offenders: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for (name, src) in super::sources::command_modules() {
+        let found = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//") && l.contains("list_applications_all("))
+            .count();
+        total += found;
+        let expected = EXPECTED
+            .iter()
+            .find(|(m, _)| *m == name)
+            .map_or(0, |(_, n)| *n);
+        if found != expected {
+            offenders.push(format!("{name}: {found} scan(s), expected {expected}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "full `/applications` list scan(s) outside their homes: {offenders:#?}\n\
+         Read the app list through `apps_pairing_cached` / `credential_expirations_cached` / \
+         `app_name_index_cached`, which share one gated scan (`scan_app_list`). A new bare scan \
+         is the third-concurrent-scan bug this rule exists for. The audit's `$expand=owners` run \
+         and the bulk expired-credential sweep are the deliberate exceptions."
+    );
+    assert_eq!(
+        total,
+        EXPECTED.iter().map(|(_, n)| n).sum::<usize>(),
+        "the scan counter found {total} call site(s) — the source walk or the matcher is broken"
     );
 }
 

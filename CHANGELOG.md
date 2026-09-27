@@ -451,7 +451,28 @@
   default permissions, so on a shared machine other accounts could read two weeks of them. The app
   now creates both folders, and tightens existing ones, so that only your account can open them.
 
+- **Refresh on the Managed Identities page now shows a managed identity created since the list
+  loaded.** The list is built from the tenant's cached service-principal index, but Refresh cleared
+  only the list itself, so it was rebuilt from that same index and a new managed identity stayed
+  missing for up to an hour, or until you refreshed App Registrations or Enterprise Apps. Refresh now
+  re-reads the service principals, as those two pages' Refresh already did.
+
+- **Adding or removing a secret or certificate while the Credential expiry list is loading no longer
+  leaves the list out of date for an hour.** The list stored the scan it had started before your
+  change, so a removed secret still showed as expiring. That scan is now discarded, and the list is
+  no longer dropped from the cache during heavy browsing on a large tenant.
+
 ### Changed
+
+- **Home and the App Registrations list load from one scan of your app registrations instead of
+  three.** On a cold start, the App Registrations, Enterprise Apps and Credential Health cards each
+  paged through every app registration on their own (18 serial requests on a 5,000-app tenant, two
+  of them fetching every secret and certificate). One scan now feeds all three. Opening App
+  Registrations while Home is still loading waits for that scan instead of starting another scan of
+  every app registration and every service principal. Moving between the security audit and the
+  Application permissions consent view also no longer re-reads every application-permission grant
+  in the tenant, and permission changes now always check an app's current grants instead of a copy
+  up to an hour old.
 
 - **The Cache dialog can clear each cache on its own.** Service principal, permissions, audit and
   list entries each get a Clear button in their row, so dropping a stale audit result no longer

@@ -43,7 +43,7 @@ There are exactly **two** cached tenant-wide directory enumerations, and no surf
 | Index | Key | Fetched by | Projection |
 |---|---|---|---|
 | Service principals | `sp_index_key` → `"{tenant}\|sp_index"` | `list_service_principals_index` | `id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames` |
-| App registrations | `app_name_index_key` → `"{tenant}\|app_name_index"` | `list_application_index_named` | `id,appId,displayName` |
+| App registrations | `app_name_index_key` → `"{tenant}\|app_name_index"` | `list_application_index_named`, or seeded (stripped to `id,appId,displayName`) by the App Registrations scan | `id,appId,displayName` |
 
 Readers: both entity lists, global search, the security audit, the consent audit, the DR backup, the
 managed-identity list, and the mailbox probe. A tab switch, a search keystroke, or a backup run right
@@ -69,6 +69,29 @@ defined once, in `azapptoolkit_dto::applications`, so the App Registrations list
 frontend reads the same constant as the backend's enumerations; the SP-index lists learn
 `SP_INDEX_MAX` at runtime from `get_directory_index_status` (`DirectoryIndexStatus`, also in the
 dto crate).
+
+### One `/applications` list scan
+
+`scan_app_list` (in `commands/applications/mod.rs`) pages `/applications` once with the list-row
+`$select`, a strict superset of the other two projections, and feeds three caches from it:
+`apps_pairing` (the App Registrations rows), `credential_expirations` (the credential-expiry
+roll-up) and `app_name_index` (stripped to `id,appId,displayName`, so no credential array is pinned
+into an index six surfaces hold an `Arc` to). Readers go through `apps_pairing_cached` /
+`credential_expirations_cached` / `app_name_index_cached`, all behind one single-flight gate,
+`app_scan_gate`, keyed on `apps_pairing_key`. Each store has its own per-key watch captured before
+the scan, so a credential write landing mid-scan refuses the two credential-bearing stores and
+leaves the name index. The SP side of the pairing join goes through `sp_index_cached`, never the
+client directly.
+
+- **Lock order is scan gate → SP gate.** `scan_app_list` must never call `app_name_index_cached` or
+  `indexes_cached`: both take the scan gate, and tokio's `Mutex` is not re-entrant.
+- The audit (`$expand=owners`) and the bulk expired-credential sweep are the only other
+  `list_applications_all` callers, pinned by `repo_invariants::the_full_application_list_scan_has_one_home`.
+- A cold Home launch used to run three concurrent scans (the App Registrations, Enterprise Apps and
+  Credential health cards): 3 × ceil(N/999) serial round trips, 18 → 6 at 5,000 apps. If the
+  Enterprise card wins the gate it runs its lean scan and the list scan follows serially.
+- Tradeoff: a cold standalone Credential Expiry visit now also reads the SP index (gated,
+  concurrent with the app scan, and shared with every other reader).
 
 ## Filtering happens in the frontend, on lean rows
 
@@ -261,7 +284,9 @@ Two shapes of this bug are worth naming, because both hid behind a guard that lo
 - The three list caches (App Registrations pairing, Enterprise Apps, Managed Identities) stored
   unconditionally, as did the search corpus — while the two indexes they are built from were
   already guarded. The indexes correctly refused their stale snapshots and the derived caches then
-  re-pinned them anyway.
+  re-pinned them anyway. The credential-expiry roll-up was the last one: stored with a plain
+  `put`, it was both unguarded and unpinned, although the `put_index` doc named it as pinned. It is
+  now a guarded, pinned store in the shared App Registrations scan.
 
 The general rule for multi-step mutations: **a partial success is a real write — invalidate,
 gated on "something actually changed."** Audit remediations, `remove_exchange_mailbox_access`,
@@ -335,7 +360,12 @@ logs its effective first-page size for exactly that reason. Batched sub-requests
 The read that dominates is `appRoleAssignedTo` **on the Microsoft Graph service principal**: it holds
 every application-permission grant in the tenant, and both the security audit
 (`prefetch_graph_app_roles`) and the consent view walk it end-to-end *before* they can score
-anything.
+anything. It is the read behind the Permissions-kind read-through
+(`{tenant}|grants:assigned_to:{sp}`, in `list_app_role_assigned_to`), swept by every grant mutator
+in the client (`invalidate_grant_cache`). A grant changed outside the app (the portal) can lag by up
+to the Permissions TTL, the same contract as `grants:oauth2_all`; the Cache dialog's Permissions
+clear resets it. `appRoleAssignments` (what one SP holds) is deliberately **uncached**: it is
+per-SP and small, and the pre-write `existing` checks read it, so it must be live.
 
 The write fan-outs (bulk delete / grant / remove-expired, DR backup writes) **can't `$batch`** —
 Graph batches GETs — so their win is bounded concurrency + adaptive 429 backoff, not round-trip

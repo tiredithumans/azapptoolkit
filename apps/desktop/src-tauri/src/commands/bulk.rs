@@ -151,8 +151,7 @@ pub async fn bulk_remove_expired_credentials(
     // Both paths project only what the sweep reads (`expired_password_key_ids`
     // touches `passwordCredentials`); the default projection drags in
     // `requiredResourceAccess` etc. — the bulk of a permission-heavy app's
-    // payload, multiplied across a full-tenant scan. Mirrors
-    // `list_credential_expirations`.
+    // payload, multiplied across a full-tenant scan.
     let apps: Vec<Application> = match &object_ids {
         Some(ids) => {
             // The selection path fetches exactly the selected ids. It used to

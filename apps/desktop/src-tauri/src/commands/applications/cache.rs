@@ -12,6 +12,8 @@ use azapptoolkit_core::cache::{Cache, CacheKind, IndexWatch};
 use azapptoolkit_core::models::{Application, ServicePrincipal};
 use azapptoolkit_graph::{GraphClient, GraphError};
 
+use crate::dto::applications::ApplicationListRowDto;
+use crate::dto::credentials::CredentialRowDto;
 use crate::state::AppState;
 
 /// Lists cache keys are namespaced by tenant so a tenant switch never bleeds.
@@ -223,16 +225,6 @@ pub(crate) fn sp_index_store(
     sp_index_store_if_current(cache, sps, watch)
 }
 
-/// Starts watching the SP-index key across a live scan.
-///
-/// Exists so callers that fetch the SP index as part of a larger join capture
-/// the watch for the key they will actually store under. Watches are per KEY:
-/// a watch taken for some other key cannot prove this one current, so the store
-/// would refuse rather than land.
-pub(crate) fn sp_index_watch<'a>(cache: &'a Cache, tenant_id: &str) -> IndexWatch<'a> {
-    cache.generation_for(CacheKind::Lists, &sp_index_key(tenant_id))
-}
-
 /// Stores the index only if THIS KEY was not invalidated since `since`.
 /// Callers that fetched live must capture [`Cache::generation_for`] BEFORE the
 /// fetch: the scan takes seconds under no lock, and re-pinning a pre-mutation
@@ -347,9 +339,13 @@ pub(crate) async fn app_name_index_cached(
     }
     // Single-flight, for the same reason as [`sp_index_cached`] — four surfaces
     // read this one, and a cold tenant would otherwise buy a full
-    // `/applications` scan per concurrent reader.
+    // `/applications` scan per concurrent reader. The gate is the SHARED
+    // [`app_scan_gate`], not one of its own: a cold reader here queues behind
+    // an in-flight App Registrations scan, which seeds this index, and the
+    // re-check below then hits. Worst case (this reader wins the race) is one
+    // lean scan, then one full scan, serially — down from three concurrent ones.
     let key = app_name_index_key(tenant_id);
-    let gate = state.single_flight(&key);
+    let gate = app_scan_gate(state, tenant_id);
     let _held = gate.lock().await;
     if let Some(cached) = app_name_index_hit(&state.cache, tenant_id) {
         return Ok(cached);
@@ -361,6 +357,72 @@ pub(crate) async fn app_name_index_cached(
         .list_application_index_named(Some(super::APPS_MAX))
         .await?;
     Ok(app_name_index_store_if_current(&state.cache, apps, watch))
+}
+
+/// The ONE single-flight gate for every full `/applications` list read: the
+/// App Registrations pairing rows, the credential-expiry roll-up and the
+/// app-name index. Keyed on [`apps_pairing_key`] because that scan
+/// ([`super::scan_app_list`]) is the superset the other two are projected from.
+///
+/// Lock order is this gate, then the SP-index gate — never the reverse.
+pub(crate) fn app_scan_gate(state: &AppState, tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    state.single_flight(&apps_pairing_key(tenant_id))
+}
+
+/// The App Registrations list rows, read through [`apps_pairing_key`] and, on a
+/// miss, produced by the shared scan behind [`app_scan_gate`] — which also
+/// seeds the credential-expiry roll-up and the app-name index.
+pub(crate) async fn apps_pairing_cached(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<Vec<ApplicationListRowDto>, GraphError> {
+    let key = apps_pairing_key(tenant_id);
+    if let Some(cached) = state
+        .cache
+        .get::<Vec<ApplicationListRowDto>>(CacheKind::Lists, &key)
+    {
+        tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = key, "hit");
+        return Ok(cached);
+    }
+    tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = key, "miss");
+    let gate = app_scan_gate(state, tenant_id);
+    let _held = gate.lock().await;
+    // Re-check: the scan we queued behind has already populated the cache.
+    if let Some(cached) = state
+        .cache
+        .get::<Vec<ApplicationListRowDto>>(CacheKind::Lists, &key)
+    {
+        return Ok(cached);
+    }
+    Ok(super::scan_app_list(state, tenant_id).await?.rows)
+}
+
+/// The tenant-wide credential-expiry roll-up, read through
+/// [`credential_expirations_key`] and, on a miss, derived from the shared App
+/// Registrations scan behind [`app_scan_gate`] rather than a scan of its own.
+pub(crate) async fn credential_expirations_cached(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<Vec<CredentialRowDto>, GraphError> {
+    let key = credential_expirations_key(tenant_id);
+    if let Some(cached) = state
+        .cache
+        .get::<Vec<CredentialRowDto>>(CacheKind::Lists, &key)
+    {
+        tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = key, "hit");
+        return Ok(cached);
+    }
+    tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = key, "miss");
+    let gate = app_scan_gate(state, tenant_id);
+    let _held = gate.lock().await;
+    // Re-check: the scan we queued behind has already populated the cache.
+    if let Some(cached) = state
+        .cache
+        .get::<Vec<CredentialRowDto>>(CacheKind::Lists, &key)
+    {
+        return Ok(cached);
+    }
+    Ok(super::scan_app_list(state, tenant_id).await?.credentials)
 }
 
 /// Both tenant-wide indexes, fetching only the cold ones — and, when both are
