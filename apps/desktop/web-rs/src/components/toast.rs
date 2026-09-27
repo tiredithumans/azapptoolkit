@@ -208,3 +208,44 @@ pub fn ToastHost() -> impl IntoView {
     // just nest redundantly.
     view! { <div class="toast-host">{stack}</div> }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The stylesheet, as shipped. The browser GUI tests mount views without
+    /// it, so they cannot see a `white-space` rule; this reads the CSS itself.
+    const STYLES: &str = include_str!("../../styles.css");
+
+    /// The declarations of the top-level rule `selector { … }`, or `None` when
+    /// the stylesheet has no such rule.
+    fn rule_body(selector: &str) -> Option<&'static str> {
+        let open = STYLES.find(&format!("\n{selector} {{"))?;
+        let body = &STYLES[open..];
+        let close = body.find('}')?;
+        Some(&body[..close])
+    }
+
+    /// Backend `UiError`s put their actionable guidance after a blank line
+    /// (`{err}\n\n{hint}`); HTML collapses that to a single space unless the
+    /// sink preserves whitespace. The admin-consent 403 toasts its remediation
+    /// steps, and they ran together into one paragraph because
+    /// `.toast__message` — unlike `.form-error` — had no `pre-wrap`. Every
+    /// class that renders a backend error message keeps the breaks.
+    #[test]
+    fn every_error_sink_keeps_the_guidance_on_its_own_lines() {
+        for selector in [
+            ".form-error",
+            ".alert",
+            ".signin-error",
+            ".toast__message",
+            ".dr-view__error",
+            ".app-detail__error",
+        ] {
+            let body = rule_body(selector)
+                .unwrap_or_else(|| panic!("styles.css has no top-level `{selector} {{` rule"));
+            assert!(
+                body.contains("white-space: pre-wrap"),
+                "`{selector}` renders backend error text but collapses its \\n\\n guidance: {body}"
+            );
+        }
+    }
+}

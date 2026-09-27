@@ -266,7 +266,162 @@ fn the_raw_retry_primitive_rule_fires_on_an_open_coded_loop() {
     assert_eq!(names_a_raw_retry_primitive(sanctioned), None);
 }
 
-/// Every Rust source the two retry rules scan, paired with the root it was
+/// The connect-budget violations in `src` (comment lines ignored).
+///
+/// Every `Client::builder()` must set `.connect_timeout(` before its
+/// `.build()`, and must not fall back with `.unwrap_or_default()` — the default
+/// client has no timeout at all. A bare `reqwest::Client::new()` /
+/// `Client::default()` is the same unbudgeted client by another name.
+fn http_client_budget_violations(src: &str) -> Vec<&'static str> {
+    let code: String = src
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let standalone = |needle: &str| {
+        code.match_indices(needle)
+            .any(|(at, _)| !code[..at].chars().next_back().is_some_and(is_ident))
+    };
+    let mut out = Vec::new();
+    for (at, _) in code.match_indices("Client::builder()") {
+        let rest = &code[at..];
+        let Some(build) = rest.find(".build()") else {
+            out.push("a `Client::builder()` with no `.build()`");
+            continue;
+        };
+        if !rest[..build].contains(".connect_timeout(") {
+            out.push("a `Client::builder()` without `.connect_timeout(CONNECT_TIMEOUT)`");
+        }
+        let after = rest[build + ".build()".len()..].trim_start();
+        if after.starts_with(".unwrap_or_default()") {
+            out.push("a `.build().unwrap_or_default()` (the default client has no timeout)");
+        }
+    }
+    if standalone("Client::new()") {
+        out.push("a `Client::new()` (no connect budget)");
+    }
+    if standalone("Client::default()") {
+        out.push("a `Client::default()` (no connect budget)");
+    }
+    out
+}
+
+/// `src` without its test code, for the connect-budget rule.
+///
+/// `sources::strip_tests` cuts at the first `#[cfg(test)]`, which is right for
+/// a trailing `mod tests { … }` but wrong for the out-of-line declaration
+/// `#[cfg(test)] mod tests;` near the top of a file (the Graph and Exchange
+/// `client.rs`): cutting there drops the very builder this rule checks. A
+/// `#[cfg(test)]` on a `;`-terminated item removes just that item; any other
+/// starts the test code, which runs to the end of the file.
+fn strip_test_code(src: &str) -> String {
+    const MARK: &str = "#[cfg(test)]";
+    let mut out = String::new();
+    let mut rest = src;
+    while let Some(at) = rest.find(MARK) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + MARK.len()..];
+        match (after.find(';'), after.find('{')) {
+            (Some(semi), brace) if brace.is_none_or(|b| semi < b) => rest = &after[semi + 1..],
+            _ => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Every HTTP client the app builds has a connect budget.
+///
+/// Only the Graph client set one, so on a network that silently drops traffic
+/// to `management.azure.com`, a key vault, `outlook.office365.com` or Log
+/// Analytics every attempt ran to the full 60–120s total timeout: about four
+/// minutes for an idempotent read before a cause-less network error. The
+/// budget is `core::http_retry::CONNECT_TIMEOUT`; this rule makes a new client
+/// unable to forget it. Test code is exempt (it builds throwaway clients to
+/// obtain a `reqwest::Error` without a socket).
+#[test]
+fn every_http_client_has_a_connect_budget() {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut builders = 0usize;
+    for (root, src) in retry_scan_sources() {
+        let is_test_file = src.components().any(|c| c.as_os_str() == "tests")
+            || src.file_name().is_some_and(|f| f == "tests.rs");
+        if is_test_file {
+            continue;
+        }
+        let text = std::fs::read_to_string(&src).expect("read source");
+        let code = strip_test_code(&text);
+        builders += code
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .map(|line| line.matches("Client::builder()").count())
+            .sum::<usize>();
+        for violation in http_client_budget_violations(&code) {
+            offenders.push(format!("{} — {violation}", relative(&root, &src)));
+        }
+    }
+
+    // Graph, ARM, Log Analytics, Key Vault, Exchange, auth and the SSO
+    // metadata probe.
+    assert!(
+        builders >= 7,
+        "found only {builders} `Client::builder()` call(s) — the source walk is broken, and a \
+         rule that scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "HTTP client(s) without a connect budget: {offenders:#?}\n\
+         Add `.connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)` to the builder \
+         and `.expect(\"reqwest client builds\")` it: a host that accepts no connection otherwise \
+         burns the whole total timeout once per retry attempt."
+    );
+}
+
+/// The connect-budget rule must fire on the shapes it exists to catch.
+#[test]
+fn the_connect_budget_rule_fires_on_an_unbudgeted_client() {
+    let unbudgeted = r#"
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap_or_default();
+    "#;
+    assert_eq!(
+        http_client_budget_violations(unbudgeted),
+        vec![
+            "a `Client::builder()` without `.connect_timeout(CONNECT_TIMEOUT)`",
+            "a `.build().unwrap_or_default()` (the default client has no timeout)",
+        ]
+    );
+    assert_eq!(
+        http_client_budget_violations("let c = reqwest::Client::new();"),
+        vec!["a `Client::new()` (no connect budget)"]
+    );
+
+    let budgeted = r#"
+        // A comment naming reqwest::Client::new() is not a client.
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)
+            .build()
+            .expect("reqwest client builds");
+        let graph = GraphClient::new(tenant, read, write, cache);
+        let other = ExchangeClient::default();
+    "#;
+    assert!(http_client_budget_violations(budgeted).is_empty());
+
+    // An out-of-line test-module declaration does not hide the builder below
+    // it; a trailing inline test module (and its throwaway client) is dropped.
+    let file = "#[cfg(test)]\nmod tests;\nlet c = reqwest::Client::builder().build();\n\
+                #[cfg(test)]\nmod t { let c = reqwest::Client::new(); }";
+    assert_eq!(
+        http_client_budget_violations(&strip_test_code(file)),
+        vec!["a `Client::builder()` without `.connect_timeout(CONNECT_TIMEOUT)`"]
+    );
+}
+
+/// Every Rust source the retry and client-budget rules scan, paired with the root it was
 /// found under (for readable offender paths): the shared crates AND the
 /// desktop backend, which hosts HTTP code of its own (`cert.rs`, the SSO
 /// metadata probe, the updater) and is where a one-off retry wrapper would

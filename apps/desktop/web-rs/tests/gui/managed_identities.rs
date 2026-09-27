@@ -63,15 +63,12 @@ async fn error_state_renders_message() {
 #[wasm_bindgen_test]
 async fn retry_after_error_refetches() {
     ts::reset();
-    ts::mock_err(
-        "list_managed_identities",
-        &fixtures::ui_error("throttled", "Too many requests"),
-    );
+    ts::mock_err("list_managed_identities", &fixtures::throttled_error());
 
     let _m = ts::mount_view(|| view! { <ManagedIdentitiesView /> });
     // The MI list now renders its load failure via the shared `DetailLoadError`
     // (raw `UiError` message, no "Failed to load:" prefix) — see the P3 grammar.
-    ts::wait_for(|| ts::body_contains("Too many requests")).await;
+    ts::wait_for(|| ts::body_contains(fixtures::THROTTLED_MESSAGE)).await;
 
     // The transient failure clears: Retry refetches in place (no remount).
     ts::mock_ok(

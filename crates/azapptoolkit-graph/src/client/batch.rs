@@ -16,6 +16,7 @@ use reqwest::Method;
 use serde::de::DeserializeOwned;
 
 use azapptoolkit_core::BearerProvider;
+use azapptoolkit_core::http_error::sanitize_error_body;
 use azapptoolkit_core::http_retry::{RetryBudget, parse_retry_after_seconds};
 use azapptoolkit_core::models::Paged;
 
@@ -64,7 +65,9 @@ fn map_batch_response<T: DeserializeOwned>(r: BatchSubResponse) -> Result<T> {
         serde_json::from_value(r.body).map_err(|e| GraphError::Deserialize(e.to_string()))
     } else {
         let retry_after_secs = r.retry_after_secs();
-        let body = r.body.to_string();
+        // The same cap as a top-level error body: a sub-response feeds the
+        // same variants, the same logs and the same toasts.
+        let body = sanitize_error_body(&r.body.to_string());
         Err(match code {
             401 => GraphError::Unauthorized,
             403 => GraphError::Forbidden(body),
@@ -226,6 +229,9 @@ impl GraphClient {
         // only the throttled sub-requests, so it can't be `with_retries`, but
         // the budget and the backoff curve are not its to re-derive.
         let mut budget = RetryBudget::new();
+        // Inner 429s surfaced as `Throttled` because the budget was spent —
+        // logged once after the loop so an exhausted re-batch is not silent.
+        let mut exhausted: usize = 0;
 
         while !pending.is_empty() {
             let requests: Vec<serde_json::Value> = pending
@@ -287,6 +293,9 @@ impl GraphClient {
                     throttled.push(idx);
                     continue;
                 }
+                if sub.status == 429 {
+                    exhausted += 1;
+                }
                 results[idx] = Some(map_batch_response::<T>(sub));
             }
 
@@ -296,8 +305,23 @@ impl GraphClient {
             if let Some(obs) = self.throttle_observer.read().as_ref() {
                 obs.on_throttle(max_retry_after);
             }
+            // Counts only — the sub-request URLs carry object ids and filters.
+            tracing::info!(
+                throttled = throttled.len(),
+                chunk = urls.len(),
+                attempt = budget.attempt(),
+                retry_after_secs = ?max_retry_after,
+                "graph $batch: re-batching throttled sub-requests"
+            );
             budget.wait(max_retry_after).await;
             pending = throttled;
+        }
+        if exhausted > 0 {
+            tracing::warn!(
+                exhausted,
+                attempts = budget.attempt() + 1,
+                "graph $batch: retry budget exhausted; surfacing throttled sub-requests"
+            );
         }
 
         // Any index the server never answered (omitted from `responses`) stays

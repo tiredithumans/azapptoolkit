@@ -75,6 +75,7 @@ impl ExchangeClient {
         let http = reqwest::Client::builder()
             .user_agent(concat!("azapptoolkit/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(60))
+            .connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)
             .build()
             .expect("reqwest client builds");
         Self {

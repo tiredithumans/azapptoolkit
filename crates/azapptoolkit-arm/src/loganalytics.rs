@@ -27,6 +27,7 @@ impl LogAnalyticsClient {
         let http = reqwest::Client::builder()
             .user_agent(concat!("azapptoolkit/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(120))
+            .connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)
             .build()
             .expect("reqwest client builds");
         Self {
@@ -158,5 +159,62 @@ mod tests {
             "got {err:?}"
         );
         assert!(!err.is_retryable());
+    }
+
+    /// A failed send names its cause, not just "error sending request for url
+    /// (…)" — reqwest's Display stops there and drops the source chain that
+    /// says DNS, connect, TLS or proxy. A refused local port is the one cause a
+    /// test can produce without a network; the query is a POST, so there is a
+    /// single attempt and no real backoff to wait out.
+    #[tokio::test]
+    async fn a_network_failure_keeps_its_cause() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("addr").port()
+        };
+        let err = client(&format!("http://127.0.0.1:{port}"))
+            .query("ws-guid", "AppEvents | take 1", "P1D")
+            .await
+            .unwrap_err();
+        let ArmError::Network(message) = err else {
+            panic!("expected a network error, got {err:?}");
+        };
+        assert!(
+            message.contains("error sending request"),
+            "the outer error is kept: {message}"
+        );
+        assert!(
+            message.to_ascii_lowercase().contains("connect"),
+            "the cause chain must survive into the message: {message}"
+        );
+    }
+
+    /// An error page is capped before it reaches the error (and so the log and
+    /// the toast) — a proxy block page can be megabytes of HTML.
+    #[tokio::test]
+    async fn an_error_body_is_sanitized_and_capped() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/workspaces/ws-guid/query"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string(format!("  <html>\0{}</html>  ", "x".repeat(5_000))),
+            )
+            .mount(&server)
+            .await;
+
+        let err = client(&server.uri())
+            .query("ws-guid", "MissingTable", "P1D")
+            .await
+            .unwrap_err();
+        let ArmError::Api { status: 400, body } = err else {
+            panic!("expected a terminal Api error, got {err:?}");
+        };
+        assert!(body.starts_with("<html>x"), "NUL stripped, trimmed: {body}");
+        assert_eq!(
+            body.chars().count(),
+            azapptoolkit_core::http_error::ERROR_BODY_MAX_CHARS + 1
+        );
+        assert!(body.ends_with('…'));
     }
 }

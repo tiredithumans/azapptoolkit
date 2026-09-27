@@ -8,9 +8,11 @@ use std::sync::Arc;
 use reqwest::Method;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
+use azapptoolkit_core::http_error::{describe_error_chain, sanitize_error_body};
 use azapptoolkit_core::http_retry::{
     Attempt, RetryClass, RetryReason, parse_retry_after_seconds, with_retries,
 };
+use azapptoolkit_core::net::endpoint_family;
 use azapptoolkit_core::token::{BearerProvider, TokenError};
 
 use crate::error::{ArmError, Result};
@@ -20,7 +22,8 @@ use crate::error::{ArmError, Result};
 /// (which lets a Logs `query` treat a 400 "table absent" as a probe miss rather
 /// than a hard failure); 429 and 5xx are retried, honoring an explicit
 /// `Retry-After` exactly and otherwise using jittered exponential backoff.
-/// `label` tags the retry warnings (e.g. `"arm"`, `"log analytics"`).
+/// `label` tags the retry warnings (e.g. `"arm"`, `"log analytics"`), followed by
+/// the verb and the endpoint family (ids masked, no query).
 pub(crate) async fn send_with_retry(
     http: &reqwest::Client,
     token: &Arc<dyn BearerProvider>,
@@ -40,7 +43,8 @@ pub(crate) async fn send_with_retry(
 
     // Retry budget, backoff and `Retry-After` handling all live in
     // `http_retry::with_retries`; this closure only classifies one attempt.
-    with_retries(label, retry_class_for(&method), |_| {
+    let label = format!("{label} {method} {}", endpoint_family(url));
+    with_retries(&label, retry_class_for(&method), |_| {
         let http = http.clone();
         let headers = headers.clone();
         let method = method.clone();
@@ -56,8 +60,9 @@ pub(crate) async fn send_with_retry(
                 Err(err) => {
                     return Attempt::Retry {
                         reason: RetryReason::Transient,
+                        status: None,
                         retry_after_secs: None,
-                        err: ArmError::Network(err.to_string()),
+                        err: ArmError::Network(describe_error_chain(&err)),
                     };
                 }
             };
@@ -66,7 +71,7 @@ pub(crate) async fn send_with_retry(
                 return Attempt::Done(
                     resp.bytes()
                         .await
-                        .map_err(|e| ArmError::Network(e.to_string())),
+                        .map_err(|e| ArmError::Network(describe_error_chain(&e))),
                 );
             }
             let retry_after = parse_retry_after_seconds(
@@ -74,7 +79,9 @@ pub(crate) async fn send_with_retry(
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok()),
             );
-            let body_text = resp.text().await.unwrap_or_default();
+            // Sanitized and capped before it reaches an error, a log line or a
+            // toast — a proxy block page can be megabytes of HTML.
+            let body_text = sanitize_error_body(&resp.text().await.unwrap_or_default());
             let code = status.as_u16();
 
             // 401/403/404 are typed; any other non-429 4xx is terminal → `Api`
@@ -102,6 +109,7 @@ pub(crate) async fn send_with_retry(
                 } else {
                     RetryReason::Transient
                 },
+                status: Some(code),
                 retry_after_secs: retry_after,
                 err: if code == 429 {
                     ArmError::Throttled {

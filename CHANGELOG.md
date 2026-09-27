@@ -2,6 +2,25 @@
 
 ### Fixed
 
+- **A throttled request now tells you how long to wait.** When Microsoft Graph, Exchange, Key Vault
+  or Azure kept throttling a request after the app's retries, the error read "throttled (429);
+  retry after Some(30)s" (or "retry after Nones"). It now reads "Wait 30 seconds, then try again".
+
+- **Azure, Key Vault and Exchange requests fail in seconds, not minutes, when a firewall blocks
+  them.** Only Microsoft Graph limited how long it waits to connect. On a network that silently
+  drops traffic to management.azure.com, a key vault, outlook.office365.com or Log Analytics, a
+  read could spin for up to four minutes before failing. Connections now give up after 10 seconds,
+  like Graph.
+
+- **Network errors now say what went wrong.** A failed request showed only "error sending request
+  for url (…)", whether the cause was DNS, a timeout, a refused connection, a proxy or a
+  certificate. The underlying cause is now included, on the sign-in card too.
+
+- **Error pop-ups keep their guidance on separate lines, and long error pages are trimmed.** The
+  admin-consent failure's remediation steps ran together into one paragraph. Error pages returned
+  by Graph, Azure or Key Vault (for example a proxy block page) are now cleaned and capped at 800
+  characters in messages and logs, as Exchange errors already were.
+
 - **A rejected access token now offers "Refresh token" instead of telling you to sign out.** When
   Microsoft Graph, Exchange, Key Vault or Azure rejected the app's token (for example after a
   Conditional Access re-check the app couldn't satisfy silently), the error read "unauthorized

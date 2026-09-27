@@ -44,7 +44,10 @@ pub enum AuthError {
     #[error("keyring: {0}")]
     Keyring(String),
 
-    #[error("http: {0}")]
+    /// Rendered with its cause chain: reqwest's own Display stops at "error
+    /// sending request for url (…)", hiding DNS / connect / TLS / proxy on the
+    /// sign-in card.
+    #[error("http: {}", azapptoolkit_core::http_error::describe_error_chain(.0))]
     Http(#[from] reqwest::Error),
 
     #[error("url: {0}")]

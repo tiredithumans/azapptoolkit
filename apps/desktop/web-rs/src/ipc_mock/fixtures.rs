@@ -53,6 +53,25 @@ pub fn ui_error(code: &str, message: &str) -> UiError {
     }
 }
 
+/// The message the backend sends when a request stays throttled after its
+/// retries (`GraphError::Throttled { retry_after_secs: Some(30) }` through
+/// `UiError::from`). Pinned to the real Display by
+/// `repo_invariants/ipc.rs::the_throttled_gui_fixture_is_the_backend_message`,
+/// so the GUI tests render what an operator actually reads — kept on one line
+/// so that pin can find the literal.
+pub const THROTTLED_MESSAGE: &str =
+    "throttled (429): the service is limiting requests. Wait 30 seconds, then try again.";
+
+/// The throttled `UiError` exactly as the backend sends it: code `throttled`,
+/// [`THROTTLED_MESSAGE`], retryable.
+pub fn throttled_error() -> UiError {
+    UiError {
+        code: "throttled".to_string(),
+        message: THROTTLED_MESSAGE.to_string(),
+        retryable: true,
+    }
+}
+
 /// A single App Registrations list row with sensible defaults; `id`/`display_name`
 /// are the fields the list and its filter key off.
 pub fn app_row(id: &str, display_name: &str) -> ApplicationListRowDto {

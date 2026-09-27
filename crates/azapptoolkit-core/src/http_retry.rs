@@ -26,6 +26,25 @@ pub fn is_retryable_code(ui_code: &str) -> bool {
     matches!(ui_code, "throttled" | "server_error" | "network_error")
 }
 
+/// Connect budget every HTTP client builder sets (`.connect_timeout(…)`),
+/// separate from its total `.timeout(…)`.
+///
+/// The total ceiling is sized for the *slowest legitimate response* (60s for a
+/// 999-app Graph page or a 20-request `$batch`, 120s for a Log Analytics query).
+/// Without a separate connect budget a host that accepts no connection — a
+/// SYN-blackholed `management.azure.com`, `*.vault.azure.net`,
+/// `outlook.office365.com` or Log Analytics host behind an egress allow-list
+/// that admitted Graph only — burns that whole ceiling before the retry loop
+/// even sees a failure, and does it once per attempt: 4 × 60s + 7s of backoff
+/// ≈ 247s for an idempotent read. A TCP+TLS handshake to any Azure endpoint is
+/// sub-second in practice, so 10s is generous, and the same read now fails in
+/// 4 × 10s + 7s ≈ 47s.
+///
+/// One definition so the clients cannot drift: only Graph had one, and
+/// `repo_invariants/trust.rs` (`every_http_client_has_a_connect_budget`) now
+/// fails any `Client::builder()` that does not set it.
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Maximum number of retries on transient failure (5xx, 429, network error).
 pub const MAX_RETRIES: u32 = 3;
 
@@ -153,6 +172,10 @@ pub enum Attempt<T, E> {
     /// [`sleep_before_retry`]).
     Retry {
         reason: RetryReason,
+        /// HTTP status; `None` = no response (a network failure). Logged
+        /// instead of the error itself whenever there is one, because a
+        /// `Server` error's Display embeds the response body.
+        status: Option<u16>,
         retry_after_secs: Option<u64>,
         err: E,
     },
@@ -175,6 +198,12 @@ pub enum Attempt<T, E> {
 /// does its own send, status mapping and body reading; everything about
 /// *whether and when to go round again* lives here.
 ///
+/// `label` names the request in the log (`graph GET /v1.0/servicePrincipals/{id}/…`,
+/// an Exchange cmdlet), so a 429 storm and a 5xx outage can be told apart and
+/// traced to the fan-out that caused them. Every retry and the final give-up
+/// log the [`RetryReason`] and the HTTP status; a failure with no response logs
+/// its error (the URL plus its cause chain) instead, since it carries no body.
+///
 /// `class` is **required**, not defaulted: a caller that has not decided whether
 /// its request may be replayed has not thought about the failure that matters,
 /// and the safe answer differs per call site rather than per crate.
@@ -184,6 +213,7 @@ pub async fn with_retries<T, E, F, Fut>(
     mut attempt: F,
 ) -> Result<T, E>
 where
+    E: std::fmt::Display,
     F: FnMut(u32) -> Fut,
     Fut: std::future::Future<Output = Attempt<T, E>>,
 {
@@ -193,6 +223,7 @@ where
             Attempt::Done(result) => return result,
             Attempt::Retry {
                 reason,
+                status,
                 retry_after_secs,
                 err,
             } => {
@@ -202,19 +233,43 @@ where
                 if reason == RetryReason::Transient && class == RetryClass::NonIdempotent {
                     tracing::debug!(
                         label,
+                        reason = ?reason,
+                        status = ?status,
                         "not replaying a non-idempotent request after a transient failure"
                     );
                     return Err(err);
                 }
                 if !budget.may_retry() {
+                    tracing::warn!(
+                        label,
+                        attempts = budget.attempt() + 1,
+                        reason = ?reason,
+                        status = ?status,
+                        "retry budget exhausted; surfacing the last error"
+                    );
                     return Err(err);
                 }
-                tracing::warn!(
-                    attempt = budget.attempt(),
-                    label,
-                    retry_after_secs = ?retry_after_secs,
-                    "transient failure; retrying"
-                );
+                match status {
+                    // Never `%err` when there is a response: a `Server` error's
+                    // Display embeds the body, and bodies are not logged.
+                    Some(status) => tracing::warn!(
+                        label,
+                        attempt = budget.attempt(),
+                        reason = ?reason,
+                        status,
+                        retry_after_secs = ?retry_after_secs,
+                        "transient failure; retrying"
+                    ),
+                    // No response, so no body: the error is the URL plus the
+                    // cause chain (DNS, connect, TLS, proxy), which is the point.
+                    None => tracing::warn!(
+                        label,
+                        attempt = budget.attempt(),
+                        reason = ?reason,
+                        cause = %err,
+                        "transient failure; retrying"
+                    ),
+                }
                 budget.wait(retry_after_secs).await;
             }
         }
@@ -384,6 +439,7 @@ mod tests {
             async move {
                 Attempt::Retry {
                     reason: RetryReason::Transient,
+                    status: Some(503),
                     retry_after_secs: None,
                     err: if n >= MAX_RETRIES {
                         "last"
@@ -413,6 +469,7 @@ mod tests {
             async {
                 Attempt::Retry {
                     reason: RetryReason::Transient,
+                    status: None,
                     retry_after_secs: None,
                     err: "reset",
                 }
@@ -429,6 +486,7 @@ mod tests {
             async {
                 Attempt::Retry {
                     reason: RetryReason::Transient,
+                    status: None,
                     retry_after_secs: None,
                     err: "reset",
                 }
@@ -451,6 +509,7 @@ mod tests {
                 async {
                     Attempt::Retry {
                         reason: RetryReason::Throttled,
+                        status: Some(429),
                         retry_after_secs: Some(1),
                         err: "429",
                     }
@@ -466,11 +525,12 @@ mod tests {
     async fn with_retries_backs_off_exponentially_and_honors_retry_after() {
         // Without a header: BASE, then doubling. With one: exactly the header.
         let waited = virtual_elapsed(async {
-            let _: Result<(), ()> = with_retries("test", RetryClass::Idempotent, |_| async {
+            let _: Result<(), &str> = with_retries("test", RetryClass::Idempotent, |_| async {
                 Attempt::Retry {
                     reason: RetryReason::Transient,
+                    status: None,
                     retry_after_secs: None,
-                    err: (),
+                    err: "reset",
                 }
             })
             .await;
@@ -484,11 +544,12 @@ mod tests {
         );
 
         let waited = virtual_elapsed(async {
-            let _: Result<(), ()> = with_retries("test", RetryClass::Idempotent, |_| async {
+            let _: Result<(), &str> = with_retries("test", RetryClass::Idempotent, |_| async {
                 Attempt::Retry {
                     reason: RetryReason::Transient,
+                    status: None,
                     retry_after_secs: Some(7),
-                    err: (),
+                    err: "reset",
                 }
             })
             .await;
@@ -511,6 +572,7 @@ mod tests {
                 if attempt < 3 {
                     Attempt::Retry {
                         reason: RetryReason::Transient,
+                        status: None,
                         retry_after_secs: None,
                         err: "transient",
                     }

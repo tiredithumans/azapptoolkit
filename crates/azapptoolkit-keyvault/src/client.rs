@@ -13,10 +13,11 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use azapptoolkit_core::http_error::{describe_error_chain, sanitize_error_body};
 use azapptoolkit_core::http_retry::{
     Attempt, RetryClass, RetryReason, parse_retry_after_seconds, with_retries,
 };
-use azapptoolkit_core::net::{redacted_host, same_origin};
+use azapptoolkit_core::net::{endpoint_family, redacted_host, same_origin};
 use azapptoolkit_core::token::{BearerProvider, TokenError};
 
 use crate::error::{KeyVaultError, Result};
@@ -54,6 +55,7 @@ impl KeyVaultClient {
         let http = reqwest::Client::builder()
             .user_agent(concat!("azapptoolkit/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(60))
+            .connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)
             .build()
             .expect("reqwest client builds");
         Self {
@@ -172,7 +174,9 @@ impl KeyVaultClient {
 
         // Retry budget, backoff and `Retry-After` handling live in
         // `http_retry::with_retries`; this closure only classifies one attempt.
-        with_retries("key vault", retry_class_for(&method), |_| {
+        // Names the verb and endpoint family (ids masked, no query) in the log.
+        let label = format!("key vault {method} {}", endpoint_family(url));
+        with_retries(&label, retry_class_for(&method), |_| {
             let http = self.http.clone();
             let headers = headers.clone();
             let method = method.clone();
@@ -192,8 +196,9 @@ impl KeyVaultClient {
                     Err(err) => {
                         return Attempt::Retry {
                             reason: RetryReason::Transient,
+                            status: None,
                             retry_after_secs: None,
-                            err: KeyVaultError::Network(err.to_string()),
+                            err: KeyVaultError::Network(describe_error_chain(&err)),
                         };
                     }
                 };
@@ -202,7 +207,7 @@ impl KeyVaultClient {
                     return Attempt::Done(
                         resp.bytes()
                             .await
-                            .map_err(|e| KeyVaultError::Network(e.to_string())),
+                            .map_err(|e| KeyVaultError::Network(describe_error_chain(&e))),
                     );
                 }
                 let retry_after = parse_retry_after_seconds(
@@ -210,7 +215,9 @@ impl KeyVaultClient {
                         .get(reqwest::header::RETRY_AFTER)
                         .and_then(|v| v.to_str().ok()),
                 );
-                let body_text = resp.text().await.unwrap_or_default();
+                // Sanitized and capped before it reaches an error, a log line
+                // or a toast — a proxy block page can be megabytes of HTML.
+                let body_text = sanitize_error_body(&resp.text().await.unwrap_or_default());
                 let code = status.as_u16();
 
                 let terminal = match code {
@@ -233,6 +240,7 @@ impl KeyVaultClient {
                     } else {
                         RetryReason::Transient
                     },
+                    status: Some(code),
                     retry_after_secs: retry_after,
                     err: if code == 429 {
                         KeyVaultError::Throttled {

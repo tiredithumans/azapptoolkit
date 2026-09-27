@@ -760,3 +760,28 @@ fn the_ipc_scanners_read_the_shapes_the_tree_uses() {
     assert!(!sources::command_attribute_at_line_start(doc, mention));
     assert!(sources::command_attribute_at_line_start(doc, real));
 }
+
+/// The GUI tests' throttled fixture is the message the backend really sends.
+///
+/// They used to mock "Too many requests", a string no client ever produced,
+/// so nothing could see the real Display leak "retry after Some(30)s" into
+/// the UI. Built through the real `UiError::from` path so a change to the
+/// Display (or to how `ui_error_from!` copies it) fails here, not in front of an
+/// operator.
+#[test]
+fn the_throttled_gui_fixture_is_the_backend_message() {
+    let ui = azapptoolkit_dto::UiError::from(azapptoolkit_graph::GraphError::Throttled {
+        retry_after_secs: Some(30),
+    });
+    assert_eq!(ui.code, "throttled");
+    assert!(ui.retryable, "a throttle is retryable");
+    let fixtures_rs = web_src().join("ipc_mock/fixtures.rs");
+    let fixtures = std::fs::read_to_string(&fixtures_rs)
+        .unwrap_or_else(|e| panic!("{}: {e}", fixtures_rs.display()));
+    assert!(
+        fixtures.contains(&format!("\"{}\"", ui.message)),
+        "ipc_mock/fixtures.rs THROTTLED_MESSAGE must be the backend's throttled message \
+         verbatim: {:?}",
+        ui.message
+    );
+}

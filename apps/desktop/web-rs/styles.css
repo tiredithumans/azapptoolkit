@@ -1383,6 +1383,8 @@ h3 {
 .app-detail__error {
   color: var(--danger);
   padding: var(--space-4);
+  /* Keep a backend UiError's \n\n guidance on its own lines. */
+  white-space: pre-wrap;
 }
 
 /* ---------- Managed identities view ---------- */
@@ -3513,6 +3515,9 @@ h3 {
 .toast__message {
   flex: 1 1 auto;
   min-width: 0;
+  /* Backend UiErrors append actionable guidance after a blank line (\n\n);
+     keep it on its own lines instead of collapsing the whitespace away. */
+  white-space: pre-wrap;
   word-break: break-word;
 }
 .toast__action {
@@ -4117,6 +4122,8 @@ h3 {
   margin: var(--space-3) 0 0;
   color: var(--danger);
   font-size: var(--text-sm);
+  /* Keep a backend UiError's \n\n guidance on its own lines. */
+  white-space: pre-wrap;
 }
 .dr-view__notice,
 .audit-progress__notice {

@@ -30,7 +30,10 @@ pub enum ExchangeError {
     #[error("not found (404): {0}")]
     NotFound(String),
 
-    #[error("throttled (429); retry after {retry_after_secs:?}s")]
+    #[error(
+        "throttled (429): the service is limiting requests. {}, then try again.",
+        azapptoolkit_core::http_error::ThrottleWait(*.retry_after_secs)
+    )]
     Throttled { retry_after_secs: Option<u64> },
 
     #[error("server error ({status}): {body}")]

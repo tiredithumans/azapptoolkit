@@ -164,8 +164,9 @@ broadest mailbox grant there is, and it carries the reduced scoped weight once
 `Application EWS.AccessAsApp` confines it — the resolver keys its verdict under the value like any
 Graph row.
 
-**Error-body hygiene.** Exchange error bodies are sanitized (`client/transport.rs::sanitize_error_body`)
-because a 403 can return a NUL-padded blob; log the `ui_code`, never the raw body.
+**Error-body hygiene.** Exchange error bodies are sanitized by the shared
+`azapptoolkit_core::http_error::sanitize_error_body` (Graph, ARM and Key Vault bodies go through
+the same helper) because a 403 can return a NUL-padded blob; log the `ui_code`, never the raw body.
 
 ## Scoped grants reuse one Exchange core
 

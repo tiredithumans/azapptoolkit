@@ -1365,10 +1365,13 @@ async fn set_preferred_signing_key(
 fn metadata_http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
+        // `expect`, not `unwrap_or_default()`: the default client has no
+        // timeout at all, so a failed build would silently lose both budgets.
         reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
+            .connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)
             .build()
-            .unwrap_or_default()
+            .expect("reqwest client builds")
     })
 }
 

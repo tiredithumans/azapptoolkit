@@ -11,6 +11,7 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
+use azapptoolkit_core::http_error::{describe_error_chain, sanitize_error_body};
 use azapptoolkit_core::http_retry::{
     Attempt, RetryClass, RetryReason, parse_retry_after_seconds, with_retries,
 };
@@ -191,7 +192,13 @@ impl ExchangeClient {
                     Ok(r) => r,
                     // No response means no `Retry-After` to honor — the shared
                     // loop falls back to jittered exponential backoff.
-                    Err(err) => return attempt_for(ExchangeError::Network(err.to_string()), None),
+                    Err(err) => {
+                        return attempt_for(
+                            ExchangeError::Network(describe_error_chain(&err)),
+                            None,
+                            None,
+                        );
+                    }
                 };
 
                 let status = resp.status();
@@ -201,7 +208,7 @@ impl ExchangeClient {
                     return Attempt::Done(
                         resp.bytes()
                             .await
-                            .map_err(|e| ExchangeError::Network(e.to_string())),
+                            .map_err(|e| ExchangeError::Network(describe_error_chain(&e))),
                     );
                 }
 
@@ -280,7 +287,7 @@ impl ExchangeClient {
                 };
                 // 429 and 5xx are retried (an explicit `Retry-After` is waited
                 // exactly); every other status is terminal.
-                attempt_for(err, retry_after)
+                attempt_for(err, retry_after, Some(code))
             }
         })
         .await
@@ -293,10 +300,12 @@ impl ExchangeClient {
 /// `http_retry::is_retryable_code(ui_code())`, not a status list re-derived
 /// here. A throttle is the one reason every cmdlet may replay (the service
 /// refused before doing the work); anything else transient is replayed only
-/// for an idempotent cmdlet — see [`retry_class_for`].
+/// for an idempotent cmdlet — see [`retry_class_for`]. `status` is `None` for a
+/// failure with no response (a network error).
 fn attempt_for(
     err: ExchangeError,
     retry_after_secs: Option<u64>,
+    status: Option<u16>,
 ) -> Attempt<bytes::Bytes, ExchangeError> {
     if !err.is_retryable() {
         return Attempt::Done(Err(err));
@@ -308,6 +317,7 @@ fn attempt_for(
     };
     Attempt::Retry {
         reason,
+        status,
         retry_after_secs,
         err,
     }
@@ -348,35 +358,14 @@ fn retry_class_for(cmdlet: &str) -> RetryClass {
     }
 }
 
-/// Normalizes an HTTP error-response body before it is stored in an
-/// [`ExchangeError`]. Exchange/edge responses are sometimes binary or
-/// NUL-padded (e.g. a 403 from a front-end proxy returns a long run of `\0`),
-/// which otherwise pollutes logs and surfaced error messages. Strips control
-/// characters (keeping ordinary whitespace), trims, and caps the length;
-/// returns `<no body>` when nothing printable remains.
-fn sanitize_error_body(raw: &str) -> String {
-    const MAX_CHARS: usize = 800;
-    let cleaned: String = raw
-        .chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
-        .collect();
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        return "<no body>".to_string();
-    }
-    let mut out: String = trimmed.chars().take(MAX_CHARS).collect();
-    if trimmed.chars().count() > MAX_CHARS {
-        out.push('…');
-    }
-    out
-}
-
 /// Builds the human-readable detail stored in a client/server `ExchangeError`.
 /// EXO puts the real authorization reason in `x-ms-diagnostics` rather than the
 /// (often NUL-padded, empty) response body, so prefer the diagnostics header and
-/// fall back to the sanitized body. The detail is prefixed with the originating
-/// `cmdlet` and suffixed with the `request-id` (when present) so a 403 names both
-/// *why* and *which request* instead of the old opaque `<no body>`.
+/// fall back to the body, both through the shared
+/// `azapptoolkit_core::http_error::sanitize_error_body`. The detail is prefixed
+/// with the originating `cmdlet` and suffixed with the `request-id` (when
+/// present) so a 403 names both *why* and *which request* instead of the old
+/// opaque `<no body>`.
 fn compose_error_detail(
     cmdlet: &str,
     raw_body: &str,
@@ -435,20 +424,6 @@ pub(crate) fn all_as<T: DeserializeOwned>(values: Vec<serde_json::Value>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sanitize_error_body_strips_nul_padding_trims_and_caps() {
-        // A NUL-padded 403 body (observed from an edge proxy) collapses to the
-        // placeholder rather than a screenful of escaped \0 in the logs.
-        assert_eq!(sanitize_error_body(&"\0".repeat(256)), "<no body>");
-        // Control chars are stripped; ordinary text + whitespace survive trimmed.
-        assert_eq!(sanitize_error_body("  Forbidden\0\u{7}  "), "Forbidden");
-        assert_eq!(sanitize_error_body("line1\nline2"), "line1\nline2");
-        // Over-long bodies are capped with an ellipsis marker.
-        let out = sanitize_error_body(&"x".repeat(1000));
-        assert!(out.ends_with('…'));
-        assert_eq!(out.chars().count(), 801);
-    }
 
     #[test]
     fn compose_error_detail_prefers_diagnostics_and_names_cmdlet() {

@@ -215,3 +215,23 @@ fn forbidden_hint_comes_from_the_catalog_only_when_exchange_named_a_reason() {
 
     assert!(ExchangeError::NotFound("gone".into()).ui_hint().is_none());
 }
+
+/// The Exchange twin of the ARM / Key Vault pin: the throttled message reads
+/// as a wait in words, never the old "retry after Some(30)s".
+#[test]
+fn throttled_message_is_readable() {
+    assert_eq!(
+        ExchangeError::Throttled {
+            retry_after_secs: Some(30),
+        }
+        .to_string(),
+        "throttled (429): the service is limiting requests. Wait 30 seconds, then try again."
+    );
+    assert_eq!(
+        ExchangeError::Throttled {
+            retry_after_secs: None,
+        }
+        .to_string(),
+        "throttled (429): the service is limiting requests. Wait a moment, then try again."
+    );
+}

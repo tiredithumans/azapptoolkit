@@ -6,6 +6,8 @@
 //! are unchanged and pinned by `tests/transport.rs`.
 
 use super::*;
+use azapptoolkit_core::http_error::{describe_error_chain, sanitize_error_body};
+use azapptoolkit_core::net::endpoint_family;
 use azapptoolkit_core::token::TokenError;
 
 const CONSISTENCY_LEVEL: HeaderName = HeaderName::from_static("consistencylevel");
@@ -29,7 +31,7 @@ impl GraphClient {
             .header(AUTHORIZATION, format!("Bearer {bearer}"))
             .send()
             .await
-            .map_err(|e| GraphError::Network(e.to_string()))?;
+            .map_err(|e| GraphError::Network(describe_error_chain(&e)))?;
         let status = resp.status();
         if !status.is_success() {
             let code = status.as_u16();
@@ -44,7 +46,7 @@ impl GraphClient {
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| GraphError::Network(e.to_string()))?;
+            .map_err(|e| GraphError::Network(describe_error_chain(&e)))?;
         serde_json::from_slice(&bytes).map_err(|e| GraphError::Deserialize(e.to_string()))
     }
 
@@ -140,7 +142,7 @@ impl GraphClient {
         let resp = req
             .send()
             .await
-            .map_err(|e| GraphError::Network(e.to_string()))?;
+            .map_err(|e| GraphError::Network(describe_error_chain(&e)))?;
         let status = resp.status();
         if !status.is_success() {
             let code = status.as_u16();
@@ -154,7 +156,7 @@ impl GraphClient {
         }
         resp.bytes()
             .await
-            .map_err(|e| GraphError::Network(e.to_string()))
+            .map_err(|e| GraphError::Network(describe_error_chain(&e)))
     }
 
     /// Follows `@odata.nextLink` from an initial page until exhausted,
@@ -544,12 +546,14 @@ impl GraphClient {
         // budget, which is why it is an outer loop around `with_retries` rather
         // than another `Attempt` variant).
         let mut cae_retried = false;
+        // Names the endpoint family (ids masked, no query) in every retry log.
+        let label = format!("graph {method} {}", endpoint_family(url));
         loop {
             // Retry budget, backoff and `Retry-After` handling live in
             // `http_retry::with_retries`; this closure only classifies one
             // attempt. `headers` is read fresh per call, so the re-minted bearer
             // below is picked up on the next pass.
-            let outcome = with_retries("graph", retry_class, |_| {
+            let outcome = with_retries(&label, retry_class, |_| {
                 let http = self.http.clone();
                 let headers = headers.clone();
                 let method = method.clone();
@@ -567,8 +571,9 @@ impl GraphClient {
                         Err(err) => {
                             return Attempt::Retry {
                                 reason: RetryReason::Transient,
+                                status: None,
                                 retry_after_secs: None,
-                                err: GraphError::Network(err.to_string()),
+                                err: GraphError::Network(describe_error_chain(&err)),
                             };
                         }
                     };
@@ -579,7 +584,7 @@ impl GraphClient {
                             resp.bytes()
                                 .await
                                 .map(Outcome::Body)
-                                .map_err(|e| GraphError::Network(e.to_string())),
+                                .map_err(|e| GraphError::Network(describe_error_chain(&e))),
                         );
                     }
 
@@ -594,10 +599,9 @@ impl GraphClient {
                         .get(reqwest::header::WWW_AUTHENTICATE)
                         .and_then(|v| v.to_str().ok())
                         .map(str::to_string);
-                    let body_text = resp
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "<no body>".to_string());
+                    // Sanitized and capped before it reaches an error, a log line
+                    // or a toast — a proxy block page can be megabytes of HTML.
+                    let body_text = sanitize_error_body(&resp.text().await.unwrap_or_default());
                     let code = status.as_u16();
 
                     if code == 401 {
@@ -637,6 +641,7 @@ impl GraphClient {
                         } else {
                             RetryReason::Transient
                         },
+                        status: Some(code),
                         retry_after_secs: retry_after,
                         err: if code == 429 {
                             GraphError::Throttled {
@@ -756,6 +761,7 @@ pub(crate) fn parse_claims_challenge(www_authenticate: &str) -> Option<String> {
 /// generic `Api`. Only the mapping is shared — the one-shot helpers still
 /// deliberately skip the retry/throttle loop.
 fn map_error_status(code: u16, body: String, retry_after: Option<u64>) -> GraphError {
+    let body = sanitize_error_body(&body);
     match code {
         401 => GraphError::Unauthorized,
         403 => GraphError::Forbidden(body),

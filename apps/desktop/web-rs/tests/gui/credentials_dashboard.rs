@@ -31,17 +31,14 @@ async fn loads_and_renders_rows() {
 #[wasm_bindgen_test]
 async fn retry_after_error_refetches() {
     ts::reset();
-    ts::mock_err(
-        "list_credential_expirations",
-        &fixtures::ui_error("throttled", "Too many requests"),
-    );
+    ts::mock_err("list_credential_expirations", &fixtures::throttled_error());
 
     let _m = ts::mount_view(|| view! { <CredentialsDashboard /> });
     // This lens now renders its load failure via the shared `DetailLoadError`
     // (raw `UiError` message + the muted error code, no "Failed to load:"
     // prefix) — the same grammar the Managed Identities list already asserts.
     // The code is what carries the context the bespoke prefix used to.
-    ts::wait_for(|| ts::body_contains("Too many requests")).await;
+    ts::wait_for(|| ts::body_contains(fixtures::THROTTLED_MESSAGE)).await;
     assert!(
         ts::body_contains("[throttled]"),
         "the error code should be surfaced alongside the message"

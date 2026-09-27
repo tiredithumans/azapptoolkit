@@ -93,6 +93,7 @@ impl EntraAuthService {
             http: reqwest::Client::builder()
                 .user_agent(concat!("azapptoolkit/", env!("CARGO_PKG_VERSION")))
                 .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)
                 .build()
                 .expect("reqwest client builds"),
         })

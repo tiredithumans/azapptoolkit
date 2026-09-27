@@ -163,14 +163,13 @@ impl GraphClient {
     ) -> Self {
         let http = reqwest::Client::builder()
             .user_agent(concat!("azapptoolkit/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(60))
             // The 60s ceiling is sized for the *slowest legitimate response* —
             // a 999-app page carrying credential arrays, or a `$batch` POST of
-            // 20 sub-requests. Without a separate connect budget a host that
-            // accepts no connection burns that whole ceiling before the retry
-            // loop even sees a failure, and does it once per attempt. A TCP+TLS
-            // handshake to Graph is sub-second in practice, so 10s is generous.
-            .connect_timeout(Duration::from_secs(10))
+            // 20 sub-requests. The shared connect budget keeps a host that
+            // accepts no connection from burning it once per attempt (see
+            // `CONNECT_TIMEOUT` for the arithmetic).
+            .timeout(Duration::from_secs(60))
+            .connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)
             // Long fan-outs (audit, DR backup) go quiet between waves. Holding
             // idle sockets across those gaps keeps the next wave off a fresh
             // handshake; 90s comfortably spans the throttle back-off window.
