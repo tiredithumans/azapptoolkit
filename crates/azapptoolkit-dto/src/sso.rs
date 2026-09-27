@@ -217,11 +217,14 @@ pub struct SamlSsoSummary {
     pub service_principal_id: String,
     /// Application (client) id.
     pub app_id: String,
-    /// Microsoft Entra Identifier / Issuer: `https://sts.windows.net/{tenant}/`.
+    /// Microsoft Entra Identifier / Issuer: `https://sts.windows.net/{tenant}/`
+    /// (commercial shown; follows the configured cloud).
     pub entity_id_issuer: String,
-    /// Login URL: `https://login.microsoftonline.com/{tenant}/saml2`.
+    /// Login URL: `https://login.microsoftonline.com/{tenant}/saml2`
+    /// (commercial shown; follows the configured cloud).
     pub login_url: String,
-    /// Logout URL: `https://login.microsoftonline.com/{tenant}/saml2`.
+    /// Logout URL: `https://login.microsoftonline.com/{tenant}/saml2`
+    /// (commercial shown; follows the configured cloud).
     pub logout_url: String,
     /// App Federation Metadata URL.
     pub federation_metadata_url: String,
@@ -245,7 +248,8 @@ pub struct OidcSsoSummary {
     pub service_principal_id: String,
     pub client_id: String,
     pub tenant_id: String,
-    /// Authority: `https://login.microsoftonline.com/{tenant}/v2.0`.
+    /// Authority: `https://login.microsoftonline.com/{tenant}/v2.0`
+    /// (commercial shown; follows the configured cloud).
     pub authority: String,
     /// OIDC discovery document URL.
     pub discovery_url: String,

@@ -165,7 +165,8 @@ then sign out and back in so a fresh token is issued.
    `Policy.ReadWrite.ApplicationConfiguration`, `Sites.FullControl.All`,
    `GroupMember.ReadWrite.All`,
    `https://outlook.office365.com/Exchange.Manage`, `https://management.azure.com/.default`,
-   `https://vault.azure.net/.default`, `https://api.loganalytics.azure.com/.default`.
+   `https://vault.azure.net/.default`, `https://api.loganalytics.azure.com/.default`
+   (commercial-cloud audiences; a sovereign build uses that cloud's hosts).
 
 4. **Group-membership changes** (adding/removing a service principal as a security-group member —
    the access model for group-gated APIs like Power BI / Fabric tenant settings) need

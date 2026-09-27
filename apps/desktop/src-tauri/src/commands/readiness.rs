@@ -19,6 +19,7 @@ use azapptoolkit_auth::AuthError;
 use azapptoolkit_core::capabilities::{
     CAPABILITIES, Capability, RoleDetect, matched_directory_role,
 };
+use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_core::models::ActiveDirectoryRole;
 
 use crate::dto::UiError;
@@ -82,6 +83,7 @@ pub async fn check_readiness(
     let active_roles = active_roles.unwrap_or_default();
     let scope_verdicts: HashMap<&'static str, Verdict> = scope_verdicts.into_iter().collect();
 
+    let cloud = state.auth.cloud();
     let mut items = Vec::with_capacity(CAPABILITIES.len());
     for cap in CAPABILITIES {
         let (role_verdict, role_detail) = role_for(
@@ -97,7 +99,7 @@ pub async fn check_readiness(
                     .get(feature)
                     .copied()
                     .unwrap_or(Verdict::Unknown);
-                (verdict, scope_detail_text(cap, verdict))
+                (verdict, scope_detail_text(cap, verdict, cloud))
             }
             None => (Verdict::Have, "Included in the sign-in scopes.".to_string()),
         };
@@ -259,10 +261,12 @@ async fn enumerate_azure_role_ids(state: &AppState, tenant_id: &str) -> Option<H
     Some(ids)
 }
 
-fn scope_detail_text(cap: &Capability, verdict: Verdict) -> String {
+/// The scope half's detail line. A missing scope is named in `cloud`'s form
+/// ([`Capability::display_scopes`]) — the audience the probe actually asked for.
+fn scope_detail_text(cap: &Capability, verdict: Verdict, cloud: CloudEnvironment) -> String {
     match verdict {
         Verdict::Have => "Scope consented.".to_string(),
-        Verdict::Missing => format!("Not consented: {}.", cap.scopes.join(", ")),
+        Verdict::Missing => format!("Not consented: {}.", cap.display_scopes(cloud).join(", ")),
         Verdict::Unknown => "Couldn't determine scope consent.".to_string(),
     }
 }
@@ -456,7 +460,42 @@ mod tests {
     #[test]
     fn scope_detail_names_missing_scopes() {
         let cap = capability("audit_reports").unwrap();
-        let text = scope_detail_text(cap, Verdict::Missing);
+        let text = scope_detail_text(cap, Verdict::Missing, CloudEnvironment::Commercial);
         assert!(text.contains("AuditLog.Read.All"));
+    }
+
+    #[test]
+    fn scope_detail_names_the_configured_clouds_audience() {
+        let cap = capability("keyvault_secrets").unwrap();
+        let text = scope_detail_text(cap, Verdict::Missing, CloudEnvironment::UsGov);
+        assert!(text.contains("vault.usgovcloudapi.net"), "{text}");
+        assert!(!text.contains("vault.azure.net"), "{text}");
+    }
+
+    /// The checklist's "Not consented: …" text names exactly the resource
+    /// audience the probe requests, so the two can't drift apart again.
+    #[test]
+    fn displayed_resource_scopes_are_the_probed_ones() {
+        let state = AppState::for_test("t", "http://127.0.0.1:1");
+        let cloud = state.auth.cloud();
+        let mut checked = 0;
+        for cap in CAPABILITIES {
+            let Some(feature) = cap.scope_feature else {
+                continue;
+            };
+            if !matches!(feature, "keyvault" | "arm" | "log_analytics" | "exchange") {
+                continue;
+            }
+            let probed = state.consent_scopes_for(feature).unwrap();
+            for shown in cap.display_scopes(cloud) {
+                assert!(
+                    probed.contains(&shown),
+                    "{}: shows {shown} but probes {probed:?}",
+                    cap.key
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 4, "only {checked} resource scopes checked");
     }
 }

@@ -20,6 +20,8 @@
 //! and the WASM frontend both depend on it directly (mirrors [`crate::scoping`]).
 //! Keep it in sync with `docs/operator-rbac/OPERATOR-ROLES.md`.
 
+use crate::cloud::CloudEnvironment;
+
 /// One of the three independent authorization planes a capability lives on. Each
 /// has its own role model and its own PIM (`OPERATOR-ROLES.md` table, lines 13-17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +96,10 @@ pub struct Capability {
     pub directory_roles_any: &'static [(&'static str, Option<&'static str>)],
     pub role_detect: RoleDetect,
     /// Delegated scope name(s) this capability needs, for display. **All** required.
+    /// Graph scopes are bare names; a resource audience is written as a
+    /// `{keyvault}` / `{arm}` / `{log_analytics}` / `{exchange}` placeholder that
+    /// [`Capability::display_scopes`] expands for the configured cloud, so the
+    /// catalog never hardcodes one cloud's host.
     pub scopes: &'static [&'static str],
     /// The `AppState::consent_scopes_for` feature key used to silently probe scope
     /// consent in the checklist, or `None` when the scope half isn't separately
@@ -395,7 +401,7 @@ pub static CAPABILITIES: &[Capability] = &[
         description: "List, read, create, and rotate Key Vault secrets.",
         directory_roles_any: &[("Key Vault Secrets Officer", None)],
         role_detect: RoleDetect::Indeterminate,
-        scopes: &["https://vault.azure.net/.default"],
+        scopes: &["{keyvault}/.default"],
         scope_feature: Some("keyvault"),
         remediation: "Key Vault secret access needs an Azure RBAC role on the vault — Key Vault \
                       Secrets Officer (or the equivalent custom role's secret DataActions) — and \
@@ -408,7 +414,7 @@ pub static CAPABILITIES: &[Capability] = &[
         description: "Read a managed identity's Azure RBAC role assignments.",
         directory_roles_any: &[("Reader", None)],
         role_detect: RoleDetect::Indeterminate,
-        scopes: &["https://management.azure.com/.default"],
+        scopes: &["{arm}/.default"],
         scope_feature: Some("arm"),
         remediation: "Reading Azure role assignments needs the Reader role (or a custom role with \
                       Microsoft.Authorization/roleAssignments/read and roleDefinitions/read) on \
@@ -421,7 +427,7 @@ pub static CAPABILITIES: &[Capability] = &[
         description: "List every Key Vault and the principals holding Azure RBAC roles on it.",
         directory_roles_any: &[("Reader", None)],
         role_detect: RoleDetect::Indeterminate,
-        scopes: &["https://management.azure.com/.default"],
+        scopes: &["{arm}/.default"],
         scope_feature: Some("arm"),
         remediation: "Enumerating Key Vaults and their role assignments needs the Reader role (or \
                       a custom role with Microsoft.KeyVault/vaults/read and \
@@ -436,7 +442,7 @@ pub static CAPABILITIES: &[Capability] = &[
                       an app's granted permissions with its observed Graph calls.",
         directory_roles_any: &[("Log Analytics Reader", None)],
         role_detect: RoleDetect::Indeterminate,
-        scopes: &["https://api.loganalytics.azure.com/.default"],
+        scopes: &["{log_analytics}/.default"],
         scope_feature: Some("log_analytics"),
         remediation: "Usage analysis needs Microsoft Entra diagnostic settings exporting \
                       MicrosoftGraphActivityLogs to a Log Analytics workspace, the Log Analytics \
@@ -450,7 +456,7 @@ pub static CAPABILITIES: &[Capability] = &[
         description: "Create an Azure RBAC role assignment for a managed identity.",
         directory_roles_any: &[("User Access Administrator", None), ("Owner", None)],
         role_detect: RoleDetect::Indeterminate,
-        scopes: &["https://management.azure.com/.default"],
+        scopes: &["{arm}/.default"],
         scope_feature: Some("arm"),
         remediation: "Assigning an Azure role needs Owner or User Access Administrator (the \
                       Microsoft.Authorization/roleAssignments/write permission) on the target \
@@ -467,7 +473,7 @@ pub static CAPABILITIES: &[Capability] = &[
             ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
         ],
         role_detect: RoleDetect::DirectoryRole,
-        scopes: &["https://outlook.office365.com/Exchange.Manage"],
+        scopes: &["{exchange}/Exchange.Manage"],
         scope_feature: Some("exchange"),
         remediation: "Exchange RBAC for Applications needs your account in a role group \
                       containing the \"Role Management\" role (e.g. Organization Management); \
@@ -485,6 +491,32 @@ impl Capability {
     pub fn role_names(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.directory_roles_any.iter().map(|(name, _)| *name)
     }
+
+    /// [`scopes`](Self::scopes) with every resource placeholder expanded to
+    /// `cloud`'s audience — the form the readiness checklist prints, and the
+    /// form `AppState::consent_scopes_for` probes.
+    pub fn display_scopes(&self, cloud: CloudEnvironment) -> Vec<String> {
+        self.scopes.iter().map(|s| expand_scope(s, cloud)).collect()
+    }
+}
+
+/// Expands a leading `{resource}` placeholder to `cloud`'s audience origin; a
+/// bare Graph scope (or an unknown key) is returned unchanged.
+fn expand_scope(scope: &str, cloud: CloudEnvironment) -> String {
+    let Some((key, rest)) = scope
+        .strip_prefix('{')
+        .and_then(|tail| tail.split_once('}'))
+    else {
+        return scope.to_string();
+    };
+    let origin = match key {
+        "keyvault" => cloud.keyvault_resource(),
+        "arm" => cloud.arm_resource().to_string(),
+        "log_analytics" => cloud.log_analytics_resource().to_string(),
+        "exchange" => cloud.exchange_resource().to_string(),
+        _ => return scope.to_string(),
+    };
+    format!("{origin}{rest}")
 }
 
 /// The capability with this `key`, or `None`. Used by command-level 403 hints
@@ -529,6 +561,82 @@ pub fn matched_directory_role(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ALL_CLOUDS: [CloudEnvironment; 4] = [
+        CloudEnvironment::Commercial,
+        CloudEnvironment::UsGov,
+        CloudEnvironment::UsGovDod,
+        CloudEnvironment::China,
+    ];
+
+    #[test]
+    fn no_catalog_scope_hardcodes_a_cloud_host() {
+        for c in CAPABILITIES {
+            for s in c.scopes {
+                assert!(
+                    !s.contains("://"),
+                    "{}: scope {s} hardcodes a host; use a {{resource}} placeholder",
+                    c.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_resource_placeholder_expands_in_every_cloud() {
+        for cloud in ALL_CLOUDS {
+            for c in CAPABILITIES {
+                let shown = c.display_scopes(cloud);
+                assert_eq!(shown.len(), c.scopes.len(), "{}", c.key);
+                for (raw, s) in c.scopes.iter().zip(&shown) {
+                    assert!(
+                        !s.contains('{') && !s.contains('}'),
+                        "{cloud:?} {}: {s} left a placeholder",
+                        c.key
+                    );
+                    if raw.starts_with('{') {
+                        assert!(s.starts_with("https://"), "{cloud:?} {}: {s}", c.key);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resource_scopes_follow_the_cloud() {
+        let kv = capability("keyvault_secrets").unwrap();
+        // Commercial is byte-for-byte the previously hardcoded string.
+        assert_eq!(
+            kv.display_scopes(CloudEnvironment::Commercial),
+            ["https://vault.azure.net/.default"]
+        );
+        assert_eq!(
+            kv.display_scopes(CloudEnvironment::UsGov),
+            ["https://vault.usgovcloudapi.net/.default"]
+        );
+        assert_eq!(
+            capability("exchange_rbac")
+                .unwrap()
+                .display_scopes(CloudEnvironment::China),
+            ["https://partner.outlook.cn/Exchange.Manage"]
+        );
+        assert_eq!(
+            capability("azure_role_reads")
+                .unwrap()
+                .display_scopes(CloudEnvironment::UsGov),
+            ["https://management.usgovcloudapi.net/.default"]
+        );
+        assert_eq!(
+            capability("graph_activity_usage")
+                .unwrap()
+                .display_scopes(CloudEnvironment::Commercial),
+            ["https://api.loganalytics.azure.com/.default"]
+        );
+        let reports = capability("audit_reports").unwrap();
+        for cloud in ALL_CLOUDS {
+            assert_eq!(reports.display_scopes(cloud), reports.scopes, "{cloud:?}");
+        }
+    }
 
     #[test]
     fn group_membership_lists_the_service_principal_member_scope_pair() {

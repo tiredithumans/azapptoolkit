@@ -265,6 +265,11 @@ Three surfaces read it so the guidance never drifts:
      `ConsentFeature` — the same scope-set + CAE derivation the `ensure_*` wrappers use, so a probe
      can never seed a token in a different CAE slot from the adapter that reuses it; `Ok`=Have,
      `consent_required`=Missing, else Unknown).
+   - a Missing scope is named through `Capability::display_scopes(cloud)`: the catalog writes a
+     resource audience as a `{keyvault}` / `{arm}` / `{log_analytics}` / `{exchange}` placeholder
+     (never a literal host, pinned by `no_catalog_scope_hardcodes_a_cloud_host`), expanded to the
+     configured cloud's origin — the same audience the probe asks for (pinned by
+     `displayed_resource_scopes_are_the_probed_ones` in `readiness.rs`).
 
    Every `ConsentFeature` has a catalog row and every catalog `scope_feature` is a
    `ConsentFeature` (pinned by `every_consent_feature_has_a_catalog_row` /

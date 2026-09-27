@@ -81,6 +81,13 @@ value, then the placeholder — so a packaged build "just works" while
 developers can still override locally with `export`. `.env` is
 git-ignored; check in only `.env.example`.
 
+A sovereign-cloud team build can bake the cloud the same way: uncomment
+`AZAPPTOOLKIT_CLOUD=usgov` (or `usgovdod` / `china`) in `.env`, and
+`build.rs` emits it as `AZAPPTOOLKIT_BUILD_CLOUD`. At runtime the cloud
+resolves as env var → baked-in value → commercial
+(`CloudEnvironment::from_env_or`); an unrecognized value logs a warning
+and falls through to the next layer.
+
 ## Testing
 
 Run every CI gate, in CI order, with one command:
@@ -367,7 +374,8 @@ Invariants every change must preserve (the audit/review baseline for auth-adjace
   `<redacted>`. Refresh tokens go to the OS keyring — chunked across numbered entries because
   Windows Credential Manager caps a blob at 2560 UTF-16 bytes (don't collapse the chunking).
 - **Build-time baking is for non-secrets only.** `src-tauri/build.rs` bakes `AZAPPTOOLKIT_CLIENT_ID`
-  / `_TENANT_ID` (public-client identifiers). Never route a credential through `build.rs` or `.env`.
+  / `_TENANT_ID` (public-client identifiers) and `_CLOUD` (a cloud name, not a secret). Never route
+  a credential through `build.rs` or `.env`.
 - **Errors are sanitized before they're shown or logged.** AAD errors are redacted to the AADSTS
   code (`azapptoolkit_auth::service::wire::redacted_aad_error`); every client's error bodies —
   Graph (including `$batch` sub-responses), ARM, Key Vault and Exchange — are control-char-stripped

@@ -428,10 +428,13 @@ configuration screen is shown.
 **Sovereign / national clouds.** The app targets the commercial cloud by
 default. To use a tenant in US Gov (GCC High), US Gov DoD, or Azure China
 (21Vianet), set `AZAPPTOOLKIT_CLOUD` to `usgov`, `usgovdod`, or `china`
-respectively (unset or `commercial` for the global cloud). This switches the
-Entra login, Microsoft Graph, Exchange Online, Key Vault, and ARM endpoints to
-that cloud's hosts. The app registration must be created in the matching
-national-cloud admin center.
+respectively (unset or `commercial` for the global cloud). A team build can
+bake it in instead, by adding `AZAPPTOOLKIT_CLOUD` to `.env` before building
+(the order is environment variable → baked-in value → commercial). This
+switches the Entra login, Microsoft Graph, Exchange Online, Key Vault, ARM and
+Log Analytics endpoints, and the SSO wizard's application template and
+app-owner URLs, to that cloud's hosts. The app registration must be created in
+the matching national-cloud admin center.
 
 ## Logs
 

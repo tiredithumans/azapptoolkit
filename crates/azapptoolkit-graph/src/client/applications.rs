@@ -585,8 +585,9 @@ impl GraphClient {
 
     /// Instantiates a non-gallery application from an application template,
     /// creating a paired application + service principal in one call. The SSO
-    /// wizard always uses the generic custom template
-    /// (`8adf8e6e-67b2-4cf2-a259-e3dc5476c621`). Newly created objects replicate
+    /// wizard uses the configured cloud's generic custom template
+    /// (`CloudEnvironment::custom_app_template_id` in `azapptoolkit-core`; the
+    /// id differs per sovereign cloud). Newly created objects replicate
     /// asynchronously, so an immediate follow-up read/PATCH can 404 briefly —
     /// callers wrap subsequent steps in a `NotFound`-only retry.
     pub async fn instantiate_application_template(

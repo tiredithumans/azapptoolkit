@@ -7,8 +7,9 @@
 //! the "New SSO application" wizard (create) and the enterprise-app detail "SSO"
 //! tab (edit existing).
 //!
-//! Both protocols instantiate the generic custom application template
-//! ([`CUSTOM_TEMPLATE_ID`]) so a paired service principal (the Enterprise App)
+//! Both protocols instantiate the configured cloud's generic custom application
+//! template ([`CloudEnvironment::custom_app_template_id`]) so a paired service
+//! principal (the Enterprise App)
 //! always appears in the list. The multi-step Graph flow races against directory
 //! replication, so the PATCH steps right after instantiate are wrapped in
 //! [`with_replication_retry`] (retries `NotFound` only).
@@ -31,6 +32,7 @@ use crate::commands::applications::{
     augment_with_object_id, invalidate_app_details, invalidate_app_lists,
 };
 use crate::commands::graph_err::forbidden_remediation;
+use crate::commands::guid::is_guid;
 use crate::dto::UiError;
 use crate::dto::sso::{
     ClaimsPolicyDto, MetadataProbeDto, OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput,
@@ -38,13 +40,7 @@ use crate::dto::sso::{
 };
 use crate::state::AppState;
 use azapptoolkit_core::cache::CacheKind;
-
-/// The Microsoft Entra generic **custom** (non-gallery) application template.
-/// Instantiating it creates a blank app + service principal we then configure.
-const CUSTOM_TEMPLATE_ID: &str = "8adf8e6e-67b2-4cf2-a259-e3dc5476c621";
-
-/// Login authority host used to build the app-owner output URLs.
-const LOGIN_HOST: &str = "https://login.microsoftonline.com";
+use azapptoolkit_core::cloud::CloudEnvironment;
 
 // ---------------- helpers ----------------
 
@@ -87,20 +83,27 @@ fn sanitize_notification_emails(input: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Static SAML output URLs that the app owner needs, derived from the tenant id.
-fn saml_summary_urls(tenant_id: &str, app_id: &str) -> (String, String, String, String) {
-    let issuer = format!("https://sts.windows.net/{tenant_id}/");
-    let login = format!("{LOGIN_HOST}/{tenant_id}/saml2");
+/// Static SAML output URLs that the app owner needs, derived from the tenant id
+/// and `cloud` (issuer root and login host differ per sovereign cloud).
+fn saml_summary_urls(
+    cloud: CloudEnvironment,
+    tenant_id: &str,
+    app_id: &str,
+) -> (String, String, String, String) {
+    let login_root = cloud.login_authority_root();
+    let issuer = format!("{}/{tenant_id}/", cloud.saml_issuer_root());
+    let login = format!("{login_root}/{tenant_id}/saml2");
     let logout = login.clone();
     let metadata = format!(
-        "{LOGIN_HOST}/{tenant_id}/federationmetadata/2007-06/federationmetadata.xml?appid={app_id}"
+        "{login_root}/{tenant_id}/federationmetadata/2007-06/federationmetadata.xml?appid={app_id}"
     );
     (issuer, login, logout, metadata)
 }
 
-/// Static OIDC output URLs (authority + discovery document) for the tenant.
-fn oidc_summary_urls(tenant_id: &str) -> (String, String) {
-    let authority = format!("{LOGIN_HOST}/{tenant_id}/v2.0");
+/// Static OIDC output URLs (authority + discovery document) for the tenant in
+/// `cloud`.
+fn oidc_summary_urls(cloud: CloudEnvironment, tenant_id: &str) -> (String, String) {
+    let authority = format!("{}/{tenant_id}/v2.0", cloud.login_authority_root());
     let discovery = format!("{authority}/.well-known/openid-configuration");
     (authority, discovery)
 }
@@ -237,10 +240,11 @@ pub async fn create_saml_sso_application(
     }
 
     let client = state.graph_for(&tenant_id);
+    let cloud = state.auth.cloud();
 
-    // 1. Instantiate the generic custom template → app + SP.
+    // 1. Instantiate the cloud's generic custom template → app + SP.
     let pair = client
-        .instantiate_application_template(CUSTOM_TEMPLATE_ID, &input.display_name)
+        .instantiate_application_template(cloud.custom_app_template_id(), &input.display_name)
         .await?;
     let object_id = pair.application.id.clone();
     let app_id = pair.application.app_id.clone();
@@ -249,7 +253,10 @@ pub async fn create_saml_sso_application(
     // From here a failure leaves a half-configured app the user can finish in
     // the SSO tab; we never auto-delete. Bust caches on any early return that
     // got past instantiate so the new (paired) SP shows up in the lists.
-    let result = configure_saml(&client, &object_id, &sp_id, &tenant_id, &app_id, &input).await;
+    let result = configure_saml(
+        &client, cloud, &object_id, &sp_id, &tenant_id, &app_id, &input,
+    )
+    .await;
     invalidate_app_lists(&state.cache, &tenant_id);
     result.map_err(|e| augment_with_object_id(e, &object_id))
 }
@@ -258,6 +265,7 @@ pub async fn create_saml_sso_application(
 /// caches once instantiate succeeded.
 async fn configure_saml(
     client: &GraphClient,
+    cloud: CloudEnvironment,
     object_id: &str,
     sp_id: &str,
     tenant_id: &str,
@@ -347,7 +355,7 @@ async fn configure_saml(
     };
 
     let (issuer, login_url, logout_url, federation_metadata_url) =
-        saml_summary_urls(tenant_id, app_id);
+        saml_summary_urls(cloud, tenant_id, app_id);
     Ok(SamlSsoSummary {
         object_id: object_id.to_string(),
         service_principal_id: sp_id.to_string(),
@@ -384,21 +392,26 @@ pub async fn create_oidc_sso_application(
     }
 
     let client = state.graph_for(&tenant_id);
+    let cloud = state.auth.cloud();
 
     let pair = client
-        .instantiate_application_template(CUSTOM_TEMPLATE_ID, &input.display_name)
+        .instantiate_application_template(cloud.custom_app_template_id(), &input.display_name)
         .await?;
     let object_id = pair.application.id.clone();
     let app_id = pair.application.app_id.clone();
     let sp_id = pair.service_principal.id.clone();
 
-    let result = configure_oidc(&client, &object_id, &app_id, &sp_id, &tenant_id, &input).await;
+    let result = configure_oidc(
+        &client, cloud, &object_id, &app_id, &sp_id, &tenant_id, &input,
+    )
+    .await;
     invalidate_app_lists(&state.cache, &tenant_id);
     result.map_err(|e| augment_with_object_id(e, &object_id))
 }
 
 async fn configure_oidc(
     client: &GraphClient,
+    cloud: CloudEnvironment,
     object_id: &str,
     app_id: &str,
     sp_id: &str,
@@ -441,7 +454,7 @@ async fn configure_oidc(
         (None, None)
     };
 
-    let (authority, discovery_url) = oidc_summary_urls(tenant_id);
+    let (authority, discovery_url) = oidc_summary_urls(cloud, tenant_id);
     Ok(OidcSsoSummary {
         object_id: object_id.to_string(),
         service_principal_id: sp_id.to_string(),
@@ -850,6 +863,7 @@ pub async fn get_signing_cert_rollover(
         &sp,
         &service_principal_id,
         &tenant_id,
+        state.auth.cloud(),
         chrono::Utc::now(),
     ))
 }
@@ -905,7 +919,15 @@ pub async fn probe_federation_metadata(
             format!("not signed in to tenant {tenant_id}"),
         )
     })?;
-    let (_, _, _, metadata_url) = saml_summary_urls(&tenant_id, &app_id);
+    // The id lands in the metadata URL's query string; anything but a GUID is
+    // not an application (client) id.
+    if !is_guid(&app_id) {
+        return Err(UiError::validation(
+            "invalid_app_id",
+            "The application (client) ID must be a GUID.",
+        ));
+    }
+    let (_, _, _, metadata_url) = saml_summary_urls(state.auth.cloud(), &tenant_id, &app_id);
     let fetched_at = chrono::Utc::now().to_rfc3339();
 
     let response = metadata_http_client().get(&metadata_url).send().await;
@@ -1080,6 +1102,7 @@ pub async fn list_sso_certificate_expirations(
     // thousand SAML SSO applications does not exist in practice.
     let (sps, _truncated) = client.list_saml_sso_service_principals().await?;
     let now = chrono::Utc::now();
+    let cloud = state.auth.cloud();
 
     let mut rows: Vec<SsoCertificateRowDto> = sps
         .iter()
@@ -1089,7 +1112,7 @@ pub async fn list_sso_certificate_expirations(
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let roll = build_rollover(sp, &sp_id, &tenant_id, now);
+            let roll = build_rollover(sp, &sp_id, &tenant_id, cloud, now);
             // The row is about the certificate that signs *today* — the active
             // one. `build_rollover` keeps it flagged `is_active` even once
             // expired, which is exactly the row worth showing loudest.
@@ -1541,6 +1564,7 @@ fn build_rollover(
     sp: &serde_json::Value,
     service_principal_id: &str,
     tenant_id: &str,
+    cloud: CloudEnvironment,
     now: chrono::DateTime<chrono::Utc>,
 ) -> SigningCertRolloverDto {
     use azapptoolkit_dto::sso::{CertStatus, RolloverPhase, SigningCertDto};
@@ -1689,7 +1713,7 @@ fn build_rollover(
         })
         .flatten();
 
-    let (_, _, _, federation_metadata_url) = saml_summary_urls(tenant_id, &app_id);
+    let (_, _, _, federation_metadata_url) = saml_summary_urls(cloud, tenant_id, &app_id);
     SigningCertRolloverDto {
         service_principal_id: service_principal_id.to_string(),
         app_id,
@@ -1959,9 +1983,11 @@ pub async fn get_sso_summary(
     service_principal_id: String,
     protocol: String,
 ) -> Result<serde_json::Value, UiError> {
+    // Captured before `get_sso_config` takes `state` by value.
+    let cloud = state.auth.cloud();
     let config = get_sso_config(state, tenant_id.clone(), service_principal_id).await?;
     if protocol == "oidc" {
-        let (authority, discovery_url) = oidc_summary_urls(&tenant_id);
+        let (authority, discovery_url) = oidc_summary_urls(cloud, &tenant_id);
         let summary = OidcSsoSummary {
             object_id: config.object_id,
             service_principal_id: config.service_principal_id,
@@ -1977,7 +2003,7 @@ pub async fn get_sso_summary(
         serde_json::to_value(summary).map_err(|e| UiError::serde(e.to_string()))
     } else {
         let (issuer, login_url, logout_url, federation_metadata_url) =
-            saml_summary_urls(&tenant_id, &config.app_id);
+            saml_summary_urls(cloud, &tenant_id, &config.app_id);
         let summary = SamlSsoSummary {
             object_id: config.object_id,
             service_principal_id: config.service_principal_id,
@@ -2490,7 +2516,8 @@ mod tests {
 
     #[test]
     fn saml_urls_match_spec() {
-        let (issuer, login, logout, metadata) = saml_summary_urls("tid", "aid");
+        let (issuer, login, logout, metadata) =
+            saml_summary_urls(CloudEnvironment::Commercial, "tid", "aid");
         assert_eq!(issuer, "https://sts.windows.net/tid/");
         assert_eq!(login, "https://login.microsoftonline.com/tid/saml2");
         assert_eq!(logout, login);
@@ -2501,8 +2528,40 @@ mod tests {
     }
 
     #[test]
+    fn saml_and_oidc_urls_follow_the_cloud() {
+        let (issuer, login, logout, metadata) =
+            saml_summary_urls(CloudEnvironment::UsGov, "tid", "aid");
+        assert_eq!(issuer, "https://sts.windows.net/tid/");
+        assert_eq!(login, "https://login.microsoftonline.us/tid/saml2");
+        assert_eq!(logout, login);
+        assert_eq!(
+            metadata,
+            "https://login.microsoftonline.us/tid/federationmetadata/2007-06/federationmetadata.xml?appid=aid"
+        );
+        let (authority, _) = oidc_summary_urls(CloudEnvironment::UsGov, "tid");
+        assert_eq!(authority, "https://login.microsoftonline.us/tid/v2.0");
+
+        let (issuer, login, _, metadata) = saml_summary_urls(CloudEnvironment::China, "tid", "aid");
+        assert_eq!(issuer, "https://sts.chinacloudapi.cn/tid/");
+        assert_eq!(login, "https://login.partner.microsoftonline.cn/tid/saml2");
+        assert!(
+            metadata.starts_with("https://login.partner.microsoftonline.cn/tid/"),
+            "{metadata}"
+        );
+        let (authority, discovery) = oidc_summary_urls(CloudEnvironment::China, "tid");
+        assert_eq!(
+            authority,
+            "https://login.partner.microsoftonline.cn/tid/v2.0"
+        );
+        assert!(discovery.starts_with(&authority), "{discovery}");
+
+        let (_, dod_login, _, _) = saml_summary_urls(CloudEnvironment::UsGovDod, "tid", "aid");
+        assert_eq!(dod_login, "https://login.microsoftonline.us/tid/saml2");
+    }
+
+    #[test]
     fn oidc_urls_match_spec() {
-        let (authority, discovery) = oidc_summary_urls("tid");
+        let (authority, discovery) = oidc_summary_urls(CloudEnvironment::Commercial, "tid");
         assert_eq!(authority, "https://login.microsoftonline.com/tid/v2.0");
         assert_eq!(
             discovery,
@@ -2636,6 +2695,26 @@ mod tests {
     }
 
     #[test]
+    fn rollover_metadata_url_follows_the_cloud() {
+        let roll = build_rollover(
+            &sp_with(
+                Some(A_HEX),
+                vec![cred("k1", A_B64, "2027-01-01T00:00:00Z", "Verify")],
+            ),
+            "sp-1",
+            "tid",
+            CloudEnvironment::UsGov,
+            now(),
+        );
+        assert!(
+            roll.federation_metadata_url
+                .starts_with("https://login.microsoftonline.us/"),
+            "{}",
+            roll.federation_metadata_url
+        );
+    }
+
+    #[test]
     fn rollover_phase_reads_the_four_states_off_live_sp_state() {
         // Steady: one valid certificate, and it's the preferred one.
         let roll = build_rollover(
@@ -2645,6 +2724,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.phase, RolloverPhase::Steady);
@@ -2663,6 +2743,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.phase, RolloverPhase::Staged);
@@ -2686,6 +2767,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.phase, RolloverPhase::PendingRetire);
@@ -2705,6 +2787,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.phase, RolloverPhase::Unconfigured);
@@ -2725,6 +2808,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.phase, RolloverPhase::Staged);
@@ -2755,6 +2839,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.certs.len(), 1);
@@ -2777,6 +2862,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.certs[0].thumbprint, B_HEX, "newest first");
@@ -2853,6 +2939,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         let active = roll.certs.iter().find(|c| c.is_active);
@@ -2872,6 +2959,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         let active = roll.certs.iter().find(|c| c.is_active);

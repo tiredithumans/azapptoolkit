@@ -14,6 +14,7 @@ use parking_lot::Mutex;
 use azapptoolkit_arm::{ArmClient, LogAnalyticsClient};
 use azapptoolkit_auth::{EntraAuthService, TenantContext};
 use azapptoolkit_core::cache::Cache;
+use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_core::identity::canonical_tenant_id;
 use azapptoolkit_core::settings::UserSettings;
 use azapptoolkit_exchange::ExchangeClient;
@@ -39,6 +40,11 @@ const DEFAULT_TENANT_ID: &str = "00000000-0000-0000-0000-000000000000";
 /// workspace root. `None` when no `.env` was present at build time.
 const BUILD_CLIENT_ID: Option<&str> = option_env!("AZAPPTOOLKIT_BUILD_CLIENT_ID");
 const BUILD_TENANT_ID: Option<&str> = option_env!("AZAPPTOOLKIT_BUILD_TENANT_ID");
+/// Sovereign cloud baked in at build time from `AZAPPTOOLKIT_CLOUD` in `.env`
+/// (a cloud name, not a secret). The runtime `AZAPPTOOLKIT_CLOUD` env var still
+/// wins; unset in both, the app targets the commercial cloud
+/// ([`CloudEnvironment::from_env_or`]).
+const BUILD_CLOUD: Option<&str> = option_env!("AZAPPTOOLKIT_BUILD_CLOUD");
 
 /// Shared state behind a [`CancelFlag`] and every [`CancelToken`] it issues.
 ///
@@ -359,7 +365,11 @@ impl AppState {
                 "AZAPPTOOLKIT_CLIENT_ID is not set; sign-in will fail until configured (first-run screen)."
             );
         }
-        let auth = EntraAuthService::new(client_id.clone(), tenant_id.clone());
+        let auth = EntraAuthService::new_in_cloud(
+            client_id.clone(),
+            tenant_id.clone(),
+            CloudEnvironment::from_env_or(BUILD_CLOUD),
+        );
         // Both ids are public identifiers (docs/DEVELOPMENT.md) and the auth
         // crate already logs the tenant; only the values and their sources are
         // recorded here, never the rest of settings.json.

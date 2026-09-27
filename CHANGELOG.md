@@ -10,9 +10,25 @@
 - **The Provisioning tab offers "Grant consent & retry".** It used to name
   `Synchronization.Read.All` and stop there. It now runs the consent round trip and reloads, as the
   Group memberships section does, and shows which roles can read provisioning.
+- **A team build can now bake in the sovereign cloud, like the client and tenant IDs.** Add
+  `AZAPPTOOLKIT_CLOUD` to `.env` before building, and the installer targets US Gov, US Gov DoD or
+  China with nothing set on each workstation. Previously every recipient had to set the variable,
+  or the app used the commercial endpoints and sign-in failed with an Entra error. A variable set on
+  the workstation still overrides the baked-in value.
 
 ### Fixed
 
+- **Creating an SSO application now works in US Gov and China tenants, and the URLs it gives app
+  owners point at your cloud.** The New SSO application wizard always used the global cloud's
+  custom-application template, which US Gov and 21Vianet tenants don't have, so creating a SAML or
+  OIDC app failed there. The Login, Logout and Metadata URLs, and the OIDC authority and discovery
+  URLs, always named `login.microsoftonline.com`, and in China the Entra Identifier named
+  `sts.windows.net`. A service provider set up from them couldn't sign anyone in. The metadata check
+  during a staged certificate rollover fetched the same wrong address, so it always read "couldn't
+  check" in a sovereign tenant. All of these now follow `AZAPPTOOLKIT_CLOUD`.
+- **Access Readiness now names the consent scope your cloud actually uses.** A US Gov or China build
+  said, for example, "Not consented: https://vault.azure.net/.default" while the app had asked for
+  the Key Vault, Azure Resource Manager, Log Analytics or Exchange scope at its own cloud's address.
 - **Access Readiness no longer reports Application Administrator or Cloud Application Administrator
   as missing for admin consent.** Those roles can grant consent for any API except Microsoft Graph
   (and Azure AD Graph) application roles, which still need Privileged Role Administrator or Global

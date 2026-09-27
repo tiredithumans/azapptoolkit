@@ -22,6 +22,20 @@ fn parse_env_line(line: &str) -> Option<(String, String)> {
     Some((key.to_string(), value.to_string()))
 }
 
+/// The `cargo:rustc-env` name a `.env` key is baked under, or `None` for a
+/// key the build does not bake. `state.rs` reads each back with `option_env!`;
+/// a runtime env var of the `.env` key's name still overrides it.
+fn baked_env_name(key: &str) -> Option<&'static str> {
+    match key {
+        "AZAPPTOOLKIT_CLIENT_ID" => Some("AZAPPTOOLKIT_BUILD_CLIENT_ID"),
+        "AZAPPTOOLKIT_TENANT_ID" => Some("AZAPPTOOLKIT_BUILD_TENANT_ID"),
+        // A cloud name (`usgov`, `usgovdod`, `china`), not a secret; validated
+        // at runtime by `CloudEnvironment::parse`, the one vocabulary.
+        "AZAPPTOOLKIT_CLOUD" => Some("AZAPPTOOLKIT_BUILD_CLOUD"),
+        _ => None,
+    }
+}
+
 /// Removes one matching pair of surrounding single or double quotes.
 fn strip_quotes(s: &str) -> &str {
     let bytes = s.as_bytes();
@@ -38,6 +52,24 @@ fn strip_quotes(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_client_tenant_and_cloud_keys_are_baked_and_nothing_else() {
+        assert_eq!(
+            baked_env_name("AZAPPTOOLKIT_CLIENT_ID"),
+            Some("AZAPPTOOLKIT_BUILD_CLIENT_ID")
+        );
+        assert_eq!(
+            baked_env_name("AZAPPTOOLKIT_TENANT_ID"),
+            Some("AZAPPTOOLKIT_BUILD_TENANT_ID")
+        );
+        assert_eq!(
+            baked_env_name("AZAPPTOOLKIT_CLOUD"),
+            Some("AZAPPTOOLKIT_BUILD_CLOUD")
+        );
+        assert_eq!(baked_env_name("TAURI_SIGNING_PRIVATE_KEY"), None);
+        assert_eq!(baked_env_name("AZAPPTOOLKIT_BUILD_CLOUD"), None);
+    }
 
     #[test]
     fn blank_and_comment_lines_are_skipped() {

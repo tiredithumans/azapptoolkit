@@ -77,8 +77,9 @@ pub struct EntraAuthService {
     /// point the token/authorize endpoints at a mock server.
     auth_root: String,
     /// Selected Microsoft cloud — drives the Graph/Exchange scope audiences (and,
-    /// via `auth_root`, the login host). Commercial unless `AZAPPTOOLKIT_CLOUD`
-    /// selects a sovereign cloud.
+    /// via `auth_root`, the login host). Chosen by the caller
+    /// ([`Self::new_in_cloud`]): `AZAPPTOOLKIT_CLOUD`, else the desktop build's
+    /// bake, else commercial.
     cloud: CloudEnvironment,
     cache: Arc<TokenCache>,
     /// Per-`(tenant, scope_key)` refresh locks, created lazily. The token cache
@@ -106,8 +107,20 @@ impl EntraAuthService {
     /// `tenant_id` is stored in its canonical (lowercase) spelling, the form
     /// the id token's `tid` claim takes, so `sign_in`'s tid check and every
     /// tenant-keyed map agree however the operator typed the GUID.
+    ///
+    /// The cloud comes from the `AZAPPTOOLKIT_CLOUD` env var alone; the desktop
+    /// app resolves its build-time bake too and calls [`Self::new_in_cloud`].
     pub fn new(client_id: impl Into<String>, tenant_id: impl AsRef<str>) -> Arc<Self> {
-        let cloud = CloudEnvironment::from_env();
+        Self::new_in_cloud(client_id, tenant_id, CloudEnvironment::from_env())
+    }
+
+    /// [`Self::new`] targeting an explicit `cloud` — the caller owns the
+    /// resolution order (runtime env var → build-time bake → commercial).
+    pub fn new_in_cloud(
+        client_id: impl Into<String>,
+        tenant_id: impl AsRef<str>,
+        cloud: CloudEnvironment,
+    ) -> Arc<Self> {
         Arc::new(Self {
             client_id: client_id.into(),
             tenant_id: canonical_tenant_id(tenant_id.as_ref()),
@@ -126,7 +139,8 @@ impl EntraAuthService {
         })
     }
 
-    /// The Microsoft cloud this service targets (from `AZAPPTOOLKIT_CLOUD`).
+    /// The Microsoft cloud this service targets — chosen by the caller:
+    /// `AZAPPTOOLKIT_CLOUD`, else the build-time bake.
     /// Lets `AppState` derive the matching Graph/Exchange/Key Vault/ARM base URLs
     /// from the same source as the scope audiences.
     pub fn cloud(&self) -> CloudEnvironment {
@@ -1729,6 +1743,20 @@ mod tests {
         assert!(matches!(result, Err(AuthError::RefreshTokenMissing(_))));
         assert!(svc.tenant_context(tenant).is_none());
         assert_eq!(load_refresh_token(tenant, oid).unwrap(), None);
+    }
+
+    #[test]
+    fn new_in_cloud_targets_that_clouds_login_and_graph_hosts() {
+        let svc = EntraAuthService::new_in_cloud("client", "tenant", CloudEnvironment::UsGov);
+        assert_eq!(svc.cloud(), CloudEnvironment::UsGov);
+        assert_eq!(svc.auth_root, "https://login.microsoftonline.us");
+        assert!(
+            svc.default_graph_read_scopes()
+                .iter()
+                .any(|s| s.starts_with("https://graph.microsoft.us/")),
+            "{:?}",
+            svc.default_graph_read_scopes()
+        );
     }
 
     #[test]
