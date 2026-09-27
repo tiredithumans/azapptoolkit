@@ -12,39 +12,112 @@
 //! Derived from the source tree, not from a list: a third call site added later
 //! is caught because it *constructs the request*, not because someone
 //! remembered to add it here.
+//!
+//! Checked **per function, with one helper level**, not per module. The first
+//! form asked only whether the *module* named the validator, which is the
+//! helper bleed `sources::commands` documents: `sso/mod.rs` and `restore.rs`
+//! both contain `validate_redirect_uri`, so a new command in either that built
+//! a patch straight from its input passed. [`unvalidated_writes`] holds the
+//! write and the check to the same function, or to every in-module caller of
+//! the helper the write sits in.
 
-use super::sources::command_modules;
+use super::sources::{command_modules, functions_in};
 
 /// The two ways a trust reaches Graph. `Patch` is the update path — it rewrites
 /// issuer/subject on an existing credential, which repoints the trust just as
 /// completely as creating one.
 const TRUST_WRITES: [&str; 2] = ["FederatedCredentialRequest {", "FederatedCredentialPatch {"];
 
-/// The single validator. `core::federation` owns the rules; a command may call
-/// it directly or through a thin local wrapper, so the rule matches the name.
-const VALIDATOR: &str = "validate_federated_credential";
+/// The single federation validator. `core::federation` owns the rules; a
+/// function may call it directly or through a thin local wrapper
+/// (`check_federated_credential`), so the rule matches the name.
+const FEDERATION_VALIDATOR: &str = "validate_federated_credential";
 
-#[test]
-fn every_command_that_writes_a_federation_trust_validates_it_first() {
+/// The patch types that carry reply URLs to Graph.
+const REDIRECT_WRITES: [&str; 3] = [
+    "ApplicationWebPatch {",
+    "ApplicationSpaPatch {",
+    "ApplicationPublicClientPatch {",
+];
+
+/// `core::redirect` owns the rules; a function may call either entry point
+/// (`validate_redirect_uri` / `validate_redirect_uris`), directly or through a
+/// thin local wrapper (`checked_uris`), so the rule matches the stem.
+const REDIRECT_VALIDATOR: &str = "validate_redirect_uri";
+
+/// The one call that mints a SAML signing certificate.
+const CERT_MINTS: [&str; 1] = [".add_token_signing_certificate("];
+
+/// The one bound on a signing certificate's lifetime.
+const CERT_LIFETIME_BOUND: &str = "resolve_cert_lifetime_days";
+
+/// Whether `body` names `ident` with an identifier boundary before it —
+/// `reconfigure(` is not a call to `configure(`.
+fn names(body: &str, ident: &str) -> bool {
+    body.match_indices(ident).any(|(at, _)| {
+        body[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+    })
+}
+
+/// `(writing functions found, offenders)` over `modules`, at **function**
+/// granularity.
+///
+/// A function whose own body constructs one of `writes` passes when that body
+/// names `validator`, or calls a module-local validator wrapper (a function
+/// whose body names the validator and writes nothing — `check_federated_credential`,
+/// `checked_uris`). Otherwise it passes one level up: it has at least one
+/// in-module caller and **every** caller validates the same way. Offenders are
+/// `module::fn`.
+fn unvalidated_writes(
+    modules: &[(String, String)],
+    writes: &[&str],
+    validator: &str,
+) -> (usize, Vec<String>) {
     let mut found = 0usize;
-    let mut offenders: Vec<String> = Vec::new();
-
-    for (name, src) in command_modules() {
-        for line in src.lines() {
-            let trimmed = line.trim_start();
-            // Doc comments legitimately name the types.
-            if trimmed.starts_with("//") {
-                continue;
-            }
-            if !TRUST_WRITES.iter().any(|w| trimmed.contains(w)) {
+    let mut offenders = Vec::new();
+    for (module, src) in modules {
+        let fns = functions_in(src);
+        let writes_in = |body: &str| writes.iter().any(|w| body.contains(w));
+        let wrappers: Vec<&str> = fns
+            .iter()
+            .filter(|f| names(&f.body, validator) && !writes_in(&f.body))
+            .map(|f| f.name.as_str())
+            .collect();
+        let validates = |body: &str| {
+            names(body, validator) || wrappers.iter().any(|w| names(body, &format!("{w}(")))
+        };
+        for (i, f) in fns.iter().enumerate() {
+            if !writes_in(&f.body) {
                 continue;
             }
             found += 1;
-            if !src.contains(VALIDATOR) {
-                offenders.push(format!("{name} — {trimmed}"));
+            if validates(&f.body) {
+                continue;
+            }
+            let call = format!("{}(", f.name);
+            let callers: Vec<&str> = fns
+                .iter()
+                .enumerate()
+                .filter(|(j, g)| *j != i && names(&g.body, &call))
+                .map(|(_, g)| g.body.as_str())
+                .collect();
+            if callers.is_empty() || !callers.iter().all(|body| validates(body)) {
+                offenders.push(format!("{module}::{}", f.name));
             }
         }
     }
+    (found, offenders)
+}
+
+/// Every function that writes a federation trust validates it first (per
+/// function, one helper level — see the module doc).
+#[test]
+fn every_command_that_writes_a_federation_trust_validates_it_first() {
+    let (found, offenders) =
+        unvalidated_writes(&command_modules(), &TRUST_WRITES, FEDERATION_VALIDATOR);
 
     assert!(
         found >= 2,
@@ -53,7 +126,8 @@ fn every_command_that_writes_a_federation_trust_validates_it_first() {
     );
     assert!(
         offenders.is_empty(),
-        "these modules write a federated identity credential without calling `{VALIDATOR}`.\n\
+        "these functions write a federated identity credential without calling \
+         `{FEDERATION_VALIDATOR}` (in their own body, or in every in-module caller).\n\
          A federated identity credential is a sign-in trust that needs no secret and never \
          expires, and Graph accepts a bad one without error — the check has to happen here, on \
          every path, or a value from an untrusted backup file becomes standing access:\n  {}",
@@ -61,7 +135,8 @@ fn every_command_that_writes_a_federation_trust_validates_it_first() {
     );
 }
 
-/// Every command that writes a redirect URI validates it first.
+/// Every function that writes a redirect URI validates it first (per function,
+/// one helper level — see the module doc).
 ///
 /// The sibling of the federation rule above, and it exists for the same reason:
 /// the interactive authentication editor and the four SSO sites ran
@@ -71,38 +146,12 @@ fn every_command_that_writes_a_federation_trust_validates_it_first() {
 /// `http://attacker.example/cb` created the app in the operator's tenant with
 /// those URLs and the codes could be collected by the attacker's host.
 ///
-/// Derived from the source tree, not a list: any future command that builds an
-/// authentication patch is caught because it *constructs the patch*.
+/// Derived from the source tree, not a list: any future function that builds
+/// an authentication patch is caught because it *constructs the patch*.
 #[test]
 fn every_command_that_writes_a_redirect_uri_validates_it_first() {
-    /// The patch types that carry reply URLs to Graph.
-    const REDIRECT_WRITES: [&str; 3] = [
-        "ApplicationWebPatch {",
-        "ApplicationSpaPatch {",
-        "ApplicationPublicClientPatch {",
-    ];
-    /// `core::redirect` owns the rules; a command may call either entry point,
-    /// directly or through a thin local wrapper, so the rule matches the stem.
-    const VALIDATOR: &str = "validate_redirect_uri";
-
-    let mut found = 0usize;
-    let mut offenders: Vec<String> = Vec::new();
-
-    for (name, src) in command_modules() {
-        for line in src.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") {
-                continue;
-            }
-            if !REDIRECT_WRITES.iter().any(|w| trimmed.contains(w)) {
-                continue;
-            }
-            found += 1;
-            if !src.contains(VALIDATOR) {
-                offenders.push(format!("{name} — {trimmed}"));
-            }
-        }
-    }
+    let (found, offenders) =
+        unvalidated_writes(&command_modules(), &REDIRECT_WRITES, REDIRECT_VALIDATOR);
 
     assert!(
         found >= 2,
@@ -111,11 +160,137 @@ fn every_command_that_writes_a_redirect_uri_validates_it_first() {
     );
     assert!(
         offenders.is_empty(),
-        "command(s) writing a redirect URI without validating it: {offenders:#?}\n\
+        "function(s) writing a redirect URI without validating it (in their own body, or in \
+         every in-module caller): {offenders:#?}\n\
          A reply URL decides where auth codes are delivered. Run \
          `core::redirect::validate_redirect_uri(s)` over every list before the patch and report \
          each rejection, the way `restore.rs::checked_uris` does."
     );
+}
+
+/// Every function that mints a SAML signing certificate bounds its lifetime
+/// first, through `sso::resolve_cert_lifetime_days` (per function, one helper
+/// level — see the module doc).
+///
+/// The signing certificate is the trust every SAML assertion is checked
+/// against, so its lifetime is the window a stolen key stays useful: an
+/// unbounded value is a trust that never has to be re-established. The bound
+/// is one function, table-tested in `sso/mod.rs`; this rule is what makes a
+/// third mint site that skips it fail CI rather than review.
+#[test]
+fn every_signing_certificate_mint_bounds_its_lifetime_first() {
+    let (found, offenders) =
+        unvalidated_writes(&command_modules(), &CERT_MINTS, CERT_LIFETIME_BOUND);
+
+    assert!(
+        found >= 2,
+        "only {found} signing-certificate mint(s) found — the source walk is broken, and a rule \
+         that scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "function(s) minting a SAML signing certificate without bounding its lifetime through \
+         `{CERT_LIFETIME_BOUND}` (in their own body, or in every in-module caller): \
+         {offenders:#?}"
+    );
+}
+
+/// The rules above must fire on a write whose *module* validates but whose
+/// *function* does not — the gap the module-level form left open.
+#[test]
+fn the_trust_rules_check_each_function_not_its_module() {
+    let module = r#"
+#[tauri::command]
+pub async fn set_web(input: Input) -> Result<(), UiError> {
+    validate_redirect_uri(&input.uri).map_err(invalid)?;
+    let web = ApplicationWebPatch { redirect_uris: Some(input.uris) };
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn create(input: Input) -> Result<(), UiError> {
+    for uri in &input.uris {
+        azapptoolkit_core::redirect::validate_redirect_uri(uri).map_err(invalid)?;
+    }
+    configure(&input).await
+}
+
+async fn configure(input: &Input) -> Result<(), UiError> {
+    let spa = ApplicationSpaPatch { redirect_uris: Some(input.uris.clone()) };
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn drifted(input: Input) -> Result<(), UiError> {
+    // validate_redirect_uri is the caller's job
+    let web = ApplicationWebPatch { redirect_uris: Some(input.uris) };
+    Ok(())
+}
+"#;
+    let modules = vec![("commands/fixture.rs".to_string(), module.to_string())];
+    let (found, offenders) = unvalidated_writes(&modules, &REDIRECT_WRITES, REDIRECT_VALIDATOR);
+    assert_eq!(found, 3, "set_web, configure and drifted each write");
+    assert_eq!(offenders, vec!["commands/fixture.rs::drifted".to_string()]);
+    // The module as a whole names the validator — the old module-level form
+    // passed `drifted`.
+    assert!(module.contains(REDIRECT_VALIDATOR));
+
+    // A helper is judged by its callers: one no in-module caller reaches is
+    // flagged (`reapply(` is not a call to `apply(`), and a thin local
+    // wrapper around the validator satisfies the function that calls it.
+    let module = r#"
+fn checked(uris: &[String]) -> Result<Vec<String>, String> {
+    for uri in uris {
+        validate_redirect_uri(uri)?;
+    }
+    Ok(uris.to_vec())
+}
+
+#[tauri::command]
+pub async fn wrapped(input: Input) -> Result<(), UiError> {
+    let uris = checked(&input.uris).map_err(invalid)?;
+    let web = ApplicationWebPatch { redirect_uris: Some(uris) };
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn validated(input: Input) -> Result<(), UiError> {
+    validate_redirect_uri(&input.uri).map_err(invalid)?;
+    reapply(&input).await
+}
+
+async fn apply(input: &Input) -> Result<(), UiError> {
+    let spa = ApplicationSpaPatch { redirect_uris: Some(input.uris.clone()) };
+    Ok(())
+}
+"#;
+    let modules = vec![("commands/fixture.rs".to_string(), module.to_string())];
+    let (found, offenders) = unvalidated_writes(&modules, &REDIRECT_WRITES, REDIRECT_VALIDATOR);
+    assert_eq!(found, 2, "wrapped and apply each write");
+    assert_eq!(offenders, vec!["commands/fixture.rs::apply".to_string()]);
+
+    // And a helper with an in-module caller that does not validate is flagged
+    // even though another caller does.
+    let module = r#"
+#[tauri::command]
+pub async fn guarded(input: Input) -> Result<(), UiError> {
+    validate_redirect_uri(&input.uri).map_err(invalid)?;
+    apply(&input).await
+}
+
+#[tauri::command]
+pub async fn unguarded(input: Input) -> Result<(), UiError> {
+    apply(&input).await
+}
+
+async fn apply(input: &Input) -> Result<(), UiError> {
+    let spa = ApplicationSpaPatch { redirect_uris: Some(input.uris.clone()) };
+    Ok(())
+}
+"#;
+    let modules = vec![("commands/fixture.rs".to_string(), module.to_string())];
+    let (_, offenders) = unvalidated_writes(&modules, &REDIRECT_WRITES, REDIRECT_VALIDATOR);
+    assert_eq!(offenders, vec!["commands/fixture.rs::apply".to_string()]);
 }
 
 /// Every `with_retries` call site states its [`RetryClass`] explicitly.

@@ -204,7 +204,8 @@ pub struct OidcSsoConfigInput {
     pub spa_redirect_uris: Vec<String>,
     /// When set, mint a client secret with this display name (returned once).
     pub secret_display_name: Option<String>,
-    /// Secret lifetime in days; defaults to 180 server-side when omitted.
+    /// Secret lifetime in days, 1–730 (Entra's 24-month cap; anything else is
+    /// rejected before the app is created); defaults to 180 server-side when omitted.
     pub secret_lifetime_days: Option<u32>,
 }
 

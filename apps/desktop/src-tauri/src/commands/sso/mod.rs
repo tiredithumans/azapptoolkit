@@ -30,7 +30,7 @@ mod claims;
 use claims::{build_claims_definition, parse_claims_definition};
 
 use crate::commands::applications::{
-    augment_with_object_id, invalidate_app_details, invalidate_app_lists,
+    MAX_SECRET_LIFETIME_DAYS, augment_with_object_id, invalidate_app_details, invalidate_app_lists,
 };
 use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::guid::is_guid;
@@ -395,6 +395,16 @@ pub async fn create_oidc_sso_application(
     tenant_id: String,
     input: OidcSsoConfigInput,
 ) -> Result<OidcSsoSummary, UiError> {
+    create_oidc_sso_application_core(&state, &tenant_id, input).await
+}
+
+/// Body of [`create_oidc_sso_application`], taking `&AppState` so the
+/// before-instantiate gates are testable against a mock Graph.
+async fn create_oidc_sso_application_core(
+    state: &AppState,
+    tenant_id: &str,
+    input: OidcSsoConfigInput,
+) -> Result<OidcSsoSummary, UiError> {
     // Reject wildcard / insecure redirect URIs (web + SPA) before creating
     // anything (MS app-registration security best practices).
     for uri in input
@@ -404,8 +414,19 @@ pub async fn create_oidc_sso_application(
     {
         azapptoolkit_core::redirect::validate_redirect_uri(uri).map_err(invalid_redirect_uri)?;
     }
+    // Same reason as the SAML certificate lifetime: the secret is only minted
+    // after instantiate, so an out-of-range lifetime is rejected here rather
+    // than after the app + SP exist. `configure_oidc` resolves it again to get
+    // the value — it is a pure function of the input, and this call is the gate.
+    if input
+        .secret_display_name
+        .as_deref()
+        .is_some_and(|s| !s.is_empty())
+    {
+        resolve_secret_lifetime_days(input.secret_lifetime_days)?;
+    }
 
-    let client = state.graph_for(&tenant_id);
+    let client = state.graph_for(tenant_id);
     let cloud = state.auth.cloud();
 
     let pair = client
@@ -416,10 +437,10 @@ pub async fn create_oidc_sso_application(
     let sp_id = pair.service_principal.id.clone();
 
     let result = configure_oidc(
-        &client, cloud, &object_id, &app_id, &sp_id, &tenant_id, &input,
+        &client, cloud, &object_id, &app_id, &sp_id, tenant_id, &input,
     )
     .await;
-    invalidate_app_lists(&state.cache, &tenant_id);
+    invalidate_app_lists(&state.cache, tenant_id);
     result.map_err(|e| augment_with_object_id(e, &object_id))
 }
 
@@ -456,8 +477,8 @@ async fn configure_oidc(
         .as_deref()
         .filter(|s| !s.is_empty())
     {
-        let days = input.secret_lifetime_days.unwrap_or(180);
-        let lifetime = Duration::from_secs(days as u64 * 86_400);
+        let days = resolve_secret_lifetime_days(input.secret_lifetime_days)?;
+        let lifetime = Duration::from_secs(u64::from(days) * 86_400);
         let secret =
             with_replication_retry(|| client.add_password(object_id, name, lifetime)).await?;
         (
@@ -532,7 +553,35 @@ fn resolve_cert_lifetime_days(days: Option<u32>) -> Result<u32, UiError> {
         return Err(UiError::validation(
             "invalid_cert_lifetime",
             format!(
-                "certificate lifetime must be between 1 and {MAX_CERT_LIFETIME_DAYS} days                  (3 years, Entra's maximum); got {days}"
+                "certificate lifetime must be between 1 and {MAX_CERT_LIFETIME_DAYS} days \
+                 (3 years, Entra's maximum); got {days}"
+            ),
+        ));
+    }
+    Ok(days)
+}
+
+/// Default OIDC client-secret lifetime when the caller supplies none — the
+/// portal's recommended preset.
+const DEFAULT_SECRET_LIFETIME_DAYS: u32 = 180;
+
+/// Bounds a caller-supplied OIDC client-secret lifetime to
+/// `1..=`[`MAX_SECRET_LIFETIME_DAYS`] (the portal's 24-month cap, the same
+/// bound the Credentials tab applies).
+///
+/// `0` would mint a secret that has already expired when the summary shows
+/// it; a large value reaches Graph only after `instantiate_application_template`
+/// has created the app and service principal, leaving a half-configured app —
+/// and `u32::MAX` days overflows `chrono` inside `GraphClient::add_password`.
+/// Checking here turns all of that into a typed rejection *before* any mutation.
+fn resolve_secret_lifetime_days(days: Option<u32>) -> Result<u32, UiError> {
+    let days = days.unwrap_or(DEFAULT_SECRET_LIFETIME_DAYS);
+    if days == 0 || i64::from(days) > MAX_SECRET_LIFETIME_DAYS {
+        return Err(UiError::validation(
+            "invalid_secret_lifetime",
+            format!(
+                "client secret lifetime must be between 1 and {MAX_SECRET_LIFETIME_DAYS} days \
+                 (24 months, Entra's maximum); got {days}"
             ),
         ));
     }
@@ -2619,6 +2668,97 @@ mod handler_tests {
             .count();
         assert_eq!(activations, 2, "one 404, then the retry that landed");
     }
+
+    fn oidc_input(secret_lifetime_days: Option<u32>) -> OidcSsoConfigInput {
+        OidcSsoConfigInput {
+            display_name: "x".into(),
+            secret_display_name: Some("oidc".into()),
+            secret_lifetime_days,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_oidc_secret_is_minted_inside_the_two_year_cap() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/v1.0/applications/{OBJECT}/addPassword")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keyId": "k1",
+                "displayName": "oidc",
+                "secretText": "s3cret"
+            })))
+            .mount(&server)
+            .await;
+        let state = AppState::for_test(TENANT, &server.uri());
+        let client = state.graph_for(TENANT);
+
+        let summary = configure_oidc(
+            &client,
+            CloudEnvironment::Commercial,
+            OBJECT,
+            "app-1",
+            SP,
+            TENANT,
+            &oidc_input(Some(730)),
+        )
+        .await
+        .expect("the secret is minted");
+        assert!(summary.client_secret.is_some());
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("request recording is on");
+        assert_eq!(requests.len(), 1, "only addPassword — no redirect PATCH");
+        let body: serde_json::Value = requests[0].body_json().expect("JSON body");
+        let end = body["passwordCredential"]["endDateTime"]
+            .as_str()
+            .expect("endDateTime is sent");
+        let end = chrono::DateTime::parse_from_rfc3339(end).expect("RFC 3339 endDateTime");
+        let want = chrono::Utc::now() + chrono::Duration::days(730);
+        let drift = (end.with_timezone(&chrono::Utc) - want).num_seconds().abs();
+        assert!(drift <= 300, "endDateTime {end} is not now + 730 days");
+    }
+
+    #[tokio::test]
+    async fn an_out_of_range_secret_lifetime_never_reaches_graph() {
+        // No mocks: any request would be recorded (and 404).
+        let server = MockServer::start().await;
+        let state = AppState::for_test(TENANT, &server.uri());
+        let client = state.graph_for(TENANT);
+
+        for days in [Some(0), Some(731), Some(u32::MAX)] {
+            // The create gate: rejected before instantiate, so no app or
+            // service principal is left half-configured.
+            let err = create_oidc_sso_application_core(&state, TENANT, oidc_input(days))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "invalid_secret_lifetime", "{days:?}");
+            // And `configure_oidc` resolves through the same gate.
+            let err = configure_oidc(
+                &client,
+                CloudEnvironment::Commercial,
+                OBJECT,
+                "app-1",
+                SP,
+                TENANT,
+                &oidc_input(days),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "invalid_secret_lifetime", "{days:?}");
+        }
+        let requests = server
+            .received_requests()
+            .await
+            .expect("request recording is on");
+        assert!(
+            requests.is_empty(),
+            "{} request(s) reached Graph",
+            requests.len()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2738,6 +2878,24 @@ mod tests {
         // And an absurd value never reaches `chrono::Duration::days`, which
         // panics rather than saturating.
         assert!(resolve_cert_lifetime_days(Some(u32::MAX)).is_err());
+    }
+
+    #[test]
+    fn a_client_secret_lifetime_is_bounded_by_entras_two_year_cap() {
+        // Default when none is supplied — the portal's recommended preset.
+        assert_eq!(resolve_secret_lifetime_days(None).unwrap(), 180);
+        assert_eq!(resolve_secret_lifetime_days(Some(1)).unwrap(), 1);
+        assert_eq!(resolve_secret_lifetime_days(Some(730)).unwrap(), 730);
+        // The same 24-month cap the Credentials tab applies.
+        let err = resolve_secret_lifetime_days(Some(731)).unwrap_err();
+        assert_eq!(err.code, "invalid_secret_lifetime");
+        // Zero would mint an already-expired secret.
+        let err = resolve_secret_lifetime_days(Some(0)).unwrap_err();
+        assert_eq!(err.code, "invalid_secret_lifetime");
+        // And an absurd value never reaches `chrono` inside `add_password`,
+        // whose `now + Duration` panics rather than saturating.
+        let err = resolve_secret_lifetime_days(Some(u32::MAX)).unwrap_err();
+        assert_eq!(err.code, "invalid_secret_lifetime");
     }
 
     #[test]

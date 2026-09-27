@@ -22,6 +22,12 @@
 
 ### Fixed
 
+- **The New SSO application wizard now refuses an OIDC client-secret lifetime outside 1–730 days
+  instead of creating a broken app.** A lifetime of 0 created a secret that had already expired, and
+  a very large one failed only after the application and its service principal existed, leaving a
+  half-configured app. The wizard now says "client secret lifetime must be between 1 and 730 days"
+  and creates nothing, as it already does for a SAML certificate lifetime, and the cap matches the
+  24 months the Credentials tab allows.
 - **A SAML app whose custom claims or notification emails couldn't be saved no longer looks fully
   set up.** The New SSO application wizard treats those two steps as best-effort. When one failed,
   the wizard still showed the same success screen, so the missing claims only came to light at the

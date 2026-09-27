@@ -1,5 +1,5 @@
-//! Rules that scan the whole command layer, plus the shared source table the
-//! other concern modules read.
+//! Rules that scan the command layer and the frontend as a whole rather than
+//! one command at a time; the shared source walk lives in [`super::sources`].
 
 /// The `.alert` tone vocabulary lives in exactly ONE component.
 ///

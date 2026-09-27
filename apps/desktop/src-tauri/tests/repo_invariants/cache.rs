@@ -5,6 +5,8 @@
 //! AGENTS.md calls cross-tenant leakage "the #1 footgun"; these are the rules
 //! that keep it mechanical rather than remembered.
 
+use super::sources::is_fn_header;
+
 // No `include_str!` table here on purpose: every rule below derives its subject
 // from `sources::command_modules()`, the same source-tree walk `sources.rs` was
 // written to replace the fan-out/cancel tables with. Three hand-maintained
@@ -77,26 +79,6 @@ fn back_walk_names_a_pinnable_key(lines: &[&str], line_no: usize) -> bool {
         .take_while(|l| !is_fn_header(l))
         .filter(|l| !l.starts_with("//"))
         .any(|l| PINNABLE_KEYS.iter().any(|k| l.contains(k)))
-}
-
-/// Whether `trimmed` opens a function — at any indentation, with any
-/// combination of visibility, `async`, `const`, `unsafe` or `extern`.
-///
-/// The walk above uses this as its boundary, so anything it fails to recognise
-/// silently widens the search into the previous function.
-fn is_fn_header(trimmed: &str) -> bool {
-    let rest = trimmed
-        .strip_prefix("pub(crate) ")
-        .or_else(|| trimmed.strip_prefix("pub(super) "))
-        .or_else(|| trimmed.strip_prefix("pub "))
-        .unwrap_or(trimmed);
-    let rest = rest
-        .strip_prefix("const ")
-        .or_else(|| rest.strip_prefix("async "))
-        .or_else(|| rest.strip_prefix("unsafe "))
-        .unwrap_or(rest);
-    let rest = rest.strip_prefix("async ").unwrap_or(rest);
-    rest.starts_with("fn ")
 }
 
 const INVALIDATORS: &[&str] = &[

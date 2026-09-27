@@ -49,8 +49,10 @@ pub(crate) async fn add_password_core(
     Ok(cred)
 }
 
-/// Maximum client-secret lifetime — the portal's 24-month hard cap.
-const MAX_SECRET_LIFETIME_DAYS: i64 = 730;
+/// Maximum client-secret lifetime — the portal's 24-month hard cap. Shared
+/// with the OIDC SSO create path (`sso::resolve_secret_lifetime_days`), so one
+/// concept has one bound.
+pub(crate) const MAX_SECRET_LIFETIME_DAYS: i64 = 730;
 
 /// Resolves an [`AddPasswordInput`] to the `(start, end)` window sent to
 /// Graph. An explicit `end_date_time` (portal "Custom" expiry) wins over
@@ -386,6 +388,7 @@ mod password_window_tests {
             (Some(90), 90),
             (Some(730), 730),
             (Some(9999), 730),
+            (Some(u32::MAX), 730),
         ] {
             assert_eq!(
                 preset_secret_end(days, now),

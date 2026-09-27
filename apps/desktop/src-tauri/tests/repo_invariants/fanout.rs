@@ -190,7 +190,6 @@ fn call_sites<'a>(src: &'a str, callee: &str) -> Vec<&'a str> {
 #[test]
 fn every_fan_out_command_honours_is_reauth_fatal() {
     let mut missing: Vec<String> = Vec::new();
-    let stale: Vec<&str> = Vec::new();
     let mut checked = 0usize;
 
     for (name, src) in super::sources::command_modules() {
@@ -207,10 +206,9 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
 
         // `run_bulk_seq` gates centrally, in the driver — every caller inherits
         // it, and `a_dead_session_halts_the_run_instead_of_burning_the_selection`
-        // covers it. A module that only drives the sequential path is handled by
-        // that, so it has no call sites to check here.
+        // covers it. So a module that only drives the sequential path has no
+        // `dispatch_capped` sites, and the loop below is empty for it.
         let sites = call_sites(&src, "dispatch_capped");
-        let _handled_by_driver = sites.is_empty() && src.contains("run_bulk_seq(");
 
         for (n, site) in sites.iter().enumerate() {
             // Two accepted shapes. Either the spawn closure gates on the shared
@@ -238,18 +236,14 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
          on `SessionDead::is_dead()`, note failures through it in the collect arm, and return \
          `session.err(..)` rather than a partial result. See commands/backup.rs for the shape."
     );
-    assert!(
-        stale.is_empty(),
-        "these now handle is_reauth_fatal — drop them from KNOWN_GAPS: {stale:?}"
-    );
     // AGENTS.md: KNOWN_GAPS "is empty and must stay so". It was empty, and the
     // test above tolerated entries being ADDED to it — a new fan-out with no
     // dead-session branch could ship by appending one line, and the only
     // pushback would be a staleness message that never fires while the gap is
     // real. An allowlist that can grow is not a ratchet.
     //
-    // Deliberately last, so the two diagnostics above (which say what to fix)
-    // are reached first when several things are wrong at once.
+    // Deliberately last, so the diagnostics above (which say what to fix) are
+    // reached first when several things are wrong at once.
     assert!(
         KNOWN_GAPS.is_empty(),
         "KNOWN_GAPS must stay empty: {KNOWN_GAPS:?}\n\

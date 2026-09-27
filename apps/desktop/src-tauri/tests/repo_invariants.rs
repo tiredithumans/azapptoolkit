@@ -14,17 +14,20 @@
 //! Cargo only compiles top-level `tests/*.rs` as test binaries, so the
 //! `repo_invariants/` directory is picked up through these declarations alone.
 //!
-//! - [`sources`] — the command layer as data: the source walk every rule reads
+//! - [`sources`] — the command layer as data: the source walk and the
+//!   per-command / per-function extractors every rule reads
 //! - [`fanout`] — dead-session gating in the long-running fan-outs
 //! - [`cache`] — invalidate-on-`Ok`, pinned indexes, watch-before-fetch
 //! - [`cancel`] — one `CancelToken` claim per long-running command
-//! - [`commands`] — whole-command-layer scans, and the shared source table
+//! - [`commands`] — whole-layer scans (the Callout primitive, consent
+//!   detection, resource-gated scope fixes)
 //! - [`ipc`] — the IPC contract: handler registry ↔ commands ↔ bindings, arg
 //!   keys, return types, and the single tauri-sys door
 //! - [`logging`] — tracing macros set their target with `target:`, not a field
 //! - [`release`] — version identity, CHANGELOG format, mirrored lint block, the
 //!   update gate, the Linux glibc floor and the NSIS install mode
-//! - [`trust`] — every path that mints an authentication trust validates it
+//! - [`trust`] — every path that mints an authentication trust validates it,
+//!   and every signing-certificate mint bounds its lifetime
 
 #[path = "repo_invariants/cache.rs"]
 mod cache;

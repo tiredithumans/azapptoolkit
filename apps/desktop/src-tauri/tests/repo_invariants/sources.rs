@@ -1,5 +1,5 @@
-//! The command layer as data: every module, and every `#[tauri::command]`
-//! body, read from the source tree at test time.
+//! The command layer as data: every module, every `#[tauri::command]` body and
+//! every function body, read from the source tree at test time.
 //!
 //! Replaces the three hand-maintained `include_str!` tables the fan-out, cancel
 //! and command rules each kept. Those tables were the reason a 7 822-insertion
@@ -216,6 +216,88 @@ pub(crate) fn commands() -> Vec<Command> {
         "found only {} #[tauri::command] handlers — the extractor is broken",
         out.len()
     );
+    out
+}
+
+/// Whether `trimmed` opens a function — at any indentation, with any
+/// combination of visibility, `async`, `const`, `unsafe` or `extern`.
+///
+/// Both the cache rule's back-walk and [`functions_in`] use this as their
+/// boundary, so anything it fails to recognise silently widens the search into
+/// the previous function. One definition, so the two cannot disagree.
+pub(crate) fn is_fn_header(trimmed: &str) -> bool {
+    let rest = trimmed
+        .strip_prefix("pub(crate) ")
+        .or_else(|| trimmed.strip_prefix("pub(super) "))
+        .or_else(|| trimmed.strip_prefix("pub "))
+        .unwrap_or(trimmed);
+    let rest = rest
+        .strip_prefix("const ")
+        .or_else(|| rest.strip_prefix("async "))
+        .or_else(|| rest.strip_prefix("unsafe "))
+        .unwrap_or(rest);
+    let rest = rest.strip_prefix("async ").unwrap_or(rest);
+    rest.starts_with("fn ")
+}
+
+/// One `fn` item — a command, a private helper, a nested fn — with its **own**
+/// body.
+pub(crate) struct Function {
+    pub(crate) name: String,
+    /// Brace-balanced body with every `//` line removed, so a comment that
+    /// merely names a validator cannot satisfy a rule that asks for the call.
+    pub(crate) body: String,
+}
+
+/// Every `fn` item in `src`, each with its own body.
+///
+/// [`commands`] stops at `#[tauri::command]` handlers; the trust rules also
+/// need the private helpers a command delegates its write to (`configure_oidc`,
+/// `wire_application`), because that is where the write sits and where the
+/// check has to be proven. Every header is scanned independently — a nested fn
+/// appears both inside its parent's body and as an item of its own. Bodiless
+/// declarations (trait items) are skipped.
+pub(crate) fn functions_in(src: &str) -> Vec<Function> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    for line in src.split_inclusive('\n') {
+        let line_at = offset;
+        offset += line.len();
+        let trimmed = line.trim_start();
+        if !is_fn_header(trimmed) {
+            continue;
+        }
+        let Some(kw) = trimmed.find("fn ") else {
+            continue;
+        };
+        let fn_at = line_at + (line.len() - trimmed.len()) + kw;
+        let name: String = src[fn_at + 3..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        let Some(params_end) = balanced_paren_end(src, fn_at) else {
+            continue;
+        };
+        let rest = &src[params_end..];
+        let (Some(brace), semi) = (rest.find('{'), rest.find(';')) else {
+            continue;
+        };
+        if semi.is_some_and(|semi| semi < brace) {
+            continue;
+        }
+        let Some(block) = balanced_block(src, params_end) else {
+            continue;
+        };
+        let body = block
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push(Function { name, body });
+    }
     out
 }
 
