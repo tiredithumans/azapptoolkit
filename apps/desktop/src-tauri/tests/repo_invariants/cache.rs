@@ -1079,7 +1079,10 @@ fn the_run_is_cacheable_guard_detector_rejects_every_escape() {
 /// fails here until the sweep names it.
 #[test]
 fn sign_out_forgets_every_per_tenant_map_on_app_state() {
-    let state = include_str!("../../src/state.rs");
+    // A Windows checkout has CRLF line endings, and the block ends below are
+    // found by splitting on "\n}\n", so normalise before scanning.
+    let state = include_str!("../../src/state.rs").replace("\r\n", "\n");
+    let state = state.as_str();
     let (_, after) = state
         .split_once("pub struct AppState {")
         .expect("AppState struct in state.rs");
@@ -1116,7 +1119,7 @@ fn sign_out_forgets_every_per_tenant_map_on_app_state() {
         "`AppState::forget_tenant` must sweep every cache kind via `invalidate_tenant`"
     );
 
-    let auth = include_str!("../../src/commands/auth.rs");
+    let auth = include_str!("../../src/commands/auth.rs").replace("\r\n", "\n");
     let (_, after) = auth
         .split_once("pub async fn sign_out(")
         .expect("sign_out command in commands/auth.rs");
