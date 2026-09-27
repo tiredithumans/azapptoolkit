@@ -1323,7 +1323,7 @@ fn sso_certificates_to_csv(rows: &[SsoCertificateRowDto]) -> String {
 fn sso_cert_status(
     active: Option<&azapptoolkit_dto::sso::SigningCertDto>,
 ) -> azapptoolkit_core::audit::CredentialStatus {
-    use azapptoolkit_core::audit::{CredentialStatus, EXPIRY_WARNING_DAYS};
+    use azapptoolkit_core::audit::CredentialStatus;
     use azapptoolkit_dto::sso::CertStatus;
     let Some(cert) = active else {
         return CredentialStatus::Unknown;
@@ -1331,12 +1331,8 @@ fn sso_cert_status(
     if matches!(cert.status, CertStatus::Expired) {
         return CredentialStatus::Expired;
     }
-    match cert.days_to_expiry {
-        None => CredentialStatus::Unknown,
-        Some(d) if d < 0 => CredentialStatus::Expired,
-        Some(d) if d <= EXPIRY_WARNING_DAYS => CredentialStatus::ExpiringSoon,
-        Some(_) => CredentialStatus::Active,
-    }
+    // The audit's own day bucketing, not a copy of it.
+    CredentialStatus::from_days_to_expiry(cert.days_to_expiry)
 }
 
 /// Cache key for [`list_sso_certificate_expirations`]. Tenant-scoped like every

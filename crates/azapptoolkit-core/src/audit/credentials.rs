@@ -28,7 +28,7 @@ pub fn summarize_credentials(
                 start_date_time: p.start_date_time,
                 end_date_time: end,
                 days_to_expiry,
-                status: credential_status(days_to_expiry),
+                status: CredentialStatus::from_days_to_expiry(days_to_expiry),
             }
         })
         .collect();
@@ -44,7 +44,7 @@ pub fn summarize_credentials(
                 start_date_time: k.start_date_time,
                 end_date_time: end,
                 days_to_expiry,
-                status: credential_status(days_to_expiry),
+                status: CredentialStatus::from_days_to_expiry(days_to_expiry),
             }
         })
         .collect();
@@ -52,9 +52,9 @@ pub fn summarize_credentials(
 }
 
 /// Whether a credential's end date is past by at least one whole day — the
-/// single "expired" rule shared by the audit scorer ([`credential_status`]),
-/// the one-click remediation, the per-app expired-secret removal, and the bulk
-/// sweep. `num_days()` truncates toward zero, so a credential that lapsed
+/// single "expired" rule shared by the audit scorer
+/// ([`CredentialStatus::from_days_to_expiry`]), the one-click remediation, the
+/// per-app expired-secret removal, and the bulk sweep. `num_days()` truncates toward zero, so a credential that lapsed
 /// under 24h ago is still *expiring soon* everywhere: the audit offers no Fix
 /// for it, and no removal path deletes it until it crosses a full day.
 pub fn is_expired(end: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
@@ -72,15 +72,6 @@ pub fn expired_password_key_ids(app: &Application, now: DateTime<Utc>) -> Vec<St
         .filter(|c| is_expired(c.end_date_time, now))
         .map(|c| c.key_id.clone())
         .collect()
-}
-
-fn credential_status(days: Option<i64>) -> CredentialStatus {
-    match days {
-        None => CredentialStatus::Unknown,
-        Some(d) if d < 0 => CredentialStatus::Expired,
-        Some(d) if d <= EXPIRY_WARNING_DAYS => CredentialStatus::ExpiringSoon,
-        Some(_) => CredentialStatus::Active,
-    }
 }
 
 pub(super) fn overall_credential_status(all: &[&CredentialSummary]) -> CredentialStatus {
@@ -179,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn is_expired_agrees_with_credential_status_at_the_day_boundary() {
+    fn is_expired_agrees_with_from_days_to_expiry_at_the_day_boundary() {
         // The shared removal predicate and the scorer's status must call the
         // same set "expired" — a sub-day lapse is ExpiringSoon to both, so no
         // removal path deletes a credential the audit never flagged.
@@ -192,11 +183,11 @@ mod tests {
         ];
         for (end, expired) in cases {
             assert_eq!(is_expired(end, now), expired, "is_expired({end:?})");
-            let status = credential_status(end.map(|e| (e - now).num_days()));
+            let status = CredentialStatus::from_days_to_expiry(end.map(|e| (e - now).num_days()));
             assert_eq!(
                 status == CredentialStatus::Expired,
                 expired,
-                "credential_status({end:?}) = {status:?}"
+                "from_days_to_expiry({end:?}) = {status:?}"
             );
         }
     }

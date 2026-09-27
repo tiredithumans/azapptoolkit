@@ -65,10 +65,13 @@ fn sp_orgwide_mail_grant_scores_high_risk_with_scope_remediation() {
         .find(|r| r.kind == RemediationKind::ScopeMailboxAccess)
         .expect("org-wide mail grant gets a scope-mailbox Fix");
     assert_eq!(fix.targets, vec!["Mail.ReadWrite".to_string()]);
-    // Row identity is the SP object id; the owner tenant rides `publisher`.
+    // Row identity is the SP object id; the owner tenant rides
+    // `app_owner_organization_id`, not `publisher` (a publisher DOMAIN on app
+    // rows — one column must not mean two things).
     assert_eq!(item.object_id, "sp-1");
+    assert_eq!(item.publisher, None);
     assert_eq!(
-        item.publisher.as_deref(),
+        item.app_owner_organization_id.as_deref(),
         Some("11111111-2222-3333-4444-555555555555")
     );
     assert_eq!(item.principal_kind, AuditPrincipalKind::ServicePrincipal);
@@ -334,6 +337,29 @@ fn principal_kind_is_additive_on_the_wire() {
     v.as_object_mut().unwrap().remove("principal_kind");
     let item: AuditItem = serde_json::from_value(v).unwrap();
     assert_eq!(item.principal_kind, AuditPrincipalKind::Application);
+}
+
+#[test]
+fn app_owner_organization_id_is_additive_on_the_wire() {
+    // A cached SP row from before the field existed deserializes as `None`.
+    let scored = score_service_principal(&base_sp(), &AppPermissions::default(), now());
+    let mut v = serde_json::to_value(&scored).unwrap();
+    assert!(v.get("app_owner_organization_id").is_some());
+    v.as_object_mut()
+        .unwrap()
+        .remove("app_owner_organization_id");
+    let item: AuditItem = serde_json::from_value(v).unwrap();
+    assert_eq!(item.app_owner_organization_id, None);
+
+    // An application row lives in this tenant: no owner-tenant value, and its
+    // `publisher` is still the verified publisher domain.
+    let app = Application {
+        publisher_domain: Some("contoso.com".into()),
+        ..base_app()
+    };
+    let item = score_application(&app, None, &AppPermissions::default(), now());
+    assert_eq!(item.app_owner_organization_id, None);
+    assert_eq!(item.publisher.as_deref(), Some("contoso.com"));
 }
 
 #[test]

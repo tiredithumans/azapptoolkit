@@ -6,6 +6,37 @@ Deep-dive companion to the audit gotchas in [AGENTS.md](../../AGENTS.md). Read t
 about are in [exchange-scoping.md](./exchange-scoping.md) and
 [sharepoint-selected.md](./sharepoint-selected.md).
 
+## Rule catalog
+
+`score_application` folds the numbered rules in this order (helpers in `audit/scoring.rs`, markers
+in `audit::issue`, finding keys in `audit/finding.rs`, weights in `audit/permissions.rs`). A rule
+that is "advisory" adds issues/recommendations but no score. Provenance says only what the code or
+tests cite — the legacy PowerShell module is not vendored here (see `audit/mod.rs`).
+
+| Rule | Helper | Score | Issue marker | Finding key | Fix | Provenance |
+|---|---|---|---|---|---|---|
+| 1 | `rule_app_permission_risk` | +10 per org-wide high-risk grant (+3 if mailbox-confined) | `HIGH_RISK_APP_PERMS` | `high_risk_perms` | — | `Constants.ps1:104-115`; net-new entries marked in `permissions.rs` |
+| 2 | same | +5 per org-wide medium-risk grant (+2 if confined) | none | — | — | `Constants.ps1:123-130`; net-new entries marked |
+| 3 | `rule_admin_consent` | +5 flat | none | — | — | not cited |
+| 4 | `rule_sp_disabled` | +2 | none | — | — | not cited |
+| 5 / 6 | `rule_credentials` | +8 all expired / +4 mixed | none (structured `credential_status`) | `expired` | `RemoveExpiredCredentials` | not cited |
+| 7 | same | +3 flat (secrets and certificates) | none | — | — | `Credential-Analysis.ps1:169` |
+| 8 / 9 | same | +3 all expiring / +2 mixed (only when none expired) | none | — | — | threshold `Constants.ps1:202` |
+| 10 | `rule_stale_app` | +2 (older than `STALE_APP_DAYS`) | none | — | — | `MaxAuditHistoryDays` in `Constants.ps1` |
+| 11 | `rule_mailbox_advisory` | advisory | `ORG_WIDE_MAILBOX`, `LEGACY_MAILBOX_POLICY`, `UNSCOPABLE_LEGACY_MAILBOX`, `UNCONFINABLE_MAILBOX`, `SCOPED_VIA_RBAC` (contains) | `orgwide_mailbox`, `legacy_mailbox_scope`, `unscopable_legacy_mailbox`, `unconfinable_orgwide`, `scoped_mailbox` | `ScopeMailboxAccess`, `MigrateApplicationAccessPolicy` | `Resource-Analysis.ps1::Add-ExchangePermissionAnalysis` |
+| 12 | `rule_sharepoint_advisory` | advisory | `ORG_WIDE_SHAREPOINT`, `UNCONFINABLE_SHAREPOINT`, `SCOPED_SHAREPOINT` | `orgwide_sharepoint`, `unconfinable_orgwide`, `scoped_sites` | `ScopeSharePointAccess` | not cited |
+| 13 | `rule_high_risk_delegated` | advisory | `HIGH_RISK_DELEGATED_PERMS` | `high_risk_delegated` | — | list `Constants.ps1:104-130` |
+| 14 | `rule_app_hygiene` | advisory | `NO_OWNERS`, `SINGLE_OWNER` | `ownership` | `AddOwner` | not cited |
+| 15–17 | same | advisory | `INSTANCE_LOCK_DISABLED`, `PUBLIC_CLIENT_CREDENTIALS`, `PREFER_CERT_OVER_SECRET` | — | — | net-new (tests' "Tier-2 advisory rules") |
+| 18 | `rule_redundant_permissions` | advisory (the narrower grant keeps its Rule 1/2 weight) | `REDUNDANT_APP_PERMS` | `redundant_perms` | `RemoveRedundantPermissions` | not cited |
+| 19 / 20 | `rule_external_exposure` | +3 audience / +2 unverified publisher | `MULTITENANT_AUDIENCE`, `UNVERIFIED_PUBLISHER` | `external_exposure` | — | not cited |
+| — | `rule_downgrade_pointers` | recommendation only | none | — | — (Downgrade… is admin-judged) | not cited |
+| runner | `unused_app_advisory` (sign-in post-pass) | advisory | none (structured `unused`) | `unused` | `DisableSignIn` | net-new |
+
+Risk levels: Critical ≥ 25, High ≥ 15, Medium ≥ 8 (`Constants.ps1:207-213`). SP-only rows run
+Rules 1–4 and 11–13 plus the sign-in post-pass (see
+[SP-only principals](#sp-only-principals-in-the-audit-no-local-application)).
+
 ## Scope-aware audit risk
 
 Mail/calendar/contacts application permissions are scopable via Exchange RBAC for Applications, so
@@ -242,6 +273,11 @@ Two kinds vary the pattern:
 fully covers narrower one" relationships (transitive closure flattened, e.g. `Sites.Read.All` →
 all three broader `Sites.*` tiers). Rule 18 flags a held narrower permission whose broader sibling
 is also held — advisory, **no score** (the broader permission already carries the risk weight).
+The covered narrower grant still keeps its own Rule 1/2 weight: the risk rules measure surface area
+(every held risk-listed grant), not effective reach, so `Mail.ReadWrite` + `Mail.Read` scores 15
+where `Mail.ReadWrite` alone scores 10. That is deliberate — Rules 1/2 are the ported per-grant
+weights, and dropping covered grants would re-rank apps; the one-click removal is what pays the
+difference back. Pinned by `redundant_permissions_rule_is_advisory_with_remediation`.
 Constraints baked into the table; keep them when extending it:
 
 - **Application permissions only.** Graph authorizes app-only calls by the union of `roles` in the
@@ -261,7 +297,8 @@ Constraints baked into the table; keep them when extending it:
 The one-click fix (`RemediationKind::RemoveRedundantPermissions` →
 `commands::remediation::remediate_remove_redundant_permissions`) re-plans from a fresh manifest +
 live `appRoleAssignments` (`plan_redundant_removals`, pure + unit-tested), with three rules
-**stricter than the scorer** (which flattens values across resources):
+**stricter than the scorer** (the scorer also pairs on `(resource, value)`, but reads an empty
+`mail_scopes` as org-wide):
 
 - The covering broader permission must be declared on the **same resource** (Graph's
   `Mail.ReadWrite` doesn't cover Exchange Online's `Mail.Read` appRole of the same name).
@@ -414,9 +451,13 @@ foreign-tenant (OIDC/multi-tenant) enterprise apps, managed identities, orphaned
   The **legacy AAP verdict is the one exception**, and it costs nothing extra (see
   `apply_legacy_policy_verdict` above): unlike an RBAC scope, a policy *does* constrain the org-wide
   Entra grant these rows are scored from.
-- **Wire shape**: one additive field, `AuditItem.principal_kind`
+- **Wire shape**: two additive fields. `AuditItem.principal_kind`
   (`application` | `service_principal` | `managed_identity`, `#[serde(default)]` so pre-field
-  cached runs deserialize as `Application`). For SP rows `object_id` is the **SP object id**.
+  cached runs deserialize as `Application`), and `AuditItem.app_owner_organization_id`
+  (`#[serde(default)]`): the SP's home tenant, exported as the last CSV column `AppOwnerOrgId`
+  (named as in the Enterprise Applications export). `publisher` is `None` on SP rows — it is an
+  application's verified publisher domain, never a tenant GUID. For SP rows `object_id` is the
+  **SP object id**.
 - **Frontend routing keys off `principal_kind`** (structured-signals rule): the `no_local_app`
   finding group; Open → enterprise / MI detail (`open_enterprise_on_tab` /
   `open_managed_identity_on_tab`); scope Fixes carry a `ScopeFixTarget` — `AppReg` rows call the

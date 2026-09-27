@@ -595,6 +595,7 @@ pub fn audit_item(name: &str, risk: RiskLevel, issues: &[String]) -> AuditItem {
         unused: false,
         sign_in_report_available: true,
         principal_kind: AuditPrincipalKind::Application,
+        app_owner_organization_id: None,
     }
 }
 

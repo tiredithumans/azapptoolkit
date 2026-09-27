@@ -190,12 +190,18 @@ fn scope_fixes_are_gated_on_a_positive_resource_test() {
 /// call sites carried their own `#[allow]` besides. AGENTS.md meanwhile said
 /// the value-only forms were pinned as forbidden. Now they do not exist, and
 /// this is what makes that true — reintroducing one by name fails here.
+///
+/// `least_privilege_alternative(value)` joined them later for the same reason:
+/// it defaulted the resource to Microsoft Graph, so the permission picker told
+/// operators to scope Office 365 Exchange Online mail permissions via Exchange
+/// RBAC. The `(` keeps the resource-aware `least_privilege_alternative_for` out.
 #[test]
 fn the_resource_blind_mailbox_gates_are_not_reintroduced() {
-    const GONE: [&str; 3] = [
+    const GONE: [&str; 4] = [
         "exchange_role_for_permission",
         "is_scopable_exchange_permission",
         "fn scope_kind(",
+        "least_privilege_alternative(",
     ];
     // Every Rust source in the workspace + the excluded frontend tree.
     // apps/desktop/src-tauri → apps/desktop → apps → repo root.
@@ -266,7 +272,8 @@ fn the_resource_blind_mailbox_gates_are_not_reintroduced() {
          Both mailbox resources expose the same permission names and only Microsoft Graph's can \
          be confined, so a value-only answer reports an unscopable legacy grant as scopable. Take \
          the resource: is_scopable_exchange_resource_permission / \
-         exchange_role_for_resource_permission / scope_kind_for.",
+         exchange_role_for_resource_permission / scope_kind_for / \
+         least_privilege_alternative_for.",
         offenders.join("\n  ")
     );
 }

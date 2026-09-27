@@ -915,7 +915,7 @@ pub(crate) fn export_audit_csv(items: Vec<AuditItem>, coverage: &AuditExportCove
     for gap in &coverage.degraded {
         out.push_str(&format!("# - {}\n", gap.description()));
     }
-    out.push_str("ApplicationName,AppId,ObjectId,CreatedDate,Publisher,SignInAudience,RiskScore,RiskLevel,CredentialStatus,PermissionCount,DaysSinceCreated,ServicePrincipalEnabled,Issues,Recommendations,PrincipalKind\n");
+    out.push_str("ApplicationName,AppId,ObjectId,CreatedDate,Publisher,SignInAudience,RiskScore,RiskLevel,CredentialStatus,PermissionCount,DaysSinceCreated,ServicePrincipalEnabled,Issues,Recommendations,PrincipalKind,AppOwnerOrgId\n");
     for item in items {
         let row = [
             csv_field(&item.application_name),
@@ -942,6 +942,9 @@ pub(crate) fn export_audit_csv(items: Vec<AuditItem>, coverage: &AuditExportCove
             csv_field(&item.issues.join("; ")),
             csv_field(&item.recommendations.join("; ")),
             csv_field(item.principal_kind.as_str()),
+            // Appended last, like PrincipalKind, so positional parsers keep
+            // working. Named as in the Enterprise Applications export.
+            csv_field(item.app_owner_organization_id.as_deref().unwrap_or("")),
         ]
         .join(",");
         out.push_str(&row);
@@ -1887,6 +1890,7 @@ mod tests {
             unused: false,
             sign_in_report_available: false,
             principal_kind: AuditPrincipalKind::Application,
+            app_owner_organization_id: None,
         }
     }
 
@@ -2058,13 +2062,14 @@ mod tests {
     }
 
     #[test]
-    fn export_audit_csv_ends_rows_with_principal_kind() {
+    fn export_audit_csv_appends_new_columns_last() {
         let mut item = sample("SP App");
         item.principal_kind = AuditPrincipalKind::ServicePrincipal;
+        item.app_owner_organization_id = Some("tenant-x".to_string());
         let csv = export_audit_csv(vec![item], &complete(1));
         let lines = csv_data_lines(&csv);
-        assert!(lines[0].ends_with(",PrincipalKind"));
-        assert!(lines[1].ends_with(",ServicePrincipal"));
+        assert!(lines[0].ends_with(",PrincipalKind,AppOwnerOrgId"));
+        assert!(lines[1].ends_with(",ServicePrincipal,tenant-x"));
     }
 
     #[test]

@@ -95,14 +95,7 @@ pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
     // assignments, app role assignments and API permissions. Both scored ZERO.
     "Application.ReadWrite.OwnedBy",
     "EntitlementManagement.ReadWrite.All",
-    // Net-new (not in the PowerShell `Constants.ps1` source): the EWS
-    // `full_access_as_app` scope on the legacy Office 365 Exchange Online
-    // resource grants full access to *every* mailbox in the tenant — strictly
-    // broader than `Mail.ReadWrite`, which is already high-risk here. It scored
-    // zero before because the risk tables only ever listed Microsoft Graph
-    // names. Unambiguous as a bare value: no other resource exposes it (see
-    // `scoping::EWS_FULL_ACCESS_AS_APP`).
-    // Net-new, and all nine additions here share one origin: they appear in
+    // Net-new, and every addition in this batch shares one origin: they appear in
     // `SUBSUMED_APP_PERMISSIONS` as the BROADER side of a subsumption pair — the
     // file already names them, and `subsuming_app_permissions` already advises
     // operators to downgrade *to* the narrower one — yet none was in either risk
@@ -147,6 +140,13 @@ pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
     "MailboxItem.ImportExport.All",
     "MailboxFolder.ReadWrite.All",
     "Mail-Advanced.ReadWrite.All",
+    // Net-new (not in the PowerShell `Constants.ps1` source): the EWS
+    // `full_access_as_app` scope on the legacy Office 365 Exchange Online
+    // resource grants full access to *every* mailbox in the tenant — strictly
+    // broader than `Mail.ReadWrite`, which is already high-risk here. It scored
+    // zero before because the risk tables only ever listed Microsoft Graph
+    // names. Unambiguous as a bare value: no other resource exposes it (see
+    // `scoping::EWS_FULL_ACCESS_AS_APP`).
     crate::scoping::EWS_FULL_ACCESS_AS_APP,
 ];
 
@@ -303,16 +303,16 @@ pub fn risk_level_for_app_permission(value: &str) -> Option<RiskLevel> {
     }
 }
 
-/// A least-privilege alternative to a broad application permission, as an
-/// advisory pointer shown at grant time — never an automatic rewrite. Returns
-/// `None` when the permission is already least-privilege or has no narrower
-/// equivalent. Derives from the shared scope predicates so it stays consistent
-/// with Rule 11/12 and the scope badges.
-pub fn least_privilege_alternative(value: &str) -> Option<&'static str> {
-    least_privilege_alternative_for(Some(crate::scoping::MICROSOFT_GRAPH_APP_ID), value)
-}
-
-/// [`least_privilege_alternative`] for a permission whose resource is known.
+/// A least-privilege alternative to a broad application permission on
+/// `resource_app_id`, as an advisory pointer shown at grant time — never an
+/// automatic rewrite. Returns `None` when the permission is already
+/// least-privilege or has no narrower equivalent. Derives from the shared
+/// resource-aware scope predicates so it stays consistent with Rule 11/12 and
+/// the scope badges.
+///
+/// There is deliberately no value-only form: one defaulted the resource to
+/// Microsoft Graph, so the permission picker offered mailbox-scoping advice for
+/// Office 365 Exchange Online's mail appRoles.
 ///
 /// The resource decides whether the Exchange advice is even true: RBAC for
 /// Applications confines Microsoft Graph's mail family (and the EWS scope), not
@@ -321,12 +321,15 @@ pub fn least_privilege_alternative(value: &str) -> Option<&'static str> {
 /// an operator after a remediation that cannot be applied, and quietly implies
 /// the grant is containable when the only remedy is removing it.
 ///
-/// A `None` resource yields no Exchange advice for the same reason.
+/// A `None` resource yields no Exchange advice for the same reason. The
+/// SharePoint advice follows [`crate::scoping::is_sharepoint_orgwide_permission`]:
+/// both SharePoint resources expose `Sites.Selected`, but another API's
+/// `Sites.`-named role is not SharePoint site access.
 pub fn least_privilege_alternative_for(
     resource_app_id: Option<&str>,
     value: &str,
 ) -> Option<&'static str> {
-    if crate::scoping::is_sharepoint_orgwide(value) {
+    if crate::scoping::is_sharepoint_orgwide_permission(resource_app_id, value) {
         // Every broad `Sites.*` has the scoped `Sites.Selected` model (Rule 12).
         Some(crate::scoping::SP_SITES_SELECTED)
     } else if crate::scoping::is_scopable_exchange_resource_permission(resource_app_id, value) {
@@ -637,25 +640,46 @@ mod tests {
 
     #[test]
     fn least_privilege_alternative_points_to_the_scoped_model() {
+        use crate::scoping::{
+            MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
+            OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+        };
+        let graph = |v| least_privilege_alternative_for(Some(MICROSOFT_GRAPH_APP_ID), v);
         // Broad Sites.* -> Sites.Selected (Rule 12 scoped model).
-        assert_eq!(
-            least_privilege_alternative("Sites.ReadWrite.All"),
-            Some("Sites.Selected")
-        );
-        assert_eq!(
-            least_privilege_alternative("Sites.FullControl.All"),
-            Some("Sites.Selected")
-        );
+        assert_eq!(graph("Sites.ReadWrite.All"), Some("Sites.Selected"));
+        assert_eq!(graph("Sites.FullControl.All"), Some("Sites.Selected"));
         // Exchange-scopable mail -> RBAC pointer; a lookalike with no Exchange
         // role does not (parallels scoping::loose_mail_lookalikes_are_not_scopable).
         assert_eq!(
-            least_privilege_alternative("Mail.Send"),
+            graph("Mail.Send"),
             Some("Scope to specific mailboxes (Exchange RBAC)")
         );
-        assert_eq!(least_privilege_alternative("Mail.ReadWrite.Shared"), None);
+        assert_eq!(graph("Mail.ReadWrite.Shared"), None);
         // Already least-privilege / no narrower equivalent.
-        assert_eq!(least_privilege_alternative("Sites.Selected"), None);
-        assert_eq!(least_privilege_alternative("Directory.ReadWrite.All"), None);
+        assert_eq!(graph("Sites.Selected"), None);
+        assert_eq!(graph("Directory.ReadWrite.All"), None);
+
+        // The resource decides: RBAC for Applications cannot confine Office 365
+        // Exchange Online's mail appRoles, and an unknown resource gets no
+        // mailbox advice either.
+        assert_eq!(
+            least_privilege_alternative_for(Some(OFFICE365_EXCHANGE_ONLINE_APP_ID), "Mail.Read"),
+            None
+        );
+        assert_eq!(least_privilege_alternative_for(None, "Mail.Send"), None);
+        // Office 365 SharePoint Online exposes Sites.Selected too.
+        assert_eq!(
+            least_privilege_alternative_for(
+                Some(OFFICE365_SHAREPOINT_ONLINE_APP_ID),
+                "Sites.Read.All"
+            ),
+            Some("Sites.Selected")
+        );
+        // Another API's `Sites.`-named role is not SharePoint site access.
+        assert_eq!(
+            least_privilege_alternative_for(Some("custom-api"), "Sites.Read.All"),
+            None
+        );
     }
 
     /// Every mailbox-family name in the risk tables must be one `scoping.rs`

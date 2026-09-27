@@ -37,6 +37,12 @@
 
 ### Fixed
 
+- **The permission picker no longer tells you to scope Office 365 Exchange Online mail permissions
+  to specific mailboxes.** Picking `Mail.Read` or another mail, calendar or contacts permission on
+  Office 365 Exchange Online showed "Scope to specific mailboxes (Exchange RBAC)". RBAC for
+  Applications only confines the Microsoft Graph versions of these permissions, so there was no way
+  to follow that advice. The note now appears only where it applies, and a `Sites.` role on an API
+  other than SharePoint no longer suggests Sites.Selected.
 - **Legacy Exchange Online mail grants and org-wide access the toolkit can't confine now appear in
   the Security findings.** The audit already flagged an app holding, for example, `Mail.Read` on
   Office 365 Exchange Online or `Sites.Read.All` on Office 365 SharePoint Online, but the finding
@@ -679,6 +685,11 @@
 
 ### Changed
 
+- **Audit CSV exports put a service principal's home tenant in its own column.** For enterprise
+  apps with no local registration, and for managed identities, the Publisher column held the owning
+  tenant's ID. App registrations put their publisher domain there, so filtering or sorting on
+  Publisher mixed the two. Publisher is now empty on those rows, and the tenant ID is in a new last
+  column, AppOwnerOrgId, named as in the Enterprise Applications export.
 - **Rotating a SAML signing certificate immediately, and retiring the previous one, now ask
   first.** An immediate rotation stops sign-in for any application that holds a single static
   certificate, and retiring removes your only rollback. Both ran on one click, unlike every other

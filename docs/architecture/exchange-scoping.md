@@ -37,7 +37,8 @@ a separate gate, `is_aap_confinable_permission` (see below). Consequences to pre
   `is_scopable_exchange_resource_permission` everywhere, including the probe and badge paths: the
   value-only forms were **deleted**, and
   `repo_invariants/commands.rs::the_resource_blind_mailbox_gates_are_not_reintroduced` fails the
-  build if either old name reappears in any `.rs` file. A path that needs a role for a value whose
+  build if any of the old names (including the Graph-defaulting `least_privilege_alternative(value)`
+  the picker once used) reappears in any `.rs` file. A path that needs a role for a value whose
   resource it no longer holds (the verdict resolver) receives the `(value, role)` pair from the
   caller that did the resource-aware lookup, rather than re-deriving it.
 - **`full_access_as_app` is a blanket grant.** `is_blanket_mailbox_grant` marks it, and

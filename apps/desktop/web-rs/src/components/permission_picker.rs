@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use azapptoolkit_core::audit::{
-    downgrade_alternatives, is_risky_delegated_scope, least_privilege_alternative,
+    downgrade_alternatives, is_risky_delegated_scope, least_privilege_alternative_for,
 };
 use azapptoolkit_core::scoping::{
     SP_FILES_SELECTED, SP_LIST_ITEMS_SELECTED, SP_LISTS_SELECTED, SP_SITES_SELECTED,
@@ -259,17 +259,18 @@ pub fn PermissionPicker(
     }
 }
 
-/// Contextual least-privilege note shown under an application permission at
-/// grant time: flags tenant-wide reach and points at the scoped alternative
-/// (Rule 11/12). Advisory only — the Grant button is never blocked.
-fn scope_hint(value: &str) -> AnyView {
+/// The text of the contextual least-privilege note shown under an application
+/// permission at grant time, as `(scoped, text)`: `scoped` picks the "ok" tone,
+/// otherwise it is a warning. Flags tenant-wide reach and points at the scoped
+/// alternative (Rule 11/12) — only where that alternative exists on this
+/// `resource_app_id` (Office 365 Exchange Online's mail appRoles cannot be
+/// confined by RBAC for Applications). `None` when there is nothing to say.
+fn scope_hint_note(resource_app_id: &str, value: &str) -> Option<(bool, String)> {
     if value == SP_SITES_SELECTED {
-        return view! {
-            <span class="permission-picker__row-note permission-picker__row-note--ok">
-                "Scoped — per-site access (least privilege)"
-            </span>
-        }
-        .into_any();
+        return Some((
+            true,
+            "Scoped — per-site access (least privilege)".to_string(),
+        ));
     }
     // The sub-site Selected family. Named individually rather than by prefix so
     // the note can say which securable each one confines to — "Selected" alone
@@ -281,26 +282,37 @@ fn scope_hint(value: &str) -> AnyView {
         SP_FILES_SELECTED => Some("individual files and library folders"),
         _ => None,
     } {
-        return view! {
-            <span class="permission-picker__row-note permission-picker__row-note--ok">
-                {format!("Scoped — grants nothing until you pick {target} (least privilege)")}
-            </span>
-        }
-        .into_any();
+        return Some((
+            true,
+            format!("Scoped — grants nothing until you pick {target} (least privilege)"),
+        ));
     }
-    let Some(alt) = least_privilege_alternative(value) else {
-        return ().into_any();
-    };
-    let note = if is_sharepoint_orgwide(value) {
+    let alt = least_privilege_alternative_for(Some(resource_app_id), value)?;
+    // Worded off the helper's own answer, so the two can never disagree.
+    let note = if alt == SP_SITES_SELECTED {
         format!("Org-wide — reaches every site. Prefer {alt}.")
     } else {
         // Exchange-scopable mail/calendar/contacts.
         format!("Org-wide — tenant-wide reach. {alt}.")
     };
-    view! {
-        <span class="permission-picker__row-note permission-picker__row-note--warn">{note}</span>
+    Some((false, note))
+}
+
+/// Contextual least-privilege note shown under an application permission at
+/// grant time (see [`scope_hint_note`]). Advisory only — the Grant button is
+/// never blocked.
+fn scope_hint(resource_app_id: &str, value: &str) -> AnyView {
+    match scope_hint_note(resource_app_id, value) {
+        Some((true, note)) => view! {
+            <span class="permission-picker__row-note permission-picker__row-note--ok">{note}</span>
+        }
+        .into_any(),
+        Some((false, note)) => view! {
+            <span class="permission-picker__row-note permission-picker__row-note--warn">{note}</span>
+        }
+        .into_any(),
+        None => ().into_any(),
     }
-    .into_any()
 }
 
 /// Grant-time downgrade pointer for an application permission: names the
@@ -451,7 +463,7 @@ fn PermissionList(
                 // Grant-time least-privilege hints (advisory; the Grant button is
                 // never blocked). Computed before `r.value` is moved below.
                 let risk = app_permission_risk_badge(&r.value);
-                let hint = scope_hint(&r.value);
+                let hint = scope_hint(&resource_app_id, &r.value);
                 let downgrade = downgrade_hint(&r.value);
                 let sel = PickerSelection {
                     resource_app_id,
@@ -488,5 +500,39 @@ fn PermissionList(
             })
             .collect();
         view! { <ul class="permission-picker__list">{rows}</ul> }.into_any()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use azapptoolkit_core::scoping::{MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID};
+
+    #[test]
+    fn scope_hint_offers_mailbox_scoping_only_where_rbac_applies() {
+        let (scoped, text) =
+            scope_hint_note(MICROSOFT_GRAPH_APP_ID, "Mail.Read").expect("Graph mail is scopable");
+        assert!(!scoped);
+        assert!(text.contains("Exchange RBAC"), "{text}");
+        // Office 365 Exchange Online's identically-named appRole cannot be
+        // confined by RBAC for Applications: no advice it cannot follow.
+        assert_eq!(
+            scope_hint_note(OFFICE365_EXCHANGE_ONLINE_APP_ID, "Mail.Read"),
+            None
+        );
+    }
+
+    #[test]
+    fn scope_hint_points_broad_sites_at_sites_selected() {
+        assert_eq!(
+            scope_hint_note(MICROSOFT_GRAPH_APP_ID, "Sites.ReadWrite.All"),
+            Some((
+                false,
+                "Org-wide — reaches every site. Prefer Sites.Selected.".to_string()
+            ))
+        );
+        let (scoped, _) = scope_hint_note(MICROSOFT_GRAPH_APP_ID, SP_SITES_SELECTED)
+            .expect("Sites.Selected gets the scoped note");
+        assert!(scoped);
     }
 }

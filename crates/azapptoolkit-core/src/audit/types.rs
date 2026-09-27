@@ -62,6 +62,23 @@ impl CredentialStatus {
             CredentialStatus::Unknown => "Unknown",
         }
     }
+
+    /// The whole-day expiry bucketing shared by the audit and the SSO
+    /// certificate board: no end date is `Unknown`, a negative day count is
+    /// `Expired`, up to [`EXPIRY_WARNING_DAYS`] is `ExpiringSoon`.
+    ///
+    /// `days` must be the truncating `(end - now).num_days()`, so this agrees
+    /// with [`is_expired`](super::is_expired): `Expired` exactly when that
+    /// returns true, and a credential that lapsed under a day ago is still
+    /// `ExpiringSoon`.
+    pub fn from_days_to_expiry(days: Option<i64>) -> Self {
+        match days {
+            None => CredentialStatus::Unknown,
+            Some(d) if d < 0 => CredentialStatus::Expired,
+            Some(d) if d <= EXPIRY_WARNING_DAYS => CredentialStatus::ExpiringSoon,
+            Some(_) => CredentialStatus::Active,
+        }
+    }
 }
 
 /// Credential-expiry lens for the App Registrations **list** rows, computed
@@ -155,10 +172,6 @@ pub struct CredentialSummary {
     pub status: CredentialStatus,
 }
 
-/// Effective Exchange-mailbox scoping verdict for a single Graph mail/calendar/
-/// contacts application permission. Only that permission family is scopable via
-/// Exchange RBAC for Applications; everything else is org-wide by nature.
-///
 /// How a mail permission's access is confined to specific mailboxes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -172,6 +185,10 @@ pub enum ScopeMechanism {
     LegacyApplicationAccessPolicy,
 }
 
+/// Effective Exchange-mailbox scoping verdict for a single Graph mail/calendar/
+/// contacts application permission. Only that permission family is scopable via
+/// Exchange RBAC for Applications; everything else is org-wide by nature.
+///
 /// The verdict is *effective*, not declared: it must account for the union of
 /// the org-wide Entra app-role grant and any Exchange RBAC role assignment.
 /// `Test-ServicePrincipalAuthorization` reports only the Exchange RBAC layer;
@@ -321,19 +338,22 @@ impl AppPermissions {
     /// [`score_service_principal`]: crate::audit::score_service_principal
     #[must_use]
     pub fn deduped(&self) -> Self {
-        let mut seen = HashSet::new();
+        // Borrowed keys, as in `redundant_app_permissions`: only the kept
+        // grants and scopes are cloned, never the set keys.
+        let mut seen: HashSet<(Option<&str>, &str)> =
+            HashSet::with_capacity(self.app_role_grants.len());
         let app_role_grants = self
             .app_role_grants
             .iter()
-            .filter(|g| seen.insert((g.resource_app_id.clone(), g.value.clone())))
+            .filter(|g| seen.insert((g.resource_app_id.as_deref(), g.value.as_str())))
             .cloned()
             .collect();
         // Delegated scopes carry no resource here, so the value alone is the key.
-        let mut seen_scopes = HashSet::new();
+        let mut seen_scopes: HashSet<&str> = HashSet::with_capacity(self.scope_values.len());
         let scope_values = self
             .scope_values
             .iter()
-            .filter(|v| seen_scopes.insert((*v).clone()))
+            .filter(|v| seen_scopes.insert(v.as_str()))
             .cloned()
             .collect();
         Self {
@@ -345,27 +365,6 @@ impl AppPermissions {
         }
     }
 
-    /// The app-role permission *values*, resource stripped — for the rules that
-    /// classify by permission name alone (the risk tables, redundancy,
-    /// SharePoint). Resolved once per scoring pass and threaded through, rather
-    /// than re-derived per rule.
-    pub fn app_role_values(&self) -> Vec<String> {
-        self.app_role_grants
-            .iter()
-            .map(|g| g.value.clone())
-            .collect()
-    }
-
-    /// True when `grant` is a mail permission that has been *confirmed* scoped
-    /// to specific mailboxes via Exchange RBAC, so it earns the reduced weight.
-    /// `OrgWide`/`Unknown`/absent all return false (full weight).
-    ///
-    /// **Gated on the grant's own resource first.** Office 365 Exchange Online
-    /// exposes its own `Mail.*` appRoles (retired Outlook REST) that RBAC for
-    /// Applications cannot confine; without this gate a scoped Graph `Mail.Read`
-    /// would lend its verdict to the unscopable legacy namesake, dropping a
-    /// genuinely org-wide grant out of the mailbox findings and scoring it at the
-    /// reduced scoped weight.
     /// True when **every** grant carrying `value` is confirmed scoped.
     ///
     /// For the rules that reason about a permission by name (redundancy) but
@@ -384,6 +383,17 @@ impl AppPermissions {
         held
     }
 
+    /// True when `grant` is a mail permission that has been *confirmed* scoped
+    /// to specific mailboxes — via Exchange RBAC for Applications or a legacy
+    /// Application Access Policy — so it earns the reduced weight.
+    /// `OrgWide`/`Unknown`/absent all return false (full weight).
+    ///
+    /// **Gated on the grant's own resource first.** Office 365 Exchange Online
+    /// exposes its own `Mail.*` appRoles (retired Outlook REST) that RBAC for
+    /// Applications cannot confine; without this gate a scoped Graph `Mail.Read`
+    /// would lend its verdict to the unscopable legacy namesake, dropping a
+    /// genuinely org-wide grant out of the mailbox findings and scoring it at the
+    /// reduced scoped weight.
     pub(super) fn is_scoped(&self, grant: &ResourcePermission) -> bool {
         self.scope_mechanism(grant).is_some()
     }
@@ -521,9 +531,16 @@ impl AuditPrincipalKind {
 /// DTO — it is serialized across the Tauri IPC bridge *as-is* (the WASM
 /// frontend deserializes this same type), embedded in
 /// `azapptoolkit_dto::audit::AuditRunResult`, and written verbatim into the
-/// JSON export. Renaming a field here is therefore a wire-format change. The
-/// whole payload is snake_case (no serde rename on this struct or its nested
-/// remediation/scope types).
+/// JSON export. Renaming a field here is therefore a wire-format change.
+///
+/// Field names are snake_case (no `rename_all` on this struct). Enum *values*
+/// are not uniform, and each must stay as it is: `RemediationKind` and
+/// `AuditPrincipalKind` serialize snake_case (`rename_all`), while `RiskLevel`,
+/// `CredentialStatus` and `CredentialKind` (inside `CredentialSummary`)
+/// serialize their PascalCase variant names (`"Critical"`, `"ExpiringSoon"`,
+/// `"Certificate"`). Cached runs and JSON-export consumers already hold those
+/// spellings, so normalizing either set is a breaking wire change. Pinned by
+/// `tests::audit_item_enum_wire_spellings_are_pinned`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditItem {
     pub application_name: String,
@@ -567,6 +584,13 @@ pub struct AuditItem {
     /// deserialize unchanged.
     #[serde(default)]
     pub principal_kind: AuditPrincipalKind,
+    /// Home tenant of the owning application, on SP-only rows (a foreign
+    /// enterprise app's tenant; this tenant for an orphaned local SP). `None` on
+    /// application rows, which live in this tenant, and on cached runs from
+    /// before the field existed. Kept out of `publisher`, which is the app's
+    /// verified publisher domain.
+    #[serde(default)]
+    pub app_owner_organization_id: Option<String>,
 }
 
 /// Stable markers the UI keys audit facets/home cards off. The scorer emits
@@ -691,5 +715,75 @@ mod tests {
         assert_eq!(RiskLevel::from_score(24), RiskLevel::High);
         assert_eq!(RiskLevel::from_score(25), RiskLevel::Critical);
         assert_eq!(RiskLevel::from_score(999), RiskLevel::Critical);
+    }
+
+    #[test]
+    fn audit_item_enum_wire_spellings_are_pinned() {
+        // Two casings share the AuditItem payload on purpose; cached runs and
+        // JSON-export consumers hold both. See the boundary note on AuditItem.
+        fn json<T: Serialize>(v: &T) -> String {
+            serde_json::to_string(v).unwrap()
+        }
+        assert_eq!(json(&RiskLevel::Critical), "\"Critical\"");
+        assert_eq!(json(&CredentialStatus::ExpiringSoon), "\"ExpiringSoon\"");
+        assert_eq!(json(&CredentialKind::Certificate), "\"Certificate\"");
+        assert_eq!(
+            json(&RemediationKind::RemoveRedundantPermissions),
+            "\"remove_redundant_permissions\""
+        );
+        assert_eq!(
+            json(&AuditPrincipalKind::ManagedIdentity),
+            "\"managed_identity\""
+        );
+        assert_eq!(
+            serde_json::from_str::<CredentialStatus>("\"ExpiringSoon\"").unwrap(),
+            CredentialStatus::ExpiringSoon
+        );
+    }
+
+    #[test]
+    fn credential_status_from_days_to_expiry_buckets() {
+        use CredentialStatus::*;
+        assert_eq!(CredentialStatus::from_days_to_expiry(None), Unknown);
+        assert_eq!(CredentialStatus::from_days_to_expiry(Some(-1)), Expired);
+        assert_eq!(CredentialStatus::from_days_to_expiry(Some(0)), ExpiringSoon);
+        assert_eq!(
+            CredentialStatus::from_days_to_expiry(Some(EXPIRY_WARNING_DAYS)),
+            ExpiringSoon
+        );
+        assert_eq!(
+            CredentialStatus::from_days_to_expiry(Some(EXPIRY_WARNING_DAYS + 1)),
+            Active
+        );
+    }
+
+    #[test]
+    fn deduped_keeps_first_occurrence_and_distinct_resources() {
+        let exo = ResourcePermission {
+            resource_app_id: Some(crate::scoping::OFFICE365_EXCHANGE_ONLINE_APP_ID.to_string()),
+            value: "Mail.Read".to_string(),
+        };
+        let unresolved = ResourcePermission {
+            resource_app_id: None,
+            value: "X".to_string(),
+        };
+        let perms = AppPermissions {
+            app_role_grants: vec![
+                ResourcePermission::graph("Mail.Read"),
+                exo.clone(),
+                ResourcePermission::graph("Mail.Read"),
+                unresolved.clone(),
+                unresolved.clone(),
+            ],
+            scope_values: vec!["b".into(), "a".into(), "b".into()],
+            ..Default::default()
+        };
+        let d = perms.deduped();
+        // The same value on two resources is two grants; exact repeats collapse.
+        assert_eq!(
+            d.app_role_grants,
+            vec![ResourcePermission::graph("Mail.Read"), exo, unresolved]
+        );
+        assert_eq!(d.scope_values, vec!["b".to_string(), "a".to_string()]);
     }
 }

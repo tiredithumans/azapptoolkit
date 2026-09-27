@@ -108,6 +108,7 @@ mod tests {
             unused: false,
             sign_in_report_available: false,
             principal_kind: AuditPrincipalKind::Application,
+            app_owner_organization_id: None,
         }
     }
 

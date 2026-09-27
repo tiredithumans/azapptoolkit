@@ -17,11 +17,6 @@ use super::permissions::{
     RedundantPermission,
 };
 
-/// Builds an [`AuditItem`] for `app`. All inputs must be pre-resolved: the
-/// caller is responsible for turning Graph IDs into permission name strings
-/// (via the bundled catalog or a live lookup).
-///
-/// `now` is a parameter so tests can use deterministic timestamps.
 /// One scoring rule's contribution: a risk-score delta plus the issues and
 /// recommendations it raises. Each `rule_*` helper returns one; `score_application`
 /// folds them in rule order so the issue / recommendation ordering is preserved
@@ -413,9 +408,13 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
 /// Rule 12 (advisory, no score): organization-wide SharePoint access. SharePoint
 /// scoping is encoded by the permission itself (`Sites.Selected` is scoped,
 /// every other `Sites.*` is org-wide), so no live lookup is needed. Returns the
-/// org-wide set for the ScopeSharePointAccess remediation.
-/// Takes the resource-stripped values: SharePoint scoping is encoded by the
-/// permission name alone, so unlike the mailbox rule it needs no resource.
+/// Graph (confinable) org-wide set for the ScopeSharePointAccess remediation.
+///
+/// Takes the grants and gates on each one's resource: only a Microsoft Graph
+/// org-wide `Sites.*` (`is_scopable_sharepoint_resource_permission`) carries
+/// the `ScopeSharePointAccess` fix, Office 365 SharePoint Online's goes to
+/// `UNCONFINABLE_SHAREPOINT`, and the healthy note needs
+/// `is_scoped_sharepoint_resource_permission`.
 fn rule_sharepoint_advisory(
     perms: &AppPermissions,
 ) -> (RuleContribution, Vec<&ResourcePermission>) {
@@ -684,7 +683,7 @@ fn rule_redundant_permissions(
     // confines the narrower one if EVERY grant of that name is confined. A
     // `Mail.ReadWrite` scoped on Graph while its unscopable legacy Exchange
     // Online namesake survives still reaches every mailbox.
-    // The GRANTS, not `perms.app_role_values()`: stripping the resource here
+    // The GRANTS, not a resource-stripped value list: stripping the resource here
     // let a Graph permission pair with a same-named one on the legacy Office 365
     // resource, which covers nothing of it. See `redundant_app_permissions`.
     let redundant =
@@ -722,7 +721,7 @@ fn rule_redundant_permissions(
 /// permission so the Rule-1/2 advice is actionable. Admin-judged, so never a
 /// one-click remediation.
 /// Takes the GRANTS, not bare values. It was the last rule reading
-/// `perms.app_role_values()`, and stripping the resource made it wrong twice
+/// a resource-stripped value list, and stripping the resource made it wrong twice
 /// over: the narrower alternatives in [`SUBSUMED_APP_PERMISSIONS`] are Microsoft
 /// Graph permissions, so pointing an Office 365 Exchange Online `Mail.Read` at
 /// "Mail.ReadBasic" named a permission that resource does not expose; and a
@@ -903,6 +902,11 @@ pub fn disable_sign_in_remediation() -> RemediationAction {
     }
 }
 
+/// Builds an [`AuditItem`] for `app`. All inputs must be pre-resolved: the
+/// caller is responsible for turning Graph IDs into permission name strings
+/// (via the bundled catalog or a live lookup).
+///
+/// `now` is a parameter so tests can use deterministic timestamps.
 pub fn score_application(
     app: &Application,
     sp_enabled: Option<bool>,
@@ -942,12 +946,13 @@ pub fn score_application(
         .collect();
     // Credentials that STILL WORK — which includes one with no end date.
     //
-    // `credential_status(None)` is `Unknown`, and counting only `Active` meant a
-    // never-expiring credential counted as nothing: an app holding one expired
-    // secret plus one that never expires reported "All credentials expired" and
-    // scored as though it had no working credential at all. That reads as a dead
-    // app, so an operator stops looking — while the app in fact holds a
-    // permanent, never-rotating credential, which is the one most worth finding.
+    // `CredentialStatus::from_days_to_expiry(None)` is `Unknown`, and counting
+    // only `Active` meant a never-expiring credential counted as nothing: an
+    // app holding one expired secret plus one that never expires reported "All
+    // credentials expired" and scored as though it had no working credential at
+    // all. That reads as a dead app, so an operator stops looking — while the
+    // app in fact holds a permanent, never-rotating credential, which is the one
+    // most worth finding.
     // `ExpiringSoon` is deliberately NOT counted here: the branches below use
     // `active_count == 0` to mean "nothing but expiring credentials left", and
     // folding it in would silence that warning entirely.
@@ -1048,6 +1053,9 @@ pub fn score_application(
         unused: false,
         sign_in_report_available: false,
         principal_kind: AuditPrincipalKind::Application,
+        // An application lives in this tenant; the owner-tenant column is for
+        // SP-only rows.
+        app_owner_organization_id: None,
     }
 }
 
@@ -1064,7 +1072,8 @@ pub struct SpAuditInput {
     pub created_date_time: Option<DateTime<Utc>>,
     pub account_enabled: Option<bool>,
     /// Home tenant of the owning application — surfaced as the item's
-    /// `publisher` so the table/CSV show where a foreign app lives.
+    /// `app_owner_organization_id` (its own export column), not `publisher`,
+    /// which is an application's verified publisher domain.
     pub app_owner_organization_id: Option<String>,
     /// Graph `servicePrincipalType`; `ManagedIdentity` selects
     /// [`AuditPrincipalKind::ManagedIdentity`] (drives Open/Fix routing).
@@ -1078,7 +1087,7 @@ pub struct SpAuditInput {
 /// Credential rules (5-9) and manifest rules (10, 14-18, downgrade pointers)
 /// are deliberately absent — credentials and the manifest live on the
 /// application object in its home tenant, which this tenant can neither see
-/// nor fix. `perms.app_role_values` are the SP's *granted* app roles (its
+/// nor fix. `perms.app_role_grants` are the SP's *granted* app roles (its
 /// `appRoleAssignments`), not a declared manifest, and `perms.scope_values`
 /// are its admin-consented (AllPrincipals) delegated scopes — so Rule 13 treats
 /// them as the consented set and ignores `perms.admin_consented_scopes`.
@@ -1127,7 +1136,10 @@ pub fn score_service_principal(
         app_id: sp.app_id.clone(),
         object_id: sp.sp_object_id.clone(),
         created_date: sp.created_date_time,
-        publisher: sp.app_owner_organization_id.clone(),
+        // The owner tenant is a GUID, not a publisher domain: it rides its own
+        // field so the Publisher column means one thing on every row.
+        publisher: None,
+        app_owner_organization_id: sp.app_owner_organization_id.clone(),
         sign_in_audience: None,
         risk_score: acc.score,
         risk_level: RiskLevel::from_score(acc.score),
