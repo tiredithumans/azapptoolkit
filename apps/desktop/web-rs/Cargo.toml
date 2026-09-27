@@ -60,7 +60,6 @@ serde_json = "1"
 serde-wasm-bindgen = { version = "0.6.5", optional = true }
 
 chrono = { version = "0.4", features = ["serde", "wasmbind"] }
-tracing = "0.1"
 
 [features]
 # The shared mock Tauri IPC bridge (`src/ipc_mock/`): installs a fake

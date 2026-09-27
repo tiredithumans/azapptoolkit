@@ -83,3 +83,76 @@ fn both_deny_recipes_run_the_advisories_check() {
         );
     }
 }
+
+/// `just machete` (verify-full + the CI `deny` job) fails on a declared-but-unused
+/// dependency, and `[package.metadata.cargo-machete] ignored` is its escape hatch.
+/// The only legitimate entry today is `thiserror` in a crate that invokes
+/// `azapptoolkit_core::http_error_enum!`: the macro's expansion names
+/// `::thiserror::Error`, which cargo-machete cannot see. Anything else in that
+/// list is a dead dependency hidden from the gate, so this keeps the hatch from
+/// becoming a dumping ground.
+#[test]
+fn machete_ignores_are_only_the_macro_expanded_thiserror() {
+    use std::path::{Path, PathBuf};
+
+    fn mentions_macro(dir: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                mentions_macro(&path)
+            } else {
+                path.extension().is_some_and(|ext| ext == "rs")
+                    && std::fs::read_to_string(&path)
+                        .is_ok_and(|src| src.contains("http_error_enum!"))
+            }
+        })
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut crate_dirs: Vec<PathBuf> = std::fs::read_dir(root.join("crates"))
+        .expect("read crates/")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.join("Cargo.toml").is_file())
+        .collect();
+    crate_dirs.push(root.join("apps/desktop/src-tauri"));
+    crate_dirs.push(root.join("apps/desktop/web-rs"));
+
+    let mut with_ignores = Vec::new();
+    for dir in crate_dirs {
+        let manifest = std::fs::read_to_string(dir.join("Cargo.toml"))
+            .unwrap_or_else(|e| panic!("read {}: {e}", dir.join("Cargo.toml").display()));
+        let Some(start) = manifest.find("[package.metadata.cargo-machete]") else {
+            continue;
+        };
+        let ignored: Vec<&str> = manifest[start..]
+            .lines()
+            .skip(1)
+            .take_while(|line| !line.trim_start().starts_with('['))
+            .map(str::trim)
+            .filter(|line| line.starts_with("ignored"))
+            .collect();
+        assert_eq!(
+            ignored,
+            [r#"ignored = ["thiserror"]"#],
+            "{}: only the macro-expanded `thiserror` may be hidden from `just machete`; \
+             any other ignored dependency is dead — remove it instead",
+            dir.display()
+        );
+        assert!(
+            mentions_macro(&dir.join("src")),
+            "{} ignores `thiserror` for cargo-machete but never invokes \
+             `http_error_enum!`, so nothing uses it — remove the dependency and the ignore",
+            dir.display()
+        );
+        with_ignores.push(dir);
+    }
+
+    assert!(
+        with_ignores.len() >= 3,
+        "expected the arm/graph/keyvault ignores; found {with_ignores:?} — the scan broke"
+    );
+}

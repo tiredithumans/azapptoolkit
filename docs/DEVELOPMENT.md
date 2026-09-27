@@ -88,7 +88,7 @@ Run every CI gate, in CI order, with one command:
 ```bash
 just verify        # the core gates + the browser GUI tests when Chrome + chromedriver are present
 just verify-ui     # same, browser tests mandatory
-just verify-full   # full CI parity: adds the audit/deny gates (needs network) + the shard-size ceiling (loud-skipped on Windows; CI runs it on Linux)
+just verify-full   # full CI parity: adds the dependency audit/deny/machete gates (audit/deny need network) + the shard-size ceiling (loud-skipped on Windows; CI runs it on Linux)
 ```
 
 `just --list` names every individual gate (`fmt-check`, `clippy`, `test`, `web-fmt-check`,
@@ -349,7 +349,8 @@ same recipes you run locally, so CI and local builds can't drift:
 - actionlint over the workflow files; shellcheck over `.claude/hooks/` plus a whole-history secrets
   scan (never gated on the change detector)
 - Dependency policy: `just audit` + `just web-audit` (RustSec advisories — root workspace **and**
-  the frontend's own lockfile) and `just deny` + `just web-deny` (license/source/bans for both trees)
+  the frontend's own lockfile), `just deny` + `just web-deny` (license/source/bans for both trees)
+  and `just machete` (declared-but-unused dependencies, both trees)
 
 `.github/workflows/release.yml` runs on `v*` tags: a `guard` job (tag ⇔ manifests, updater pubkey,
 RustSec) → a 3-OS build matrix (Windows NSIS + MSI, macOS Apple Silicon `.dmg` + `.app.tar.gz`,

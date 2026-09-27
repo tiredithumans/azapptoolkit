@@ -151,7 +151,6 @@ dependencies = [
  "serde_json",
  "tauri-sys",
  "thaw",
- "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",

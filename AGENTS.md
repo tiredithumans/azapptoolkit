@@ -170,7 +170,7 @@ bake them via `.env`).
 Run the gates CI runs before declaring a change done, via the `just` recipes:
 
 1. `just verify` — fmt → clippy → test → web-fmt → web-clippy → web-test → web-build, then the browser GUI tests when this box can run them (`just verify-ui` to require them).
-2. `just verify-full` — adds `audit`/`web-audit`/`deny`/`web-deny` (required CI checks) and the shard-size ceiling.
+2. `just verify-full` — adds `audit`/`web-audit`/`deny`/`web-deny`/`machete` (required CI checks) + the shard ceiling.
 3. CI-side only: actionlint, shellcheck of `.claude/hooks/` + a whole-history secrets scan (never gated on the change detector), CodeQL (build-mode `none`; macro expansion is a known gap).
 
 The browser GUI tests (`just web-itest`) are the frontend's only behavioural gate: renaming a CSS class, aria-label, or on-screen text a test references fails CI. Sharding + footguns: [frontend-workspace.md](docs/architecture/frontend-workspace.md). For behaviour no test can prove, run `just dev` and exercise the view.

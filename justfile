@@ -318,9 +318,9 @@ _verify-core: fmt-check clippy test web-fmt-check web-clippy web-test web-build
 # The CI gates in CI order + the browser tests when this box can run them. Run before "done".
 verify: _verify-core web-itest-auto
     @echo ""
-    @echo "verify OK — NOT run: audit, web-audit, deny, web-deny (need network) and web-itest-size (shard-size ceiling)."
+    @echo "verify OK — NOT run: audit, web-audit, deny, web-deny (need network), machete (needs cargo-machete) and web-itest-size (shard-size ceiling)."
     @echo "  just verify-ui    = verify with the GUI tests REQUIRED (fails without a browser)"
-    @echo "  just verify-full  = full CI parity (adds the audit/deny gates + the shard-size ceiling)"
+    @echo "  just verify-full  = full CI parity (adds the audit/deny/machete gates + the shard-size ceiling)"
     @echo "If web-itest reported SKIPPED above, frontend behavior is still unproven:"
     @echo "renaming a CSS class, aria-label, or on-screen text a GUI test references"
     @echo "passes verify and fails CI."
@@ -333,17 +333,17 @@ verify: _verify-core web-itest-auto
 verify-ui: _verify-core web-itest
 
 # Full CI parity: the core gates + both RustSec scans + both deny policies + the
-# browser GUI tests + the per-shard wasm ceiling. web-itest runs LAST because it
-# needs a local browser + matching WebDriver (see its recipe) — the
-# machine-independent gates fail first on a box without one.
+# unused-dependency scan + the browser GUI tests + the per-shard wasm ceiling.
+# web-itest runs LAST because it needs a local browser + matching WebDriver (see
+# its recipe) — the machine-independent gates fail first on a box without one.
 #
 # `web-itest-size` is here because ci.yml runs it and this recipe claims CI
 # parity. It was missing, so a shard that had grown past the ceiling passed
 # `just verify-full` locally and failed in CI — the exact failure mode the
 # recipe exists to prevent.
 
-# Full CI parity: core gates + audit/deny for both trees + browser tests + shard ceiling.
-verify-full: _verify-core audit web-audit deny web-deny web-itest web-itest-size
+# Full CI parity: core gates + audit/deny for both trees + unused-dep scan + browser tests + shard ceiling.
+verify-full: _verify-core audit web-audit deny web-deny machete web-itest web-itest-size
 
 # --- Dependency policy (CI audit/deny jobs) ---------------------------------
 
@@ -381,6 +381,19 @@ deny:
 [working-directory('apps/desktop/web-rs')]
 web-deny:
     cargo deny --config ../../../deny.toml check advisories bans licenses sources
+
+# Unused-dependency scan over BOTH trees. cargo-machete walks directories, not the
+# cargo workspace, so this one root run also covers the excluded apps/desktop/web-rs.
+# It needs no build and no network. A dependency used only inside a macro expansion
+# is invisible to it: list it under that crate's `[package.metadata.cargo-machete]
+# ignored` with a comment saying why (today: `thiserror` in arm/graph/keyvault,
+# named only by `core::http_error_enum!`). Plain mode, not `--with-metadata`: that
+# shells out to `cargo metadata`, which may rewrite a lockfile, and every other
+# gate here runs `--locked`. CI pins the matching version in ci.yml.
+
+# Fail on a declared-but-unused dependency in either tree (cargo-machete).
+machete:
+    cargo machete --skip-target-dir
 
 # --- Release / packaging ----------------------------------------------------
 

@@ -339,7 +339,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
- "tracing",
  "wiremock",
 ]
 
@@ -411,7 +410,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "url",
  "wiremock",
 ]
 
@@ -447,7 +445,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
- "tracing",
  "wiremock",
  "zeroize",
 ]
@@ -1235,7 +1232,6 @@ dependencies = [
 name = "desktop"
 version = "0.30.2"
 dependencies = [
- "anyhow",
  "async-trait",
  "aws-lc-rs",
  "azapptoolkit-arm",
@@ -1260,7 +1256,6 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-updater",
- "thiserror 2.0.21",
  "time",
  "tokio",
  "tracing",
