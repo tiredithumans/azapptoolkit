@@ -4,8 +4,8 @@
 //! the last 90 days from MicrosoftGraphActivityLogs, so an admin can compare
 //! what the app *does* against its declared permissions (e.g. `Mail.ReadWrite`
 //! granted but only GETs observed → the Downgrade… action applies). Degrades to
-//! setup guidance (`usage_unavailable`) or a consent button — never breaks the
-//! tab.
+//! setup guidance (`usage_unavailable`), a consent button or a "Verify
+//! identity" step-up — never breaks the tab.
 
 use std::sync::Arc;
 
@@ -16,6 +16,7 @@ use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::auth;
 use crate::bindings::usage;
 use crate::components::ui::Callout;
+use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::state::use_session;
 
 #[component]
@@ -27,6 +28,9 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let consent_needed = RwSignal::new(false);
+    // A Conditional Access step-up (`interaction_required`) for Log Analytics
+    // or for the ARM workspace discovery before it.
+    let step_up_needed = RwSignal::new(false);
     let unavailable = RwSignal::new(false);
 
     // Stale-usage guard: a different app's detail in the same pane must not
@@ -36,6 +40,7 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
         result.set(None);
         error.set(None);
         consent_needed.set(false);
+        step_up_needed.set(false);
         unavailable.set(false);
     });
 
@@ -46,6 +51,7 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
         busy.set(true);
         error.set(None);
         consent_needed.set(false);
+        step_up_needed.set(false);
         unavailable.set(false);
         let tenant = tenant.get();
         let app_id = detail.with(|d| d.application.app_id.clone());
@@ -58,8 +64,13 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
                 Ok(r) => result.set(Some(r)),
                 Err(e) => {
                     consent_needed.set(e.is_consent_required());
+                    step_up_needed.set(e.is_interaction_required());
                     unavailable.set(e.code == "usage_unavailable");
-                    error.set(Some(e.message));
+                    error.set(Some(if e.is_interaction_required() {
+                        VERIFY_IDENTITY_MESSAGE.to_string()
+                    } else {
+                        e.message
+                    }));
                 }
             }
             busy.set(false);
@@ -119,6 +130,20 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
                                                     "Grant consent & retry"
                                                 </Button>
                                             </div>
+                                        }
+                                    })}
+                                // The query acquires Log Analytics, then ARM for
+                                // workspace discovery; either can be the one a
+                                // policy steps up, and only that one opens the
+                                // browser.
+                                {step_up_needed
+                                    .get()
+                                    .then(|| {
+                                        view! {
+                                            <VerifyIdentityButton
+                                                features=&["log_analytics", "arm"]
+                                                on_verified=Callback::new(move |()| do_load())
+                                            />
                                         }
                                     })}
                             </Callout>

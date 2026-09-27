@@ -25,17 +25,20 @@
   app threw away your whole session. Every view, including browsing Entra ID, then needed
   Re-authenticate, and when the policy covered only that one service, re-authenticating didn't
   clear it, so the prompt came back. Your session is now kept, and the error offers "Verify
-  identity", which completes the check for that service in your browser. Refresh token handles the
-  same prompt for Microsoft Graph by re-authenticating in place.
+  identity", which completes the check for that service in your browser and, where the error is
+  shown in place (Azure RBAC, Key Vault access, Observed Graph activity, mailbox scoping), retries.
+  For Microsoft Graph the check runs on the permissions you signed in with, so it never turns into
+  a consent prompt; Refresh token handles the same prompt by re-authenticating in place.
 - **Microsoft Graph tokens obtained at sign-in, launch, Refresh token and Grant consent now support
   Continuous Access Evaluation.** The app has always asked Graph for tokens that are revoked
   promptly when a password is reset, a user is disabled or a sign-in is flagged as risky. Tokens
   from those flows lacked it for up to their full lifetime.
 - **A busy or briefly unavailable Microsoft sign-in service no longer fails the action or signs you
   out at launch.** Token requests are now retried after a throttling (429) or server error, waiting
-  as long as the service asks, like every other Microsoft call the app makes. Access Readiness no
-  longer shows "Couldn't determine" for a scope just because several token requests ran at once. A
-  brief outage at launch no longer sends you back through the browser sign-in.
+  as long as the service asks, like every other Microsoft call the app makes, up to 30 seconds (a
+  longer wait fails straight away rather than stalling every sign-in step behind it). Access
+  Readiness no longer shows "Couldn't determine" for a scope just because several token requests
+  ran at once. A brief outage at launch no longer sends you back through the browser sign-in.
 - **Adding or removing an enterprise app from a security group now requests every permission
   Microsoft Graph requires for it.** Graph needs Application.ReadWrite.All as well as
   GroupMember.ReadWrite.All to add a service principal to a group. The app asked only for the

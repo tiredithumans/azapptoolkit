@@ -285,9 +285,13 @@ impl Session {
     ///
     /// `feature` is the caller's declared `consent_feature` — the same
     /// limitation as consent: nothing in the error names the audience. A
-    /// step-up is per audience, so for any Graph failure any Graph set works;
-    /// a component whose commands ride ARM / Exchange / Log Analytics declares
-    /// that feature via `use_command().with_consent_feature(..)`.
+    /// component whose commands ride ARM / Exchange / Log Analytics declares
+    /// that feature via `use_command().with_consent_feature(..)`; every Graph
+    /// feature (the `"write"` default included) is stepped up on the sign-in
+    /// read scopes by the backend (`step_up_where_required`) — a Graph policy
+    /// targets the resource, and stepping up on an unconsented write bundle
+    /// would show a consent screen instead of the MFA prompt. Surfaces that
+    /// render their own error use the inline twin, `VerifyIdentityButton`.
     pub fn report_interaction_required(
         &self,
         e: &azapptoolkit_dto::UiError,
@@ -299,8 +303,7 @@ impl Session {
         let session = *self;
         self.push_toast(
             ToastKind::Error,
-            "Microsoft Entra needs you to verify your identity (for example, \
-             multi-factor authentication) for this action.",
+            crate::components::verify_identity_button::VERIFY_IDENTITY_MESSAGE,
             Some("Verify identity".to_string()),
             Some(std::rc::Rc::new(move || {
                 session.spawn_scope_step_up(feature)

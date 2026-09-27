@@ -18,6 +18,7 @@ use crate::bindings::keyvault_rbac::{
 use crate::components::export_menu::ExportMenu;
 use crate::components::ui::SearchInput;
 use crate::components::ui::{Badge, Callout, ShowMore};
+use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
@@ -70,6 +71,8 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
     let progress: RwSignal<Option<KeyVaultSweepProgress>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let consent_required = RwSignal::new(false);
+    // A Conditional Access step-up for Azure management (`interaction_required`).
+    let step_up_required = RwSignal::new(false);
     let search = RwSignal::new(String::new());
 
     let search_debounced = use_debounced(search.into(), LIST_FILTER_DEBOUNCE_MS);
@@ -176,6 +179,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
         error.set(None);
         progress.set(None);
         consent_required.set(false);
+        step_up_required.set(false);
         let Some(t) = t else { return };
         let tenant_id = t.tenant_id.clone();
         leptos::task::spawn_local(async move {
@@ -200,6 +204,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
         scanning.set(true);
         error.set(None);
         consent_required.set(false);
+        step_up_required.set(false);
         progress.set(Some(KeyVaultSweepProgress {
             done: 0,
             total: 0,
@@ -216,7 +221,12 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                 Ok(r) => result.set(Some(r)),
                 Err(e) => {
                     consent_required.set(e.is_consent_required());
-                    error.set(Some(e.message));
+                    step_up_required.set(e.is_interaction_required());
+                    error.set(Some(if e.is_interaction_required() {
+                        VERIFY_IDENTITY_MESSAGE.to_string()
+                    } else {
+                        e.message
+                    }));
                 }
             }
             scanning.set(false);
@@ -329,6 +339,16 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                                                 "Grant consent & retry"
                                             </Button>
                                         </div>
+                                    }
+                                })}
+                            {step_up_required
+                                .get()
+                                .then(|| {
+                                    view! {
+                                        <VerifyIdentityButton
+                                            features=&["arm"]
+                                            on_verified=Callback::new(move |()| do_run())
+                                        />
                                     }
                                 })}
                         </Callout>

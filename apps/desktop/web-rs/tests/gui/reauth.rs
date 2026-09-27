@@ -9,9 +9,18 @@
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use wasm_bindgen::JsCast;
+
 use azapptoolkit_web_rs::bindings::SignInOutcome;
+use azapptoolkit_web_rs::bindings::usage::GraphUsageResult;
 use azapptoolkit_web_rs::components::toast::ToastHost;
+use azapptoolkit_web_rs::ipc_mock;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
+use azapptoolkit_web_rs::views::tabs::usage_panel::UsagePanel;
 
 #[wasm_bindgen_test]
 async fn dead_session_error_offers_reauth_action_that_calls_reauthenticate() {
@@ -149,6 +158,9 @@ async fn interaction_required_toast_runs_the_scope_step_up() {
     ts::wait_for(|| ts::call_count("request_scope_step_up") == 1).await;
     let call = ts::last_call("request_scope_step_up").expect("request_scope_step_up called");
     assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
+    // The caller's declared feature crosses as-is; the backend
+    // (`step_up_where_required`) steps up every Graph feature on the sign-in
+    // read scopes, so the "write" default never shows a consent screen.
     assert_eq!(
         call.arg_str("feature").as_deref(),
         Some("write"),
@@ -157,6 +169,107 @@ async fn interaction_required_toast_runs_the_scope_step_up() {
     ts::wait_for(|| ts::body_contains("Verified")).await;
     assert_eq!(ts::call_count("reauthenticate"), 0);
     assert_eq!(ts::call_count("sign_out"), 0, "never a sign-out");
+}
+
+fn click_button(label: &str) {
+    for el in ts::query_all("button") {
+        if el.text_content().unwrap_or_default().trim() == label {
+            let el: web_sys::HtmlElement = el.unchecked_into();
+            el.click();
+            return;
+        }
+    }
+    panic!("no button labelled `{label}`");
+}
+
+/// Surfaces that render their own error never reach the toast sink, so an
+/// Azure / Log Analytics MFA policy used to print the raw AADSTS text with no
+/// way forward. Observed Graph activity now offers "Verify identity & retry",
+/// which steps up BOTH audiences its query acquires (Log Analytics, then ARM
+/// for workspace discovery — the backend opens the browser only for the one
+/// that needs it) and re-runs the query. Never a re-auth or a sign-out.
+#[wasm_bindgen_test]
+async fn an_inline_surface_offers_the_resource_step_up_and_retries() {
+    ts::reset();
+    ts::mock_err(
+        "get_app_graph_usage",
+        &fixtures::ui_error(
+            "interaction_required",
+            "additional verification required for this resource (interaction_required (AADSTS50076))",
+        ),
+    );
+    let features = Rc::new(RefCell::new(Vec::<String>::new()));
+    let seen = features.clone();
+    ipc_mock::mock_each("request_scope_step_up", move |args| {
+        seen.borrow_mut()
+            .push(args["feature"].as_str().unwrap_or_default().to_string());
+    });
+    let detail = Arc::new(fixtures::application_detail("obj-1", "app-1", "Payroll"));
+    let _m = ts::mount_view(move || {
+        view! { <UsagePanel detail=Signal::derive(move || detail.clone()) /> }
+    });
+
+    click_button("Check observed usage (90d)");
+    ts::wait_for(|| ts::body_contains("Verify identity & retry")).await;
+    assert!(ts::body_contains("verify your identity"));
+    assert!(!ts::body_contains("AADSTS"), "our wording, not AAD's code");
+    assert!(!ts::body_contains("Grant consent & retry"));
+
+    ts::mock_ok(
+        "get_app_graph_usage",
+        &GraphUsageResult {
+            app_id: "app-1".into(),
+            days: 90,
+            workspace_name: "law-prod".into(),
+            rows: Vec::new(),
+            truncated: false,
+        },
+    );
+    click_button("Verify identity & retry");
+    ts::wait_for(|| ts::body_contains("law-prod")).await;
+
+    assert_eq!(*features.borrow(), ["log_analytics", "arm"]);
+    assert_eq!(
+        ts::call_count("get_app_graph_usage"),
+        2,
+        "re-ran after verifying"
+    );
+    assert_eq!(ts::call_count("reauthenticate"), 0);
+    assert_eq!(ts::call_count("sign_out"), 0, "never a sign-out");
+}
+
+/// A failed step-up keeps the surface and says why, instead of retrying.
+#[wasm_bindgen_test]
+async fn a_failed_inline_step_up_says_so_and_does_not_retry() {
+    ts::reset();
+    ts::mock_err(
+        "get_app_graph_usage",
+        &fixtures::ui_error("interaction_required", "verify"),
+    );
+    ts::mock_err(
+        "request_scope_step_up",
+        &fixtures::ui_error("cancelled", "the browser sign-in was closed"),
+    );
+    let detail = Arc::new(fixtures::application_detail("obj-1", "app-1", "Payroll"));
+    let _m = ts::mount_view(move || {
+        view! { <UsagePanel detail=Signal::derive(move || detail.clone()) /> }
+    });
+
+    click_button("Check observed usage (90d)");
+    ts::wait_for(|| ts::body_contains("Verify identity & retry")).await;
+    click_button("Verify identity & retry");
+    ts::wait_for(|| ts::body_contains("Couldn't complete verification")).await;
+
+    assert_eq!(
+        ts::call_count("request_scope_step_up"),
+        1,
+        "stops at the first failure"
+    );
+    assert_eq!(
+        ts::call_count("get_app_graph_usage"),
+        1,
+        "no retry without verification"
+    );
 }
 
 /// A step-up on the Graph read scopes (tenant-wide MFA or sign-in frequency)

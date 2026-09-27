@@ -119,14 +119,20 @@ pub async fn request_scope_consent(
         .map_err(UiError::from)
 }
 
-/// Completes a Conditional Access step-up for an optional `feature`'s scopes
+/// Completes a Conditional Access step-up for an optional `feature`'s audience
 /// (e.g. `"arm"`, `"exchange"`, `"log_analytics"`). The recovery path the UI's
-/// "Verify identity" toast invokes after a command fails with the
+/// "Verify identity" levers invoke after a command fails with the
 /// `interaction_required` code (MFA, registration or an external challenge a
 /// policy demands for that resource): one browser round trip with
 /// `prompt=login`, pinned to the signed-in account, that seeds the token cache
 /// so the retried command's silent acquisition succeeds. The session is never
 /// dropped — that code does not purge the refresh token.
+///
+/// `EntraAuthService::step_up_where_required` picks the set: every Graph
+/// feature steps up on the sign-in read scopes (a Graph policy targets the
+/// resource, and the read set is the one always consented), and a non-Graph
+/// feature opens the browser only when its silent acquisition still needs the
+/// step-up — so a surface can name every audience its command touches.
 #[tauri::command]
 pub async fn request_scope_step_up(
     state: State<'_, AppState>,
@@ -138,7 +144,7 @@ pub async fn request_scope_step_up(
     })?;
     state
         .auth
-        .step_up_for_scopes(&tenant_id, &scopes)
+        .step_up_where_required(&tenant_id, &scopes)
         .await
         .map_err(UiError::from)
 }

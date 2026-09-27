@@ -28,6 +28,7 @@ use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::ui::{
     Badge, Callout, CopyableId, DataTable, DetailLoadError, SkeletonList, TabBar, TabBarItem,
 };
+use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::state::use_session;
 use crate::util::keep_alive;
 use crate::views::managed_identities::chip_kind_for;
@@ -398,6 +399,23 @@ pub fn ManagedIdentityDetailPane(
                             }
                                 .into_any()
                         }
+                        // A Conditional Access policy wants MFA (or another
+                        // interactive step) for Azure management: the session
+                        // is fine, so offer the ARM step-up, then re-run.
+                        Err(e) if e.is_interaction_required() => {
+                            view! {
+                                <Callout tone="warn">
+                                    <p>{VERIFY_IDENTITY_MESSAGE}</p>
+                                    <VerifyIdentityButton
+                                        features=&["arm"]
+                                        on_verified=Callback::new(move |()| {
+                                            arm_reload.update(|n| *n += 1)
+                                        })
+                                    />
+                                </Callout>
+                            }
+                                .into_any()
+                        }
                         Err(_) => {
                             view! {
                                 <Callout tone="warn">
@@ -511,6 +529,7 @@ fn AssignAzureRolePanel(
     #[prop(into)] principal_id: Signal<Option<String>>,
     #[prop(into)] on_assigned: Callback<()>,
 ) -> impl IntoView {
+    let session = use_session();
     let open = RwSignal::new(false);
     let role = RwSignal::new(COMMON_AZURE_ROLES[0].1.to_string());
     let scope = RwSignal::new(String::new());
@@ -545,7 +564,14 @@ fn AssignAzureRolePanel(
                     scope.set(String::new());
                     on_assigned.run(());
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => {
+                    // The shared recovery toast, aimed at ARM: "Grant consent"
+                    // or "Verify identity" (an Azure-management MFA policy)
+                    // for the audience this write rides — never the Graph
+                    // write default. The inline text stays this form's message.
+                    session.report_recovery_action(&e, "arm");
+                    error.set(Some(e.message));
+                }
             }
             busy.set(false);
         });

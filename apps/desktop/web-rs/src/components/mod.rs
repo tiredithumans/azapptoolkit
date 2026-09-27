@@ -48,4 +48,5 @@ pub mod ui;
 pub mod update_splash;
 pub mod uri_list_editor;
 pub mod vault_picker;
+pub mod verify_identity_button;
 pub mod virtual_list;

@@ -28,8 +28,10 @@ says the requested set is a Graph one. The per-scope refresh lock stays keyed on
 (honouring `Retry-After`) or a 5xx / network failure is retried; any other rejection is terminal and
 classified as before. The class comes from the grant (`retry_class_for`): a `refresh_token` grant is
 idempotent, an `authorization_code` is single-use, so only a 429 replays it. A timeout is terminal,
-because the refresh holds its per-scope lock across the backoff (intended — same-key waiters get the
-retried result instead of re-POSTing into the same throttle).
+and so is a `Retry-After` above `TOKEN_RETRY_AFTER_MAX_SECS` (30 s), because the refresh holds its
+per-scope lock across the backoff (intended for a short wait — same-key waiters get the retried
+result instead of re-POSTing into the same throttle — but not for the minutes the shared policy
+honours for Graph / ARM writes).
 
 **An abandoned browser round trip is `cancelled`.** The redirect wait (`REDIRECT_WAIT`, 300 s)
 timing out, or Entra redirecting `access_denied` with `error_subcode=cancel` or with no AADSTS code
@@ -152,12 +154,27 @@ read scopes never met the ARM policy, so the purge repeated.
 - `interaction_required` is a `core::reauth::PASSTHROUGH_NON_FATAL_CODES` entry: it survives every
   client's `Token` arm, never halts a fan-out, and is not retryable. It must never join
   `REAUTH_FATAL_CODES`.
-- Recovery: `Session::report_interaction_required` raises a **Verify identity** toast whose action
-  calls `request_scope_step_up(tenant_id, feature)` → `EntraAuthService::step_up_for_scopes` — one
-  `prompt=login` round trip for that feature's scopes (the shared core with `consent_for_scopes`,
-  identity-checked the same way), which seeds the token cache so the retried command is silent. The
-  feature is the caller's declared `consent_feature` (default `"write"`), the same limitation as
-  consent: nothing in the error names the audience.
+- Recovery: `request_scope_step_up(tenant_id, feature)` →
+  `EntraAuthService::step_up_where_required` → `step_up_for_scopes` — one `prompt=login` round trip
+  (the shared core with `consent_for_scopes`, identity-checked the same way), which seeds the token
+  cache so the retried command is silent. Nothing in the error names the audience, so the caller
+  names the feature, and `step_up_where_required` aims it:
+  - **every Graph feature steps up on the sign-in read scopes** — a policy targets the resource,
+    not individual scopes, and the read set is the one always consented; stepping up on the
+    `"write"` default would show an operator who never consented the write bundle a consent screen
+    instead of the MFA prompt. It runs unconditionally, because a cached read token masks the need;
+  - **a non-Graph feature** (ARM, Exchange, Key Vault, Log Analytics) is first acquired silently and
+    opens the browser only when that still fails `interaction_required`; any other failure (a
+    missing consent) comes back as-is. So a surface can name every audience its command acquires.
+- Two front-end levers call it, both one per pattern: the toast sink
+  (`Session::report_interaction_required`, **Verify identity**, with the caller's
+  `consent_feature` — ARM / Exchange writes declare theirs) and, for a surface that renders its own
+  error, the inline `components::verify_identity_button::VerifyIdentityButton` (**Verify identity &
+  retry**, which re-runs the surface). The inline one sits beside each hand-rolled "Grant consent &
+  retry": the managed-identity Azure RBAC tab (`arm`; its Assign form routes through
+  `report_recovery_action(.., "arm")`), the Key Vault RBAC sweep (`arm`), Observed Graph activity
+  (`log_analytics` then `arm` — the query acquires both) and the mailbox-scoping banner
+  (`exchange`).
 - A step-up on the Graph read scopes (tenant-wide MFA, sign-in frequency) comes back from
   `refresh_session` as `interaction_required`; **Refresh token** falls back to `reauthenticate`
   for it, which is exactly that step-up.

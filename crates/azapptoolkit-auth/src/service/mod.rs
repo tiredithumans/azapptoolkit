@@ -190,7 +190,8 @@ impl EntraAuthService {
     /// failure is retried when [`retry_class_for`] allows it for this grant; any
     /// other rejection is terminal and classified exactly as before. A timeout
     /// is terminal too — a 30s-silent endpoint retried would hold the caller's
-    /// per-scope refresh lock for minutes. `params` carry the refresh token /
+    /// per-scope refresh lock for minutes — and so is a `Retry-After` above
+    /// [`TOKEN_RETRY_AFTER_MAX_SECS`], for the same reason. `params` carry the refresh token /
     /// code verifier, so only the grant type ever reaches the log label.
     async fn post_token(&self, authority: &str, params: &[(&str, &str)]) -> Result<TokenResponse> {
         let url = format!("{authority}/oauth2/v2.0/token");
@@ -272,6 +273,12 @@ impl EntraAuthService {
             );
             AuthError::TokenExchange(format!("HTTP {status}"))
         };
+        if retry_after_secs.is_some_and(|s| s > TOKEN_RETRY_AFTER_MAX_SECS) {
+            // Waiting it out would hold the caller's per-scope refresh lock
+            // (and, on the interactive paths, the operator) for minutes; fail
+            // now with the throttle error instead.
+            return Attempt::Done(Err(err));
+        }
         match status.as_u16() {
             429 => Attempt::Retry {
                 reason: RetryReason::Throttled,
@@ -289,6 +296,13 @@ impl EntraAuthService {
         }
     }
 }
+
+/// The longest `Retry-After` a `/token` retry waits out. A throttle or 5xx that
+/// asks for longer is terminal: the shared policy honours up to
+/// `core::http_retry::RETRY_AFTER_MAX_SECS` (minutes) for Graph / ARM writes,
+/// but a token call runs under the per-(tenant, scope) refresh lock, so every
+/// same-key caller would queue behind the wait.
+const TOKEN_RETRY_AFTER_MAX_SECS: u64 = 30;
 
 /// The `grant_type` of a `/token` request — the one parameter safe to log.
 fn grant_type<'a>(params: &[(&str, &'a str)]) -> Option<&'a str> {
@@ -504,6 +518,40 @@ impl EntraAuthService {
     pub async fn step_up_for_scopes(&self, tenant_id: &str, scopes: &[String]) -> Result<()> {
         self.interactive_for_scopes(tenant_id, scopes, "login", "verification")
             .await
+    }
+
+    /// The step-up the UI's "Verify identity" lever runs for a failed
+    /// command's feature scope set — [`Self::step_up_for_scopes`] aimed at the
+    /// set that can actually take it:
+    ///
+    /// - **A Graph set** steps up on the Graph **read** scopes, whatever
+    ///   feature failed. Conditional Access targets the resource, not
+    ///   individual scopes, so a verified Graph read token satisfies any Graph
+    ///   policy; the read set is consented at sign-in, while stepping up on
+    ///   the write (or another on-demand) set would show an operator who never
+    ///   consented it a consent or admin-approval screen instead of the MFA
+    ///   prompt. The token cache would mask the need (a cached read token is
+    ///   still valid while the refresh behind a write needs MFA), so this runs
+    ///   unconditionally.
+    /// - **Any other set** (ARM, Exchange, Key Vault, Log Analytics) is first
+    ///   acquired silently and stepped up only when that fails with
+    ///   [`AuthError::InteractionRequired`]. Nothing in the error names the
+    ///   audience that raised it, so a surface whose command touches two
+    ///   audiences (Log Analytics then ARM for the usage query) asks for both
+    ///   in order; the audience that needs no step-up costs no browser round
+    ///   trip. Any other silent failure (e.g. `ConsentRequired`) is returned
+    ///   as-is: `prompt=login` cannot fix it.
+    pub async fn step_up_where_required(&self, tenant_id: &str, scopes: &[String]) -> Result<()> {
+        if self.is_graph_scope_set(scopes) {
+            let read = self.default_graph_read_scopes();
+            return self.step_up_for_scopes(tenant_id, &read).await;
+        }
+        match self.access_token_for_scopes(tenant_id, scopes).await {
+            Err(AuthError::InteractionRequired(_)) => {
+                self.step_up_for_scopes(tenant_id, scopes).await
+            }
+            other => other.map(|_| ()),
+        }
     }
 
     /// Shared core of [`Self::consent_for_scopes`] and
@@ -2187,6 +2235,156 @@ mod tests {
         );
     }
 
+    // ---- F108 follow-up: the step-up aims at the set that can take it ----
+
+    #[tokio::test]
+    async fn a_graph_step_up_runs_on_the_read_scopes_not_the_failed_set() {
+        // A Graph write failing `interaction_required` must not step up on the
+        // write bundle: an operator who never consented it would get a consent
+        // screen instead of the MFA prompt. The read set is always consented.
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("graph-step-up-tenant", "graph-step-up-oid");
+        let mut svc = signed_in_service(server.uri(), tenant, oid);
+        let (nonce, url_slot) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        svc.open_browser = recording_opener(
+            redirecting_opener(nonce.clone(), Arc::new(AtomicUsize::new(0))),
+            url_slot.clone(),
+        );
+        mount_interactive_token(&server, tenant, tenant, Some(oid), None, nonce).await;
+        let (read, write) = (
+            svc.default_graph_read_scopes(),
+            svc.default_graph_write_scopes(),
+        );
+
+        svc.step_up_where_required(tenant, &write).await.unwrap();
+
+        let query = recorded_query(&url_slot);
+        assert_eq!(query.get("prompt").map(String::as_str), Some("login"));
+        let scope = &query["scope"];
+        assert!(scope.contains("Directory.Read.All"), "{scope}");
+        assert!(!scope.contains("Application.ReadWrite.All"), "{scope}");
+        // Seeded in the CAE read slot the Graph read adapter consumes.
+        assert!(svc.cache.get(tenant, &read, true).is_some());
+        assert!(svc.cache.get(tenant, &write, true).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_resource_that_needs_no_step_up_opens_no_browser() {
+        // A surface names every audience its command touches (the usage query
+        // needs Log Analytics AND ARM); the one whose silent acquisition works
+        // must cost no browser round trip (`signed_in_service` panics on one).
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("no-step-up-tenant", "no-step-up-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(token_ok("arm-silent"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+
+        svc.step_up_where_required(tenant, &arm_scopes())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            svc.cache.get(tenant, &arm_scopes(), false).unwrap().token,
+            "arm-silent"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_resource_that_needs_a_step_up_gets_one() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("needs-step-up-tenant", "needs-step-up-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .and(wiremock::matchers::body_string_contains(
+                "grant_type=refresh_token",
+            ))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "interaction_required",
+                "error_description": "AADSTS50076: you must use multi-factor authentication"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut svc = signed_in_service(server.uri(), tenant, oid);
+        let (nonce, opened) = (Arc::new(Mutex::new(None)), Arc::new(AtomicUsize::new(0)));
+        svc.open_browser = redirecting_opener(nonce.clone(), opened.clone());
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .and(wiremock::matchers::body_string_contains(
+                "grant_type=authorization_code",
+            ))
+            .respond_with(interactive_token_response(tenant, Some(oid), None, nonce))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        svc.step_up_where_required(tenant, &arm_scopes())
+            .await
+            .unwrap();
+
+        assert_eq!(opened.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            svc.cache.get(tenant, &arm_scopes(), false).unwrap().token,
+            "interactive-at"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_missing_consent_is_not_answered_with_a_step_up() {
+        // `prompt=login` can't grant consent: the typed error comes back and
+        // no browser opens (`signed_in_service` panics on one).
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("step-up-consent-tenant", "step-up-consent-oid");
+        mount_token_error(
+            &server,
+            tenant,
+            serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "AADSTS65001: The user or administrator has not consented"
+            }),
+        )
+        .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+
+        let result = svc.step_up_where_required(tenant, &arm_scopes()).await;
+
+        assert!(
+            matches!(result, Err(AuthError::ConsentRequired(_))),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_long_retry_after_on_the_token_endpoint_is_terminal() {
+        // Honouring minutes of Retry-After would hold the per-scope refresh
+        // lock (and every same-key caller) for the whole wait.
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("long-retry-after-tenant", "long-retry-after-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", (TOKEN_RETRY_AFTER_MAX_SECS + 1).to_string()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+
+        let started = std::time::Instant::now();
+        let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+        assert!(result.is_err(), "{result:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(TOKEN_RETRY_AFTER_MAX_SECS));
+        server.verify().await;
+    }
+
     // ---- F115: the single-flight refresh, proven by behaviour ----
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2224,10 +2422,19 @@ mod tests {
     async fn different_scope_sets_refresh_independently() {
         let server = MockServer::start().await;
         let (tenant, oid) = ("per-key-tenant", "per-key-oid");
-        let delay = std::time::Duration::from_millis(500);
+        // Each answer is held for `delay`; the responder records when each
+        // request ARRIVED. Serialised behind one lock, the second cannot even
+        // be sent until the first is answered, so the gap between arrivals is
+        // at least `delay` by construction — no wall-clock budget to flake on.
+        let delay = std::time::Duration::from_secs(2);
+        let arrivals = Arc::new(Mutex::new(Vec::<std::time::Instant>::new()));
+        let seen = arrivals.clone();
         Mock::given(method("POST"))
             .and(path(format!("/{tenant}/oauth2/v2.0/token")))
-            .respond_with(token_ok("per-key").set_delay(delay))
+            .respond_with(move |_: &wiremock::Request| {
+                seen.lock().push(std::time::Instant::now());
+                token_ok("per-key").set_delay(delay)
+            })
             .expect(2)
             .mount(&server)
             .await;
@@ -2235,21 +2442,22 @@ mod tests {
         let vault = EntraAuthService::resource_default_scopes("https://vault.azure.net");
 
         let arm = arm_scopes();
-        let started = std::time::Instant::now();
         let (a, b) = tokio::join!(
             svc.access_token_for_scopes(tenant, &arm),
             svc.access_token_for_scopes(tenant, &vault),
         );
-        let elapsed = started.elapsed();
 
         a.unwrap();
         b.unwrap();
         server.verify().await;
-        // Serialised behind one lock this takes two full delays; the per-key
-        // locks let the two audiences overlap (generous margin for a busy box).
+        // The per-key locks let the second audience's request reach the
+        // endpoint while the first was still being held.
+        let arrivals = arrivals.lock();
+        assert_eq!(arrivals.len(), 2);
+        let gap = arrivals[1].duration_since(arrivals[0]);
         assert!(
-            elapsed < delay * 2 - std::time::Duration::from_millis(100),
-            "{elapsed:?}"
+            gap < delay,
+            "second request arrived {gap:?} after the first"
         );
     }
 
