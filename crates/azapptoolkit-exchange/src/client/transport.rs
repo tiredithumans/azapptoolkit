@@ -41,8 +41,10 @@ impl ExchangeClient {
     ///
     /// Continuation is a POST to the `@odata.nextLink` URL with the *same* body
     /// and headers (not a GET, unlike Microsoft Graph), and the link is only
-    /// valid for 5-10 minutes — hence no delay between pages.
-    /// See <https://learn.microsoft.com/exchange/reference/admin-api-get-started#pagination>.
+    /// valid for 5-10 minutes — hence no delay between pages. The continuation
+    /// contract is the same nextLink / POST-continuation one Microsoft documents
+    /// for the v2.0 Admin API; see
+    /// <https://learn.microsoft.com/exchange/reference/admin-api-get-started#pagination>.
     pub(crate) async fn invoke_command(
         &self,
         cmdlet: &str,

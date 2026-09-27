@@ -1232,6 +1232,9 @@ pub fn exchange_role_assignment(
         name: Some(name),
         role: Some(role.to_string()),
         custom_resource_scope: Some(scope_name.to_string()),
+        recipient_write_scope: None,
+        custom_recipient_write_scope: None,
+        recipient_administrative_unit_scope: None,
     }
 }
 

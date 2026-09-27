@@ -76,7 +76,12 @@ things stay deliberately narrower:
 Widening either gate shifts the audit's scoped-mail weighting, so it needs a CHANGELOG note.
 `-RecipientAdministrativeUnitScope` is a read-only capability here: an AU-scoped assignment is *read*
 correctly (`is_org_wide_auth_row` won't call it org-wide; the enrich step simply finds no management
-scope), but the grant paths only build `MemberOfGroup` management scopes.
+scope), but the grant paths only build `MemberOfGroup` management scopes. The role-assignment list
+(`list_exchange_role_assignments`) labels such an assignment "Administrative unit <id>" rather than
+"(org-wide)"; `roles_already_scoped` and `plan_role_assignments` stay keyed on `CustomResourceScope`,
+because an AU scope is not the toolkit's group scope. The AU wire keys (`RecipientWriteScope`,
+`CustomRecipientWriteScope`, `RecipientAdministrativeUnitScope`) are read tolerantly, each its own
+field, pending a captured AU-scoped envelope.
 
 ## Migrating a legacy Application Access Policy
 
@@ -303,6 +308,20 @@ pure `MemberOfGroup` OR-chain; anything it cannot fully read is unrewritable.
 back: a scope that cannot be *proved* safe to narrow keeps its original groups,
 because an integration that silently stops seeing a mailbox reports "not found",
 not "denied" — the hardest kind of outage to trace to a permission change.
+
+## Transport: the InvokeCommand gateway
+
+Every Exchange cmdlet rides `POST {base}/adminapi/beta/{tenant}/InvokeCommand` with a `CmdletInput`
+envelope (`azapptoolkit-exchange::client`). That is the ExchangeOnlineManagement PowerShell module's
+own REST transport, exercised against live tenants but **not a contract Microsoft publishes for
+third parties**. The documented Admin API is the preview `adminapi/v2.0/{tenant}/{Endpoint}` surface
+with `Exchange.ManageV2`; its six endpoints (AcceptedDomain, Mailbox, MailboxFolderPermission,
+OrganizationConfig, DistributionGroupMember, DynamicDistributionGroupMember) cover none of the
+RBAC-for-Applications cmdlets, and the gateway rejects a `ManageV2` token, so the app requests the
+classic `Exchange.Manage` scope (`core::constants::EXCHANGE_SCOPES`). The support risk is that
+Microsoft can change the gateway without notice. Migration trigger: once the role-assignment,
+management-scope, service-principal and `Test-ServicePrincipalAuthorization` cmdlets appear under
+`adminapi/v2.0`, move to that surface and to `Exchange.ManageV2`.
 
 ## Name the resource in operator-facing text
 

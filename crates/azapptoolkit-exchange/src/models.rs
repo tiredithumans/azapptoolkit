@@ -32,6 +32,16 @@ pub struct ExoManagementScope {
 }
 
 /// A management role assignment created via `New-ManagementRoleAssignment`.
+///
+/// `custom_resource_scope` is the toolkit's management scope, and the only
+/// field the planners (`roles_already_scoped`, `plan_role_assignments`) key on.
+/// The three recipient-write-scope fields are read only so the listing does not
+/// mislabel an assignment made with `-RecipientAdministrativeUnitScope` as
+/// org-wide. Their names are the ExchangeRoleAssignment properties and have not
+/// been confirmed against a captured AU-scoped envelope, so each is read
+/// tolerantly (a non-string value is `None`, never a failed row) and kept as
+/// its own field: a `#[serde(alias)]` merge would fail the whole list with a
+/// duplicate-field error if two of the keys arrived together.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExoRoleAssignment {
     #[serde(rename = "Name", default)]
@@ -44,6 +54,29 @@ pub struct ExoRoleAssignment {
     pub custom_resource_scope: Option<String>,
     #[serde(rename = "Identity", default)]
     pub identity: Option<String>,
+    /// The recipient write-scope type, e.g. `AdministrativeUnit`.
+    #[serde(
+        rename = "RecipientWriteScope",
+        default,
+        deserialize_with = "ps_optional_string"
+    )]
+    pub recipient_write_scope: Option<String>,
+    /// The identity behind a custom recipient write scope (for an AU scope,
+    /// the administrative unit's ID).
+    #[serde(
+        rename = "CustomRecipientWriteScope",
+        default,
+        deserialize_with = "ps_optional_string"
+    )]
+    pub custom_recipient_write_scope: Option<String>,
+    /// The `-RecipientAdministrativeUnitScope` value, should the gateway echo
+    /// the parameter name as a property.
+    #[serde(
+        rename = "RecipientAdministrativeUnitScope",
+        default,
+        deserialize_with = "ps_optional_string"
+    )]
+    pub recipient_administrative_unit_scope: Option<String>,
 }
 
 /// A recipient group (mail-enabled security group, M365 group, or
@@ -280,9 +313,77 @@ where
     })
 }
 
+/// Tolerant string for a cmdlet property whose wire shape is unconfirmed: a
+/// JSON string becomes `Some` (trimmed; blank is `None`), and anything else —
+/// a number (an enum serialized by value), an object, `null` — is `None`
+/// instead of failing the whole response.
+fn ps_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(s)) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn role_assignment_of(json: serde_json::Value) -> ExoRoleAssignment {
+        serde_json::from_value(json).expect("role assignment deserializes")
+    }
+
+    #[test]
+    fn an_administrative_unit_scoped_assignment_reads_its_scope() {
+        let a = role_assignment_of(serde_json::json!({
+            "Name": "Application Mail.Read-app",
+            "Role": "Application Mail.Read",
+            "RecipientWriteScope": "AdministrativeUnit",
+            "CustomRecipientWriteScope": "4d819ce9-5d1f-4b3e-9a6c-0d2b7e8f1a23"
+        }));
+        assert_eq!(
+            a.recipient_write_scope.as_deref(),
+            Some("AdministrativeUnit")
+        );
+        assert_eq!(
+            a.custom_recipient_write_scope.as_deref(),
+            Some("4d819ce9-5d1f-4b3e-9a6c-0d2b7e8f1a23")
+        );
+        assert_eq!(a.custom_resource_scope, None);
+    }
+
+    #[test]
+    fn an_unexpected_write_scope_shape_never_fails_the_row() {
+        // An enum serialized by value, not name: the row still parses.
+        let a = role_assignment_of(serde_json::json!({
+            "Role": "Application Mail.Read",
+            "RecipientWriteScope": 11,
+            "CustomRecipientWriteScope": { "Name": "x" },
+            "RecipientAdministrativeUnitScope": "   "
+        }));
+        assert_eq!(a.role.as_deref(), Some("Application Mail.Read"));
+        assert_eq!(a.recipient_write_scope, None);
+        assert_eq!(a.custom_recipient_write_scope, None);
+        assert_eq!(a.recipient_administrative_unit_scope, None);
+    }
+
+    #[test]
+    fn a_row_without_write_scope_keys_reads_none() {
+        let a = role_assignment_of(serde_json::json!({
+            "Role": "Application Mail.Read",
+            "CustomResourceScope": "app_scope_x"
+        }));
+        assert_eq!(a.custom_resource_scope.as_deref(), Some("app_scope_x"));
+        assert_eq!(a.recipient_write_scope, None);
+        assert_eq!(a.custom_recipient_write_scope, None);
+        assert_eq!(a.recipient_administrative_unit_scope, None);
+    }
 
     fn in_scope_of(json: serde_json::Value) -> Option<bool> {
         serde_json::from_value::<ExoAuthorizationResult>(json)

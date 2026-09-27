@@ -48,6 +48,11 @@
 
 ### Fixed
 
+- **The Exchange scoping section no longer lists an administrative-unit-scoped role assignment as
+  org-wide.** "Current Exchange role assignments" showed "(org-wide)" for any assignment without a
+  management scope, so an assignment created with `-RecipientAdministrativeUnitScope` looked as if it
+  reached every mailbox. It now shows "Administrative unit" and the unit's ID. The mailbox Scope
+  verdicts and audit scoring already read these assignments correctly; only this list was wrong.
 - **Scoping mailbox access now tells you when a permission still reaches every mailbox.** If an
   Exchange role couldn't be assigned or an org-wide grant couldn't be removed, the result listed each
   failure but not what it meant. A single note now names the permissions that are still granted

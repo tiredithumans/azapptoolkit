@@ -33,14 +33,15 @@ use azapptoolkit_exchange::targets::{
 };
 // The pure mailbox-scope decisions now live in the crate, where they are
 // unit-testable without a Tauri `State`. This file keeps the I/O around them.
+use azapptoolkit_exchange::aap::{
+    SourceGroupRead, group_policies_for_migration, plan_source_membership, source_member,
+    unverified_members,
+};
 use azapptoolkit_exchange::verdict::{
     aap_verdict_for, reconcile_orgwide_grant, row_grants_permission, scope_from_rbac_error,
     verdict_from_rows,
 };
-use azapptoolkit_exchange::{
-    ExchangeClient, ExchangeError, SourceGroupRead, group_policies_for_migration,
-    member_of_group_filter, plan_source_membership, source_member, unverified_members,
-};
+use azapptoolkit_exchange::{ExchangeClient, ExchangeError, member_of_group_filter};
 use azapptoolkit_graph::GraphClient;
 
 use crate::commands::applications::{invalidate_app_detail_state, invalidate_app_lists};
@@ -119,9 +120,9 @@ pub(crate) async fn exchange_client_checked(
     exchange_client(state, tenant_id)
 }
 
-// The module was one 3 000-line file; it is split by section so an edit reads
-// only the part it touches. Everything is re-exported flat, so `commands::exchange::X`
-// paths (lib.rs `generate_handler![]`, the other command modules) are unchanged —
+// Split by section so an edit reads only the part it touches. Everything is
+// re-exported flat, so `commands::exchange::X` paths (lib.rs
+// `generate_handler![]`, the other command modules) are unchanged —
 // the glob also carries each command's `__cmd__` macro, which `generate_handler!`
 // needs (same pattern as `commands::applications`).
 mod aap_migration;

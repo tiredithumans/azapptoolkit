@@ -1,81 +1,12 @@
 //! Unit tests for the Exchange command layer (`super`).
+//!
+//! Pure decisions are tested beside their code in `azapptoolkit-exchange`;
+//! only the command-layer glue is tested here.
 
 use super::*;
 
-use azapptoolkit_core::models::{
-    AppRoleAssignment, Application, RequiredResourceAccess, ResourceAccess,
-};
-use azapptoolkit_core::scoping::{
-    EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
-    exchange_role_for_resource_permission,
-};
-use azapptoolkit_exchange::targets::group_dns_in_filter;
-
-fn target(value: &str) -> ExchangeTarget {
-    ExchangeTarget {
-        graph_value: value.to_string(),
-        exchange_role: "Application Mail.Read",
-        app_role_id: "role-id".to_string(),
-        resource_sp_object_id: "graph-sp".to_string(),
-    }
-}
-
-fn values(targets: &[ExchangeTarget]) -> Vec<&str> {
-    targets.iter().map(|t| t.graph_value.as_str()).collect()
-}
-
-/// The two mailbox resources as they resolve in a tenant, with one appRole
-/// each keyed `role-<value>`.
-fn mailbox_resources() -> Vec<ResourceRoles> {
-    let index = |values: &[&str]| -> HashMap<String, String> {
-        values
-            .iter()
-            .map(|v| (format!("role-{v}"), v.to_string()))
-            .collect()
-    };
-    vec![
-        ResourceRoles {
-            app_id: MICROSOFT_GRAPH_APP_ID,
-            sp_object_id: "graph-sp".to_string(),
-            // `MailboxItem.ReadWrite.All` is RBAC-scopable but was never
-            // governed by an Application Access Policy — the migration-parity
-            // case below.
-            role_value_by_id: index(&[
-                "Mail.Read",
-                "Mail.Send",
-                "User.Read.All",
-                "MailboxItem.ReadWrite.All",
-            ]),
-        },
-        ResourceRoles {
-            app_id: OFFICE365_EXCHANGE_ONLINE_APP_ID,
-            sp_object_id: "exo-sp".to_string(),
-            // The legacy resource exposes the EWS scope AND its own
-            // Outlook-REST `Mail.Read` appRole (a different GUID).
-            role_value_by_id: [
-                (
-                    format!("exo-role-{EWS_FULL_ACCESS_AS_APP}"),
-                    EWS_FULL_ACCESS_AS_APP.to_string(),
-                ),
-                ("exo-role-Mail.Read".to_string(), "Mail.Read".to_string()),
-            ]
-            .into(),
-        },
-    ]
-}
-
-fn declared(resource_app_id: &str, role_ids: &[&str]) -> RequiredResourceAccess {
-    RequiredResourceAccess {
-        resource_app_id: resource_app_id.to_string(),
-        resource_access: role_ids
-            .iter()
-            .map(|id| ResourceAccess {
-                id: id.to_string(),
-                r#type: "Role".to_string(),
-            })
-            .collect(),
-    }
-}
+use azapptoolkit_core::models::AppRoleAssignment;
+use azapptoolkit_core::scoping::EWS_FULL_ACCESS_AS_APP;
 
 fn grant(resource_sp_id: &str, app_role_id: &str) -> AppRoleAssignment {
     AppRoleAssignment {
@@ -84,95 +15,6 @@ fn grant(resource_sp_id: &str, app_role_id: &str) -> AppRoleAssignment {
         app_role_id: app_role_id.to_string(),
         ..Default::default()
     }
-}
-
-#[test]
-fn declared_targets_span_graph_and_the_legacy_ews_scope() {
-    // The EWS `full_access_as_app` scope is the one non-Graph permission an
-    // Application Access Policy could confine. Deriving targets from Microsoft
-    // Graph alone made it invisible: no `Application EWS.AccessAsApp` was ever
-    // assigned and its org-wide grant was never stripped.
-    let app = Application {
-        required_resource_access: vec![
-            declared(
-                MICROSOFT_GRAPH_APP_ID,
-                &["role-Mail.Read", "role-User.Read.All"],
-            ),
-            declared(
-                OFFICE365_EXCHANGE_ONLINE_APP_ID,
-                &[&format!("exo-role-{EWS_FULL_ACCESS_AS_APP}")],
-            ),
-        ],
-        ..Default::default()
-    };
-    let targets = targets_from_declared(&app, &mailbox_resources());
-    assert_eq!(values(&targets), ["Mail.Read", EWS_FULL_ACCESS_AS_APP]);
-    // Each target carries the resource SP its grant lives on, so the strip
-    // can't hit the wrong resource.
-    assert_eq!(targets[0].resource_sp_object_id, "graph-sp");
-    assert_eq!(targets[1].resource_sp_object_id, "exo-sp");
-    assert_eq!(targets[1].exchange_role, "Application EWS.AccessAsApp");
-}
-
-#[test]
-fn declared_targets_skip_exchange_onlines_own_mail_roles() {
-    // Office 365 Exchange Online's `Mail.Read` (retired Outlook REST) has no
-    // RBAC-for-Applications counterpart, so it must not become a target —
-    // stripping it would leave the app with no scoped replacement.
-    let app = Application {
-        required_resource_access: vec![declared(
-            OFFICE365_EXCHANGE_ONLINE_APP_ID,
-            &["exo-role-Mail.Read"],
-        )],
-        ..Default::default()
-    };
-    assert!(targets_from_declared(&app, &mailbox_resources()).is_empty());
-}
-
-#[test]
-fn granted_targets_span_both_resources_and_keep_resources_apart() {
-    // Migration derives its targets from held grants. Both resources expose an
-    // appRole named `Mail.Read`; each target must point at the resource its own
-    // grant was made on.
-    let assignments = vec![
-        grant("graph-sp", "role-Mail.Send"),
-        grant("exo-sp", &format!("exo-role-{EWS_FULL_ACCESS_AS_APP}")),
-        grant("exo-sp", "exo-role-Mail.Read"), // not RBAC-scopable
-        grant("other-sp", "role-Mail.Read"),   // unrelated resource
-        // RBAC-scopable, but no Application Access Policy ever governed it:
-        // it is org-wide today and must stay org-wide through a migration,
-        // which would otherwise scope it and strip its grant — a silent
-        // narrowing of live access.
-        grant("graph-sp", "role-MailboxItem.ReadWrite.All"),
-    ];
-    let targets = targets_from_grants(&assignments, &mailbox_resources());
-    assert_eq!(values(&targets), ["Mail.Send", EWS_FULL_ACCESS_AS_APP]);
-    assert_eq!(targets[0].resource_sp_object_id, "graph-sp");
-    assert_eq!(targets[1].resource_sp_object_id, "exo-sp");
-
-    // The same permission IS a target on the Grant-access / Scope-fix path,
-    // which derives from what the operator asked to scope, not from a policy.
-    let app = Application {
-        required_resource_access: vec![declared(
-            MICROSOFT_GRAPH_APP_ID,
-            &["role-MailboxItem.ReadWrite.All"],
-        )],
-        ..Default::default()
-    };
-    let declared_targets = targets_from_declared(&app, &mailbox_resources());
-    assert_eq!(values(&declared_targets), ["MailboxItem.ReadWrite.All"]);
-    assert_eq!(
-        declared_targets[0].exchange_role,
-        "Application MailboxItem.ReadWrite"
-    );
-}
-
-#[test]
-fn filter_none_keeps_every_target() {
-    // The coarse Exchange-scoping-section path scopes all declared mail permissions.
-    let targets = vec![target("Mail.Read"), target("Mail.Send")];
-    let out = filter_targets_by_value(targets, None);
-    assert_eq!(values(&out), ["Mail.Read", "Mail.Send"]);
 }
 
 #[test]
@@ -203,27 +45,6 @@ fn alias_is_safe_and_bounded() {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     );
     assert_eq!(messy.len(), 64);
-}
-
-#[test]
-fn filter_some_keeps_only_requested() {
-    // The per-permission "Scope this one" path narrows to a single value.
-    let targets = vec![
-        target("Mail.Read"),
-        target("Mail.Send"),
-        target("Calendars.Read"),
-    ];
-    let out = filter_targets_by_value(targets, Some(&["Mail.Send".to_string()]));
-    assert_eq!(values(&out), ["Mail.Send"]);
-}
-
-fn rbac_scope() -> MailPermissionScope {
-    MailPermissionScope::Scoped {
-        scope_name: Some("azapptoolkit_x".into()),
-        recipient_filter: None,
-        group_count: None,
-        mechanism: ScopeMechanism::Rbac,
-    }
 }
 
 #[tokio::test]
@@ -290,9 +111,9 @@ async fn exo_answering_one_scoped_row(
 
 #[tokio::test]
 async fn the_ews_scope_is_resolved_not_short_circuited() {
-    // The join the two halves lacked: `declared_targets_span_graph_and_the_
-    // legacy_ews_scope` proves the EWS `full_access_as_app` target reaches the
-    // resolver, and this proves the resolver PROBES for it and keys a verdict
+    // The join the two halves lacked: `azapptoolkit_exchange::targets`'s
+    // `declared_targets_span_graph_and_the_legacy_ews_scope` proves the EWS
+    // `full_access_as_app` target reaches the resolver, and this proves the resolver PROBES for it and keys a verdict
     // under it. The resolver used to re-derive the role against Microsoft
     // Graph, which has no such permission, so an EWS-only set returned
     // `Ok(empty)` with zero requests — the Permissions tab showed `Unknown`
@@ -354,98 +175,7 @@ async fn a_graph_mail_row_resolves_through_the_same_path() {
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
-#[test]
-fn reconcile_downgrades_rbac_scope_when_orgwide_grant_remains() {
-    let granted: HashSet<String> = ["Mail.Read".to_string()].into_iter().collect();
-    // Test-ServicePrincipalAuthorization can't see the Entra grant, so a scoped
-    // RBAC role coexisting with the un-stripped org-wide grant unions to org-wide.
-    assert!(matches!(
-        reconcile_orgwide_grant(rbac_scope(), "Mail.Read", &granted),
-        MailPermissionScope::OrgWide
-    ));
-}
-
-#[test]
-fn reconcile_keeps_rbac_scope_when_no_residual_grant() {
-    // Properly stripped: scoped RBAC with no org-wide grant stays scoped.
-    assert!(matches!(
-        reconcile_orgwide_grant(rbac_scope(), "Mail.Read", &HashSet::new()),
-        MailPermissionScope::Scoped {
-            mechanism: ScopeMechanism::Rbac,
-            ..
-        }
-    ));
-    // A grant for a *different* permission must not affect this one.
-    let other: HashSet<String> = ["Calendars.ReadWrite".to_string()].into_iter().collect();
-    assert!(matches!(
-        reconcile_orgwide_grant(rbac_scope(), "Mail.Read", &other),
-        MailPermissionScope::Scoped { .. }
-    ));
-}
-
-#[test]
-fn reconcile_lets_a_surviving_ews_grant_defeat_every_scope() {
-    // `full_access_as_app` reaches every mailbox with full access, so while it
-    // survives org-wide, a `Mail.Read` confined to one group is still org-wide
-    // in effect — even though the granted set never names `Mail.Read`.
-    let granted: HashSet<String> = [EWS_FULL_ACCESS_AS_APP.to_string()].into_iter().collect();
-    assert!(matches!(
-        reconcile_orgwide_grant(rbac_scope(), "Mail.Read", &granted),
-        MailPermissionScope::OrgWide
-    ));
-    assert!(matches!(
-        reconcile_orgwide_grant(rbac_scope(), "Calendars.ReadWrite", &granted),
-        MailPermissionScope::OrgWide
-    ));
-}
-
-#[test]
-fn reconcile_never_downgrades_legacy_aap_scope() {
-    // A RestrictAccess AAP genuinely confines an org-wide grant — exempt.
-    let granted: HashSet<String> = ["Mail.Read".to_string()].into_iter().collect();
-    let aap = MailPermissionScope::Scoped {
-        scope_name: Some("Policy-X".into()),
-        recipient_filter: None,
-        group_count: None,
-        mechanism: ScopeMechanism::LegacyApplicationAccessPolicy,
-    };
-    assert!(matches!(
-        reconcile_orgwide_grant(aap, "Mail.Read", &granted),
-        MailPermissionScope::Scoped {
-            mechanism: ScopeMechanism::LegacyApplicationAccessPolicy,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn filter_empty_list_keeps_nothing() {
-    let targets = vec![target("Mail.Read")];
-    let out = filter_targets_by_value(targets, Some(&[]));
-    assert!(out.is_empty());
-}
-
-#[test]
-fn org_wide_strip_skips_targets_whose_scoped_role_failed() {
-    // Mirrors sharepoint::org_wide_removal_requires_a_landed_site_grant: a
-    // target whose scoped Exchange role did NOT land keeps its org-wide grant,
-    // so a partial assignment failure never strands the principal with no
-    // mailbox access. Only the landed/already-present ones are stripped.
-    let scoped = vec![
-        (target("Mail.Read"), true),  // assigned or already present → strip
-        (target("Mail.Send"), false), // assignment failed → keep org-wide grant
-    ];
-    let out = targets_safe_to_strip(scoped);
-    assert_eq!(values(&out), ["Mail.Read"]);
-}
-
-#[test]
-fn org_wide_strip_keeps_nothing_when_all_assignments_fail() {
-    let scoped = vec![(target("Mail.Read"), false), (target("Mail.Send"), false)];
-    assert!(targets_safe_to_strip(scoped).is_empty());
-}
-
-/// A target on its own appRole, keyed `role-<value>` like [`mailbox_resources`].
+/// A Graph target on its own appRole, keyed `role-<value>`.
 fn graph_target(value: &str) -> ExchangeTarget {
     ExchangeTarget {
         graph_value: value.to_string(),
@@ -501,153 +231,6 @@ fn the_not_effective_note_names_every_permission() {
 }
 
 #[test]
-fn group_dns_in_filter_extracts_the_dn_set() {
-    // Round-trips what `member_of_group_filter` produces, set-wise.
-    let dns = ["CN=a,DC=x".to_string(), "CN=b,DC=y".to_string()];
-    let filter = member_of_group_filter(&dns);
-    let got = group_dns_in_filter(&filter);
-    assert_eq!(
-        got,
-        ["CN=a,DC=x".to_string(), "CN=b,DC=y".to_string()]
-            .into_iter()
-            .collect()
-    );
-}
-
-#[test]
-fn group_dns_in_filter_is_formatting_agnostic() {
-    // Exchange may echo the filter with extra parens/whitespace; the group
-    // *set* is what we compare, so those differences don't trip the warning.
-    let same = group_dns_in_filter("(MemberOfGroup  -eq  'CN=a,DC=x')")
-        == group_dns_in_filter("MemberOfGroup -eq 'CN=a,DC=x'");
-    assert!(same);
-    // A genuinely different group set is detected.
-    assert_ne!(
-        group_dns_in_filter("MemberOfGroup -eq 'CN=a,DC=x'"),
-        group_dns_in_filter("MemberOfGroup -eq 'CN=b,DC=y'"),
-    );
-}
-
-fn auth_row(role: &str, allowed_scope: Option<&str>, scope_type: &str) -> ExoAuthorizationResult {
-    ExoAuthorizationResult {
-        role_name: Some(role.to_string()),
-        granted_permissions: None,
-        allowed_resource_scope: allowed_scope.map(str::to_string),
-        scope_type: Some(scope_type.to_string()),
-        in_scope: None,
-    }
-}
-
-#[test]
-fn verdict_from_rows_tags_rbac_mechanism() {
-    // A row confined to a custom recipient scope is RBAC-scoped.
-    let row = auth_row(
-        "Application Mail.Read",
-        Some("azapptoolkit_app-1"),
-        "CustomRecipientScope",
-    );
-    assert!(matches!(
-        verdict_from_rows(&[&row]),
-        MailPermissionScope::Scoped {
-            mechanism: ScopeMechanism::Rbac,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn composite_roles_confer_each_bundled_permission() {
-    // `Application Mail Full Access` grants Mail.ReadWrite + Mail.Send without
-    // carrying either permission's role name. Matching RoleName alone found no
-    // row for `Mail.Send`, so a correctly scoped app read org-wide.
-    let mut row = auth_row(
-        "Application Mail Full Access",
-        Some("azapptoolkit_app-1"),
-        "CustomRecipientScope",
-    );
-    row.granted_permissions = Some("Mail.ReadWrite, Mail.Send".to_string());
-    assert!(row_grants_permission(
-        &row,
-        "Application Mail.Send",
-        "Mail.Send"
-    ));
-    assert!(row_grants_permission(
-        &row,
-        "Application Mail.ReadWrite",
-        "Mail.ReadWrite"
-    ));
-    // A permission the composite does NOT bundle still doesn't match.
-    assert!(!row_grants_permission(
-        &row,
-        "Application Calendars.Read",
-        "Calendars.Read"
-    ));
-    // ...and a permission substring must not match a longer value.
-    let mut basic = auth_row("Application Mail.ReadBasic", None, "CustomRecipientScope");
-    basic.granted_permissions = Some("Mail.ReadBasic".to_string());
-    assert!(!row_grants_permission(
-        &basic,
-        "Application Mail.Read",
-        "Mail.Read"
-    ));
-}
-
-#[test]
-fn dedicated_role_name_still_matches_without_a_permission_list() {
-    // The fast path / fallback: a row that omits GrantedPermissions is still
-    // matched by its role name.
-    let row = auth_row("Application Mail.Read", None, "CustomRecipientScope");
-    assert!(row_grants_permission(
-        &row,
-        "Application Mail.Read",
-        "Mail.Read"
-    ));
-}
-
-fn aap(app_id: &str, access_right: &str, scope: Option<&str>) -> ExoApplicationAccessPolicy {
-    ExoApplicationAccessPolicy {
-        identity: Some("policy-1".into()),
-        app_id: Some(app_id.into()),
-        scope_name: scope.map(str::to_string),
-        scope_identity: None,
-        access_right: Some(access_right.into()),
-        description: None,
-    }
-}
-
-#[test]
-fn aap_restrict_access_is_scoped_via_legacy_mechanism() {
-    // The legacy fallback only fires when RBAC reports org-wide; a
-    // RestrictAccess policy then confines the app to its scope group.
-    let policies = [aap("app-1", "RestrictAccess", Some("Sales"))];
-    match aap_verdict_for(&policies, "app-1").expect("should be scoped") {
-        MailPermissionScope::Scoped {
-            mechanism,
-            scope_name,
-            ..
-        } => {
-            assert_eq!(mechanism, ScopeMechanism::LegacyApplicationAccessPolicy);
-            assert_eq!(scope_name.as_deref(), Some("Sales"));
-        }
-        other => panic!("expected Scoped, got {other:?}"),
-    }
-}
-
-#[test]
-fn aap_deny_access_is_not_scoped() {
-    // DenyAccess is a blocklist (everything *except* the group) — still
-    // effectively org-wide, so it must NOT be reported as scoped.
-    let policies = [aap("app-1", "DenyAccess", Some("Execs"))];
-    assert!(aap_verdict_for(&policies, "app-1").is_none());
-}
-
-#[test]
-fn aap_ignores_policies_for_other_apps() {
-    let policies = [aap("other-app", "RestrictAccess", Some("Sales"))];
-    assert!(aap_verdict_for(&policies, "app-1").is_none());
-}
-
-#[test]
 fn retired_groups_note_names_them_and_only_claims_clean_when_it_is() {
     let clean = RetiredScopeGroupDto {
         display_name: Some("Sales Mailboxes".into()),
@@ -686,76 +269,6 @@ fn retired_groups_note_names_them_and_only_claims_clean_when_it_is() {
         !retired_groups_note(&[]).is_empty(),
         "no resolved group must still read as a sentence"
     );
-}
-
-#[test]
-fn migration_keeps_the_policy_while_any_grant_is_still_org_wide() {
-    // The policy is the ONLY thing constraining a surviving org-wide grant, so
-    // deleting it widens the app's reach to every mailbox — the regression that
-    // shipped when an EWS-confining policy was deleted with nothing re-scoped.
-    assert!(
-        !policies_safe_to_remove(2, 1, true),
-        "one of two grants stripped ⇒ keep the policy"
-    );
-    assert!(
-        !policies_safe_to_remove(1, 0, true),
-        "nothing stripped ⇒ keep the policy"
-    );
-    // Fully re-scoped ⇒ the documented step 5 runs.
-    assert!(policies_safe_to_remove(2, 2, true));
-    // No constrainable grant at all ⇒ the policy governs nothing.
-    assert!(policies_safe_to_remove(0, 0, true));
-}
-
-#[test]
-fn two_permission_values_can_share_one_exchange_role() {
-    // The precondition that made `assign_scoped_roles` strand a grant: the
-    // role map is many-to-one, so an app declaring BOTH of these emits two
-    // targets carrying the SAME Exchange role. The second assignment is then a
-    // duplicate, and before the in-loop dedupe its Err marked the target
-    // unsafe to strip — so its org-wide grant survived the scoping, forever.
-    assert_eq!(
-        exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, "Mail.ReadBasic"),
-        exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, "Mail.ReadBasic.All"),
-    );
-    assert!(
-        exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, "Mail.ReadBasic").is_some()
-    );
-}
-
-#[test]
-fn an_incomplete_resource_view_never_authorizes_deleting_a_policy() {
-    // `mailbox_resource_roles` resolves Office 365 Exchange Online
-    // best-effort, so a transient failure yields ZERO targets for an app whose
-    // full_access_as_app grant is live. The old "no targets ⇒ delete" branch
-    // then removed the only thing confining it — widening the app to every
-    // mailbox in the tenant, which is strictly worse than misreporting.
-    assert!(
-        !policies_safe_to_remove(0, 0, false),
-        "an unverifiable empty target set must never authorize deletion"
-    );
-    // ...and the guard is absolute: even a "fully re-scoped" count is not
-    // trustworthy when the target set it was derived from may be incomplete.
-    assert!(!policies_safe_to_remove(2, 2, false));
-}
-
-#[test]
-fn resource_completeness_requires_both_mailbox_resources() {
-    let roles = |app_id: &'static str| ResourceRoles {
-        app_id,
-        sp_object_id: "sp".into(),
-        role_value_by_id: HashMap::new(),
-    };
-    assert!(mailbox_resources_complete(&[
-        roles(MICROSOFT_GRAPH_APP_ID),
-        roles(OFFICE365_EXCHANGE_ONLINE_APP_ID),
-    ]));
-    // Graph alone is the exact shape a swallowed Exchange Online lookup
-    // produces — the case that must read as incomplete.
-    assert!(!mailbox_resources_complete(&[roles(
-        MICROSOFT_GRAPH_APP_ID
-    )]));
-    assert!(!mailbox_resources_complete(&[]));
 }
 
 /// A pre-existing scope confining a DIFFERENT group set is not agreement.

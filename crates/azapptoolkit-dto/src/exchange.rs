@@ -58,8 +58,20 @@ pub struct ExchangeGroupRef {
 pub struct ExchangeRoleAssignmentDto {
     pub name: Option<String>,
     pub role: Option<String>,
+    /// The management scope the assignment is confined to (the toolkit's
+    /// scope when it made the grant).
     pub custom_resource_scope: Option<String>,
     pub identity: Option<String>,
+    /// Recipient write-scope type (`AdministrativeUnit` for an assignment made
+    /// with `-RecipientAdministrativeUnitScope`), when Exchange reports one.
+    #[serde(default)]
+    pub recipient_write_scope: Option<String>,
+    /// The identity behind a custom recipient write scope (an AU's ID).
+    #[serde(default)]
+    pub custom_recipient_write_scope: Option<String>,
+    /// The administrative unit, should Exchange echo it under this name.
+    #[serde(default)]
+    pub recipient_administrative_unit_scope: Option<String>,
 }
 
 /// One member of the toolkit-managed scope group, for the "mailboxes in scope"

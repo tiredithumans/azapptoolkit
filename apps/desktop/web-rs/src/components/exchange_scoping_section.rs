@@ -667,14 +667,11 @@ pub fn ExchangeScopingSection(
                                                         noun.get_untracked(),
                                                     )
                                                     row=|a: exchange::ExchangeRoleAssignmentDto| {
+                                                        let scope = assignment_scope_label(&a);
                                                         view! {
                                                             <tr>
                                                                 <td>{a.role.unwrap_or_default()}</td>
-                                                                <td class="mono">
-                                                                    {a
-                                                                        .custom_resource_scope
-                                                                        .unwrap_or_else(|| "(org-wide)".into())}
-                                                                </td>
+                                                                <td class="mono">{scope}</td>
                                                             </tr>
                                                         }
                                                             .into_any()
@@ -773,5 +770,115 @@ pub fn ExchangeScopingSection(
                             }}
                             })}
         </CollapsibleScopingSection>
+    }
+}
+
+/// The Scope cell of "Current Exchange role assignments". An assignment with
+/// no management scope is org-wide only when nothing else confines it: one
+/// made with `-RecipientAdministrativeUnitScope` reaches just that unit.
+/// Blank strings count as absent. Other raw `RecipientWriteScope` values are
+/// never shown: an unfamiliar value on a genuinely org-wide row would
+/// otherwise read as a confinement.
+fn assignment_scope_label(a: &exchange::ExchangeRoleAssignmentDto) -> String {
+    let present = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(scope) = present(&a.custom_resource_scope) {
+        return scope;
+    }
+    if let Some(unit) = present(&a.recipient_administrative_unit_scope) {
+        return format!("Administrative unit {unit}");
+    }
+    let custom = present(&a.custom_recipient_write_scope);
+    let is_au = present(&a.recipient_write_scope)
+        .is_some_and(|t| t.eq_ignore_ascii_case("AdministrativeUnit"));
+    match (is_au, custom) {
+        (true, Some(unit)) => format!("Administrative unit {unit}"),
+        (true, None) => "Administrative unit".to_string(),
+        (false, Some(scope)) => scope,
+        (false, None) => "(org-wide)".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assignment() -> exchange::ExchangeRoleAssignmentDto {
+        exchange::ExchangeRoleAssignmentDto {
+            name: None,
+            role: Some("Application Mail.Read".into()),
+            custom_resource_scope: None,
+            identity: None,
+            recipient_write_scope: None,
+            custom_recipient_write_scope: None,
+            recipient_administrative_unit_scope: None,
+        }
+    }
+
+    #[test]
+    fn a_management_scope_wins_over_every_write_scope_field() {
+        let a = exchange::ExchangeRoleAssignmentDto {
+            custom_resource_scope: Some("app_scope_x".into()),
+            recipient_write_scope: Some("AdministrativeUnit".into()),
+            custom_recipient_write_scope: Some("au-1".into()),
+            recipient_administrative_unit_scope: Some("au-2".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&a), "app_scope_x");
+    }
+
+    #[test]
+    fn an_administrative_unit_scope_is_named_not_called_org_wide() {
+        let named = exchange::ExchangeRoleAssignmentDto {
+            recipient_administrative_unit_scope: Some("au-2".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&named), "Administrative unit au-2");
+
+        let typed = exchange::ExchangeRoleAssignmentDto {
+            recipient_write_scope: Some("administrativeunit".into()),
+            custom_recipient_write_scope: Some("au-1".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&typed), "Administrative unit au-1");
+
+        let bare = exchange::ExchangeRoleAssignmentDto {
+            recipient_write_scope: Some("AdministrativeUnit".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&bare), "Administrative unit");
+    }
+
+    #[test]
+    fn a_custom_recipient_write_scope_is_shown_by_name() {
+        let a = exchange::ExchangeRoleAssignmentDto {
+            recipient_write_scope: Some("CustomRecipientScope".into()),
+            custom_recipient_write_scope: Some("Sales".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&a), "Sales");
+    }
+
+    #[test]
+    fn nothing_confining_reads_org_wide_and_blanks_count_as_absent() {
+        assert_eq!(assignment_scope_label(&assignment()), "(org-wide)");
+        // An unfamiliar write-scope type alone is not a confinement.
+        let unknown = exchange::ExchangeRoleAssignmentDto {
+            recipient_write_scope: Some("Organization".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&unknown), "(org-wide)");
+        let blanks = exchange::ExchangeRoleAssignmentDto {
+            custom_resource_scope: Some("  ".into()),
+            recipient_write_scope: Some(" ".into()),
+            custom_recipient_write_scope: Some(String::new()),
+            recipient_administrative_unit_scope: Some("\t".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&blanks), "(org-wide)");
     }
 }

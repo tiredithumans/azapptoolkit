@@ -546,6 +546,9 @@ pub async fn list_exchange_role_assignments(
             role: a.role,
             custom_resource_scope: a.custom_resource_scope,
             identity: a.identity,
+            recipient_write_scope: a.recipient_write_scope,
+            custom_recipient_write_scope: a.custom_recipient_write_scope,
+            recipient_administrative_unit_scope: a.recipient_administrative_unit_scope,
         })
         .collect())
 }
