@@ -173,16 +173,22 @@ full-gallery zero.)
 After a successful mutation, bust the relevant list cache (`invalidate_app_lists(...)`); never on
 the error path, so a failed write doesn't clear fresh data.
 
-`invalidate_app_lists` drops **eight** things together: the apps-pairing, enterprise, `sp_index`,
-`app_name_index`, `search_corpus` and `app_role_resources` keys (the last is the Grant-access
+`invalidate_app_lists` drops every tenant key derived from the app/SP set: `apps_pairing_key`,
+`enterprise_key`, `sp_index_key`, `app_name_index_key`, `search_corpus_key`, `mi_key` (the
+managed-identity list, now a filtered projection of the SP index), `credential_expirations_key` (a
+create/delete changes the app set it scans) and `invalidate_app_role_resources` (the Grant-access
 picker's "Tenant app registrations" directory — a create/delete adds or removes an SP that may
 expose roles), plus — transitively — the per-app detail cache (`invalidate_app_details`) and the
-cached audit run (`invalidate_audit_cache`). The transitive two
-matter: a scope grant or credential change re-scores the app, so the audit/posture tile must
-refetch too (two reviews independently mis-read this as a missing invalidation because earlier
-versions of this doc listed only the four list keys) — so any mutation that can add/remove/rename a service principal or app registration
-(`create_application`, `grant_exchange_mailbox_access`) must call it, or a stale pairing/search
-index survives until the TTL.
+cached audit run (`invalidate_audit_cache`). The transitive two matter: a scope grant or credential
+change re-scores the app, so the audit/posture tile must refetch too. Two reviews independently
+mis-read this as a missing invalidation because earlier versions of this doc listed only the four
+list keys, and the list drifted twice more after that; it is now pinned both ways
+(`repo_invariants::the_list_tier_doc_names_every_key_invalidate_app_lists_drops` checks this
+paragraph names every key the function drops, and
+`invalidate_app_lists_drops_every_app_set_key_and_nothing_else` checks the runtime behaviour). Any
+mutation that can add/remove/rename a service principal or app registration (`create_application`,
+`grant_exchange_mailbox_access`) must call it, or a stale pairing/search index survives until the
+TTL.
 
 **Credential-only mutations are tiered.** `add_password`, `remove_password`, the certificate
 add/remove pair, `generate_self_signed_certificate`, `remove_expired_passwords`,
@@ -191,10 +197,17 @@ per mutated app) change a single app's secrets/certs — which surfaces in the A
 badge), that app's detail payload, and the audit (expiring-credential findings), but **cannot** add,
 remove, or rename a service principal or app registration. They call
 `invalidate_app_credentials(cache, tenant, object_id)` instead of `invalidate_app_lists`: it drops
-apps-pairing, the *one* app's detail, and the audit run, and deliberately **keeps** `sp_index`,
+apps-pairing, the *one* app's detail, the credential-expiry list and the audit run, and deliberately **keeps** `sp_index`,
 `app_name_index`, the enterprise list, and the mailbox-scope verdicts. Keeping the two tenant-wide
 indexes is the point — dropping them would force the next list visit to re-enumerate every app and
 every service principal (tens of seconds on a large tenant) for a change that touched neither.
+
+**Detail-affecting mutations that cannot change the set take `invalidate_app_detail_state`**
+(= `invalidate_app_details` + `invalidate_audit_cache`): grant/revoke/scope a permission
+(`permissions.rs`, the Exchange and SharePoint scoping cores), owners (`owners.rs`), authentication
+settings (`authentication.rs`) and remediations (`remediation.rs`, `bulk.rs`). They change
+detail-visible and audit-relevant state but add, remove or rename nothing, so the list tier stays
+valid. Calling the one function instead of its two halves means a call site can't drop one of them.
 
 **In-place PATCHes of one app take the detail tier.** SSO URLs (`set_saml_urls`), OIDC redirect
 URIs (`set_oidc_redirect_uris`), the claims mapping (`set_claims_mapping`), and the exposed

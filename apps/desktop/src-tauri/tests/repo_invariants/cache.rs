@@ -518,15 +518,7 @@ fn service_principal_cache_self_invalidates_in_the_client() {
          is keyed by appId, so the prefix sweep is the only bust that can't miss."
     );
 
-    let cache_facade = include_str!("../../src/commands/applications/cache.rs");
-    let lists = cache_facade
-        .split_once("pub(crate) fn invalidate_app_lists")
-        .expect("invalidate_app_lists moved")
-        .1;
-    let body = lists
-        .split_once("\npub(crate) fn ")
-        .map(|(b, _)| b)
-        .unwrap_or(lists);
+    let body = invalidate_app_lists_body();
     assert!(
         !body.contains("CacheKind::ServicePrincipal"),
         "invalidate_app_lists must NOT invalidate CacheKind::ServicePrincipal. That kind is keyed \
@@ -534,6 +526,100 @@ fn service_principal_cache_self_invalidates_in_the_client() {
          aggregator-side bust here is keyed wrong, so it silently clears nothing while reading as \
          though it covered the case."
     );
+}
+
+/// The body of `invalidate_app_lists` in the applications cache facade — from
+/// its header to the next `pub(crate) fn` (the next function's doc comment
+/// rides along, which callers skip as comment lines).
+fn invalidate_app_lists_body() -> &'static str {
+    let cache_facade = include_str!("../../src/commands/applications/cache.rs");
+    let lists = cache_facade
+        .split_once("pub(crate) fn invalidate_app_lists")
+        .expect("invalidate_app_lists moved")
+        .1;
+    lists
+        .split_once("\npub(crate) fn ")
+        .map(|(b, _)| b)
+        .unwrap_or(lists)
+}
+
+/// Every function a code line calls whose name ends in `_key` or starts with
+/// `invalidate_` — the keys and sub-tiers a list-tier bust drops. A path
+/// prefix (`crate::commands::audit::`) is stripped; the method `.invalidate(`
+/// itself does not match (no `invalidate_` prefix).
+fn called_keys_and_tiers(body: &str) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for line in body.lines() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        let bytes = line.as_bytes();
+        for (open, _) in line.match_indices('(') {
+            let mut start = open;
+            while start > 0 {
+                let c = bytes[start - 1];
+                if c.is_ascii_alphanumeric() || c == b'_' || c == b':' {
+                    start -= 1;
+                } else {
+                    break;
+                }
+            }
+            let path = &line[start..open];
+            let name = path.rsplit("::").next().unwrap_or(path);
+            if name.ends_with("_key") || name.starts_with("invalidate_") {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// `caching-and-search.md`'s list-tier paragraph must name every key and
+/// sub-tier `invalidate_app_lists` drops.
+///
+/// That paragraph exists because reviewers mis-read an incomplete list as a
+/// missing invalidation; the list then drifted three times (four keys, then
+/// "seven", then "eight", against a body that dropped more each time). A count
+/// word invites the drift, so it is banned outright; the names are checked
+/// against the function body, so a key added there without a doc line fails
+/// here. The runtime half is `detail_cache_tests::
+/// invalidate_app_lists_drops_every_app_set_key_and_nothing_else`.
+#[test]
+fn the_list_tier_doc_names_every_key_invalidate_app_lists_drops() {
+    let names = called_keys_and_tiers(invalidate_app_lists_body());
+    assert!(
+        names.len() >= 8,
+        "expected invalidate_app_lists to call at least 8 key/tier functions, parsed {names:?} — \
+         the body split or the call parser broke, so this rule would pass vacuously"
+    );
+
+    let doc = include_str!("../../../../../docs/architecture/caching-and-search.md");
+    let marker = "`invalidate_app_lists` drops";
+    let from = doc.find(marker).unwrap_or_else(|| {
+        panic!(
+            "caching-and-search.md lost the paragraph starting {marker:?} (the \
+             \"Invalidation — only on `Ok`\" section) — restore it"
+        )
+    });
+    let rest = &doc[from..];
+    let paragraph = rest.split_once("\n\n").map(|(p, _)| p).unwrap_or(rest);
+
+    for name in &names {
+        assert!(
+            paragraph.contains(&format!("`{name}`")),
+            "invalidate_app_lists calls `{name}`, but the caching-and-search.md paragraph \
+             starting {marker:?} (\"Invalidation — only on `Ok`\") does not name it in \
+             backticks — add it there so the list can't drift into a false missing-invalidation \
+             report again"
+        );
+    }
+    for count in ["**seven**", "**eight**", "**nine**", "**ten**"] {
+        assert!(
+            !paragraph.contains(count),
+            "the list-tier paragraph states a count ({count}); name the keys instead — every \
+             past count went stale"
+        );
+    }
 }
 
 /// The walk this rule depends on, on the two shapes that used to slip past it.

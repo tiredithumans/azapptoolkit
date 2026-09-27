@@ -30,12 +30,14 @@ pub enum CacheKind {
 }
 
 impl CacheKind {
-    /// All kinds, for whole-cache operations (clear, tenant sweep). Adding a
-    /// variant must extend this — the per-kind bucket array is sized by it.
-    /// Stable Rust can't count enum variants at compile time, so this can't by
-    /// itself prove it lists *every* variant — the exhaustive `match` in
-    /// `CacheConfig::ttl_for` (no wildcard) is what forces a new variant to be
-    /// handled.
+    /// All kinds, for whole-cache operations (clear, tenant sweep). The
+    /// per-kind bucket array is sized by it, so a kind missing from here would
+    /// index past the end. Stable Rust can't count enum variants, so the
+    /// completeness proof is structural instead: [`Self::idx`] is an exhaustive
+    /// `match` (no wildcard), so a new variant fails to compile there, and each
+    /// arm resolves its bucket through the `const` [`Self::position`] lookup,
+    /// so an arm whose kind is missing from `ALL` is a compile-time panic —
+    /// never an index-out-of-bounds inside a Tauri command.
     const ALL: [CacheKind; 4] = [
         CacheKind::ServicePrincipal,
         CacheKind::Permissions,
@@ -43,11 +45,49 @@ impl CacheKind {
         CacheKind::Lists,
     ];
 
-    /// Index into the per-kind bucket array (matches enum declaration order).
-    fn idx(self) -> usize {
-        self as usize
+    /// Where `kind` sits in [`Self::ALL`]. Only ever evaluated in a `const`
+    /// context (see [`Self::idx`]), so the panic is a build error. Compares
+    /// discriminants because `PartialEq` isn't callable in a `const fn`.
+    const fn position(kind: CacheKind) -> usize {
+        let mut i = 0;
+        while i < Self::ALL.len() {
+            if Self::ALL[i] as usize == kind as usize {
+                return i;
+            }
+            i += 1;
+        }
+        panic!(
+            "CacheKind missing from CacheKind::ALL — extend ALL; the per-kind bucket array is sized by it"
+        );
+    }
+
+    /// Index into the per-kind bucket array: the kind's position in
+    /// [`Self::ALL`], resolved at compile time per arm.
+    const fn idx(self) -> usize {
+        match self {
+            CacheKind::ServicePrincipal => {
+                const { CacheKind::position(CacheKind::ServicePrincipal) }
+            }
+            CacheKind::Permissions => const { CacheKind::position(CacheKind::Permissions) },
+            CacheKind::Audit => const { CacheKind::position(CacheKind::Audit) },
+            CacheKind::Lists => const { CacheKind::position(CacheKind::Lists) },
+        }
     }
 }
+
+/// `ALL` holds no duplicates: every entry indexes its own bucket, so two kinds
+/// can never share one (and with `position` proving every kind is present,
+/// `ALL` is exactly the variant set).
+const _: () = {
+    let mut i = 0;
+    while i < CacheKind::ALL.len() {
+        assert!(
+            CacheKind::ALL[i].idx() == i,
+            "CacheKind::ALL lists a kind twice"
+        );
+        i += 1;
+    }
+};
 
 /// Runtime-mutable cache settings. Mirrors `Set-azapptoolkitCacheConfiguration`:
 /// caching can be toggled and the per-kind TTLs / entry cap adjusted live.

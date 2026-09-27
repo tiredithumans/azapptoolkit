@@ -389,8 +389,9 @@ pub(crate) async fn indexes_cached(
 
 /// The `/applications` index carries the same three contracts the SP index
 /// does — shared allocation, typed-only reachability, pinned against per-app
-/// churn, dropped on the tenant sweep. Mirrored here rather than folded into
-/// `sp_index_tests` so a regression names the index that broke.
+/// churn, dropped on the tenant sweep and on `invalidate_app_lists`. Mirrored
+/// test for test in `sp_index_tests` rather than folded into one module, so a
+/// regression names the index that broke — keep the two in step.
 #[cfg(test)]
 mod app_name_index_tests {
     use super::{app_name_index_hit, app_name_index_key, app_name_index_store};
@@ -525,15 +526,26 @@ mod sp_index_tests {
     /// Guards the trap in this design: the index is stored typed, so a reader
     /// reaching for it with the plain `get` reads a MISS and silently pays for a
     /// full tenant rescan. Every reader must go through `sp_index_hit`.
+    ///
+    /// Asserting only `.is_none()` cannot tell a miss from an eviction — the
+    /// untyped `get`'s poison path deletes an entry it can't decode — so the
+    /// second half proves the pinned index is still there, untouched (the same
+    /// guard as the `app_name_index` twin).
     #[test]
     fn the_index_is_not_reachable_through_the_untyped_get() {
         let cache = Cache::new();
-        sp_index_store(&cache, "t1", vec![sp("a")]);
+        let stored = sp_index_store(&cache, "t1", vec![sp("a")]);
         assert!(
             cache
                 .get::<Vec<ServicePrincipal>>(CacheKind::Lists, &sp_index_key("t1"))
                 .is_none(),
             "read the typed index untyped — use sp_index_hit instead"
+        );
+        let hit = sp_index_hit(&cache, "t1")
+            .expect("the untyped read must MISS the pinned index, not evict it");
+        assert!(
+            std::sync::Arc::ptr_eq(&stored, &hit),
+            "the entry survived but was rebuilt — the untyped read must not disturb it at all"
         );
     }
 
@@ -565,6 +577,21 @@ mod sp_index_tests {
             );
         }
         assert!(sp_index_hit(&cache, "t1").is_some());
+    }
+
+    /// The list-changing bust must reach the index — a create/delete can add
+    /// or remove a paired SP every join reads.
+    #[test]
+    fn invalidate_app_lists_drops_the_index() {
+        let cache = Cache::new();
+        sp_index_store(&cache, "t1", vec![sp("a")]);
+        sp_index_store(&cache, "t2", vec![sp("b")]);
+        super::invalidate_app_lists(&cache, "t1");
+        assert!(sp_index_hit(&cache, "t1").is_none());
+        assert!(
+            sp_index_hit(&cache, "t2").is_some(),
+            "other tenant must survive"
+        );
     }
 }
 
@@ -661,6 +688,74 @@ mod detail_cache_tests {
                 .get::<String>(CacheKind::Audit, &audit_cache_key("t2"))
                 .is_some(),
             "other tenant's audit must survive"
+        );
+    }
+
+    /// The whole list tier, as one ratchet: every tenant key derived from the
+    /// app/SP set falls for the mutated tenant, the other tenant keeps all of
+    /// them, and a Lists key outside the tier is untouched. The doc paragraph in
+    /// `caching-and-search.md` names the same set (pinned by
+    /// `repo_invariants/cache.rs`), so a key added here without a doc line, or
+    /// dropped from the function, fails one of the two.
+    #[test]
+    fn invalidate_app_lists_drops_every_app_set_key_and_nothing_else() {
+        use super::{
+            app_name_index_key, app_role_resources_key, apps_pairing_key,
+            credential_expirations_key, enterprise_key, search_corpus_key, sp_index_key,
+        };
+        use crate::commands::audit::audit_cache_key;
+        use crate::commands::managed_identity::mi_key;
+
+        let list_keys = |t: &str| {
+            vec![
+                apps_pairing_key(t),
+                enterprise_key(t),
+                sp_index_key(t),
+                app_name_index_key(t),
+                search_corpus_key(t),
+                mi_key(t),
+                credential_expirations_key(t),
+                app_role_resources_key(t),
+                app_detail_key(t, "obj"),
+                mail_scopes_key(t, "declared|obj"),
+            ]
+        };
+        let cache = Cache::new();
+        for t in ["t1", "t2"] {
+            for key in list_keys(t) {
+                cache.put(CacheKind::Lists, key.clone(), &key);
+            }
+            cache.put(CacheKind::Audit, audit_cache_key(t), &"audit".to_string());
+        }
+        cache.put(
+            CacheKind::Lists,
+            "t1|unrelated".to_string(),
+            &"sentinel".to_string(),
+        );
+
+        invalidate_app_lists(&cache, "t1");
+
+        let has = |kind, k: &str| cache.get::<String>(kind, k).is_some();
+        for key in list_keys("t1") {
+            assert!(
+                !has(CacheKind::Lists, &key),
+                "{key} must fall with the list tier"
+            );
+        }
+        assert!(
+            !has(CacheKind::Audit, &audit_cache_key("t1")),
+            "the audit run must fall with the list tier"
+        );
+        for key in list_keys("t2") {
+            assert!(
+                has(CacheKind::Lists, &key),
+                "other tenant's {key} must survive"
+            );
+        }
+        assert!(has(CacheKind::Audit, &audit_cache_key("t2")));
+        assert!(
+            has(CacheKind::Lists, "t1|unrelated"),
+            "a Lists key outside the tier is not an app-set key"
         );
     }
 
