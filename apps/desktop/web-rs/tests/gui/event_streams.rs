@@ -26,6 +26,27 @@ async fn bulk_progress_stream_delivers_emitted_events() {
     assert!(!item.cancelled);
 }
 
+/// `tauri-sys` drops (and `log::error!`s) an event it cannot decode instead of
+/// panicking, so one malformed payload must not end the stream: the next good
+/// one still arrives. At the old pin the decode `unwrap` aborted the module.
+#[wasm_bindgen_test]
+async fn an_undecodable_event_is_dropped_and_the_stream_keeps_delivering() {
+    ts::reset();
+    let mut stream = events::bulk_progress()
+        .await
+        .expect("subscribe to bulk-progress");
+
+    ts::emit_event("bulk-progress", &serde_json::json!({ "unexpected": true }));
+    ts::emit_event("bulk-progress", &fixtures::bulk_progress(3, 10));
+
+    let item = stream
+        .next()
+        .await
+        .expect("the good event after the bad one");
+    assert_eq!(item.done, 3);
+    assert_eq!(item.total, 10);
+}
+
 #[wasm_bindgen_test]
 async fn site_sweep_stream_delivers_emitted_events() {
     ts::reset();

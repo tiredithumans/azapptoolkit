@@ -1,7 +1,8 @@
 //! Typed fixture builders for the mock IPC bridge (the GUI test harness and the
 //! GitHub Pages demo). Built from the shared DTO types (not hand-written JSON),
 //! so they can't drift from the wire format the bindings deserialize — the same
-//! `serde-wasm-bindgen` round-trip the real IPC uses validates them.
+//! JSON round-trip the real IPC uses (`serde_json` → `JSON.parse` → `tauri-sys`'s
+//! `JSON.stringify` + `serde_json`) validates them.
 
 use azapptoolkit_core::audit::{
     AuditItem, AuditPrincipalKind, CredentialKind, CredentialStatus, ListCredentialStatus,

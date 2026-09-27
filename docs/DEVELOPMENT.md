@@ -112,6 +112,21 @@ a matching table-driven test that cites the PowerShell source
 `file:line` it was ported from — this is how rule-for-rule parity with
 the legacy module is maintained.
 
+### Bumping the Rust toolchain
+
+`rust-toolchain.toml` pins the exact toolchain, so a lint the compiler is phasing out stays a
+warning until someone bumps it — and then fails in a transitive crate, not in our code. Bump
+deliberately:
+
+1. Run `just future-incompat` and resolve, or plan for, every crate it lists. Known today:
+   proc-macro-error2 2.0.1 under the frontend's view macros (the recipe's comment names the chain
+   and the upstream exits). The fallback when a bump must land first is a `[patch.crates-io]` to a
+   fixed fork, which also needs a `deny.toml` `allow-git` entry.
+2. Advance `rust-toolchain.toml`, the `rust-version` in `/Cargo.toml` and
+   `apps/desktop/web-rs/Cargo.toml` (when the MSRV moves), and the six `dtolnay/rust-toolchain`
+   SHA pins across `.github/workflows/` together (precedent: the 0.30.2 "Changed" entry).
+3. Run `just verify-full`.
+
 ## Packaging installers
 
 The release workflow builds packages for all three platforms — Windows

@@ -4,6 +4,15 @@ dist = "dist"
 # Optimization is selected by the caller's `--release` flag (the Tauri
 # `beforeBuildCommand` passes it for packaged builds; `trunk serve` omits it
 # for fast dev rebuilds), so there is no `release` default to set here.
+# `minify` rides the same flag: `--release` (the Tauri beforeBuildCommand and
+# `web-build-pages`) also minifies the CSS and the HTML (styles.css 121 KB ->
+# 69 KB), while `trunk serve` and `web-build` (debug, what verify/CI build) stay
+# readable. Trunk's default is `never`; the wasm itself is already wasm-opt'd
+# (`data-wasm-opt` in index.html). The wasm-bindgen JS glue is attempted too, but
+# Trunk 0.21.14's JS minifier cannot parse its `export { .. as default }` and
+# logs "WARN Failed to minify JS", shipping that file verbatim — harmless, and it
+# needs no opt-out (there is none per asset for the rust glue).
+minify = "on_release"
 
 [serve]
 addresses = ["127.0.0.1"]

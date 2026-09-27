@@ -195,6 +195,61 @@ web-itest-size:
     @echo "  !! A GUI test shard grown past the ceiling will fail CI, not this run."
     @echo ""
 
+# Size of the SHIPPED frontend bundle: raw and gzip bytes of the built
+# `dist/*.wasm`, `*.js` and `*.css`, as a markdown table (so CI appends it
+# verbatim to `$GITHUB_STEP_SUMMARY`). `web-itest-size` above only measures the
+# debug GUI-test shards; nothing else put a number on what the webview loads at
+# every launch, so a dependency bump or a view that doubled it landed unnoticed.
+# It measures whatever `dist/` holds: run `just web-build-release` (or
+# `web-build-pages`) first. Deliberately NOT in `verify-full`, which builds the
+# frontend in debug and mirrors CI's debug-only `web` job; pages.yml and the
+# release workflow's Linux leg, which already run the release Trunk build, call
+# it instead. WASM_WARN_KB is a soft ceiling (~1.5x the release wasm recorded in
+# docs/architecture/release-updater-demo.md): past it the recipe prints a WARN
+# line and still exits 0. Unix/CI only (bash), with a loud Windows skip below.
+
+# Report the built frontend bundle's raw + gzip sizes (run a release build first).
+[unix]
+[working-directory('apps/desktop/web-rs')]
+web-size:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    shopt -s nullglob
+    WASM_WARN_KB=7300
+    files=(dist/*.wasm dist/*.js dist/*.css)
+    if [ ${#files[@]} -eq 0 ]; then
+      echo "no built bundle in dist/ — run \`just web-build-release\` (or web-build-pages) first" >&2
+      exit 1
+    fi
+    total=0
+    total_gz=0
+    warn=""
+    echo "| file | bytes | gzip -9 |"
+    echo "|---|---:|---:|"
+    for f in "${files[@]}"; do
+      bytes=$(wc -c < "$f")
+      gz=$(gzip -9 -c "$f" | wc -c)
+      total=$(( total + bytes ))
+      total_gz=$(( total_gz + gz ))
+      printf '| %s | %d | %d |\n' "$(basename "$f")" "$bytes" "$gz"
+      if [[ "$f" == *.wasm ]] && [ $(( bytes / 1024 )) -gt "$WASM_WARN_KB" ]; then
+        warn="$(basename "$f") is $(( bytes / 1024 )) KB, past the ${WASM_WARN_KB} KB soft ceiling"
+      fi
+    done
+    printf '| **total** | **%d** | **%d** |\n' "$total" "$total_gz"
+    if [ -n "$warn" ]; then
+      echo ""
+      echo "WARN: $warn — check what grew before raising it (see release-updater-demo.md)."
+    fi
+
+# On Windows the bundle-size report stays a CI/Unix recipe (bash), so it
+# completes — loudly, never silently.
+[windows]
+web-size:
+    @echo ""
+    @echo "  !! SKIPPED: web-size — the bundle-size report runs on Linux/macOS (and in CI) only."
+    @echo ""
+
 # --- Housekeeping ------------------------------------------------------------
 
 # Delete every cargo build artifact to reclaim disk. There are TWO independent
@@ -265,6 +320,29 @@ test: _stub-frontend-dist
 check: _stub-frontend-dist
     cargo check --locked --workspace --all-targets
     cargo check --locked --manifest-path apps/desktop/web-rs/Cargo.toml --target wasm32-unknown-unknown --all-targets --features test-support
+
+# Future-incompatibility report for BOTH trees: code the pinned toolchain still
+# accepts but a later Rust will reject. Not a gate (nothing here is ours to fix
+# in place, and the pinned toolchain keeps it a warning) — run it before bumping
+# `rust-toolchain.toml` (docs/DEVELOPMENT.md, "Bumping the Rust toolchain"), so a
+# listed crate is planned for instead of surfacing as a hard error in a
+# transitive proc-macro on the bump PR. Same two invocations as `check`, plus
+# `--future-incompat-report`, which names every affected crate even on a cached
+# build ("0 dependencies" for a clean tree). For the detailed lint text, run
+# `cargo report future-incompatibilities` inside that tree afterwards — it takes
+# no `--manifest-path` and errors on a tree with no report, so it is not used here.
+#
+# Known today (web-rs only): proc-macro-error2 2.0.1, E0365 "extern crate
+# `proc_macro` is private" (rust#127909), reached via leptos_macro -> rstml 0.12
+# -> syn_derive 0.2 and thaw_utils -> reactive_stores 0.2 -> reactive_stores_macro
+# 0.2.6. No semver update removes it: the exits are leptos adopting rstml >= 0.13
+# (which drops syn_derive) and thaw moving off reactive_stores 0.2; the fallback
+# is a `[patch.crates-io]` to a fixed fork (plus a deny.toml `allow-git` entry).
+
+# Future-incompat report for both trees (not a gate) — run before a toolchain bump.
+future-incompat: _stub-frontend-dist
+    cargo check --locked --workspace --all-targets --future-incompat-report
+    cargo check --locked --manifest-path apps/desktop/web-rs/Cargo.toml --target wasm32-unknown-unknown --all-targets --features test-support --future-incompat-report
 
 # One crate's tests, e.g. `just test-crate azapptoolkit-core` or
 # `just test-crate desktop -- repo_invariants` (args after `--` go to cargo test).

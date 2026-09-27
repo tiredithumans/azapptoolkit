@@ -725,6 +725,18 @@
   whether the client and tenant IDs came from an environment variable, settings.json or the build.
   A log excerpt attached to a bug report no longer needs these asked for separately.
 
+- **The window reads backend replies and progress updates through JSON.** `tauri-sys`, the
+  frontend's bridge to the backend, moves to upstream `571cef4`. That version decodes every reply
+  and event via JSON instead of `serde-wasm-bindgen` — upstream's workaround for a reported webview
+  crash ("Out of bounds table access") in Tauri + Leptos apps that decode many events, such as the
+  per-app progress of a tenant-wide audit or bulk fix. A progress update the window can't read is
+  now skipped instead of stopping the window.
+
+- **Release builds ship a minified stylesheet and page.** The 121 KB stylesheet was bundled as
+  written; Trunk now minifies it (and `index.html`) in release and Pages builds, taking it to 69 KB
+  (28 KB → 11 KB compressed). The script that loads the app is unchanged: Trunk's minifier cannot
+  parse it and ships it as written.
+
 ## [0.30.2] - 2026-09-25
 
 ### Changed

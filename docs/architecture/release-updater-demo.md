@@ -121,7 +121,9 @@ deploys it (needs Settings → Pages → Source = "GitHub Actions"). The `demo` 
 - **The bridge** — the demo installs the shared `ipc_mock` bridge, the same
   `window.__TAURI_INTERNALS__` mock the GUI test harness uses. It lives in
   `web-rs/src/ipc_mock/` (not inside `test_support`), gated by the internal `mock-ipc` feature
-  that both `test-support` and `demo` enable.
+  that both `test-support` and `demo` enable. Fixtures cross it as JSON (`serde_json` →
+  `JSON.parse`), the same shape Tauri delivers and `tauri-sys` (`JSON.stringify` + `serde_json`)
+  decodes; a `serde_wasm_bindgen` `Map` or `undefined` would arrive as `{}` or panic.
 - **Boot** — fixtures are pre-loaded from `demo/mod.rs`; a demo tenant is seeded so the
   config/sign-in gates fall through to the shell (`lib.rs`); a read-only banner renders
   (`shell.rs`, `.demo-banner`).
@@ -151,6 +153,31 @@ deploys it (needs Settings → Pages → Source = "GitHub Actions"). The `demo` 
   demo → register a fixture for it.
 - **No SPA fallback needed** — nav is signal-based (no router), so there is no `404.html`; only
   the `--public-url` subpath base-href matters.
+
+## Shipped frontend size
+
+`just web-size` prints the raw and `gzip -9` bytes of the built `dist/*.wasm`, `*.js` and `*.css`
+as a markdown table. It measures whatever `dist/` holds, so build first:
+`just web-build-release && just web-size`. `pages.yml` (after the demo build) and the release
+workflow's Linux leg (after "Build bundles") append the table to the job summary. It is not in
+`verify-full`, which builds the frontend in debug like CI's `web` job; `web-itest-size` gates only
+the debug GUI-test shards.
+
+Baseline, 2026-09-27 (0.30.2 + `minify = "on_release"`, Trunk 0.21.14):
+
+| file | bytes | gzip -9 |
+|---|---:|---:|
+| desktop `_bg.wasm` | 4,990,548 | 1,817,338 |
+| desktop JS glue | 57,009 | 9,494 |
+| `styles.css` | 69,111 | 11,434 |
+| **desktop total** | **5,116,668** | **1,838,266** |
+| Pages demo total (`--features demo`) | 5,279,325 | 1,905,422 |
+
+Before minification the stylesheet shipped verbatim at 121,586 bytes (28,206 gzipped). The JS
+glue is not minified: Trunk's JS minifier cannot parse wasm-bindgen's `export { .. as default }`
+and ships it as written (a `WARN Failed to minify JS` in the build log). The recipe's soft
+ceiling, `WASM_WARN_KB=7300` (~1.5x the release wasm), prints a `WARN` line and still exits 0 —
+find what grew before raising it, and re-record the table here when it moves materially.
 
 ## Crypto dependencies: no `rsa`; a deliberate `sha2` pin
 

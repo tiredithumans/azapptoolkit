@@ -41,12 +41,17 @@ jobs:
           workspaces: apps/desktop/web-rs
       - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
         with:
-          tool: just,trunk
+          # Pinned like ci.yml's trunk: the minified release bundle stays reproducible.
+          tool: just,trunk@0.21.14
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       # The base href must match the Pages subpath so the hashed JS/WASM/CSS
       # resolve under https://<user>.github.io/<repo>/.
       - name: Build demo bundle
         run: just web-build-pages "/azapptoolkit/"
+      # Raw + gzip sizes of the shipped wasm/js/css, published to the run's
+      # summary (baseline: docs/architecture/release-updater-demo.md).
+      - name: Report bundle size
+        run: just web-size >> "$GITHUB_STEP_SUMMARY"
       # GitHub Pages runs Jekyll by default, which can drop files; opt out. Emit
       # it into the (gitignored) dist rather than committing it.
       - name: Disable Jekyll

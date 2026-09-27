@@ -130,7 +130,8 @@ jobs:
 
       - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
         with:
-          tool: just,trunk
+          # Pinned like ci.yml's trunk: the minified release bundle stays reproducible.
+          tool: just,trunk@0.21.14
 
       - name: Install Tauri CLI
         # Pinned to the newest published `tauri-cli` at or below the locked `tauri`
@@ -144,6 +145,13 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY_PASSWORD }}
         run: just ${{ matrix.recipe }}
+
+      # Raw + gzip sizes of the shipped wasm/js/css (the beforeBuildCommand's
+      # release Trunk build), published to the run's summary. Every leg ships
+      # the identical frontend, so it is reported once.
+      - name: Report bundle size
+        if: runner.os == 'Linux'
+        run: just web-size >> "$GITHUB_STEP_SUMMARY"
 
       # glibc symbol versions bind to the BUILD host's libc, so this runner image
       # IS the oldest distro the AppImage/.deb can start on. ubuntu-22.04 = glibc

@@ -164,7 +164,10 @@ jobs:
           workspaces: apps/desktop/web-rs
       - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
         with:
-          tool: just,trunk,wasm-pack
+          # trunk is version-pinned (like cargo-deny) so the release build and its
+          # minifier (Trunk.toml `minify`) are reproducible across CI, Pages and
+          # release; bump it in all three workflows together.
+          tool: just,trunk@0.21.14,wasm-pack
       # web-rs is excluded from the root workspace, so the `rust` job's
       # `cargo fmt --all` does not reach it — format-check it here.
       - name: fmt

@@ -1,7 +1,7 @@
 //! The single door from the bindings to `tauri-sys`'s IPC calls.
 //!
-//! Upstream `tauri_sys::core::invoke_result` decodes both sides with
-//! `serde_wasm_bindgen::from_value(..).unwrap()`. Every command here rejects
+//! Upstream `tauri_sys::core::invoke_result` decodes both sides via JSON
+//! (`JSON.stringify` + `serde_json`), then `unwrap`s. Every command here rejects
 //! with a `UiError` object, but Tauri itself rejects with a plain **string**
 //! whenever the call never reached the command: arguments that do not match
 //! the parameter list ("invalid args `tenantId` for command …"), an unknown
@@ -10,13 +10,15 @@
 //! the whole WASM instance — the window froze with no toast.
 //!
 //! This wrapper asks upstream for `serde_json::Value` on both sides, which
-//! decodes any shape Tauri produces (numbers, strings, arrays, objects, the
-//! mock bridge's `Map`s), then decodes the real types itself: a rejection that
-//! is not a `UiError`, or a reply that does not match the binding's type,
-//! becomes `UiError { code: "ipc", .. }` on the action that caused it. The one
-//! value it cannot rescue is a rejection carrying a JS function or `Symbol`,
-//! which Tauri never produces. `repo_invariants/ipc.rs` pins that no binding
-//! reaches `tauri_sys::core`'s invoke functions except through this module.
+//! decodes any shape Tauri produces (numbers, strings, arrays, objects), then
+//! decodes the real types itself: a rejection that is not a `UiError`, or a
+//! reply that does not match the binding's type, becomes
+//! `UiError { code: "ipc", .. }` on the action that caused it. A reply or
+//! rejection `JSON.stringify` cannot render (`undefined`, a function, a
+//! `Symbol`, a `BigInt`) still panics upstream, but Tauri never produces one:
+//! its replies are `JSON.parse` output. `repo_invariants/ipc.rs` pins that no
+//! binding reaches `tauri_sys::core`'s invoke functions except through this
+//! module.
 
 use azapptoolkit_dto::UiError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
