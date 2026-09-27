@@ -410,10 +410,12 @@ Invariants every change must preserve (the audit/review baseline for auth-adjace
   — log the `ui_code`/status/request id, never a raw body that could carry token material. The
   shared retry loop logs the status and reason, and a network failure's cause chain (it has no body).
 - **Owner-only on disk.** `settings.json`, exports, backups, restore reports and `.pfx` files go
-  through `azapptoolkit_core::private_file::write_owner_only` (0600 on unix). The config and log
-  directories are created, and existing ones tightened, to 0700 on unix by
-  `private_file::create_owner_only_dir`: the log files themselves are written at the umask, and they
-  carry tenant ids, app names and Graph error bodies. Windows relies on the per-user profile ACL.
+  through `azapptoolkit_core::private_file::write_owner_only` (0600 on unix; written to an
+  unpredictably named temp created exclusively — never following a planted symlink — then renamed
+  into place). The config and log directories are created, and existing ones tightened, to 0700 on
+  unix by `private_file::create_owner_only_dir`: the log files themselves are written at the umask,
+  and they carry tenant ids, app names and Graph error bodies. Windows relies on the per-user
+  profile ACL.
 - **Tokens stay scoped to their resource.** Write scopes are consented incrementally; optional
   admin scopes ride `ScopedTokenAdapter`, never the sign-in scope set. A missing consent surfaces
   as `consent_required` — it must not purge the refresh token (see AGENTS.md).

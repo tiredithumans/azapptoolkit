@@ -408,7 +408,9 @@ by algorithm**; the reveal modal previously showed only the SHA-256 value under 
 The reveal hands back the private key as PKCS#8 PEM **and** as a password-protected PKCS#12
 bundle. Both are the *same key*: `build_pfx` takes the PKCS#8 DER `rcgen` already holds
 (`KeyPair::serialized_der()`), never a second key pair, so the one public half now sitting on the
-app registration authenticates whichever the operator installs.
+app registration authenticates whichever the operator installs. rcgen's `KeyPair` is held in
+`Zeroizing` (rcgen's `zeroize` feature), so its PKCS#8 copy is wiped on every path; the copy
+p12-keystore takes into its `KeyStore` is not reachable and is not wiped.
 
 Why both. PEM is what Linux and macOS hosts, the Python/Node MSAL libraries, the Azure SDK's
 `certificate_path` and a Key Vault import consume. Windows consumes neither of those: an operator

@@ -20,7 +20,7 @@ use aws_lc_rs::digest;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use time::{Duration, OffsetDateTime};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 pub struct GeneratedCert {
     /// Base64-encoded DER of the certificate — the `key` for a Graph key credential.
@@ -103,11 +103,13 @@ pub fn generate_self_signed(
         return Err("certificate subject (common name) is required".into());
     }
 
-    let key_pair =
+    // rcgen keeps the private key's PKCS#8 DER inside the `KeyPair`; held in
+    // `Zeroizing` (rcgen's `zeroize` feature) so that copy is wiped when it
+    // drops — on every `?` below as well as on success.
+    let key_pair = Zeroizing::new(
         rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_2048)
-            .map_err(|e| format!("RSA key generation failed: {e}"))?;
-    // PKCS#8 PEM of the private key — surfaced once to the user, never persisted.
-    let pkcs8_pem = key_pair.serialize_pem();
+            .map_err(|e| format!("RSA key generation failed: {e}"))?,
+    );
 
     let mut params = rcgen::CertificateParams::new(Vec::<String>::new())
         .map_err(|e| format!("certificate params failed: {e}"))?;
@@ -121,7 +123,7 @@ pub fn generate_self_signed(
     params.not_after = not_after;
 
     let cert = params
-        .self_signed(&key_pair)
+        .self_signed(&*key_pair)
         .map_err(|e| format!("self-signing failed: {e}"))?;
     let der = cert.der();
     let der_bytes: &[u8] = der.as_ref();
@@ -138,9 +140,9 @@ pub fn generate_self_signed(
         digest::digest(&digest::SHA256, der_bytes).as_ref(),
     );
 
-    // `serialized_der()` borrows the PKCS#8 bytes rcgen already holds rather
-    // than handing back an owned copy, so the private key does not land on a
-    // second allocation that would need its own zeroization.
+    // `serialized_der()` borrows rcgen's single PKCS#8 copy rather than handing
+    // back an owned one, and that copy sits in `Zeroizing`, so it is wiped when
+    // `key_pair` drops — on the error paths too.
     let pfx_password = random_pfx_password();
     let pfx_der = build_pfx(
         der_bytes,
@@ -149,6 +151,11 @@ pub fn generate_self_signed(
         cn,
         &pfx_password,
     )?;
+
+    // PKCS#8 PEM of the private key — surfaced once to the user, never persisted.
+    // Serialized last so no error path above holds an unwiped copy; on success
+    // it moves into `GeneratedCert`, whose `Drop` wipes it.
+    let pkcs8_pem = key_pair.serialize_pem();
 
     Ok(GeneratedCert {
         cert_der_base64: STANDARD.encode(der_bytes),
@@ -203,6 +210,11 @@ fn random_pfx_password() -> String {
 /// with `HasPrivateKey = False`, which the operator discovers much later, when a
 /// client assertion won't sign.
 ///
+/// Residual copy: `PrivateKeyChain::new` copies the key into the `KeyStore`
+/// (`key.as_ref().to_owned()`), which neither exposes nor wipes it. That copy is
+/// out of our reach, like the aws-lc-rs key inside rcgen's `KeyPair`; the caller
+/// wipes the PKCS#8 bytes it owns.
+///
 /// The profile is set explicitly even though it is the writer's current default.
 /// A default that quietly moved to a legacy PBE would downgrade every bundle we
 /// mint, in a version bump with no diff to review.
@@ -240,6 +252,19 @@ fn build_pfx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins rcgen's `zeroize` feature: without it `KeyPair` has no `Zeroize`
+    /// impl, `Zeroizing<KeyPair>` does not compile, and the PKCS#8 copy rcgen
+    /// holds is freed unwiped.
+    #[test]
+    fn the_rcgen_key_pair_wipes_its_pkcs8_copy() {
+        let mut kp =
+            rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_2048)
+                .unwrap();
+        assert!(!kp.serialized_der().is_empty());
+        kp.zeroize();
+        assert!(kp.serialized_der().is_empty());
+    }
 
     #[test]
     fn generates_rsa_self_signed_with_expected_fields() {
