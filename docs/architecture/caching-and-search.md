@@ -11,7 +11,9 @@ List cache keys are prefixed with the tenant id via helpers like
 The convention is universal: every kind — Lists, Audit (`{tenant}|audit_run`,
 `{tenant}|site_sweep`), ServicePrincipal, and Permissions — uses `{tenant_id}|…`, and `sign_out`
 prefix-sweeps **all four kinds**, so a different operator signing into the *same* tenant never
-reads the previous session's audit/sweep/SP data.
+reads the previous session's audit/sweep/SP data. The audit-run entry is stored typed
+(`put_typed`, unpinned) and must be read with `get_typed::<CachedAuditRun>` — an untyped `get` on
+it misses.
 
 ### Proving the session, and what may be pinned
 

@@ -19,6 +19,7 @@
 
 use std::collections::HashSet;
 
+use azapptoolkit_core::audit::PostureCounts;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 
@@ -27,7 +28,6 @@ use crate::components::ui::{Callout, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
 use crate::util::{TimeAgo, keep_alive, time_ago};
 use crate::views::app_permission_grants_view::AppPermissionGrantsView;
-use crate::views::audit_view::posture::PostureCounts;
 use crate::views::audit_view::{AuditAppsPane, AuditController, FindingsPane};
 use crate::views::consent_grants_view::ConsentGrantsView;
 use crate::views::credentials_dashboard::CredentialsDashboard;

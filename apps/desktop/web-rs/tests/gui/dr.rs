@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::backup::{
-    RestorePlan, RestoreReport, RestoredApp, SchemaTooNew, TenantBackup,
+    RestorePlan, RestoreReport, RestoredApp, SchemaTooNew, SkippedObject, TenantBackup,
 };
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::dr::DisasterRecoveryView;
@@ -123,6 +123,71 @@ fn click_button(label: &str) {
         }
     }
     panic!("no button labelled `{label}`");
+}
+
+/// Runs a backup whose `backup_tenant` answers `b`, and waits for the result
+/// panel (summary + Save). `ts::reset()` is the caller's to have done.
+async fn run_backup(b: TenantBackup) -> ts::Mounted {
+    ts::mock_ok("backup_tenant", &b);
+    let m = ts::mount_view(|| view! { <DisasterRecoveryView /> });
+    ts::tick().await;
+    click_button("Back up this tenant");
+    ts::wait_for(|| ts::query(".dr-view__result").is_some()).await;
+    m
+}
+
+/// An object the backup could not read restores as if it never existed, so
+/// the result must say so — by name — BEFORE the operator decides to save
+/// this file as the tenant's DR artifact.
+#[wasm_bindgen_test]
+async fn a_backup_with_skipped_objects_warns_before_save() {
+    ts::reset();
+    let _m = run_backup(TenantBackup {
+        skipped: vec![SkippedObject::new(
+            "application",
+            "obj-9",
+            Some("Payroll API".to_string()),
+            "owners read failed",
+        )],
+        ..backup()
+    })
+    .await;
+
+    assert!(
+        ts::body_contains("1 object(s) could not be fully read"),
+        "{}",
+        ts::body_text()
+    );
+    assert!(ts::body_contains("restoring it will not recreate it"));
+    assert!(ts::body_contains("Payroll API"));
+    assert!(ts::body_contains("owners read failed"));
+    assert_eq!(ts::query_all(".dr-view__skipped-list li").len(), 1);
+
+    // The notice precedes the save decision in document order.
+    let list = ts::query(".dr-view__skipped-list").expect("skipped list");
+    let save = ts::query_all(".dr-view__result button")
+        .into_iter()
+        .find(|el| {
+            el.text_content()
+                .unwrap_or_default()
+                .contains("Save backup file")
+        })
+        .expect("save button");
+    let following = web_sys::Node::DOCUMENT_POSITION_FOLLOWING;
+    assert_ne!(
+        list.compare_document_position(&save) & following,
+        0,
+        "the skipped-object notice must come before Save backup file…"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn a_clean_backup_shows_no_skipped_notice() {
+    ts::reset();
+    let _m = run_backup(backup()).await;
+    assert!(ts::body_contains("Save backup file"));
+    assert!(ts::query(".dr-view__skipped-list").is_none());
+    assert!(!ts::body_contains("could not be fully read"));
 }
 
 /// A manifest from a newer build is blocked in the plan, before Confirm — not

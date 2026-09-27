@@ -11,7 +11,10 @@ use crate::models::{KeyCredential, PasswordCredential};
 
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Declaration order IS severity order (`Low < Medium < High < Critical`), so
+/// the derived `Ord` ranks a finding by its worst member — the Findings pane's
+/// group ranking and the Home card's summary both take a `max` over it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RiskLevel {
     Low,
     Medium,
@@ -634,6 +637,12 @@ pub mod issue {
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
+
+    #[test]
+    fn risk_level_orders_by_severity() {
+        use RiskLevel::*;
+        assert!(Low < Medium && Medium < High && High < Critical);
+    }
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 4, 22, 12, 0, 0).unwrap()

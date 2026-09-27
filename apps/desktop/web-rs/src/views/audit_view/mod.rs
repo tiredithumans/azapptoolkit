@@ -12,7 +12,6 @@ mod controller;
 mod filter;
 mod findings;
 mod groups;
-pub mod posture;
 mod row;
 mod sort;
 

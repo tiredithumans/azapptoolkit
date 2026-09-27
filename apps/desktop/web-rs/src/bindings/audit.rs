@@ -1,4 +1,5 @@
-//! Audit IPC bindings: run, cancel, cached read, CSV export. Streamed
+//! Audit IPC bindings: run, cancel, cached read (whole run, or the Home
+//! card's counts-only summary), CSV export. Streamed
 //! progress events live in `bindings::events::audit_progress`.
 
 use super::ipc::{invoke, invoke_result};
@@ -8,7 +9,8 @@ use serde::Serialize;
 
 use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::audit::{
-    AuditExportCoverage, AuditProgress, AuditRunResult, MAILBOX_SCOPING_UNRESOLVED,
+    AuditExportCoverage, AuditProgress, AuditRunResult, CachedAuditSummary,
+    MAILBOX_SCOPING_UNRESOLVED,
 };
 
 /// Runs a full security audit. Exchange mailbox-scoping is resolved as part of
@@ -24,6 +26,11 @@ pub async fn cancel_audit() {
 
 pub async fn get_cached_audit(tenant_id: &str) -> Option<AuditRunResult> {
     invoke("get_cached_audit", TenantArg { tenant_id }).await
+}
+
+/// The cached run reduced to the Home posture card's counts — never the items.
+pub async fn get_cached_audit_summary(tenant_id: &str) -> Option<CachedAuditSummary> {
+    invoke("get_cached_audit_summary", TenantArg { tenant_id }).await
 }
 
 #[derive(Serialize)]

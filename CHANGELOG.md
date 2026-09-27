@@ -695,6 +695,10 @@
   permission granted or revoked outside the app (for example in the Entra portal) can take up to an
   hour to appear there, or until you clear Permissions in the Cache dialog. The Enterprise Apps
   Access tab and the permission tester still read assignments live.
+- **Home's Security Posture card no longer loads the whole security audit.** To show a few counts
+  it received every scored app from the last scan (tens of megabytes on a large tenant), and it
+  loaded it again after every scan, while the Security tab kept a second copy. Home now receives
+  only the counts, so it updates straight after a scan and uses less memory.
 - **Items parked in the Open dock no longer load when you sign in.** Every parked app
   registration, enterprise app and managed identity used to fetch its full details from Microsoft
   Graph at launch, for panes you had not opened: up to eight apps' worth of requests competing with

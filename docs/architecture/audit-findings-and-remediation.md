@@ -313,7 +313,8 @@ group or filter, prefer a structured flag on `AuditItem` over matching an adviso
 ## Finding groups, filters & bulk-action pairing
 
 The Findings pane renders `groups::group_findings` — the `GROUP_CATALOG`, keyed by the **same**
-finding keys `filter::matches_finding` understands. Classification delegates to
+finding keys `azapptoolkit_core::audit::matches_finding` understands (core, not the workbench,
+because the backend's Home summary classifies with it too). Classification delegates to
 `matches_finding`, so each marker predicate lives exactly once. Actionable groups are ranked by
 their own **worst severity**, then affected-principal count, then catalog order (the sort is stable);
 healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed disclosure.
@@ -343,16 +344,21 @@ healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed
   client, secret-over-cert) are deliberately left to the All-apps issue column.
 - **Load-bearing asymmetry:** `scoped_mailbox` matches with `.contains(SCOPED_VIA_RBAC)` while
   every sibling finding uses `.starts_with` — the marker sits mid-issue, not at the front. The
-  `filter.rs` tests pin this; a "normalize everything to `starts_with`" sweep silently empties
+  core `audit/finding.rs` tests pin this; a "normalize everything to `starts_with`" sweep silently empties
   the finding.
-- **Shared counts, one source:** `audit_view/posture.rs::posture_counts` feeds both the Security
-  tab's posture strip and the Home posture card (severity row + Top-findings counts), so the
-  numbers can't disagree. Its finding buckets classify through `filter::matches_finding`, so a
-  count can't diverge from the group it summarizes (pinned by
-  `posture_counts_agree_with_finding_groups`); the Home card counts the two unconfinable-reach
-  groups too. `groups::tone` is the one `RiskLevel` → tone map (group dots, risk badges, the Home
-  card). The Home card's ranked Top-findings list reuses
-  `groups::ranked_actionable_findings`, so the finding *order* and tone can't disagree either.
+- **Shared counts, one source:** `azapptoolkit_core::audit::posture_counts` (+ `finding_worst`)
+  feeds both the Security tab's posture strip (over the run it holds) and the Home posture card
+  (severity row + Top-findings counts), so the numbers can't disagree. Home never pulls the run:
+  it reads `get_cached_audit_summary`, a `dto::audit::CachedAuditSummary` of counts and per-finding
+  worst severity the backend computes from the cached entry — the run is up to 10k items, and Home
+  used to ship it over IPC on every audit reload. The buckets classify through `matches_finding`,
+  so a count can't diverge from the group it summarizes (pinned by
+  `posture_counts_agree_with_finding_groups`); `PostureCounts::finding(key)` is the one key→bucket
+  map. The Home card counts the two unconfinable-reach groups too. `groups::tone` is the one
+  `RiskLevel` → tone map (group dots, risk badges, the Home card). The Home card's ranked
+  Top-findings list goes through `groups::ranked_actionable_findings`, which ranks the summary's
+  tallies with the same `rank_key` as `group_findings`, so the finding *order* and tone can't
+  disagree either (pinned by `summary_ranking_matches_the_workbench_ranking`).
 - **Bulk-action pairing:** `groups::group_bulk_actions(key)` pairs each finding group with the
   fix that addresses **that rule**: Expired → RemoveExpired, Org-wide mailbox/SharePoint → Scope,
   Redundant → RemoveRedundant, Ownership → AddOwner, Unused → DisableSignIn + Delete. Advisory

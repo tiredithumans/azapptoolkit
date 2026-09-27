@@ -5,8 +5,10 @@
 //! service-principal state + consent flags, feeds them into
 //! [`azapptoolkit_core::audit::score_application`], and emits `audit-progress`
 //! Tauri events after each app. Completed results land in the shared cache
-//! under [`CacheKind::Audit`] keyed `{tenant_id}|audit_run` so the dashboard
-//! can re-render without re-scanning.
+//! under [`CacheKind::Audit`] keyed `{tenant_id}|audit_run` — stored typed
+//! (`put_typed`), so every read is a refcount clone — so the Security view can
+//! re-render without re-scanning and the dashboard can read a counts-only
+//! [`CachedAuditSummary`] instead of the run.
 //!
 //! Adaptive concurrency: a [`ConcurrencyThrottle`](crate::commands::throttle)
 //! wired as the Graph client's `ThrottleObserver` decrements the in-flight cap
@@ -44,7 +46,7 @@ use crate::commands::progress::emit_progress;
 use crate::commands::throttle::FanOutMeter;
 use crate::dto::UiError;
 use crate::dto::audit::{
-    AuditCoverageGap, AuditExportCoverage, AuditProgress, AuditRunResult,
+    AuditCoverageGap, AuditExportCoverage, AuditProgress, AuditRunResult, CachedAuditSummary,
     MAILBOX_SCOPING_UNRESOLVED,
 };
 use crate::state::AppState;
@@ -100,7 +102,10 @@ pub(crate) fn audit_cache_key(tenant_id: &str) -> String {
 /// in-process with a 60-minute TTL, so "read time" and "run time" differ by up
 /// to an hour, and a cache hit stamped on read would tell an operator a
 /// 59-minute-old posture was current.
-#[derive(serde::Serialize, serde::Deserialize)]
+///
+/// Stored with `put_typed` and read ONLY with `get_typed::<CachedAuditRun>`:
+/// the entry is in-process, never serialized, and an untyped `cache.get` on it
+/// reads `Null` and misses — which would surface as "no audit run".
 struct CachedAuditRun {
     /// RFC3339 UTC.
     completed_at: String,
@@ -108,13 +113,8 @@ struct CachedAuditRun {
     /// [`AuditRunResult::mailbox_scoping_resolved`] — stored with the items
     /// because an unresolved run is still cacheable (it over-reports, never
     /// under-reports), so a cache hit and its export must still carry the
-    /// caveat. Defaults to `true` for an entry written before the field.
-    #[serde(default = "default_true")]
+    /// caveat.
     mailbox_scoping_resolved: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// Whether a finished run may be written to the audit cache.
@@ -493,25 +493,24 @@ pub async fn run_audit(
         "audit complete",
     );
 
-    // Built BEFORE the cache write and destructured back out for the result, so
-    // the cached run and the one returned to the caller carry byte-identical
-    // items and the same completion stamp — and so the multi-MB item vector is
-    // moved through, never cloned.
-    let run = CachedAuditRun {
-        completed_at: Utc::now().to_rfc3339(),
-        items,
-        mailbox_scoping_resolved,
-    };
+    // One stamp for both, so the cached run and the one returned to the caller
+    // carry the same completion time. The cache holds its own copy of the items:
+    // one clone per completed, cacheable run is cheaper than the whole-tree
+    // `serde_json::to_value` walk an untyped `put` did, and it makes every later
+    // read (`get_cached_audit`, the Home summary, export) a refcount clone
+    // instead of a full deserialize.
+    let completed_at = Utc::now().to_rfc3339();
     if run_is_cacheable(cancelled, truncated, &degraded) {
-        state
-            .cache
-            .put(CacheKind::Audit, audit_cache_key(&tenant_id), &run);
+        state.cache.put_typed(
+            CacheKind::Audit,
+            audit_cache_key(&tenant_id),
+            Arc::new(CachedAuditRun {
+                completed_at: completed_at.clone(),
+                items: items.clone(),
+                mailbox_scoping_resolved,
+            }),
+        );
     }
-    let CachedAuditRun {
-        completed_at,
-        items,
-        mailbox_scoping_resolved,
-    } = run;
 
     Ok(AuditRunResult {
         tenant_id,
@@ -551,10 +550,10 @@ pub(crate) fn invalidate_audit_cache(cache: &azapptoolkit_core::cache::Cache, te
 /// Returns the cached audit for this tenant, if one was run within the last
 /// 60 minutes.
 ///
-/// **The only command that answers from cache alone**, which is why it is also
-/// the only one that has to check the session itself. Every other read reaches
-/// Graph through `graph_for`, so a tenant with no session fails at the token
-/// and never returns data. Here the `tenant_id` argument alone decided which
+/// **Answers from cache alone** (as does [`get_cached_audit_summary`]), which
+/// is why both check the session themselves. A read that reaches Graph goes
+/// through `graph_for`, so a tenant with no session fails at the token and
+/// never returns data. Here the `tenant_id` argument alone decided which
 /// tenant's directory data came back — a stale or wrong id from the webview
 /// (a tenant switch mid-flight is the realistic one) served the *other*
 /// tenant's audit, which is the cross-tenant leak this codebase treats as its
@@ -563,12 +562,12 @@ pub(crate) fn invalidate_audit_cache(cache: &azapptoolkit_core::cache::Cache, te
 pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option<AuditRunResult> {
     state.auth.tenant_context(&tenant_id)?;
     let key = audit_cache_key(&tenant_id);
-    let run: CachedAuditRun = state.cache.get(CacheKind::Audit, &key)?;
-    let CachedAuditRun {
-        completed_at,
-        items,
-        mailbox_scoping_resolved,
-    } = run;
+    let run = state
+        .cache
+        .get_typed::<CachedAuditRun>(CacheKind::Audit, &key)?;
+    let items = run.items.clone();
+    let completed_at = run.completed_at.clone();
+    let mailbox_scoping_resolved = run.mailbox_scoping_resolved;
     // Report availability is reconstructed from the cached items (every item
     // carries the run's `sign_in_report_available`); a cached run never re-prompts
     // for consent, so `sign_in_consent_required` is false on a cache hit.
@@ -593,6 +592,29 @@ pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option
         // caveat must survive the round trip.
         mailbox_scoping_resolved,
     })
+}
+
+/// The Home dashboard's view of the cached audit: the posture counts and each
+/// finding's worst severity, never the items (see [`CachedAuditSummary`]).
+/// `None` when no run is cached — or when `tenant_id` has no session, exactly
+/// like [`get_cached_audit`], since this too answers from the cache alone.
+///
+/// `completed_at` is the stamp the run wrote, not this read's time: the card
+/// says "Scanned 40 minutes ago" from it, and a cache hit re-stamped on read
+/// would present an hour-old posture as current.
+#[tauri::command]
+pub fn get_cached_audit_summary(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Option<CachedAuditSummary> {
+    state.auth.tenant_context(&tenant_id)?;
+    let run = state
+        .cache
+        .get_typed::<CachedAuditRun>(CacheKind::Audit, &audit_cache_key(&tenant_id))?;
+    Some(CachedAuditSummary::from_items(
+        &run.items,
+        Some(run.completed_at.clone()),
+    ))
 }
 
 /// Opens the OS save-file dialog and writes the audit in the requested
@@ -626,9 +648,9 @@ pub async fn save_audit_to_file(
     let (items, coverage): (Vec<AuditItem>, AuditExportCoverage) = match items {
         Some(items) => (items, coverage),
         None => {
-            let run: CachedAuditRun = state
+            let run = state
                 .cache
-                .get(CacheKind::Audit, &audit_cache_key(&tenant_id))
+                .get_typed::<CachedAuditRun>(CacheKind::Audit, &audit_cache_key(&tenant_id))
                 .ok_or_else(|| {
                     UiError::validation(
                         "no_cached_audit",
@@ -636,7 +658,7 @@ pub async fn save_audit_to_file(
                     )
                 })?;
             let coverage = cached_run_coverage(&run);
-            (run.items, coverage)
+            (run.items.clone(), coverage)
         }
     };
     let (content, ext, filter_name) = match format.as_str() {
@@ -1866,6 +1888,43 @@ mod tests {
             sign_in_report_available: false,
             principal_kind: AuditPrincipalKind::Application,
         }
+    }
+
+    /// The run entry is stored typed, so every reader must use `get_typed` —
+    /// an untyped `get` on it misses, which would read as "no audit run" on
+    /// Home and fail the by-reference export. And the Home summary carries the
+    /// stamp the run wrote, never the read time.
+    #[test]
+    fn the_cached_run_is_stored_typed_and_summarized_from_its_own_stamp() {
+        let cache = Cache::new();
+        let key = audit_cache_key("t1");
+        cache.put_typed(
+            CacheKind::Audit,
+            key.clone(),
+            Arc::new(CachedAuditRun {
+                completed_at: "2026-01-01T00:00:00Z".into(),
+                items: vec![sample("A"), sample("B")],
+                mailbox_scoping_resolved: true,
+            }),
+        );
+        let run = cache
+            .get_typed::<CachedAuditRun>(CacheKind::Audit, &key)
+            .expect("typed read hits");
+        assert_eq!(run.items.len(), 2);
+        // The wrong door: `CachedAuditRun` is no longer `Deserialize`, so probe
+        // with the item vector the untyped path would have to decode.
+        assert!(
+            cache
+                .get::<Vec<AuditItem>>(CacheKind::Audit, &key)
+                .is_none(),
+            "an untyped read of the typed run entry must miss"
+        );
+        let summary = CachedAuditSummary::from_items(&run.items, Some(run.completed_at.clone()));
+        assert_eq!(
+            summary.completed_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        assert_eq!(summary.posture.medium, 2);
     }
 
     fn sp(id: &str, app_id: &str, sp_type: Option<&str>) -> ServicePrincipal {

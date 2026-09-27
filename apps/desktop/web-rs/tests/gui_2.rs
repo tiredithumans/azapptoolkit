@@ -8,15 +8,22 @@
 //! module (see the sharding note in AGENTS.md).
 //!
 //! This shard holds the security-audit cluster (both audit panes plus the surfaces that read a
-//! run: credential expiry, readiness) and the whole-shell smoke test.
+//! run: credential expiry, readiness, the Home posture card) and the whole-shell smoke test,
+//! whose views (permission tester, resource access) its behaviour tests reuse.
 #![cfg(target_arch = "wasm32")]
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
 #[path = "gui/credentials_dashboard.rs"]
 mod credentials_dashboard;
+#[path = "gui/home_dashboard.rs"]
+mod home_dashboard;
+#[path = "gui/permission_tester.rs"]
+mod permission_tester;
 #[path = "gui/readiness.rs"]
 mod readiness;
+#[path = "gui/resource_access.rs"]
+mod resource_access;
 #[path = "gui/security_audit.rs"]
 mod security_audit;
 #[path = "gui/security_findings.rs"]

@@ -117,6 +117,7 @@ pub fn run() {
             commands::audit::run_audit,
             commands::audit::cancel_audit,
             commands::audit::get_cached_audit,
+            commands::audit::get_cached_audit_summary,
             commands::audit::save_audit_to_file,
             commands::remediation::remediate_disable_sign_in,
             commands::remediation::remediate_remove_expired_credentials,

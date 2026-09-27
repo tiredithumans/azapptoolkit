@@ -133,7 +133,8 @@ deploys it (needs Settings → Pages → Source = "GitHub Actions"). The `demo` 
   plain `mock_ok` returns one payload for every id — the wrong-detail bug to avoid. Ids are
   synthetic-but-realistic GUIDs from `fixtures::guid(seed)`.
 - **Footgun: infallible invokes panic without a fixture.** The infallible `invoke()` reads
-  (`get_cached_audit` / `cache_stats` / `export_audit_csv` / `get_auth_config`) and the
+  (`get_cached_audit` / `get_cached_audit_summary` / `cache_stats` / `export_audit_csv` /
+  `get_auth_config`) and the
   `()`-returning ones (`invalidate_list_cache` — fired by every list Refresh — `clear_cache`,
   `cancel_*`, …) must be registered in `demo::register_fixtures`, or they **panic** on the
   rejected-promise fallback. Adding a new infallible `invoke()`/`invoke::<()>` reachable in the

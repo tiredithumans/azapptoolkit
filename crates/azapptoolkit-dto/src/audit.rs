@@ -1,6 +1,10 @@
 //! Audit IPC DTOs.
 
-use azapptoolkit_core::audit::AuditItem;
+use std::collections::BTreeMap;
+
+use azapptoolkit_core::audit::{
+    AuditItem, POSTURE_FINDING_KEYS, PostureCounts, RiskLevel, finding_worst, posture_counts,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +150,49 @@ impl Default for AuditExportCoverage {
     }
 }
 
+/// What the Home dashboard's Security Posture card needs from the cached run:
+/// counts, never items.
+///
+/// The cached run is up to 10 000 [`AuditItem`]s with five `Vec`s each —
+/// several to tens of MB of JSON. Home used to receive all of it over IPC on
+/// every audit reload (while the Security tab held a second copy) only to
+/// reduce it to a dozen numbers; the backend now reduces it with the same
+/// core [`posture_counts`] the Security strip runs over its own copy, so the
+/// two surfaces still share one count source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CachedAuditSummary {
+    /// The stamp the RUN wrote (RFC3339 UTC), never the read time — see
+    /// [`AuditRunResult::completed_at`]. `Option` to mirror it.
+    pub completed_at: Option<String>,
+    pub posture: PostureCounts,
+    /// Worst member risk level per non-empty posture finding, keyed by the
+    /// finding key ([`POSTURE_FINDING_KEYS`]) — what ranks the card's "Top
+    /// findings" and colours their tone dots, as the Findings pane does.
+    pub worst: BTreeMap<String, RiskLevel>,
+}
+
+impl CachedAuditSummary {
+    pub fn from_items(items: &[AuditItem], completed_at: Option<String>) -> Self {
+        let worst = POSTURE_FINDING_KEYS
+            .iter()
+            .filter_map(|&key| finding_worst(items, key).map(|w| (key.to_string(), w)))
+            .collect();
+        Self {
+            completed_at,
+            posture: posture_counts(items),
+            worst,
+        }
+    }
+
+    /// `(count, worst)` for a finding key; `None` for a key the posture counts
+    /// don't cover. An empty finding reads `(0, Low)`.
+    pub fn finding_tally(&self, key: &str) -> Option<(usize, RiskLevel)> {
+        let count = self.posture.finding(key)?;
+        let worst = self.worst.get(key).copied().unwrap_or(RiskLevel::Low);
+        Some((count, worst))
+    }
+}
+
 impl AuditRunResult {
     /// This run's caveats, for the exporter. Derived rather than restated so a
     /// new coverage signal on the run reaches the export by editing one place.
@@ -268,6 +315,53 @@ impl AuditCoverageGap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_carries_counts_worst_and_the_runs_own_stamp() {
+        use azapptoolkit_core::audit::{AuditPrincipalKind, CredentialStatus};
+        let item = |level, status, unused| AuditItem {
+            application_name: "App".into(),
+            app_id: "app-1".into(),
+            object_id: "obj-1".into(),
+            created_date: None,
+            publisher: None,
+            sign_in_audience: None,
+            risk_score: 0,
+            risk_level: level,
+            issues: vec![],
+            recommendations: vec![],
+            remediations: vec![],
+            credential_status: status,
+            permission_count: 0,
+            service_principal_enabled: None,
+            days_since_created: None,
+            certificates: vec![],
+            secrets: vec![],
+            last_sign_in: None,
+            unused,
+            sign_in_report_available: false,
+            principal_kind: AuditPrincipalKind::Application,
+        };
+        let items = [
+            item(RiskLevel::High, CredentialStatus::Expired, false),
+            item(RiskLevel::Low, CredentialStatus::Expired, false),
+            item(RiskLevel::Medium, CredentialStatus::Active, false),
+        ];
+        let s = CachedAuditSummary::from_items(&items, Some("2026-01-01T00:00:00Z".into()));
+        assert_eq!(s.completed_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(s.posture, posture_counts(&items));
+        assert_eq!(s.finding_tally("expired"), Some((2, RiskLevel::High)));
+        // An empty finding is a zero tally, not a missing one.
+        assert_eq!(s.finding_tally("unused"), Some((0, RiskLevel::Low)));
+        assert!(!s.worst.contains_key("unused"));
+        assert_eq!(s.finding_tally("redundant_perms"), None);
+        // Survives the IPC round trip.
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CachedAuditSummary>(&json).unwrap(),
+            s
+        );
+    }
 
     #[test]
     fn coverage_gaps_round_trip_and_unknown_variants_degrade_to_other() {

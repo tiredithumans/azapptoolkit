@@ -725,7 +725,7 @@ fn a_command_answering_from_cache_alone_checks_the_session() {
     // index accessors ([`CACHED_ACCESSORS`]) started counting: search, the
     // directory-status probe and eight other tenant-wide scans read the cache
     // one call away from the command body, where a `cache.get` scan cannot see.
-    const KNOWN_CACHE_READING_COMMANDS: usize = 25;
+    const KNOWN_CACHE_READING_COMMANDS: usize = 27;
     assert!(
         checked.len() >= KNOWN_CACHE_READING_COMMANDS,
         "the cache-read detector found only {} command(s) but at least {} answer from cache \

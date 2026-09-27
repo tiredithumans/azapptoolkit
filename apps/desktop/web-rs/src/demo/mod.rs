@@ -25,6 +25,7 @@ use azapptoolkit_core::models::{Application, KeyCredential, PasswordCredential};
 use azapptoolkit_dto::applications::{
     ApplicationDetail, ApplicationListRowDto, DirectoryIndexStatus,
 };
+use azapptoolkit_dto::audit::CachedAuditSummary;
 use azapptoolkit_dto::enterprise_application::EnterpriseApplicationDetail;
 use azapptoolkit_dto::exchange::MailScopeEntry;
 use azapptoolkit_dto::managed_identity::MiSubtype;
@@ -562,7 +563,17 @@ fn register_fixtures() {
 
     // ---- Security / health ----
     mock_ok("list_credential_expirations", &f::credential_expirations());
-    mock_ok("get_cached_audit", &Some(f::audit_run_result()));
+    let audit_run = f::audit_run_result();
+    // Home's posture card reads the counts-only summary; derived from the same
+    // run so the demo's Home card and Security strip agree.
+    mock_ok(
+        "get_cached_audit_summary",
+        &Some(CachedAuditSummary::from_items(
+            &audit_run.items,
+            audit_run.completed_at.clone(),
+        )),
+    );
+    mock_ok("get_cached_audit", &Some(audit_run));
     // The two grant lenses of the Security workbench. Both are fallible reads,
     // so an unmocked route degrades to the lens's error state rather than
     // panicking — but that would show the demo's visitors a failure where the

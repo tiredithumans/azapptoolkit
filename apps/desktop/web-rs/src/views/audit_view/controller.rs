@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use azapptoolkit_core::audit::RemediationKind;
+use azapptoolkit_core::audit::{PostureCounts, RemediationKind, posture_counts};
 use leptos::prelude::*;
 
 use crate::bindings::audit::{self, AuditExportCoverage, AuditProgress, AuditRunResult};
@@ -19,8 +19,6 @@ use crate::bindings::auth;
 use crate::bindings::events;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::Session;
-
-use super::posture::{PostureCounts, posture_counts};
 
 #[derive(Clone, Copy)]
 pub(crate) struct AuditController {
@@ -36,8 +34,10 @@ pub(crate) struct AuditController {
     pub peak_cap: RwSignal<usize>,
     pub scan_error: RwSignal<Option<String>>,
     pub exporting: RwSignal<bool>,
-    /// Per-bucket counts for the posture strip + Home card, computed once per
-    /// scan (never per keystroke) without cloning the multi-MB run.
+    /// Per-bucket counts for the posture strip, computed once per scan (never
+    /// per keystroke) without cloning the multi-MB run — by core's
+    /// `posture_counts`, the same function the backend runs for the Home
+    /// card's summary, so the two surfaces can't disagree.
     pub posture: Memo<Option<PostureCounts>>,
     pub consent_needed: Memo<bool>,
     pub total_items: Memo<Option<usize>>,

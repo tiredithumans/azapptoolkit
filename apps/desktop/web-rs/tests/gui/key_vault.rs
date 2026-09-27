@@ -6,6 +6,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_web_rs::state::ActiveView;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::key_vault_view::KeyVaultView;
 
@@ -97,4 +98,64 @@ async fn tenant_switch_clears_listed_secrets_and_vault_name() {
         ts::body_contains("Enter a vault name"),
         "back to the pre-load state"
     );
+}
+
+/// Lists `db-password`, reveals it, and waits for the value on screen. The
+/// session is put on the Key Vault view first: the wipe fires when the view
+/// CHANGES away from it.
+async fn reveal_db_password() -> ts::Mounted {
+    ts::reset();
+    ts::mock_ok("kv_list_secrets", &fixtures::kv_secrets(&["db-password"]));
+    ts::mock_ok(
+        "kv_get_secret",
+        &fixtures::kv_secret_value("db-password", "s3cr3t-value"),
+    );
+
+    let m = ts::mount_view(|| view! { <KeyVaultView /> });
+    m.session.set_view(ActiveView::KeyVault);
+    ts::tick().await;
+
+    ts::set_input_value(VAULT_INPUT, "myvault");
+    ts::click(LIST_BTN);
+    ts::wait_for(|| ts::body_contains("db-password")).await;
+
+    ts::click("td.cell-mid button");
+    ts::wait_for(|| ts::body_contains("s3cr3t-value")).await;
+    m
+}
+
+/// The module's security promise: the page stays mounted (keep-alive), yet a
+/// revealed secret exists only while the page is on screen.
+#[wasm_bindgen_test]
+async fn reveal_is_wiped_when_the_view_changes() {
+    let m = reveal_db_password().await;
+
+    m.session.set_view(ActiveView::Home);
+    ts::tick().await;
+    assert!(
+        !ts::body_contains("s3cr3t-value"),
+        "the revealed value must be wiped when the view leaves Key Vault"
+    );
+    // `CopyableId` also carries the value in a `title` attribute.
+    assert!(ts::query("[title=\"s3cr3t-value\"]").is_none());
+
+    // Coming back does not bring it back; the (non-secret) listing survives.
+    m.session.set_view(ActiveView::KeyVault);
+    ts::tick().await;
+    assert!(!ts::body_contains("s3cr3t-value"));
+    assert!(ts::query("[title=\"s3cr3t-value\"]").is_none());
+    assert!(ts::body_contains("db-password"), "only the secret is wiped");
+}
+
+#[wasm_bindgen_test]
+async fn hide_puts_a_revealed_secret_away() {
+    let _m = reveal_db_password().await;
+    let hide = ts::query_all("button")
+        .into_iter()
+        .find(|el| el.text_content().unwrap_or_default().trim() == "Hide")
+        .expect("Hide button");
+    hide.unchecked_into::<web_sys::HtmlElement>().click();
+    ts::tick().await;
+    assert!(!ts::body_contains("s3cr3t-value"));
+    assert!(ts::query("[title=\"s3cr3t-value\"]").is_none());
 }
