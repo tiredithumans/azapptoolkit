@@ -275,6 +275,7 @@ pub fn sso_config(object_id: &str, app_id: &str) -> SsoConfigDto {
         notification_emails: vec!["identity-team@contoso.com".to_string()],
         claims_policy: None,
         claims_policy_id: None,
+        claims_read_failed: false,
     }
 }
 

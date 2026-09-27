@@ -27,5 +27,7 @@ mod credential_sweep;
 mod enterprise_application_list;
 #[path = "gui/open_items_dock.rs"]
 mod open_items_dock;
+#[path = "gui/sso_claims.rs"]
+mod sso_claims;
 #[path = "gui/sso_rollover.rs"]
 mod sso_rollover;

@@ -47,13 +47,23 @@ impl EntraAuthService {
         self.graph_scopes(&["Policy.Read.All"])
     }
 
-    /// `Policy.ReadWrite.ApplicationConfiguration` Graph scope for creating and
-    /// assigning claims-mapping policies (SAML attribute & claim customization
-    /// in the SSO setup flow). Admin-consent-only; acquired on demand, never at
-    /// sign-in, so SSO setups that don't customize claims never request it and a
-    /// tenant that hasn't consented can still sign in and browse.
+    /// `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All`
+    /// — ONE token for every claims-mapping-policy call (SAML attribute & claim
+    /// customization in the SSO wizard and the detail "SSO" tab). Creating,
+    /// updating and deleting the policy object needs only the Policy scope, but
+    /// the service-principal `$ref` assign/list/remove are documented delegated
+    /// as "Application.ReadWrite.All and Policy.ReadWrite.ApplicationConfiguration"
+    /// (Learn "Assign claimsMappingPolicy", "List assigned claimsMappingPolicy"),
+    /// and the policy's `appliesTo` needs a Policy scope plus Application read.
+    /// One bundle covers all of them, so a single consent covers both reading
+    /// and saving. Admin-consent-only; acquired on demand, never at sign-in, so
+    /// SSO setups that don't customize claims never request it and a tenant that
+    /// hasn't consented can still sign in and browse.
     pub fn default_graph_policy_write_scopes(&self) -> Vec<String> {
-        self.graph_scopes(&["Policy.ReadWrite.ApplicationConfiguration"])
+        self.graph_scopes(&[
+            "Policy.ReadWrite.ApplicationConfiguration",
+            "Application.ReadWrite.All",
+        ])
     }
 
     /// `Sites.FullControl.All` Graph scope for the SharePoint `Sites.Selected`
@@ -157,6 +167,27 @@ mod tests {
                     .any(|s| s == &format!("https://graph.microsoft.com/{perm}"))
             );
         }
+    }
+
+    #[test]
+    fn policy_write_scopes_pair_the_policy_scope_with_application_readwrite() {
+        // The SP-side `$ref` assign/list/remove need both scopes in ONE token.
+        let scopes = EntraAuthService::new("c", "t").default_graph_policy_write_scopes();
+        for perm in [
+            "Policy.ReadWrite.ApplicationConfiguration",
+            "Application.ReadWrite.All",
+        ] {
+            assert!(
+                scopes
+                    .iter()
+                    .any(|s| s == &format!("https://graph.microsoft.com/{perm}")),
+                "missing {perm}: {scopes:?}"
+            );
+        }
+        assert!(scopes.iter().any(|s| s == "offline_access"));
+        // Nothing else that writes rides this token.
+        let writes: Vec<&String> = scopes.iter().filter(|s| s.contains("ReadWrite")).collect();
+        assert_eq!(writes.len(), 2, "{writes:?}");
     }
 
     #[test]

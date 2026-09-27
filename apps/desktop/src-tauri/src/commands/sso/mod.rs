@@ -105,6 +105,10 @@ fn oidc_summary_urls(tenant_id: &str) -> (String, String) {
 /// Creates and assigns a claims-mapping policy for `policy`, returning the new
 /// policy id. The caller must have pre-acquired the policy-write token (so a
 /// missing consent surfaces as the typed `consent_required`).
+///
+/// A failed assign deletes the policy just minted (best effort — it has no
+/// subjects, so no ownership check is needed) instead of leaving an orphan in
+/// the tenant; the original assign error is returned either way.
 async fn apply_claims_policy(
     client: &GraphClient,
     service_principal_id: &str,
@@ -115,17 +119,81 @@ async fn apply_claims_policy(
     let created = client
         .create_claims_mapping_policy(&definition, display_name)
         .await?;
-    client
+    if let Err(err) = client
         .assign_claims_mapping_policy(service_principal_id, &created.id)
-        .await?;
+        .await
+    {
+        discard_unassigned_claims_policy(client, &created.id).await;
+        return Err(err);
+    }
     Ok(created.id)
+}
+
+/// Best-effort delete of a claims-mapping policy this call just created and
+/// never managed to assign — it has no subjects, so deleting it touches no app.
+/// A failure only leaves the orphan the delete was trying to avoid, so it is
+/// logged, never surfaced over the error that got us here.
+async fn discard_unassigned_claims_policy(client: &GraphClient, policy_id: &str) {
+    if let Err(err) = client.delete_claims_mapping_policy(policy_id).await {
+        tracing::warn!(?err, policy = %policy_id, "failed to delete an unassigned claims policy");
+    }
+}
+
+/// What saving the claims editor does to Graph, decided from live state before
+/// any write (see [`plan_claims_write`]).
+#[derive(Debug, PartialEq, Eq)]
+enum ClaimsWrite {
+    /// No policy assigned and none wanted.
+    Nothing,
+    /// No policy assigned: create one and assign it.
+    Create,
+    /// This SP is the policy's only subject: replace its definition in place.
+    PatchInPlace(String),
+    /// The assigned policy is shared with other subjects: give this SP its own
+    /// copy (create, unassign `detach`, assign the copy) and leave the shared
+    /// policy untouched for everyone else.
+    Fork { detach: String },
+    /// An empty editor: unassign the policy, and delete it too when this SP was
+    /// its only subject (nothing else would ever use it again).
+    Detach { policy_id: String, delete: bool },
+}
+
+/// Decides how to save a claims policy. `assigned` is the ids of the policies
+/// assigned to `sp_id`; `subjects` is the `appliesTo` ids of the one assigned
+/// policy (`None` when none is assigned). Any subject other than `sp_id` — a
+/// second SP, or an application object — makes the policy shared, and a shared
+/// policy is never edited in place or deleted. More than one assigned policy
+/// should be impossible (Graph allows one per SP); it fails closed, no writes.
+fn plan_claims_write(
+    sp_id: &str,
+    assigned: &[String],
+    subjects: Option<&[String]>,
+    empty: bool,
+) -> Result<ClaimsWrite, UiError> {
+    let sole = subjects.is_some_and(|subs| subs.iter().all(|s| s == sp_id));
+    match assigned {
+        [] if empty => Ok(ClaimsWrite::Nothing),
+        [] => Ok(ClaimsWrite::Create),
+        [id] if empty => Ok(ClaimsWrite::Detach {
+            policy_id: id.clone(),
+            delete: sole,
+        }),
+        [id] if sole => Ok(ClaimsWrite::PatchInPlace(id.clone())),
+        [id] => Ok(ClaimsWrite::Fork { detach: id.clone() }),
+        _ => Err(UiError::validation(
+            "multiple_claims_policies",
+            "This application has more than one claims-mapping policy assigned. Resolve it in the \
+             Entra admin center before editing claims here.",
+        )),
+    }
 }
 
 // ---------------- create ----------------
 
 /// Creates a SAML SSO enterprise application end to end and returns the
 /// app-owner summary. Steps 1–5 use the standard write scope; the optional
-/// claims step (6) needs `Policy.ReadWrite.ApplicationConfiguration` and is
+/// claims step (6) needs the claims-mapping policy token
+/// (`Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All`) and is
 /// skipped entirely when no custom claims are requested.
 #[tauri::command]
 pub async fn create_saml_sso_application(
@@ -450,7 +518,9 @@ fn augment_with_object_id(mut err: UiError, object_id: &str) -> UiError {
 
 /// Reads the current SSO configuration of an existing enterprise app to drive
 /// the detail-pane "SSO" tab. The claims read degrades gracefully — it never
-/// forces a consent prompt (that only happens via an explicit edit).
+/// forces a consent prompt (that only happens via an explicit edit). A failed
+/// claims read sets `claims_read_failed`, so the tab can tell "no policy" from
+/// "couldn't read it" and refuse to save over claims it never loaded.
 #[tauri::command]
 pub async fn get_sso_config(
     state: State<'_, AppState>,
@@ -494,8 +564,9 @@ pub async fn get_sso_config(
     let redirect_uris = web_redirects;
 
     // Claims: best-effort (read concurrently in the first wave above). A missing
-    // scope/consent leaves the policy unset.
-    let (claims_policy, claims_policy_id) = match claims_result {
+    // scope/consent leaves the policy unset AND flags the read as failed, so the
+    // tab never offers a save over a policy it couldn't see.
+    let (claims_policy, claims_policy_id, claims_read_failed) = match claims_result {
         Ok(policies) => match policies.into_iter().next() {
             Some(policy) => {
                 let parsed = policy
@@ -503,13 +574,16 @@ pub async fn get_sso_config(
                     .first()
                     .map(|d| parse_claims_definition(d))
                     .unwrap_or_default();
-                (Some(parsed), Some(policy.id))
+                (Some(parsed), Some(policy.id), false)
             }
-            None => (None, None),
+            None => (None, None, false),
         },
         Err(err) => {
-            tracing::debug!(?err, "claims policy read skipped (scope/consent)");
-            (None, None)
+            tracing::debug!(
+                ?err,
+                "claims policy unreadable; SSO tab will block claims edits"
+            );
+            (None, None, true)
         }
     };
 
@@ -529,6 +603,7 @@ pub async fn get_sso_config(
         notification_emails,
         claims_policy,
         claims_policy_id,
+        claims_read_failed,
     })
 }
 
@@ -1626,10 +1701,13 @@ fn build_rollover(
     }
 }
 
-/// Replaces the claims-mapping policy on an existing app. Removes any existing
-/// assignment first (claims-mapping definitions are effectively replace-only),
-/// then creates + assigns a fresh policy. Passing an empty `policy` (no schema
-/// entries and no transformations) just removes the current policy.
+/// Saves the claims-mapping policy of an existing app. When this SP is the
+/// policy's only subject the definition is PATCHed in place (no unassign window,
+/// no new object); when the policy is shared with other apps, this app gets a
+/// private copy and the shared policy is left as it was for everyone else. An
+/// empty `policy` (Entra's defaults) unassigns the policy and deletes it once
+/// nothing else uses it. A failure to read the current assignment is returned
+/// and nothing is written.
 #[tauri::command]
 pub async fn set_claims_mapping(
     state: State<'_, AppState>,
@@ -1639,37 +1717,128 @@ pub async fn set_claims_mapping(
     policy: ClaimsPolicyDto,
 ) -> Result<Option<String>, UiError> {
     // Pre-acquire so a missing consent surfaces typed (the UI's "Grant consent").
+    // Stays in the command, not the core: silent grants can't obtain consent.
     state
         .ensure_policy_write_token(&tenant_id)
         .await
         .map_err(UiError::from)?;
-    let client = state.graph_for(&tenant_id);
+    set_claims_mapping_core(
+        &state,
+        &tenant_id,
+        &service_principal_id,
+        &display_name,
+        &policy,
+    )
+    .await
+}
 
-    // Remove existing assignment(s) so the new policy fully replaces them.
-    if let Ok(existing) = client
-        .list_assigned_claims_mapping_policies(&service_principal_id)
+/// The handler body, taking `&AppState` so a test can drive it against a mock
+/// Graph — the seam [`set_oidc_redirect_uris_core`] uses. Reads the live
+/// assignment and the policy's `appliesTo` first, plans with
+/// [`plan_claims_write`], then writes.
+pub(crate) async fn set_claims_mapping_core(
+    state: &AppState,
+    tenant_id: &str,
+    service_principal_id: &str,
+    display_name: &str,
+    policy: &ClaimsPolicyDto,
+) -> Result<Option<String>, UiError> {
+    let client = state.graph_for(tenant_id);
+
+    // A listing failure propagates: guessing "nothing assigned" would assign a
+    // second policy (Graph rejects it) or skip the ownership proof.
+    let assigned: Vec<String> = client
+        .list_assigned_claims_mapping_policies(service_principal_id)
+        .await?
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    let subjects = match assigned.as_slice() {
+        [id] => Some(client.list_claims_mapping_policy_subjects(id).await?),
+        _ => None,
+    };
+    let plan = plan_claims_write(
+        service_principal_id,
+        &assigned,
+        subjects.as_deref(),
+        policy.is_empty(),
+    )?;
+
+    let result = match plan {
+        ClaimsWrite::Nothing => None,
+        ClaimsWrite::Create => {
+            Some(apply_claims_policy(&client, service_principal_id, display_name, policy).await?)
+        }
+        ClaimsWrite::PatchInPlace(id) => {
+            client
+                .update_claims_mapping_policy(&id, &build_claims_definition(policy))
+                .await?;
+            Some(id)
+        }
+        ClaimsWrite::Fork { detach } => Some(
+            fork_claims_policy(&client, service_principal_id, display_name, policy, &detach)
+                .await?,
+        ),
+        ClaimsWrite::Detach { policy_id, delete } => {
+            client
+                .remove_claims_mapping_policy(service_principal_id, &policy_id)
+                .await?;
+            if delete {
+                // The operator's intent (no custom claims) is already live, and
+                // a retry would find nothing assigned — so an orphan is logged,
+                // not surfaced as a failed save.
+                if let Err(err) = client.delete_claims_mapping_policy(&policy_id).await {
+                    tracing::warn!(?err, policy = %policy_id, "failed to delete the detached claims policy");
+                }
+            }
+            None
+        }
+    };
+    // Saving one SP's claims-mapping policy adds, removes or renames no app or
+    // SP, so the list tier is untouched; the SSO tab reads the policy live.
+    // Detail tier only (see `set_saml_urls`).
+    invalidate_app_details(&state.cache, tenant_id);
+    Ok(result)
+}
+
+/// Gives `service_principal_id` its own copy of a SHARED claims policy: the new
+/// policy is created first (a failure there changes nothing), then the shared
+/// one is unassigned from this SP only, then the copy is assigned. A failed
+/// assign re-assigns the shared policy (best effort) and deletes the copy, so
+/// the app is left as it started. The shared policy's other subjects are never
+/// touched. Create-first (rather than unassign then [`apply_claims_policy`])
+/// keeps the window with no policy assigned to one round trip.
+async fn fork_claims_policy(
+    client: &GraphClient,
+    service_principal_id: &str,
+    display_name: &str,
+    policy: &ClaimsPolicyDto,
+    shared_id: &str,
+) -> Result<String, GraphError> {
+    let created = client
+        .create_claims_mapping_policy(&build_claims_definition(policy), display_name)
+        .await?;
+    if let Err(err) = client
+        .remove_claims_mapping_policy(service_principal_id, shared_id)
         .await
     {
-        for assigned in existing {
-            if let Err(err) = client
-                .remove_claims_mapping_policy(&service_principal_id, &assigned.id)
-                .await
-            {
-                tracing::warn!(?err, policy = %assigned.id, "failed to detach old claims policy");
-            }
-        }
+        discard_unassigned_claims_policy(client, &created.id).await;
+        return Err(err);
     }
-
-    let policy_id = if policy.is_empty() {
-        None
-    } else {
-        Some(apply_claims_policy(&client, &service_principal_id, &display_name, &policy).await?)
-    };
-    // Re-assigning one SP's claims-mapping policy adds, removes or renames no
-    // app or SP, so the list tier is untouched; the SSO tab reads the policy
-    // live. Detail tier only (see `set_saml_urls`).
-    invalidate_app_details(&state.cache, &tenant_id);
-    Ok(policy_id)
+    if let Err(err) = client
+        .assign_claims_mapping_policy(service_principal_id, &created.id)
+        .await
+    {
+        if let Err(rollback) = client
+            .assign_claims_mapping_policy(service_principal_id, shared_id)
+            .await
+        {
+            tracing::warn!(?rollback, policy = %shared_id, "failed to re-assign the shared claims policy");
+        }
+        discard_unassigned_claims_policy(client, &created.id).await;
+        return Err(err);
+    }
+    Ok(created.id)
 }
 
 /// Sets the SAML signing-certificate expiry notification recipients
@@ -1953,11 +2122,279 @@ mod handler_tests {
                 .is_empty()
         );
     }
+
+    // ---- claims-mapping policy saves ----
+
+    const SP: &str = "sp-1";
+
+    fn claims_policy() -> ClaimsPolicyDto {
+        ClaimsPolicyDto {
+            schema: vec![crate::dto::sso::ClaimSchemaEntryDto {
+                source: Some("user".into()),
+                id: Some("mail".into()),
+                jwt_claim_type: Some("email".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    async fn mount_assigned(server: &MockServer, ids: &[&str]) {
+        let value: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| serde_json::json!({"id": id, "definition": ["{}"]}))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1.0/servicePrincipals/{SP}/claimsMappingPolicies"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": value })),
+            )
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_subjects(server: &MockServer, policy: &str, subjects: &[&str]) {
+        let value: Vec<serde_json::Value> = subjects
+            .iter()
+            .map(|id| serde_json::json!({ "id": id }))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1.0/policies/claimsMappingPolicies/{policy}/appliesTo"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": value })),
+            )
+            .mount(server)
+            .await;
+    }
+
+    /// Mounts every claims write with the expected call count.
+    async fn mount_writes(
+        server: &MockServer,
+        patch: u64,
+        create: u64,
+        unassign: u64,
+        assign: u64,
+        delete: u64,
+    ) {
+        Mock::given(method("PATCH"))
+            .and(path("/v1.0/policies/claimsMappingPolicies/pol-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(patch)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/policies/claimsMappingPolicies"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "pol-new", "displayName": "Custom claims", "definition": ["{}"]
+            })))
+            .expect(create)
+            .mount(server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(format!(
+                "/v1.0/servicePrincipals/{SP}/claimsMappingPolicies/pol-1/$ref"
+            )))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(unassign)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/v1.0/servicePrincipals/{SP}/claimsMappingPolicies/$ref"
+            )))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(assign)
+            .mount(server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1.0/policies/claimsMappingPolicies/pol-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(delete)
+            .mount(server)
+            .await;
+    }
+
+    fn assert_detail_tier_only(state: &AppState) {
+        assert!(!detail_cached(state), "a claims save busts the detail tier");
+        assert!(
+            sp_index_hit(&state.cache, TENANT).is_some(),
+            "the SP index must survive a claims save"
+        );
+        assert!(
+            app_name_index_hit(&state.cache, TENANT).is_some(),
+            "the app-registration index must survive a claims save"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claims_save_patches_a_policy_this_app_owns_in_place() {
+        let server = MockServer::start().await;
+        mount_assigned(&server, &["pol-1"]).await;
+        mount_subjects(&server, "pol-1", &[SP]).await;
+        mount_writes(&server, 1, 0, 0, 0, 0).await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+        let id = set_claims_mapping_core(&state, TENANT, SP, "Custom claims", &claims_policy())
+            .await
+            .expect("the mocked PATCH succeeds");
+        assert_eq!(id.as_deref(), Some("pol-1"), "same policy, edited in place");
+        assert_detail_tier_only(&state);
+    }
+
+    #[tokio::test]
+    async fn a_claims_save_on_a_shared_policy_forks_a_private_copy() {
+        let server = MockServer::start().await;
+        mount_assigned(&server, &["pol-1"]).await;
+        mount_subjects(&server, "pol-1", &[SP, "other-sp"]).await;
+        // Never PATCH (it would change the other app's claims), never delete.
+        mount_writes(&server, 0, 1, 1, 1, 0).await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+        let id = set_claims_mapping_core(&state, TENANT, SP, "Custom claims", &claims_policy())
+            .await
+            .expect("the mocked fork succeeds");
+        assert_eq!(id.as_deref(), Some("pol-new"));
+        assert_detail_tier_only(&state);
+    }
+
+    #[tokio::test]
+    async fn a_failed_claims_listing_writes_nothing_and_invalidates_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1.0/servicePrincipals/{SP}/claimsMappingPolicies"
+            )))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(&server)
+            .await;
+        mount_writes(&server, 0, 0, 0, 0, 0).await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+        let err = set_claims_mapping_core(&state, TENANT, SP, "Custom claims", &claims_policy())
+            .await
+            .expect_err("a failed listing surfaces instead of being guessed around");
+        assert_eq!(err.code, "forbidden");
+        assert!(detail_cached(&state), "a failed save invalidates nothing");
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert!(
+            requests.iter().all(|r| r.method.as_str() == "GET"),
+            "no write may follow a failed listing: {requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_claims_unassigns_and_deletes_an_orphaned_policy() {
+        let server = MockServer::start().await;
+        mount_assigned(&server, &["pol-1"]).await;
+        mount_subjects(&server, "pol-1", &[SP]).await;
+        mount_writes(&server, 0, 0, 1, 0, 1).await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+        let id = set_claims_mapping_core(
+            &state,
+            TENANT,
+            SP,
+            "Custom claims",
+            &ClaimsPolicyDto::default(),
+        )
+        .await
+        .expect("the mocked detach succeeds");
+        assert_eq!(id, None);
+        assert_detail_tier_only(&state);
+    }
+
+    #[tokio::test]
+    async fn clearing_claims_never_deletes_a_shared_policy() {
+        let server = MockServer::start().await;
+        mount_assigned(&server, &["pol-1"]).await;
+        mount_subjects(&server, "pol-1", &[SP, "other-sp"]).await;
+        mount_writes(&server, 0, 0, 1, 0, 0).await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+        let id = set_claims_mapping_core(
+            &state,
+            TENANT,
+            SP,
+            "Custom claims",
+            &ClaimsPolicyDto::default(),
+        )
+        .await
+        .expect("the mocked unassign succeeds");
+        assert_eq!(id, None);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_claims_save_plan_never_edits_or_deletes_a_shared_policy() {
+        let sp = "sp";
+        let one = vec!["p".to_string()];
+        let sole = vec!["sp".to_string()];
+        let shared = vec!["sp".to_string(), "other".to_string()];
+        /// (assigned, appliesTo, editor empty, expected plan)
+        type Case<'a> = (&'a [String], Option<&'a [String]>, bool, ClaimsWrite);
+        let cases: [Case; 7] = [
+            (&[], None, true, ClaimsWrite::Nothing),
+            (&[], None, false, ClaimsWrite::Create),
+            (
+                &one,
+                Some(&sole),
+                false,
+                ClaimsWrite::PatchInPlace("p".into()),
+            ),
+            (
+                &one,
+                Some(&shared),
+                false,
+                ClaimsWrite::Fork { detach: "p".into() },
+            ),
+            (
+                &one,
+                Some(&sole),
+                true,
+                ClaimsWrite::Detach {
+                    policy_id: "p".into(),
+                    delete: true,
+                },
+            ),
+            (
+                &one,
+                Some(&shared),
+                true,
+                ClaimsWrite::Detach {
+                    policy_id: "p".into(),
+                    delete: false,
+                },
+            ),
+            // No appliesTo proof ⇒ never treated as owned.
+            (&one, None, false, ClaimsWrite::Fork { detach: "p".into() }),
+        ];
+        for (assigned, subjects, empty, want) in cases {
+            assert_eq!(
+                plan_claims_write(sp, assigned, subjects, empty).unwrap(),
+                want,
+                "assigned={assigned:?} subjects={subjects:?} empty={empty}"
+            );
+        }
+        // More than one assigned policy fails closed, empty or not.
+        let two = vec!["a".to_string(), "b".to_string()];
+        for empty in [true, false] {
+            let err = plan_claims_write(sp, &two, None, empty).unwrap_err();
+            assert_eq!(err.code, "multiple_claims_policies");
+        }
+    }
 
     #[test]
     fn a_signing_certificate_lifetime_is_bounded_by_entras_three_year_ceiling() {

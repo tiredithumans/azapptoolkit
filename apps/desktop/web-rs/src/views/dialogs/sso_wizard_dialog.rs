@@ -300,7 +300,7 @@ pub fn SsoWizardDialog(
                         <div class="sso-claims">
                             <span class="sso-field__label">"Attributes & claims (optional)"</span>
                             <Body1 class="hint">
-                                "Custom claims require admin consent for Policy.ReadWrite.ApplicationConfiguration. Leave empty to use Entra's default claim set."
+                                "Custom claims require admin consent for Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All. Leave empty to use Entra's default claim set."
                             </Body1>
                             <ClaimsEditor state=claims_state />
                         </div>
@@ -347,7 +347,7 @@ pub fn SsoWizardDialog(
                                 .then(|| {
                                     view! {
                                         <Callout tone="warn">
-                                            "Custom claims need admin consent for Policy.ReadWrite.ApplicationConfiguration."
+                                            "Custom claims need admin consent for Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All."
                                             <Button
                                                 appearance=Signal::derive(|| ButtonAppearance::Primary)
                                                 on_click=Box::new(grant_and_retry)

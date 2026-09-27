@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize};
 ///   + `id` (the source property, e.g. `userprincipalname`),
 /// - **extension attribute**: `source` + `extension_id`,
 /// - **constant**: `value` only (no `source`),
-/// - **transformation-sourced**: `source = "transformation"` + `id` (the
-///   transformation's id; emitted as `TransformationID` in the Graph schema).
+/// - **transformation-sourced**: `source = "transformation"` + `id` (this
+///   entry's own `ID`, which the transformation's `OutputClaims[].ClaimTypeReferenceId`
+///   joins to) + `transformation_id` (the `ID` of the `ClaimsTransformation`
+///   entry that generates the value, emitted as `TransformationID`).
 ///
 /// The emitted claim is named by `saml_claim_type` (SAML token claim URI) and/or
 /// `jwt_claim_type` (JWT/OIDC token claim name); at least one is normally set.
@@ -29,10 +31,17 @@ pub struct ClaimSchemaEntryDto {
     /// `transformation`. `None` ⇒ a constant claim (`value`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// `ID` — the source attribute; or the transformation id when
-    /// `source == "transformation"` (emitted as `TransformationID`).
+    /// `ID` — the source attribute; for a transformation-sourced entry, this
+    /// entry's own id (what `OutputClaims[].ClaimTypeReferenceId` joins to).
+    /// Always emitted as `ID`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// `TransformationID` — for `source == "transformation"`, the `ID` of the
+    /// `ClaimsTransformation` entry that generates this claim's value. Distinct from
+    /// `id`, which is this schema entry's OWN `ID` — the value a transformation's
+    /// `OutputClaims[].ClaimTypeReferenceId` joins to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transformation_id: Option<String>,
     /// `ExtensionID` — a directory extension attribute (alternative to `id`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_id: Option<String>,
@@ -71,6 +80,9 @@ pub struct TransformParamDto {
     pub id: String,
     /// `Value` — the constant value passed to the transformation.
     pub value: String,
+    /// `DataType` (e.g. `string`) — optional; round-tripped so a save never drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
 }
 
 /// An output claim produced by a claims transformation (`OutputClaims[]`).
@@ -88,7 +100,8 @@ pub struct TransformOutputClaimDto {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimsTransformationDto {
-    /// `ID` — referenced by a schema entry's `TransformationID`. Must be unique.
+    /// `ID` — referenced by a schema entry's `transformation_id`
+    /// (`TransformationID`). Must be unique.
     pub id: String,
     /// `TransformationMethod` — `Join` | `ExtractMailPrefix` | `ToLowercase()` |
     /// `ToUppercase()` | `RegexReplace()`.
@@ -171,8 +184,7 @@ pub struct SamlSsoConfigInput {
     /// Certificate validity in days; defaults to 365 server-side.
     pub cert_lifetime_days: Option<u32>,
     /// Optional custom claims-mapping policy; `None`/empty leaves Entra's default
-    /// claim set (and avoids the `Policy.ReadWrite.ApplicationConfiguration`
-    /// consent).
+    /// claim set (and avoids the claims-mapping policy consent).
     #[serde(default)]
     pub claims_policy: Option<ClaimsPolicyDto>,
     /// Optional SAML signing-certificate expiry notification recipients
@@ -295,11 +307,17 @@ pub struct SsoConfigDto {
     #[serde(default)]
     pub notification_emails: Vec<String>,
     /// The currently assigned claims-mapping policy, decoded for editing.
-    /// `None` when no policy is assigned (or the read was skipped on missing
-    /// scope/consent).
+    /// `None` means no policy is assigned — meaningful only when
+    /// [`Self::claims_read_failed`] is false.
     #[serde(default)]
     pub claims_policy: Option<ClaimsPolicyDto>,
     pub claims_policy_id: Option<String>,
+    /// True when the assigned claims-mapping policy could NOT be read (consent for
+    /// the policy-write bundle not granted yet, a 403, a transient failure). Then
+    /// `claims_policy == None` means "unknown", not "no policy": the SSO tab must
+    /// not offer Save, or it would replace claims the operator never saw.
+    #[serde(default)]
+    pub claims_read_failed: bool,
 }
 
 /// Lifecycle position of one SAML token-signing certificate. Derived from live
@@ -568,6 +586,7 @@ mod tests {
         // Unset optionals must not serialize (camelCase + skip_serializing_if).
         assert!(json.get("source").is_none());
         assert!(json.get("id").is_none());
+        assert!(json.get("transformationId").is_none());
         assert!(json.get("samlClaimType").is_none());
     }
 

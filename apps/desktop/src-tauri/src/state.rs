@@ -298,19 +298,24 @@ impl AppState {
     ///
     /// Pre-seeding `graph_clients` is what makes this work — `graph_for` is a
     /// get-or-build, so the seeded client wins and no `ScopedTokenAdapter` is
-    /// ever constructed. Nothing here touches `settings.json`.
+    /// ever constructed. Nothing here touches `settings.json`. The claims-mapping
+    /// policy token rides the same static bearer, so the claims `*_core` can be
+    /// driven too.
     #[cfg(test)]
     pub(crate) fn for_test(tenant_id: &str, base_url: &str) -> Self {
         use azapptoolkit_core::token::StaticTokenProvider;
 
         let cache = Cache::new();
-        let client = Arc::new(GraphClient::with_base_url(
-            tenant_id.to_string(),
-            StaticTokenProvider::new("test-token"),
-            StaticTokenProvider::new("test-token"),
-            Arc::clone(&cache),
-            format!("{}/v1.0", base_url.trim_end_matches('/')),
-        ));
+        let client = Arc::new(
+            GraphClient::with_base_url(
+                tenant_id.to_string(),
+                StaticTokenProvider::new("test-token"),
+                StaticTokenProvider::new("test-token"),
+                Arc::clone(&cache),
+                format!("{}/v1.0", base_url.trim_end_matches('/')),
+            )
+            .with_policy_write_token(StaticTokenProvider::new("test-token")),
+        );
         Self {
             auth: EntraAuthService::new("test-client", tenant_id),
             client_id: "test-client".to_string(),
@@ -468,8 +473,8 @@ impl AppState {
                 tenant_id.to_string(),
                 self.auth.default_graph_policy_scopes(),
             );
-            // Policy.ReadWrite.ApplicationConfiguration for claims-mapping policies
-            // (SAML claim customization). Same on-demand, incremental-consent
+            // Policy.ReadWrite.ApplicationConfiguration + Application.ReadWrite.All
+            // for claims-mapping policies (SAML claim customization). Same on-demand, incremental-consent
             // contract — never part of the sign-in bundle.
             let policy_write_token = ScopedTokenAdapter::new_cae(
                 self.auth.clone(),
@@ -620,8 +625,9 @@ impl AppState {
         self.ensure_scoped_token(tenant_id, scopes, false).await
     }
 
-    /// Acquires (and caches) the `Policy.ReadWrite.ApplicationConfiguration`
-    /// token up front, surfacing a *typed* auth error — notably
+    /// Acquires (and caches) the claims-mapping policy token
+    /// (`Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All`)
+    /// up front, surfacing a *typed* auth error — notably
     /// [`AuthError::ConsentRequired`] — before any claims-mapping write. The
     /// `ScopedTokenAdapter` boundary flattens errors to `String` (a
     /// `consent_required` raised inside a scoped Graph call would reach the UI as

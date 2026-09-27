@@ -121,11 +121,12 @@ pub struct GraphClient {
     /// Optional `Policy.Read.All` token for reading Conditional Access policies,
     /// acquired on demand. Same graceful-degradation contract as `audit_log_token`.
     policy_token: Option<Arc<dyn BearerProvider>>,
-    /// Optional `Policy.ReadWrite.ApplicationConfiguration` token for creating
-    /// and assigning claims-mapping policies (SAML attribute & claim
-    /// customization). The default `write_token` (`Application.ReadWrite.All`)
-    /// does NOT cover `/policies/claimsMappingPolicies`, so those writes must
-    /// ride this scope; acquired on demand (incremental consent).
+    /// Optional `Policy.ReadWrite.ApplicationConfiguration` +
+    /// `Application.ReadWrite.All` token (one token) for claims-mapping
+    /// policies (SAML attribute & claim customization). The default
+    /// `write_token` does NOT cover `/policies/claimsMappingPolicies`, and the
+    /// service-principal `$ref` assign/list/remove are documented as needing
+    /// both scopes in the same token; acquired on demand (incremental consent).
     policy_write_token: Option<Arc<dyn BearerProvider>>,
     /// Optional `Sites.FullControl.All` token for the SharePoint `Sites.Selected`
     /// model (list/grant/revoke a site's per-app permissions). The verb-selected
@@ -211,8 +212,9 @@ impl GraphClient {
         self
     }
 
-    /// Attaches a `Policy.ReadWrite.ApplicationConfiguration` token enabling
-    /// claims-mapping-policy create/assign (SAML claim customization).
+    /// Attaches a `Policy.ReadWrite.ApplicationConfiguration` +
+    /// `Application.ReadWrite.All` token enabling claims-mapping-policy
+    /// create/update/delete and the service-principal assign/list/remove.
     pub fn with_policy_write_token(mut self, token: Arc<dyn BearerProvider>) -> Self {
         self.policy_write_token = Some(token);
         self
@@ -334,14 +336,15 @@ impl GraphClient {
         self.require_token(self.policy_token.as_ref(), "Policy.Read.All")
     }
 
-    /// The `Policy.ReadWrite.ApplicationConfiguration` token the claims-mapping
-    /// policy writes ride (see [`Self::with_policy_write_token`]). `None` means
+    /// The `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All`
+    /// token the claims-mapping policy calls ride (see
+    /// [`Self::with_policy_write_token`]). `None` means
     /// the optional scope wasn't wired — surfaced as `Forbidden` so the UI
     /// degrades rather than panics.
     fn policy_write_token(&self) -> Result<&Arc<dyn BearerProvider>> {
         self.require_token(
             self.policy_write_token.as_ref(),
-            "Policy.ReadWrite.ApplicationConfiguration",
+            "Policy.ReadWrite.ApplicationConfiguration + Application.ReadWrite.All",
         )
     }
 

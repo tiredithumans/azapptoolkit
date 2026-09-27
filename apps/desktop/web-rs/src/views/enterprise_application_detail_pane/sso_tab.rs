@@ -541,6 +541,10 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
     let rotated_cert: RwSignal<Option<String>> = RwSignal::new(None);
     // Attributes & claims editor state, seeded from the assigned policy.
     let claims_state = ClaimsEditorState::from_dto(&cfg.claims_policy.clone().unwrap_or_default());
+    // The assigned policy couldn't be read: the editor above shows "no policy",
+    // which may be false, so Save stays off until a read succeeds. Plain bool —
+    // every reload re-mounts this editor through `SsoContent`'s Suspense.
+    let claims_unread = cfg.claims_read_failed;
 
     let cmd = use_command();
     let needs_consent = RwSignal::new(false);
@@ -651,6 +655,11 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
         );
     };
     let save_claims = move || {
+        // Belt and braces behind the disabled button: never save over a policy
+        // this editor never loaded.
+        if claims_unread {
+            return;
+        }
         needs_consent.set(false);
         let policy = claims_state.to_dto();
         cmd.run_with(
@@ -677,6 +686,19 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
             move |()| {
                 needs_consent.set(false);
                 session.toast_success("Consent granted. Save again to apply your claims.");
+            },
+            move |tenant_id| async move {
+                crate::bindings::auth::request_scope_consent(&tenant_id, "policy_write").await
+            },
+        );
+    };
+    // Consent, then re-read the SSO config so the editor shows the live policy.
+    // If the read still fails the flag stays set and Save stays off.
+    let load_claims = move |_| {
+        cmd.run_toast_err(
+            move |()| {
+                session.toast_success("Consent granted. Loading the current claims.");
+                reload.update(|n| *n = n.wrapping_add(1));
             },
             move |tenant_id| async move {
                 crate::bindings::auth::request_scope_consent(&tenant_id, "policy_write").await
@@ -793,11 +815,26 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 </Button>
 
                 <h4>"Attributes & claims"</h4>
+                {claims_unread
+                    .then(|| {
+                        view! {
+                            <Callout tone="warn">
+                                "Couldn't read this app's current claims policy, so the editor below may not show its real claims. Saving is turned off until they load — a save now could replace claims you can't see. Loading needs admin consent for Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All."
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                    on_click=Box::new(load_claims)
+                                    disabled=Signal::derive(move || cmd.busy.get())
+                                >
+                                    "Load claims"
+                                </Button>
+                            </Callout>
+                        }
+                    })}
                 <ClaimsEditor state=claims_state />
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(move |_| save_claims())
-                    disabled=Signal::derive(move || cmd.busy.get())
+                    disabled=Signal::derive(move || cmd.busy.get() || claims_unread)
                 >
                     "Save claims"
                 </Button>
@@ -807,7 +844,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                         .then(|| {
                             view! {
                                 <Callout tone="warn">
-                                    "Custom claims need admin consent for Policy.ReadWrite.ApplicationConfiguration."
+                                    "Custom claims need admin consent for Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All."
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                                         on_click=Box::new(grant_consent)

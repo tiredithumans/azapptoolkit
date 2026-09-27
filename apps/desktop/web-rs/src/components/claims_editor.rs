@@ -3,7 +3,7 @@
 //! "New SSO application" wizard so the (large) editing surface isn't duplicated.
 //!
 //! This is **pure presentation + state**: the caller owns the save action (and
-//! the `Policy.ReadWrite.ApplicationConfiguration` consent flow). It builds a
+//! the claims-mapping policy consent flow). It builds a
 //! [`ClaimsEditorState`] from the loaded [`ClaimsPolicyDto`], renders the editor,
 //! and on save reads `state.to_dto()` back. Policy-level fields the editor
 //! doesn't model (group filter / issuer / audience overrides) ride along in
@@ -94,6 +94,7 @@ fn seed_basic_override(
             key: next_key(seq),
             source: RwSignal::new("user".to_string()),
             attribute: RwSignal::new(attribute.to_string()),
+            transformation_id: RwSignal::new(String::new()),
             extension_id: RwSignal::new(String::new()),
             value: RwSignal::new(String::new()),
             saml_claim_type: RwSignal::new(saml_uri.to_string()),
@@ -124,8 +125,12 @@ struct SchemaRow {
     key: usize,
     /// One of [`SOURCE_OPTIONS`] (directory source or `constant`).
     source: RwSignal<String>,
-    /// Source attribute, or the transformation id when `source == transformation`.
+    /// Source attribute; for `source == transformation`, the claim's own id
+    /// (Graph `ID`, what the transformation's output claim references).
     attribute: RwSignal<String>,
+    /// The generating transformation's id (Graph `TransformationID`) — only
+    /// sent when `source == transformation`.
+    transformation_id: RwSignal<String>,
     /// Directory extension attribute (alternative to `attribute`).
     extension_id: RwSignal<String>,
     /// Static value (when `source == constant`).
@@ -158,6 +163,8 @@ struct TParamRow {
     key: usize,
     id: RwSignal<String>,
     value: RwSignal<String>,
+    /// `DataType` as loaded — not editable, preserved so a save never drops it.
+    data_type: RwSignal<Option<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -198,6 +205,9 @@ impl ClaimsEditorState {
                     key: next_key(seq),
                     source: RwSignal::new(source),
                     attribute: RwSignal::new(e.id.clone().unwrap_or_default()),
+                    transformation_id: RwSignal::new(
+                        e.transformation_id.clone().unwrap_or_default(),
+                    ),
                     extension_id: RwSignal::new(e.extension_id.clone().unwrap_or_default()),
                     value: RwSignal::new(e.value.clone().unwrap_or_default()),
                     saml_claim_type: RwSignal::new(e.saml_claim_type.clone().unwrap_or_default()),
@@ -231,6 +241,7 @@ impl ClaimsEditorState {
                             key: next_key(seq),
                             id: RwSignal::new(p.id.clone()),
                             value: RwSignal::new(p.value.clone()),
+                            data_type: RwSignal::new(p.data_type.clone()),
                         })
                         .collect(),
                 ),
@@ -306,6 +317,7 @@ fn schema_row_to_dto(row: SchemaRow) -> Option<ClaimSchemaEntryDto> {
         ClaimSchemaEntryDto {
             source: None,
             id: None,
+            transformation_id: None,
             extension_id: None,
             value: opt(row.value),
             saml_claim_type: opt(row.saml_claim_type),
@@ -316,6 +328,10 @@ fn schema_row_to_dto(row: SchemaRow) -> Option<ClaimSchemaEntryDto> {
         ClaimSchemaEntryDto {
             source: (!source.is_empty()).then_some(source.clone()),
             id: opt(row.attribute),
+            // Only a transformation-sourced claim names a transformation.
+            transformation_id: (source == "transformation")
+                .then(|| opt(row.transformation_id))
+                .flatten(),
             // Extension attributes only apply to directory sources.
             extension_id: (source != "transformation")
                 .then(|| opt(row.extension_id))
@@ -327,6 +343,7 @@ fn schema_row_to_dto(row: SchemaRow) -> Option<ClaimSchemaEntryDto> {
         }
     };
     let empty = entry.id.is_none()
+        && entry.transformation_id.is_none()
         && entry.extension_id.is_none()
         && entry.value.is_none()
         && entry.saml_claim_type.is_none()
@@ -362,7 +379,11 @@ fn transform_row_to_dto(row: TransformRow) -> Option<ClaimsTransformationDto> {
         .filter_map(|p| {
             let pid = p.id.get_untracked().trim().to_string();
             let value = p.value.get_untracked().trim().to_string();
-            (!pid.is_empty() || !value.is_empty()).then_some(TransformParamDto { id: pid, value })
+            (!pid.is_empty() || !value.is_empty()).then_some(TransformParamDto {
+                id: pid,
+                value,
+                data_type: p.data_type.get_untracked(),
+            })
         })
         .collect();
     let output_claims = row
@@ -407,6 +428,7 @@ pub fn ClaimsEditor(state: ClaimsEditorState) -> impl IntoView {
                 key: next_key(seq),
                 source: RwSignal::new("user".to_string()),
                 attribute: RwSignal::new(String::new()),
+                transformation_id: RwSignal::new(String::new()),
                 extension_id: RwSignal::new(String::new()),
                 value: RwSignal::new(String::new()),
                 saml_claim_type: RwSignal::new(String::new()),
@@ -505,7 +527,7 @@ pub fn ClaimsEditor(state: ClaimsEditorState) -> impl IntoView {
             // ---- transformations ----
             <div class="row-between claims-editor__transforms-head">
                 <Body1 class="hint">
-                    "Transformations generate a claim's value (Join, ExtractMailPrefix, case, RegexReplace). Reference one from a claim whose source is \"Transformation\" by matching its id."
+                    "Transformations generate a claim's value (Join, ExtractMailPrefix, case, RegexReplace). A claim whose source is \"Transformation\" names the transformation in its Transformation id; the transformation's output claim references that claim's id."
                 </Body1>
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -562,7 +584,13 @@ fn SchemaRowView(row: SchemaRow, schema: RwSignal<Vec<SchemaRow>>) -> impl IntoV
             {move || {
                 is_transformation()
                     .then(|| {
-                        view! { <Input value=row.attribute placeholder="Transformation id" /> }
+                        view! {
+                            <Input
+                                value=row.attribute
+                                placeholder="Claim id (output claims reference this)"
+                            />
+                            <Input value=row.transformation_id placeholder="Transformation id" />
+                        }
                     })
             }}
             {move || {
@@ -652,6 +680,7 @@ fn TransformRowView(
                 key: next_key(seq),
                 id: RwSignal::new(String::new()),
                 value: RwSignal::new(String::new()),
+                data_type: RwSignal::new(None),
             })
         });
     };
@@ -798,6 +827,7 @@ mod tests {
             key: 0,
             source: RwSignal::new(source.to_string()),
             attribute: RwSignal::new(attribute.to_string()),
+            transformation_id: RwSignal::new(String::new()),
             extension_id: RwSignal::new(String::new()),
             value: RwSignal::new(value.to_string()),
             saml_claim_type: RwSignal::new(saml.to_string()),
@@ -839,11 +869,39 @@ mod tests {
             row.extension_id = RwSignal::new("extension_abc_dept".to_string());
             let dto = schema_row_to_dto(row).expect("transformation row is real");
             assert!(dto.extension_id.is_none());
+            assert_eq!(dto.id.as_deref(), Some("t1"));
 
             let mut user_row = schema_row("user", "", "", "urn:x");
             user_row.extension_id = RwSignal::new("extension_abc_dept".to_string());
             let dto = schema_row_to_dto(user_row).expect("user row is real");
             assert_eq!(dto.extension_id.as_deref(), Some("extension_abc_dept"));
+        });
+    }
+
+    #[test]
+    fn a_transformation_row_sends_its_own_id_and_the_transformation_id_separately() {
+        // Graph joins the transformation's output claim to the entry's own `ID`
+        // and finds the transformation by `TransformationID` — two ids, never one.
+        with_owner(|| {
+            let row = schema_row("transformation", "DataJoin", "", "");
+            row.transformation_id.set(" JoinTheData ".to_string());
+            row.jwt_claim_type.set("JoinedData".to_string());
+            let dto = schema_row_to_dto(row).expect("transformation row is real");
+            assert_eq!(dto.id.as_deref(), Some("DataJoin"));
+            assert_eq!(dto.transformation_id.as_deref(), Some("JoinTheData"));
+        });
+    }
+
+    #[test]
+    fn a_transformation_id_is_dropped_for_a_directory_source() {
+        // A directory claim has no generating transformation; a stale id left
+        // behind by switching the source would point Graph at one.
+        with_owner(|| {
+            let row = schema_row("user", "mail", "", "urn:x");
+            row.transformation_id.set("JoinTheData".to_string());
+            let dto = schema_row_to_dto(row).expect("user row is real");
+            assert!(dto.transformation_id.is_none());
+            assert_eq!(dto.id.as_deref(), Some("mail"));
         });
     }
 
@@ -901,6 +959,7 @@ mod tests {
                 key: 0,
                 id: RwSignal::new(String::new()),
                 value: RwSignal::new(String::new()),
+                data_type: RwSignal::new(None),
             }]);
             let dto = transform_row_to_dto(row).expect("real transform");
             assert_eq!(dto.input_claims.len(), 1);
