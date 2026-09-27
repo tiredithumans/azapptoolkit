@@ -386,6 +386,13 @@
   with the filter drawer collapsed so only the small active-filter badge hinted why apps were
   missing. It now clears with the search and facet filters.
 
+### Changed
+
+- **The Cache dialog can clear each cache on its own.** Service principal, permissions, audit and
+  list entries each get a Clear button in their row, so dropping a stale audit result no longer
+  means clearing everything and rebuilding the tenant-wide indexes. The on/off button now says what
+  it will do ("Disable cache" / "Enable cache") instead of "Toggle enabled".
+
 ## [0.30.2] - 2026-09-25
 
 ### Changed

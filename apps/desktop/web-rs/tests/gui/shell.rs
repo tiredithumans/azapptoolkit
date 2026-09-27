@@ -13,7 +13,8 @@ use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::updater::{UpdateCheck, UpdateInfo, UpdatesDisabled};
-use azapptoolkit_web_rs::test_support as ts;
+use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
+use azapptoolkit_web_rs::views::dialogs::cache_diagnostics_dialog::CacheDiagnosticsDialog;
 use azapptoolkit_web_rs::views::shell::AppShell;
 
 #[wasm_bindgen_test]
@@ -173,4 +174,34 @@ async fn an_available_update_toasts_on_launch() {
     );
     let _m = ts::mount_view(|| view! { <AppShell><div /></AppShell> });
     ts::wait_for(|| ts::body_contains("Update available: v9.9.9")).await;
+}
+
+#[wasm_bindgen_test]
+async fn cache_dialog_clears_one_kind_and_labels_the_toggle() {
+    // The shell mounts the Cache dialog; each kind's row carries its own Clear
+    // (not just "Clear all"), and the toggle says what a click will do.
+    ts::reset();
+    ts::mock_ok("cache_stats", &fixtures::cache_stats());
+    ts::mock_ok("clear_cache", &());
+
+    let _m = ts::mount_view(|| {
+        view! {
+            <CacheDiagnosticsDialog
+                open=Signal::derive(|| true)
+                on_close=Callback::new(|_| ())
+            />
+        }
+    });
+
+    ts::wait_for(|| ts::body_contains("Audit hits / misses")).await;
+    // Fixture has caching enabled, so the button offers to disable it.
+    assert!(ts::body_contains("Disable cache"));
+    assert!(!ts::body_contains("Toggle enabled"));
+
+    ts::click("button[aria-label=\"Clear audit cache\"]");
+    ts::wait_for(|| ts::call_count("clear_cache") >= 1).await;
+    let call = ts::last_call("clear_cache").unwrap();
+    // CacheKindDto is `rename_all = "snake_case"`.
+    assert_eq!(call.arg_str("kind").as_deref(), Some("audit"));
+    ts::wait_for(|| ts::body_contains("Cleared the audit cache.")).await;
 }
