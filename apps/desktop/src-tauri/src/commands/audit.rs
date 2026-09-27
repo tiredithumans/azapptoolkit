@@ -129,6 +129,8 @@ pub async fn run_audit(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<AuditRunResult, UiError> {
+    let started = std::time::Instant::now();
+    tracing::info!(tenant = %tenant_id, "audit started");
     let client = state.graph_for(&tenant_id);
     let meter = FanOutMeter::attach(client.clone(), INITIAL_CONCURRENCY);
     // Detach the observer however the run exits — an early `?` return (e.g. app
@@ -149,6 +151,21 @@ pub async fn run_audit(
     // Effective Exchange mailbox-scoping is resolved on every run so a mail
     // permission confined to specific mailboxes scores below an org-wide one.
     let exo = audit_exchange_client(&state, &tenant_id);
+
+    // The prefetch below is the longest phase of a large run, and until now the
+    // first event came only after it. `total == 0` is what tells the webview to
+    // render this as a phase label rather than a "0 / 0" fraction.
+    emit_progress(
+        &app_handle,
+        "audit-progress",
+        AuditProgress {
+            done: 0,
+            total: 0,
+            current_app: Some("Reading tenant-wide directory data…".to_string()),
+            in_flight_cap: meter.limit(),
+            cancelled: false,
+        },
+    );
 
     // These six tenant-wide reads are INDEPENDENT — every join between them
     // (`seed_lean_sps_from_index`, `derive_orgwide_mail_scopes`,
@@ -433,6 +450,20 @@ pub async fn run_audit(
 
     let cancelled = cancelled_before_all_dispatched || cancel.is_cancelled();
     items.sort_by_key(|i| std::cmp::Reverse(i.risk_score));
+    // One summary line per run, like the site sweep's `site sweep complete`:
+    // "it took 40 minutes / stopped at 60% / found less than yesterday" is
+    // answerable from the log only if the run records its shape.
+    tracing::info!(
+        total,
+        scored = items.len(),
+        unscored,
+        truncated,
+        cancelled,
+        degraded = ?degraded,
+        cached = run_is_cacheable(cancelled, truncated, &degraded),
+        elapsed_secs = started.elapsed().as_secs(),
+        "audit complete",
+    );
 
     // Built BEFORE the cache write and destructured back out for the result, so
     // the cached run and the one returned to the caller carry byte-identical
@@ -530,8 +561,10 @@ pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option
 /// `format` (`csv`, `json`, or `html`) to the chosen path. Returns the path,
 /// or `None` if the user cancelled. Exports **by reference**: with
 /// `items: None` the backend serves its own cached run, so the multi-MB item
-/// vector never round-trips the IPC bridge; a *cancelled* run — which is
-/// never cached — passes its items explicitly.
+/// vector never round-trips the IPC bridge; any run the backend did not
+/// cache (cancelled, truncated or degraded — see `run_is_cacheable`) passes
+/// its items explicitly, since the cache holds nothing for it or, worse, an
+/// earlier complete run that would be exported in its place.
 ///
 /// `coverage` describes the run those explicit items came from, and every
 /// writer opens with it: the exported file is the artifact that leaves the app,
@@ -1487,17 +1520,28 @@ async fn score_one(
 ) -> Result<AuditItem, UiError> {
     // Lean lookup: the audit reads only `sp.id` and `sp.account_enabled`. The
     // prewarm above seeds the matching `|lean` cache key, so this is a hit.
-    let sp = match ctx
+    //
+    // A FAILED lookup is an error, never `None`. `Ok(None)` means the app truly
+    // has no service principal; mapping a failed read to that same `None` took
+    // away the input of the admin-consent and disabled-SP rules and emptied
+    // `orgwide` below, so a `Scoped { Rbac }` verdict was never reconciled
+    // against a surviving org-wide grant — and the run, with nothing in
+    // `degraded`, was cached as a clean complete scan. Propagated, the error
+    // reaches the run's collector: a transient failure counts the app as
+    // unscored (→ `PerPrincipalScoring`, never cached), a dead session stops
+    // the run for re-auth.
+    let sp = ctx
         .client
         .get_service_principal_by_app_id_lean(&app.app_id)
         .await
-    {
-        Ok(sp) => sp,
-        Err(err) => {
-            tracing::warn!(app = %app.display_name, ?err, "audit: SP lookup failed");
-            None
-        }
-    };
+        .map_err(|err| {
+            tracing::warn!(
+                app = %app.display_name,
+                ?err,
+                "audit: SP lookup failed; app left unscored"
+            );
+            UiError::from(err)
+        })?;
 
     let mut perms = resolve_permissions(&ctx.resolver, &app.required_resource_access).await;
 
@@ -2016,5 +2060,124 @@ mod tests {
             v["completed_at"],
             serde_json::json!("2026-09-02T09:00:00+00:00")
         );
+    }
+
+    // ── Producers of `degraded` ────────────────────────────────────────────
+    //
+    // `only_a_complete_undegraded_run_is_cacheable` pins the guard; these pin
+    // what FEEDS it from `score_one`. A failed SP lookup used to come back as
+    // a clean `Ok(AuditItem)`, invisible to the guard.
+
+    use azapptoolkit_core::token::{BearerProvider, StaticTokenProvider, TokenError};
+
+    /// A `ScoreCtx` with every tenant-wide input empty and Exchange off — the
+    /// shape of a run whose prefetch found nothing, so only the per-app SP
+    /// lookup reaches the (mock) Graph.
+    fn score_ctx(client: Arc<GraphClient>, cache: Arc<Cache>) -> ScoreCtx {
+        ScoreCtx {
+            resolver: Arc::new(ResourceResolver::new(client.clone())),
+            client,
+            cache,
+            tenant_id: "tenant-test".to_string(),
+            exo: None,
+            admin_consent_clients: Arc::default(),
+            orgwide_mail_by_sp: Arc::default(),
+            legacy_policies: Arc::default(),
+            exo_tripped: Arc::new(AtomicBool::new(false)),
+            sign_in_available: false,
+            sign_in_map: Arc::default(),
+        }
+    }
+
+    /// An app declaring no permissions, so the resolver makes no Graph call.
+    fn bare_app() -> Application {
+        Application {
+            app_id: "app-1".into(),
+            display_name: "Demo".into(),
+            ..Default::default()
+        }
+    }
+
+    async fn mock_sp_lookup(server: &wiremock::MockServer, response: wiremock::ResponseTemplate) {
+        use wiremock::matchers::{method, path, query_param};
+        wiremock::Mock::given(method("GET"))
+            .and(path("/servicePrincipals"))
+            .and(query_param("$filter", "appId eq 'app-1'"))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    fn graph_over(server: &wiremock::MockServer, token: Arc<dyn BearerProvider>) -> ScoreCtx {
+        let cache = Cache::new();
+        let client = Arc::new(GraphClient::with_base_url(
+            "tenant-test",
+            token.clone(),
+            token,
+            cache.clone(),
+            server.uri(),
+        ));
+        score_ctx(client, cache)
+    }
+
+    #[tokio::test]
+    async fn a_failed_sp_lookup_leaves_the_app_unscored_instead_of_clean() {
+        let server = wiremock::MockServer::start().await;
+        // `Retry-After: 0` keeps the retry budget from sleeping out its backoff.
+        mock_sp_lookup(
+            &server,
+            wiremock::ResponseTemplate::new(503).insert_header("Retry-After", "0"),
+        )
+        .await;
+        let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+
+        let err = score_one(&ctx, &bare_app(), None)
+            .await
+            .expect_err("a failed SP read must not score the app as holding nothing");
+        // → `unscored += 1` → `PerPrincipalScoring` in the collector …
+        assert_eq!(classify_audit_failure(&err), AuditFailure::Transient);
+        // … and a run carrying that gap is never cached as a clean scan.
+        assert!(!run_is_cacheable(
+            false,
+            false,
+            &[AuditCoverageGap::PerPrincipalScoring]
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_tenant_without_the_sp_still_scores() {
+        // Control: a real "no service principal" answer is not a gap.
+        let server = wiremock::MockServer::start().await;
+        mock_sp_lookup(
+            &server,
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
+        )
+        .await;
+        let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+
+        let item = score_one(&ctx, &bare_app(), None)
+            .await
+            .expect("an app with no SP scores normally");
+        assert_eq!(item.service_principal_enabled, None);
+    }
+
+    #[tokio::test]
+    async fn a_dead_session_during_the_sp_lookup_stops_the_run() {
+        struct DeadSession;
+        #[async_trait::async_trait]
+        impl BearerProvider for DeadSession {
+            async fn bearer(&self) -> Result<String, TokenError> {
+                Err(TokenError::new("refresh_missing", "gone"))
+            }
+        }
+        // Never answered: the token fails before any request is sent.
+        let server = wiremock::MockServer::start().await;
+        let ctx = graph_over(&server, Arc::new(DeadSession));
+
+        let err = score_one(&ctx, &bare_app(), None)
+            .await
+            .expect_err("a dead session must surface, not score the app");
+        // Swallowed to `None` before, this now stops the run for re-auth.
+        assert_eq!(classify_audit_failure(&err), AuditFailure::SessionDead);
     }
 }

@@ -2,6 +2,22 @@
 
 ### Fixed
 
+- **An app whose service principal could not be read during a security audit is no longer
+  scored as clean.** When the per-app service-principal lookup failed (a Graph outage that
+  outlasted the retries), the audit carried on without it: the admin-consent and disabled-sign-in
+  rules lost their input, and a mailbox permission scoped through Exchange RBAC was never checked
+  against a surviving org-wide grant — yet the run reported itself complete and was cached for an
+  hour. The app is now counted among those that could not be scored, the run carries the "some
+  applications could not be scored" caveat and is not cached, and a session that expired during
+  the lookup stops the run for re-sign-in instead of being ignored.
+- **Exporting an incomplete audit writes that run, with its caveats.** Only a cancelled run handed
+  its own results to the exporter; a truncated or degraded run — never cached — was exported from
+  the cache instead, so the file either failed with "no cached audit" or held an earlier complete
+  scan presented as the current one.
+- **The security audit says what it is doing before it starts scoring.** The first phase reads the
+  tenant's app registrations, service principals, consent grants and role assignments, and is the
+  longest part of a large run; during it the progress readout showed "0 / 0 apps (cap: 8)" over an
+  empty bar. It now reads "Reading tenant-wide directory data…" until the app count is known.
 - **A tenant with more than 5,000 SharePoint sites no longer gets its site scan reported — and
   cached — as complete.** The `Sites.Selected` reverse lookup enumerates sites up to a 5,000-site
   safety cap and silently stopped there: the Sites tab read "scanned 5000 of 5000 sites", the result

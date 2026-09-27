@@ -14,7 +14,7 @@ use wasm_bindgen_test::*;
 use azapptoolkit_core::audit::{
     AuditPrincipalKind, RemediationAction, RemediationKind, RiskLevel, issue,
 };
-use azapptoolkit_dto::audit::AuditRunResult;
+use azapptoolkit_dto::audit::{AuditCoverageGap, AuditProgress, AuditRunResult};
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::security_view::SecurityView;
 
@@ -175,5 +175,81 @@ async fn sp_mailbox_fix_routes_to_the_sp_only_command() {
             .and_then(|v| v.as_bool()),
         Some(true),
         "the org-wide grant is stripped so RBAC scoping is effective"
+    );
+}
+
+fn audit_progress(done: usize, total: usize, current: &str, cap: usize) -> AuditProgress {
+    AuditProgress {
+        done,
+        total,
+        current_app: Some(current.to_string()),
+        in_flight_cap: cap,
+        cancelled: false,
+    }
+}
+
+/// The tenant-wide prefetch is the longest phase of a large run and knows no
+/// app count yet: it reads as a phase label, never as "0 / 0 apps". Once the
+/// count lands the fraction takes over, and the rate-limit notice still keys
+/// off the live cap dropping below its peak.
+#[wasm_bindgen_test]
+async fn audit_progress_reads_as_a_phase_until_the_app_count_is_known() {
+    let _m = mount_security().await;
+    // Let `use_progress_stream` register its listener before we emit.
+    ts::tick().await;
+    ts::tick().await;
+
+    ts::emit_event(
+        "audit-progress",
+        &audit_progress(0, 0, "Reading tenant-wide directory data…", 8),
+    );
+    ts::wait_for(|| ts::body_contains("Reading tenant-wide directory data")).await;
+    assert!(
+        !ts::body_contains("0 / 0 apps"),
+        "the preparation phase must not read as a stalled 0 / 0 fraction"
+    );
+
+    ts::emit_event("audit-progress", &audit_progress(3, 10, "App X", 8));
+    ts::wait_for(|| ts::body_contains("3 / 10 apps")).await;
+    assert!(ts::body_contains("App X"));
+    assert!(
+        !ts::body_contains("Reading tenant-wide directory data"),
+        "the phase label gives way to the fraction"
+    );
+    assert!(
+        ts::query(".audit-progress__notice").is_none(),
+        "no back-off notice while the cap is at its peak"
+    );
+
+    ts::emit_event("audit-progress", &audit_progress(4, 10, "App Y", 4));
+    ts::wait_for(|| ts::query(".audit-progress__notice").is_some()).await;
+}
+
+/// A degraded run is never cached backend-side, so exporting it "by reference"
+/// either failed with `no_cached_audit` or wrote an EARLIER complete run in its
+/// place. It must hand the exporter its own items.
+#[wasm_bindgen_test]
+async fn a_degraded_run_exports_its_own_items() {
+    ts::reset();
+    let mut run = cached_run();
+    run.degraded = vec![AuditCoverageGap::PerPrincipalScoring];
+    ts::mock_ok("get_cached_audit", &run);
+    ts::mock_ok("save_audit_to_file", &Option::<String>::None);
+    let _m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Org-wide mailbox access")).await;
+
+    click_button("Export");
+    ts::wait_for(|| !ts::query_all("[role=\"menuitem\"]").is_empty()).await;
+    click_button("Export as CSV…");
+    ts::wait_for(|| ts::call_count("save_audit_to_file") == 1).await;
+
+    let call = ts::last_call("save_audit_to_file").unwrap();
+    assert_eq!(
+        call.args
+            .get("items")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
+        Some(2),
+        "an uncached run ships its own items instead of exporting by reference"
     );
 }

@@ -41,8 +41,8 @@ struct SaveArgs<'a> {
 /// Opens an OS save dialog and writes the audit in `format` (`csv`, `json`, or
 /// `html`). Returns the chosen path on success, `None` if the user cancelled.
 /// Exports by reference: pass `items: None` and the backend serves its own
-/// cached run (no multi-MB IPC round trip); pass `Some` only for a cancelled
-/// run, which is never cached.
+/// cached run (no multi-MB IPC round trip); pass `Some` for any run the
+/// backend did not cache — cancelled, truncated or degraded.
 ///
 /// `coverage` is the run's caveats ([`AuditRunResult::coverage`]) — small
 /// enough to always send, and what makes the exported file say what the scan

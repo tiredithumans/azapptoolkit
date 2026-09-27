@@ -739,3 +739,119 @@ fn the_cache_read_detector_sees_the_forms_rustfmt_actually_produces() {
     assert!(first_cache_read(&flat).is_some(), "wrapped read must match");
     assert_eq!(flat.len(), map.len());
 }
+
+/// The audit run is written to the cache **only** inside
+/// `if run_is_cacheable(…) { … }`.
+///
+/// AGENTS.md: "a cancelled/truncated/degraded run is never cached nor shown as
+/// an all-clear". `run_is_cacheable` is exhaustively unit-tested in
+/// `commands/audit.rs`, but that pins the predicate, not its use — a refactor
+/// that moved the write out of the `if`, or added a second one for a "partial
+/// snapshot", compiled and passed every test.
+///
+/// Keyed on the audit-run KEY rather than on `CacheKind::Audit`: that kind is
+/// shared with the site and Key Vault sweeps, which carry their own guards. The
+/// key is passed by value only on a write (reads and invalidations borrow it as
+/// `&audit_cache_key(…)`), so the match below sees exactly the writes.
+#[test]
+fn the_audit_run_is_cached_only_behind_run_is_cacheable() {
+    const WRITES: [&str; 3] = [".put(", ".put_typed(", ".put_index("];
+    const KEY_ARG: &str = "CacheKind::Audit,audit_cache_key(";
+    let mut sites = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+    for (name, src) in super::sources::command_modules() {
+        let code: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (flat, _) = flatten_out_whitespace(&code);
+        let mut from = 0usize;
+        while let Some(hit) = flat[from..].find(KEY_ARG) {
+            let at = from + hit;
+            from = at + KEY_ARG.len();
+            if !WRITES.iter().any(|w| flat[..at].ends_with(w)) {
+                continue;
+            }
+            sites += 1;
+            if !guarded_by_run_is_cacheable(&flat, at) {
+                let start = at.saturating_sub(80);
+                let start = (start..at)
+                    .find(|&i| flat.is_char_boundary(i))
+                    .unwrap_or(at);
+                offenders.push(format!("{name}: …{}", &flat[start..from]));
+            }
+        }
+    }
+    assert!(
+        sites >= 1,
+        "no audit-run cache write (`.put(CacheKind::Audit, audit_cache_key(…)`) found in any \
+         command module — the walk or the matcher is broken, and this rule is checking nothing"
+    );
+    assert!(
+        offenders.is_empty(),
+        "an audit-run cache write is not directly inside `if run_is_cacheable(…) {{ … }}`:\n  {}\n\
+         AGENTS.md: \"a cancelled/truncated/degraded run is never cached\" — `run_is_cacheable` \
+         is the one predicate that says so; write the run only inside its `if`.",
+        offenders.join("\n  ")
+    );
+}
+
+/// Whether the flattened code at `at` sits DIRECTLY in the block of an
+/// `if run_is_cacheable(…)`: walk back to the nearest unmatched `{`, and the
+/// statement text before it must be that `if`. Rejects a negated condition, an
+/// `else` block, a write after the block, and a write nested in another `if`.
+fn guarded_by_run_is_cacheable(flat: &str, at: usize) -> bool {
+    let bytes = flat.as_bytes();
+    let mut depth = 0usize;
+    let mut open = None;
+    for i in (0..at).rev() {
+        match bytes[i] {
+            b'}' => depth += 1,
+            b'{' if depth == 0 => {
+                open = Some(i);
+                break;
+            }
+            b'{' => depth -= 1,
+            _ => {}
+        }
+    }
+    let Some(open) = open else {
+        return false;
+    };
+    let head_start = flat[..open].rfind([';', '{', '}']).map_or(0, |i| i + 1);
+    flat[head_start..open].starts_with("ifrun_is_cacheable(")
+}
+
+#[test]
+fn the_run_is_cacheable_guard_detector_rejects_every_escape() {
+    // The regression guard for the guard: each rejected shape is a refactor that
+    // compiles and would otherwise pass.
+    fn check(src: &str) -> bool {
+        let (flat, _) = flatten_out_whitespace(src);
+        let at = flat
+            .find("CacheKind::Audit,audit_cache_key(")
+            .expect("fixture carries a write");
+        guarded_by_run_is_cacheable(&flat, at)
+    }
+    assert!(check(
+        "let run = x;\nif run_is_cacheable(c, t, &d) {\n    state\n        .cache\n        \
+         .put(CacheKind::Audit, audit_cache_key(&t), &run);\n}"
+    ));
+    for escape in [
+        "fn f() { let run = x; state.cache.put(CacheKind::Audit, audit_cache_key(&t), &run); }",
+        "fn f() { if !run_is_cacheable(c, t, &d) { state.cache.put(CacheKind::Audit, \
+         audit_cache_key(&t), &run); } }",
+        "fn f() { if run_is_cacheable(c, t, &d) {} else { state.cache.put(CacheKind::Audit, \
+         audit_cache_key(&t), &run); } }",
+        "fn f() { if run_is_cacheable(c, t, &d) { if other { state.cache.put(CacheKind::Audit, \
+         audit_cache_key(&t), &run); } } }",
+        "fn f() { if run_is_cacheable(c, t, &d) { log(); } state.cache.put(CacheKind::Audit, \
+         audit_cache_key(&t), &run); }",
+    ] {
+        assert!(
+            !check(escape),
+            "detector accepted an unguarded write: {escape}"
+        );
+    }
+}

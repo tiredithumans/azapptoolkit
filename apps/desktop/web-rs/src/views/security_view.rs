@@ -187,9 +187,17 @@ fn PostureStrip() -> impl IntoView {
                             0.0
                         };
                         let cap = p.in_flight_cap;
-                        view! {
-                            <div class="audit-progress">
-                                <ProgressBar value=Signal::derive(move || pct) />
+                        // `total == 0` is a PHASE, not a fraction: the app
+                        // count is not known until the tenant-wide prefetch
+                        // (the longest part of a large run) lands, and
+                        // "0 / 0 apps" read as a stalled scan.
+                        let status = if p.total == 0 {
+                            let label = p
+                                .current_app
+                                .unwrap_or_else(|| "Preparing the scan…".to_string());
+                            view! { <Body1>{label}</Body1> }.into_any()
+                        } else {
+                            view! {
                                 <Body1>
                                     {format!(
                                         "{} / {} apps  (cap: {}{})",
@@ -200,6 +208,13 @@ fn PostureStrip() -> impl IntoView {
                                     )}
                                 </Body1>
                                 {p.current_app.map(|n| view! { <Body1>{n}</Body1> })}
+                            }
+                                .into_any()
+                        };
+                        view! {
+                            <div class="audit-progress">
+                                <ProgressBar value=Signal::derive(move || pct) />
+                                {status}
                                 <Show when=move || cap < peak_cap.get()>
                                     <p class="audit-progress__notice" role="status">
                                         "Microsoft Graph is rate-limiting this scan, so it's automatically slowing down to recover. It will still complete — large tenants just take longer."
