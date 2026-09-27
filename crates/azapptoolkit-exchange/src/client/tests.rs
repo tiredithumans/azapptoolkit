@@ -762,3 +762,210 @@ async fn an_empty_next_link_terminates_rather_than_looping() {
         .expect("blank link terminates");
     assert_eq!(scopes.len(), 1);
 }
+
+// ── Retry class: a write is not replayed after an unknown outcome ──────────
+
+#[tokio::test]
+async fn a_write_is_not_replayed_after_a_server_error() {
+    // A 502 on a POST leaves the outcome unknown: the write may already have
+    // committed. Replaying `New-ManagementRoleAssignment` then fails as a
+    // duplicate ("failed to assign", org-wide grant kept) and replaying
+    // `Remove-ApplicationAccessPolicy` fails as not-found (migration reported
+    // "partial") — false failures after a write that landed. `expect(1)` is
+    // verified when the server drops; nothing sleeps because nothing retries.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(ResponseTemplate::new(502).set_body_string("bad gateway"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let err = make_client(&server.uri())
+        .new_role_assignment("app-1", "Application Mail.Read", Some("scope"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ExchangeError::Server { status: 502, .. }),
+        "got {err:?}"
+    );
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(ResponseTemplate::new(502).set_body_string("bad gateway"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let err = make_client(&server.uri())
+        .remove_application_access_policy("id")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ExchangeError::Server { status: 502, .. }),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_read_is_retried_after_a_server_error() {
+    // A `Get-` cmdlet is replay-safe, so the transient budget still applies.
+    // `Retry-After: 0` keeps the test from spending the real 1 s backoff.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(ResponseTemplate::new(502).insert_header("Retry-After", "0"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [] })))
+        .mount(&server)
+        .await;
+    let policies = make_client(&server.uri())
+        .get_application_access_policies()
+        .await
+        .expect("a read recovers from one 502");
+    assert!(policies.is_empty());
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_write_is_still_retried_when_throttled() {
+    // A 429 is a refusal before any work was done, so even a write replays.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [{
+                "Name": "ra-1",
+                "Role": "Application Mail.Read",
+                "RoleAssigneeName": "app-1",
+                "CustomResourceScope": "scope",
+                "Identity": "ra-1"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let ra = make_client(&server.uri())
+        .new_role_assignment("app-1", "Application Mail.Read", Some("scope"))
+        .await
+        .expect("a throttled write is replayed");
+    assert_eq!(ra.role.as_deref(), Some("Application Mail.Read"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+// ── Mid-pagination errors keep their classification ────────────────────────
+
+/// Mounts a first page that promises a continuation at `{server}/page2`.
+async fn mount_first_page_with_next_link(server: &MockServer) {
+    let page2 = format!("{}/page2", server.uri());
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [{ "Name": "scope-a", "RecipientFilter": "MemberOfGroup -eq 'CN=a'" }],
+            "@odata.nextLink": page2,
+        })))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn an_auth_failure_mid_pagination_keeps_its_classification() {
+    // Only a not-found is reclassified mid-pagination (so `invoke_optional`
+    // cannot read it as "absent"). A 401/403 on page 2 must stay itself: the
+    // audit's Exchange breaker and the sign-in / role guidance key off it.
+    let server = MockServer::start().await;
+    mount_first_page_with_next_link(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/page2"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let err = make_client(&server.uri())
+        .list_management_scopes()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ExchangeError::Unauthorized), "got {err:?}");
+
+    let server = MockServer::start().await;
+    mount_first_page_with_next_link(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/page2"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .insert_header("x-ms-diagnostics", "2000003;reason=\"denied\""),
+        )
+        .mount(&server)
+        .await;
+    let err = make_client(&server.uri())
+        .list_management_scopes()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExchangeError::Forbidden {
+                had_diagnostics: true,
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_dead_session_mid_pagination_stays_reauth_fatal() {
+    use azapptoolkit_core::token::{BearerProvider, TokenError};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Mints a token for page 1, then reports the session gone — the bearer is
+    // fetched per page, so this is exactly what a mid-read sign-out looks like.
+    struct DiesAfterFirstPage(AtomicUsize);
+    // The `#[async_trait]` expansion, written out: this crate has no
+    // async-trait dependency and one test does not justify adding it.
+    impl BearerProvider for DiesAfterFirstPage {
+        fn bearer<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<
+            Box<dyn Future<Output = std::result::Result<String, TokenError>> + Send + 'async_trait>,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok("tok".to_string())
+                } else {
+                    Err(TokenError::new("refresh_missing", "gone"))
+                }
+            })
+        }
+    }
+
+    let server = MockServer::start().await;
+    mount_first_page_with_next_link(&server).await;
+    let client = ExchangeClient::with_base_url(
+        Arc::new(DiesAfterFirstPage(AtomicUsize::new(0))),
+        "tenant-1",
+        "admin@contoso.com",
+        server.uri(),
+    );
+    let err = client.list_management_scopes().await.unwrap_err();
+    assert!(matches!(err, ExchangeError::Token(_)), "got {err:?}");
+    assert_eq!(err.ui_code(), "refresh_missing");
+    assert!(
+        azapptoolkit_core::reauth::is_reauth_fatal(err.ui_code()),
+        "a dead session on page 2 must still stop a fan-out"
+    );
+}

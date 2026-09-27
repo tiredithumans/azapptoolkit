@@ -2,6 +2,22 @@
 
 ### Fixed
 
+- **Exchange changes are no longer re-sent after a server error or a dropped connection.** The
+  Exchange client ran a retry loop of its own that replayed every cmdlet after a 5xx or network
+  failure, including `New-ManagementRoleAssignment`, `New-ManagementScope`, `New-ServicePrincipal`
+  and `Remove-ApplicationAccessPolicy`. When the first attempt had already taken effect, the replay
+  failed as a duplicate or a missing object. A scoped grant that had landed was reported as "failed
+  to assign" (the org-wide grant was kept and scoping was reported as not effective), and a legacy
+  access policy that was removed was reported as a partial migration. Exchange now uses the same
+  retry policy as Graph, ARM and Key Vault: throttling is still retried for every cmdlet, but only
+  reads and group-membership changes (which are safe to repeat) are replayed after a server or
+  network error. A write that fails that way is reported as that error, and re-running the action
+  finishes it.
+- **A sign-in that expires while Exchange is paging a long list now stops the operation for
+  re-sign-in.** Any failure on the second or later page of an Exchange read was reported as a
+  generic protocol error. An expired session was therefore not recognised, so the security audit and
+  bulk actions carried on against it, and a 401/403 lost its sign-in or role guidance. Only a "not
+  found" on a later page is still reported as a refusal to return a truncated list.
 - **Cancel now stops only the run it belongs to.** The security audit, every bulk action and the
   legacy-policy migration shared one stop signal. So did the Resource Access site scan, Key Vault
   scan and mailbox probe, and the Disaster Recovery backup and restore. Because those screens keep

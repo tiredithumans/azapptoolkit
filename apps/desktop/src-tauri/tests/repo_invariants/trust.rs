@@ -133,6 +133,145 @@ fn every_command_that_writes_a_redirect_uri_validates_it_first() {
 /// line may state the class directly.
 #[test]
 fn every_retry_call_site_derives_its_idempotency_class() {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut found = 0usize;
+    for (root, src) in retry_scan_sources() {
+        let text = std::fs::read_to_string(&src).expect("read source");
+        // The definition itself, not a call site.
+        if src.ends_with("http_retry.rs") || !text.contains("with_retries(") {
+            continue;
+        }
+        found += 1;
+        let derived = text.contains("retry_class_for(");
+        let pinned_to_a_literal_verb =
+            text.contains("RetryClass::Idempotent") && text.contains("Method::");
+        if !derived && !pinned_to_a_literal_verb {
+            offenders.push(relative(&root, &src));
+        }
+    }
+
+    // Graph, ARM, Key Vault and Exchange transports.
+    assert!(
+        found >= 4,
+        "only {found} file(s) call with_retries — the source walk is broken, and a rule that \
+         scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "with_retries call site(s) that neither derive their class from the verb nor pin it to a \
+         literal one: {offenders:#?}\n\
+         Route the transport through a `retry_class_for(&method)` helper so a POST/PATCH cannot \
+         silently inherit a GET's replay policy."
+    );
+}
+
+/// The retry schedule's raw primitives. Naming one outside `http_retry.rs` is
+/// an open-coded loop: its own attempt counter, its own sleep, its own budget.
+const RAW_RETRY_PRIMITIVES: [&str; 5] = [
+    "MAX_RETRIES",
+    "BASE_DELAY_MS",
+    "next_backoff_ms",
+    "sleep_before_retry",
+    "sleep_with_jitter",
+];
+
+/// The first raw retry primitive a non-comment line of `src` names, if any.
+/// Matches whole identifiers only (`MY_MAX_RETRIES` is not `MAX_RETRIES`).
+fn names_a_raw_retry_primitive(src: &str) -> Option<&'static str> {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    src.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .find_map(|line| {
+            RAW_RETRY_PRIMITIVES.into_iter().find(|name| {
+                line.match_indices(name).any(|(at, _)| {
+                    let before = line[..at].chars().next_back();
+                    let after = line[at + name.len()..].chars().next();
+                    !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+                })
+            })
+        })
+}
+
+/// No client open-codes the retry schedule.
+///
+/// The rule above only sees `with_retries(` call sites, so a transport that
+/// never adopted the shared loop was invisible to it: the Exchange client ran
+/// its own `attempt < MAX_RETRIES` loop and replayed `New-*`/`Remove-*`
+/// cmdlets after a 5xx, the exact failure `RetryClass` exists to prevent.
+/// Banning the primitives outside `http_retry.rs` closes that gap without
+/// flagging the desktop's legitimate non-retrying reqwest calls.
+#[test]
+fn no_client_open_codes_the_retry_schedule() {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    for (root, src) in retry_scan_sources() {
+        if src.ends_with("http_retry.rs") {
+            continue;
+        }
+        scanned += 1;
+        let text = std::fs::read_to_string(&src).expect("read source");
+        if let Some(name) = names_a_raw_retry_primitive(&text) {
+            offenders.push(format!("{} — names `{name}`", relative(&root, &src)));
+        }
+    }
+
+    assert!(
+        scanned > 0,
+        "the source walk found nothing — a rule that scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "source(s) open-coding the retry schedule: {offenders:#?}\n\
+         Route the loop through `with_retries` + `retry_class_for` (or drive a `RetryBudget` for \
+         a stateful loop): an open-coded loop escapes the RetryClass rule, so a write can be \
+         replayed after an unknown outcome."
+    );
+}
+
+/// The raw-primitive rule must actually FIRE on the shape it exists to catch,
+/// and not on a comment or on the sanctioned seams.
+#[test]
+fn the_raw_retry_primitive_rule_fires_on_an_open_coded_loop() {
+    let open_coded = r#"
+        let mut attempt = 0u32;
+        loop {
+            if attempt < MAX_RETRIES {
+                sleep_before_retry(retry_after, delay_ms).await;
+                attempt += 1;
+                continue;
+            }
+        }
+    "#;
+    assert_eq!(names_a_raw_retry_primitive(open_coded), Some("MAX_RETRIES"));
+    assert_eq!(
+        names_a_raw_retry_primitive("    delay = next_backoff_ms(delay);"),
+        Some("next_backoff_ms")
+    );
+    assert_eq!(
+        names_a_raw_retry_primitive("use http_retry::{BASE_DELAY_MS, with_retries};"),
+        Some("BASE_DELAY_MS")
+    );
+
+    // A comment that talks about the budget is not a loop.
+    let comment_only =
+        "    /// retried up to `MAX_RETRIES` times\n    // after MAX_RETRIES it surfaces";
+    assert_eq!(names_a_raw_retry_primitive(comment_only), None);
+
+    // The sanctioned seams, and an identifier that merely contains a name.
+    let sanctioned = r#"
+        with_retries(cmdlet, retry_class_for(cmdlet), |_| async { todo!() }).await;
+        let mut budget = RetryBudget::new();
+        const MY_MAX_RETRIES_HINT: u32 = 1;
+    "#;
+    assert_eq!(names_a_raw_retry_primitive(sanctioned), None);
+}
+
+/// Every Rust source the two retry rules scan, paired with the root it was
+/// found under (for readable offender paths): the shared crates AND the
+/// desktop backend, which hosts HTTP code of its own (`cert.rs`, the SSO
+/// metadata probe, the updater) and is where a one-off retry wrapper would
+/// most likely appear.
+fn retry_scan_sources() -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
     fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -147,46 +286,26 @@ fn every_retry_call_site_derives_its_idempotency_class() {
         }
     }
 
-    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../crates")
-        .canonicalize()
-        .expect("crates dir");
-    let mut files = Vec::new();
-    rust_files(&crates, &mut files);
-    assert!(!files.is_empty(), "the source walk found no crate sources");
-
-    let mut offenders: Vec<String> = Vec::new();
-    let mut found = 0usize;
-    for src in files {
-        let text = std::fs::read_to_string(&src).expect("read source");
-        // The definition itself, not a call site.
-        if src.ends_with("http_retry.rs") || !text.contains("with_retries(") {
-            continue;
-        }
-        found += 1;
-        let derived = text.contains("retry_class_for(");
-        let pinned_to_a_literal_verb =
-            text.contains("RetryClass::Idempotent") && text.contains("Method::");
-        if !derived && !pinned_to_a_literal_verb {
-            offenders.push(
-                src.strip_prefix(&crates)
-                    .unwrap_or(&src)
-                    .display()
-                    .to_string(),
-            );
-        }
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    for (dir, what) in [
+        (manifest.join("../../../crates"), "crates"),
+        (manifest.join("src"), "desktop backend"),
+    ] {
+        let root = dir
+            .canonicalize()
+            .unwrap_or_else(|e| panic!("{what} dir: {e}"));
+        let mut files = Vec::new();
+        rust_files(&root, &mut files);
+        assert!(
+            !files.is_empty(),
+            "the source walk found no {what} sources — the rule would pass vacuously"
+        );
+        sources.extend(files.into_iter().map(|f| (root.clone(), f)));
     }
+    sources
+}
 
-    assert!(
-        found >= 3,
-        "only {found} file(s) call with_retries — the source walk is broken, and a rule that \
-         scans nothing passes vacuously"
-    );
-    assert!(
-        offenders.is_empty(),
-        "with_retries call site(s) that neither derive their class from the verb nor pin it to a \
-         literal one: {offenders:#?}\n\
-         Route the transport through a `retry_class_for(&method)` helper so a POST/PATCH cannot \
-         silently inherit a GET's replay policy."
-    );
+fn relative(root: &std::path::Path, src: &std::path::Path) -> String {
+    src.strip_prefix(root).unwrap_or(src).display().to_string()
 }

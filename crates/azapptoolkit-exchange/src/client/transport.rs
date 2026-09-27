@@ -1,6 +1,9 @@
 //! Transport core for the Exchange Online Admin API: the `CmdletInput`
-//! envelope POST, the retry loop with its diagnostics-header capture (the
-//! bodyless-403 semantics live here), and the shared result projections.
+//! envelope POST with its diagnostics-header capture (the bodyless-403
+//! semantics live here), and the shared result projections. Retries go through
+//! `azapptoolkit_core::http_retry::with_retries`, with the `RetryClass` taken
+//! from the cmdlet verb (`retry_class_for`) — every call is a POST, so the
+//! HTTP method says nothing about whether a replay is safe.
 
 use azapptoolkit_core::net::{redacted_host, same_origin};
 use azapptoolkit_core::token::TokenError;
@@ -9,8 +12,7 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use azapptoolkit_core::http_retry::{
-    BASE_DELAY_MS, MAX_RETRIES, next_backoff_ms, parse_retry_after_seconds, sleep_before_retry,
-    sleep_with_jitter,
+    Attempt, RetryClass, RetryReason, parse_retry_after_seconds, with_retries,
 };
 
 use super::{ADMIN_API_VERSION, ExchangeClient, INVOKE_ENDPOINT, X_ANCHOR_MAILBOX};
@@ -68,14 +70,21 @@ impl ExchangeClient {
         for page in 1..=MAX_PAGES {
             let bytes = match self.send_core(cmdlet, &target, &body).await {
                 Ok(bytes) => bytes,
-                // A failure while following an `@odata.nextLink` is not "this
-                // object does not exist" — pages of it have already been read.
-                // Reclassifying here is what stops `invoke_optional` mapping a
-                // mid-pagination `NotFound` to an empty collection, which every
+                // A "not found" while following an `@odata.nextLink` is not
+                // "this object does not exist" — pages of it have already been
+                // read. Reclassifying it is what stops `invoke_optional` mapping
+                // a mid-pagination `NotFound` to an empty collection, which every
                 // caller reads as proof of absence. A short list widens access
                 // on the consolidation and reverse-scope paths, so this must
                 // fail rather than truncate.
-                Err(err) if page > 1 => {
+                //
+                // Only the not-found shapes are reclassified (the exact two
+                // `invoke_optional` swallows). Every other error already stops
+                // a truncated `Ok`, and must keep its class: a `Token` carrying
+                // a re-auth-fatal code is what halts a fan-out on a dead
+                // session, and a 401/403 drives the audit's Exchange breaker and
+                // the sign-in / role guidance in `ui_hint`.
+                Err(err) if page > 1 && err.is_missing_object() => {
                     return Err(ExchangeError::Protocol(format!(
                         "{cmdlet} failed on page {page} while following @odata.nextLink \
                          ({err}); refusing to return a truncated collection"
@@ -129,10 +138,12 @@ impl ExchangeClient {
     /// empty result, so callers can treat a missing object as `None`.
     ///
     /// Only a **first-page** `NotFound` can reach these arms:
-    /// [`Self::invoke_command`] reclassifies any mid-pagination failure as
-    /// `Protocol`. Without that, a continuation that 404'd turned a partially
-    /// read collection into "this object has nothing", which the consolidation
-    /// planner and the reverse scope lookup both read as proof of absence.
+    /// [`Self::invoke_command`] reclassifies a mid-pagination not-found error as
+    /// `Protocol` (other mid-pagination errors keep their own class — they
+    /// cannot reach these arms anyway). Without that, a continuation that 404'd
+    /// turned a partially read collection into "this object has nothing", which
+    /// the consolidation planner and the reverse scope lookup both read as proof
+    /// of absence.
     pub(crate) async fn invoke_optional(
         &self,
         cmdlet: &str,
@@ -165,122 +176,170 @@ impl ExchangeClient {
                 .map_err(|e| ExchangeError::Protocol(e.to_string()))?,
         );
 
-        let mut attempt = 0u32;
-        let mut delay_ms = BASE_DELAY_MS;
-        loop {
-            let resp = self
-                .http
-                .post(url)
-                .headers(headers.clone())
-                .json(body)
-                .send()
-                .await;
-            let resp = match resp {
-                Ok(r) => r,
-                Err(err) => {
-                    if attempt < MAX_RETRIES {
-                        tracing::warn!(%attempt, ?err, "transport error; retrying");
-                        sleep_with_jitter(delay_ms).await;
-                        attempt += 1;
-                        delay_ms = next_backoff_ms(delay_ms);
-                        continue;
-                    }
-                    return Err(ExchangeError::Network(err.to_string()));
+        // Retry budget, backoff and `Retry-After` handling all live in
+        // `http_retry::with_retries`; this closure only classifies one attempt.
+        // `cmdlet` is the label, so the shared "retrying" warning names it.
+        with_retries(cmdlet, retry_class_for(cmdlet), |_| {
+            let headers = headers.clone();
+            async move {
+                let resp = match self.http.post(url).headers(headers).json(body).send().await {
+                    Ok(r) => r,
+                    // No response means no `Retry-After` to honor — the shared
+                    // loop falls back to jittered exponential backoff.
+                    Err(err) => return attempt_for(ExchangeError::Network(err.to_string()), None),
+                };
+
+                let status = resp.status();
+                if status.is_success() {
+                    // Terminal even when the body read fails: after a 2xx the
+                    // write has committed, so it is never replayed.
+                    return Attempt::Done(
+                        resp.bytes()
+                            .await
+                            .map_err(|e| ExchangeError::Network(e.to_string())),
+                    );
                 }
-            };
 
-            let status = resp.status();
-            if status.is_success() {
-                return resp
-                    .bytes()
-                    .await
-                    .map_err(|e| ExchangeError::Network(e.to_string()));
-            }
-
-            let retry_after = parse_retry_after_seconds(
-                resp.headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok()),
-            );
-            // The EXO admin endpoint returns its real authorization reason in the
-            // `x-ms-diagnostics` header, not the body (a 403 body is typically a
-            // NUL-padded blob). Capture the diagnostic headers so the surfaced
-            // error names *why* and *which request*, not just `<no body>`.
-            let header_str = |name: &str| {
-                resp.headers()
-                    .get(name)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string)
-            };
-            let diagnostics = header_str("x-ms-diagnostics");
-            let request_id = header_str("request-id").or_else(|| header_str("x-ms-request-id"));
-            // On a bodyless rejection the auth middleware's reason (if any)
-            // rides `WWW-Authenticate` — captured for the log line below.
-            let www_authenticate = header_str("www-authenticate");
-            let raw_body = resp.text().await.unwrap_or_default();
-            let body_text = compose_error_detail(cmdlet, &raw_body, &diagnostics, &request_id);
-            let code = status.as_u16();
-            // Any non-429 4xx is a terminal client error (401/403/404 get their
-            // own variants below; everything else falls through to `Api`).
-            let is_client_4xx = (400..500).contains(&code) && code != 429;
-
-            if code == 401 {
-                return Err(ExchangeError::Unauthorized);
-            }
-            if is_client_4xx {
-                tracing::warn!(
-                    cmdlet,
-                    status = code,
-                    diagnostics = diagnostics.as_deref().unwrap_or(""),
-                    request_id = request_id.as_deref().unwrap_or(""),
-                    www_authenticate = www_authenticate.as_deref().unwrap_or(""),
-                    "exchange admin cmdlet rejected"
+                let retry_after = parse_retry_after_seconds(
+                    resp.headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok()),
                 );
-            }
-            if code == 403 {
-                // Whether EXO named an RBAC reason (`x-ms-diagnostics`) vs. a
-                // bodyless/reasonless 403 — `ui_hint` branches on this so a stale
-                // role token isn't misreported as a definite Exchange RBAC gap.
-                let had_diagnostics = diagnostics
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|d| !d.is_empty());
-                return Err(ExchangeError::Forbidden {
-                    detail: body_text,
-                    had_diagnostics,
-                });
-            }
-            if code == 404 {
-                return Err(ExchangeError::NotFound(body_text));
-            }
-            if is_client_4xx {
-                return Err(ExchangeError::Api {
-                    status: code,
-                    body: body_text,
-                });
-            }
+                // The EXO admin endpoint returns its real authorization reason in
+                // the `x-ms-diagnostics` header, not the body (a 403 body is
+                // typically a NUL-padded blob). Capture the diagnostic headers so
+                // the surfaced error names *why* and *which request*, not just
+                // `<no body>`.
+                let header_str = |name: &str| {
+                    resp.headers()
+                        .get(name)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string)
+                };
+                let diagnostics = header_str("x-ms-diagnostics");
+                let request_id = header_str("request-id").or_else(|| header_str("x-ms-request-id"));
+                // On a bodyless rejection the auth middleware's reason (if any)
+                // rides `WWW-Authenticate` — captured for the log line below.
+                let www_authenticate = header_str("www-authenticate");
+                let raw_body = resp.text().await.unwrap_or_default();
+                let body_text = compose_error_detail(cmdlet, &raw_body, &diagnostics, &request_id);
+                let code = status.as_u16();
+                // Any non-429 4xx is a terminal client error (401/403/404 get
+                // their own variants below; everything else falls through to
+                // `Api`).
+                let is_client_4xx = (400..500).contains(&code) && code != 429;
 
-            // Retryable (429, 5xx). An explicit `Retry-After` is waited exactly
-            // (no jitter / no 30s clamp); only the no-header path uses backoff.
-            if attempt < MAX_RETRIES {
-                tracing::warn!(%attempt, status = %status, retry_after_secs = ?retry_after, "transient error; retrying");
-                sleep_before_retry(retry_after, delay_ms).await;
-                attempt += 1;
-                delay_ms = next_backoff_ms(delay_ms);
-                continue;
+                let err = if code == 401 {
+                    ExchangeError::Unauthorized
+                } else {
+                    if is_client_4xx {
+                        tracing::warn!(
+                            cmdlet,
+                            status = code,
+                            diagnostics = diagnostics.as_deref().unwrap_or(""),
+                            request_id = request_id.as_deref().unwrap_or(""),
+                            www_authenticate = www_authenticate.as_deref().unwrap_or(""),
+                            "exchange admin cmdlet rejected"
+                        );
+                    }
+                    if code == 403 {
+                        // Whether EXO named an RBAC reason (`x-ms-diagnostics`)
+                        // vs. a bodyless/reasonless 403 — `ui_hint` branches on
+                        // this so a stale role token isn't misreported as a
+                        // definite Exchange RBAC gap.
+                        let had_diagnostics = diagnostics
+                            .as_deref()
+                            .map(str::trim)
+                            .is_some_and(|d| !d.is_empty());
+                        ExchangeError::Forbidden {
+                            detail: body_text,
+                            had_diagnostics,
+                        }
+                    } else if code == 404 {
+                        ExchangeError::NotFound(body_text)
+                    } else if is_client_4xx {
+                        ExchangeError::Api {
+                            status: code,
+                            body: body_text,
+                        }
+                    } else if code == 429 {
+                        ExchangeError::Throttled {
+                            retry_after_secs: retry_after,
+                        }
+                    } else {
+                        ExchangeError::Server {
+                            status: code,
+                            body: body_text,
+                        }
+                    }
+                };
+                // 429 and 5xx are retried (an explicit `Retry-After` is waited
+                // exactly); every other status is terminal.
+                attempt_for(err, retry_after)
             }
+        })
+        .await
+    }
+}
 
-            return if code == 429 {
-                Err(ExchangeError::Throttled {
-                    retry_after_secs: retry_after,
-                })
-            } else {
-                Err(ExchangeError::Server {
-                    status: code,
-                    body: body_text,
-                })
-            };
-        }
+/// Classifies one failed attempt for [`with_retries`].
+///
+/// The shared policy decides what is transient: `is_retryable()` is
+/// `http_retry::is_retryable_code(ui_code())`, not a status list re-derived
+/// here. A throttle is the one reason every cmdlet may replay (the service
+/// refused before doing the work); anything else transient is replayed only
+/// for an idempotent cmdlet — see [`retry_class_for`].
+fn attempt_for(
+    err: ExchangeError,
+    retry_after_secs: Option<u64>,
+) -> Attempt<bytes::Bytes, ExchangeError> {
+    if !err.is_retryable() {
+        return Attempt::Done(Err(err));
+    }
+    let reason = if matches!(err, ExchangeError::Throttled { .. }) {
+        RetryReason::Throttled
+    } else {
+        RetryReason::Transient
+    };
+    Attempt::Retry {
+        reason,
+        retry_after_secs,
+        err,
+    }
+}
+
+/// The retry class for an Exchange cmdlet.
+///
+/// Every Exchange call is a POST to `InvokeCommand`, so — unlike Graph, ARM and
+/// Key Vault — the HTTP method says nothing; the class comes from the cmdlet's
+/// verb. A paging continuation re-sends the same envelope, so it inherits the
+/// class of the cmdlet it continues.
+///
+/// Exchange objects are name-keyed, so replaying a write that already
+/// committed does not double it: it **fails**, and that false failure is the
+/// harm. A replayed `New-ManagementRoleAssignment` after a 502 fails as a
+/// duplicate, the scoped-grant path reports "failed to assign" and keeps the
+/// org-wide grant ("scoping is NOT effective") although the scoped role landed;
+/// a replayed `Remove-ApplicationAccessPolicy` fails as not-found and the AAP
+/// migration reports "partial" although the policy is gone. So only reads —
+/// and the two membership mutators, whose "already a member" / "not a member"
+/// replies `groups.rs` already treats as success — are replayed after a server
+/// or network error. Every other verb, and any unknown one, is
+/// [`RetryClass::NonIdempotent`]: only a throttle is replayed.
+fn retry_class_for(cmdlet: &str) -> RetryClass {
+    const READ_VERBS: [&str; 3] = ["Get-", "Test-", "Search-"];
+    // A replay is harmless: `add_group_member` / `remove_group_member`
+    // (groups.rs) swallow the already-a-member / not-a-member reply.
+    const REPLAY_SAFE_WRITES: [&str; 2] = [
+        "Add-DistributionGroupMember",
+        "Remove-DistributionGroupMember",
+    ];
+    if READ_VERBS.iter().any(|verb| cmdlet.starts_with(verb))
+        || REPLAY_SAFE_WRITES.contains(&cmdlet)
+    {
+        RetryClass::Idempotent
+    } else {
+        RetryClass::NonIdempotent
     }
 }
 
@@ -408,6 +467,39 @@ mod tests {
         // failing cmdlet is identified.
         let detail = compose_error_detail("Get-Group", &"\0".repeat(16), &None, &None);
         assert_eq!(detail, "[Get-Group] <no body>");
+    }
+
+    #[test]
+    fn retry_class_for_derives_from_the_cmdlet_verb() {
+        // Every cmdlet string this crate sends, plus the fail-safe default for
+        // an unknown verb: a class this table does not name is a replayed write.
+        let table: &[(&str, RetryClass)] = &[
+            ("Get-ApplicationAccessPolicy", RetryClass::Idempotent),
+            ("Get-DistributionGroup", RetryClass::Idempotent),
+            ("Get-DistributionGroupMember", RetryClass::Idempotent),
+            ("Get-Group", RetryClass::Idempotent),
+            ("Get-ManagementRoleAssignment", RetryClass::Idempotent),
+            ("Get-ManagementScope", RetryClass::Idempotent),
+            ("Get-ServicePrincipal", RetryClass::Idempotent),
+            ("Test-ApplicationAccessPolicy", RetryClass::Idempotent),
+            ("Test-ServicePrincipalAuthorization", RetryClass::Idempotent),
+            // Membership mutators: groups.rs treats the replay reply as success.
+            ("Add-DistributionGroupMember", RetryClass::Idempotent),
+            ("Remove-DistributionGroupMember", RetryClass::Idempotent),
+            ("New-DistributionGroup", RetryClass::NonIdempotent),
+            ("New-ManagementRoleAssignment", RetryClass::NonIdempotent),
+            ("New-ManagementScope", RetryClass::NonIdempotent),
+            ("New-ServicePrincipal", RetryClass::NonIdempotent),
+            ("Remove-ApplicationAccessPolicy", RetryClass::NonIdempotent),
+            ("Remove-DistributionGroup", RetryClass::NonIdempotent),
+            ("Remove-ManagementRoleAssignment", RetryClass::NonIdempotent),
+            ("Set-ManagementScope", RetryClass::NonIdempotent),
+            ("Frobnicate-X", RetryClass::NonIdempotent),
+            ("", RetryClass::NonIdempotent),
+        ];
+        for (cmdlet, want) in table {
+            assert_eq!(retry_class_for(cmdlet), *want, "{cmdlet:?}");
+        }
     }
 
     #[test]

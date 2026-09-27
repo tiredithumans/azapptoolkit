@@ -131,7 +131,8 @@ pub enum RetryReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryClass {
     /// GET/HEAD/PUT/DELETE, or a POST that is semantically a read (a `$batch`
-    /// of GET sub-requests). Every transient class is retried.
+    /// of GET sub-requests, or an Exchange `Get-`/`Test-` cmdlet — every cmdlet
+    /// is a POST). Every transient class is retried.
     Idempotent,
     /// A POST/PATCH that creates or mutates. Only [`RetryReason::Throttled`] is
     /// retried.
@@ -164,7 +165,11 @@ pub enum Attempt<T, E> {
 /// `next_backoff_ms`, same `attempt += 1` — differing only in how they turned a
 /// status into their own error and, for Graph, a throttle-observer callback.
 /// Retry *semantics* are a policy, and a policy re-derived in four places is one
-/// that can silently diverge in three of them.
+/// that can silently diverge in three of them. Exchange was the last client to
+/// move — every Exchange call is a POST, so it takes its class from the cmdlet
+/// verb — and `repo_invariants/trust.rs` now fails any source outside this
+/// module that names the raw schedule primitives (`MAX_RETRIES`,
+/// `next_backoff_ms`, `sleep_before_retry`, …).
 ///
 /// `attempt` receives the zero-based attempt number (for its own logging) and
 /// does its own send, status mapping and body reading; everything about

@@ -10,7 +10,8 @@
 //! Mirrors [`azapptoolkit_graph`]: pulls a bearer token from a
 //! [`azapptoolkit_core::token::BearerProvider`] (here for the
 //! `https://outlook.office365.com/Exchange.Manage` audience) and retries
-//! transient failures with the same exponential backoff.
+//! transient failures through the same `core::http_retry::with_retries` policy,
+//! with the retry class taken from the cmdlet verb (every call is a POST).
 
 pub mod aap;
 pub mod client;

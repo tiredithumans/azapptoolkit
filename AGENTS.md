@@ -84,7 +84,7 @@ docs/CHANGELOG-archive.md            # releases <= 0.26.3 (split out of CHANGELO
 
 ## Canonical commands
 
-Every build/dev/verify command is a `just` recipe (`just --list` describes each; never hand-type `cargo`). Day to day:
+Every build/dev/verify command is a `just` recipe (never hand-type `cargo`). Day to day:
 `just check` · `just test-crate <crate>` · `just verify` (before declaring a change done) ·
 `just verify-full` (CI parity) · `just clean` (both build trees). Browser-gated: `just web-itest`,
 `just web-itest-size`. Pages demo: `just web-build-pages [BASE]`. Release builds are per-host
@@ -105,7 +105,7 @@ bake them via `.env`).
 - **Every paged read sends `$top`** (`client::MAX_PAGE_SIZE`; `/applications` sends `DEFAULT_APP_PAGE_SIZE`) — paging is serial.
 - **Full-collection PATCH for `appRoles` / `oauth2PermissionScopes`:** re-read live, mutate, write the whole array back; disable then remove; exposed app roles edit the paired application as raw JSON; bust with `invalidate_app_details` only.
 - **camelCase vs snake_case:** Graph domain models are camel (no serde rename), DTOs/bindings snake; `Application` + `AuditItem` cross IPC as-is, so a rename is a wire-format change.
-- **One definition per policy:** HTTP error taxonomy from `core::http_error_enum!`, retry budget from `core::http_retry` (incl. `$batch`), re-auth-fatal codes only in `core::reauth::REAUTH_FATAL_CODES`.
+- **One definition per policy:** HTTP errors from `core::http_error_enum!` (Exchange: hand-rolled, conformance-tested), retries from `core::http_retry` (incl. `$batch`), re-auth-fatal codes only in `core::reauth::REAUTH_FATAL_CODES`.
 - **The `BearerProvider` boundary carries the auth classification** as `core::token::TokenError { code, message }` — never a bare `String` — with `token_adapter::token_error` as the sole mapping.
 - **Per-tenant operator defaults live in `settings.json`** (`UserSettings.tenant_defaults`); two writers read-modify-write via `UserSettings::stored`; `apply_tenant_defaults` destructures exhaustively and preserves the rotation-owned vault fields.
 - **Build-time config baking:** `build.rs` reads `.env` → `AZAPPTOOLKIT_BUILD_*`; env vars override. **CSP governs the webview only** — backend reqwest egress needs no `connect-src` change.

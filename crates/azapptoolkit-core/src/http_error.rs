@@ -1,5 +1,8 @@
-//! One definition of the HTTP client error taxonomy the four typed clients
-//! share.
+//! One definition of the HTTP client error taxonomy the typed clients share:
+//! Graph, ARM and Key Vault are instances of this macro. Exchange stays
+//! hand-written because its `Forbidden { detail, had_diagnostics }` is a struct
+//! variant the `extra` arm cannot express; `azapptoolkit-exchange`'s
+//! `tests/error_conformance.rs` pins it to an instance of this macro instead.
 //!
 //! `GraphError`, `ArmError` and `KeyVaultError` were three hand-maintained
 //! enums with byte-for-byte identical variants, identical `#[error(…)]`
@@ -20,7 +23,7 @@
 
 /// Defines a client error enum with the shared HTTP taxonomy.
 ///
-/// Generates the nine common variants, `is_retryable` (delegating to
+/// Generates the ten common variants, `is_retryable` (delegating to
 /// [`crate::http_retry::is_retryable_code`]) and `ui_code` (the single
 /// variant-to-wire-code table). The `Token` arm passes an auth classification
 /// through via [`crate::reauth::passthrough_code`] rather than flattening it —
