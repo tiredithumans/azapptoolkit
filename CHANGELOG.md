@@ -249,6 +249,19 @@
 - **Restore no longer re-issues client secrets that had already expired when the backup was
   taken.** Each one is named in the report and counted in the plan; a secret that expired after the
   backup is still re-issued.
+- **The restore plan now shows what blocks a restore, and all the work it will do, before you
+  confirm.** A backup written by a newer version of azapptoolkit was accepted by the plan and
+  refused only after you confirmed; it is now blocked in the plan, as a backup from another cloud
+  already was. Loading a backup into the tenant it was taken from now warns that restoring creates
+  a second copy of every app instead of rolling anything back. The plan also counts the enterprise
+  apps whose access will be re-applied, those that need manual follow-up, the managed identities
+  to re-bind, and the gaps the backup itself recorded.
+- **Restored apps keep their Expose-an-API settings when an identifier URI contains the tenant ID
+  or a custom prefix.** Only `api://{appId}` was rewritten to the new app's ID.
+  `api://{tenantId}/{appId}`, `api://{tenantId}/{name}` and `api://{name}/{appId}` kept the source
+  tenant's IDs and were rejected by the destination tenant, and because the scopes and
+  pre-authorized apps go in the same update, all of them were lost with a single warning. Every
+  `api://` URI now has the source app and tenant IDs replaced.
 - **A tenant backup no longer reads as complete when it could not read a managed identity's
   permissions or an enterprise app's assignments.** When Graph failed to return a managed
   identity's held app roles, or an enterprise app's assigned users/groups or group memberships, the

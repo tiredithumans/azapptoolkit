@@ -205,8 +205,9 @@ pub fn DisasterRecoveryView() -> impl IntoView {
         });
     });
 
-    // Restore is blocked on a cloud mismatch (a hard error from the backend too).
-    let cloud_blocked = move || plan.get().and_then(|p| p.cloud_mismatch).is_some();
+    // Restore is blocked on a cloud mismatch or a too-new manifest (both hard
+    // errors from the backend too).
+    let plan_blocked = move || plan.get().is_some_and(|p| p.is_blocked());
 
     view! {
         <div class="tool-page dr-view">
@@ -367,7 +368,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                     >
                         <Icon name=IconName::Upload size=16 /> " Load backup file…"
                     </Button>
-                    <Show when=move || plan.get().is_some() && !cloud_blocked() && !restoring.get()>
+                    <Show when=move || plan.get().is_some() && !plan_blocked() && !restoring.get()>
                         <Button appearance=ButtonAppearance::Primary on_click=move |_| confirm_open.set(true)>
                             "Restore into this tenant…"
                         </Button>
@@ -432,10 +433,14 @@ pub fn DisasterRecoveryView() -> impl IntoView {
     }
 }
 
-/// The dry-run plan: counts + the cloud-mismatch blocker + the tenant-change note.
+/// The dry-run plan: the work of all five passes, both blockers (cloud
+/// mismatch, too-new manifest), the tenant-change note, and a duplicate
+/// warning when the backup is being restored into the tenant it came from.
 #[component]
 fn RestorePlanView(plan: backup::RestorePlan) -> impl IntoView {
     let cloud = plan.cloud_mismatch.clone();
+    let schema = plan.schema_too_new.clone();
+    let same_tenant = (!plan.tenant_changed).then(|| plan.source_tenant_id.clone());
     view! {
         <div class="dr-view__plan">
             {cloud.map(|m| view! {
@@ -446,6 +451,25 @@ fn RestorePlanView(plan: backup::RestorePlan) -> impl IntoView {
                         m.backup_cloud.as_str(), m.destination_cloud.as_str(),
                     )}
                 </p>
+            })}
+            {schema.map(|s| view! {
+                <p class="dr-view__error" role="alert">
+                    {format!(
+                        "This backup was written by a newer version of azapptoolkit (manifest \
+                         schema {}; this version reads up to {}). Restore is blocked — update \
+                         azapptoolkit first.",
+                        s.manifest_version, s.supported_version,
+                    )}
+                </p>
+            })}
+            {same_tenant.map(|src| view! {
+                <Callout tone="warn">
+                    {format!(
+                        "This backup was taken from this tenant ({src}). Restoring it here does \
+                         not roll anything back — it creates a second copy of every app \
+                         registration in it, with new appIds and new secrets.",
+                    )}
+                </Callout>
             })}
             <Show when=move || plan.tenant_changed>
                 <p class="dr-view__note">
@@ -468,6 +492,26 @@ fn RestorePlanView(plan: backup::RestorePlan) -> impl IntoView {
                 <li>{format!("{} certificate(s) need manual re-upload", plan.certificates_needing_manual_upload)}</li>
                 <li>{format!("{} federated credential(s) to restore (each validated and listed in the report)", plan.federated_credentials_to_restore)}</li>
                 <li>{format!("{} owner(s) to remap by name", plan.owners_to_remap)}</li>
+                <li>{format!(
+                    "{} enterprise app(s) to re-apply access to (settings, role assignments, group memberships)",
+                    plan.enterprise_apps_to_reapply,
+                )}</li>
+                {(plan.enterprise_apps_manual > 0).then(|| view! {
+                    <li>{format!(
+                        "{} enterprise app(s) need manual follow-up (gallery/foreign apps, or no paired app registration in this backup)",
+                        plan.enterprise_apps_manual,
+                    )}</li>
+                })}
+                <li>{format!(
+                    "{} managed identity(ies) to re-bind by name — each must already be recreated here; Azure RBAC is always a manual step",
+                    plan.managed_identities_to_rebind,
+                )}</li>
+                {(plan.skipped_in_backup > 0).then(|| view! {
+                    <li>{format!(
+                        "{} gap(s) recorded in the backup (objects or parts it could not read) — restoring will not recreate what is missing",
+                        plan.skipped_in_backup,
+                    )}</li>
+                })}
             </ul>
         </div>
     }

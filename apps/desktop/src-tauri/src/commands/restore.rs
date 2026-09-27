@@ -10,7 +10,8 @@
 //!    this restore already created (see below). Reuses
 //!    `create_application_core_tagged`.
 //! 2. **Wire references** — declared permissions (remapped), identifier URIs
-//!    (`api://{old}` → `api://{new}`), Expose-an-API scopes + pre-authorized
+//!    (every `api://` segment naming the source appId / source tenant →
+//!    the new appId / destination tenant), Expose-an-API scopes + pre-authorized
 //!    apps, authentication/redirect URIs, federated credentials (validated +
 //!    reported), owners (remapped by UPN / display name), and bulk-regenerate
 //!    secrets.
@@ -71,7 +72,7 @@ use crate::dto::backup::{
     AppRegistrationBackup, BACKUP_SCHEMA_VERSION, CloudMismatch, CredentialMeta,
     EnterpriseAppBackup, ManagedIdentityBackup, ManualItem, PrincipalRef, RegeneratedSecret,
     RestoreFailure, RestorePlan, RestoreReport, RestoredApp, RestoredEnterpriseApp,
-    RestoredManagedIdentity, TenantBackup,
+    RestoredManagedIdentity, SchemaTooNew, TenantBackup,
 };
 use crate::dto::bulk::BulkProgress;
 use crate::state::AppState;
@@ -305,7 +306,11 @@ async fn decide_adoption(
 
 /// Dry-run analysis of restoring `backup` into the current tenant — counts and
 /// warnings only, no writes. The frontend shows this before the operator
-/// confirms the (irreversible) restore.
+/// confirms the (irreversible) restore: the work of all five passes, both hard
+/// blockers (a cross-cloud manifest and a too-new `schema_version`, which
+/// [`restore_tenant`] still enforces on its own), and whether the destination
+/// is the tenant the backup was taken from. A blocked manifest still returns
+/// a plan — carrying the blocker — so the operator sees why before Confirm.
 #[tauri::command]
 pub async fn plan_restore(
     state: State<'_, AppState>,
@@ -326,7 +331,7 @@ pub async fn plan_restore(
 /// additive, so an older manifest restores correctly, and refusing one would
 /// break the DR case the format was versioned to support.
 fn check_manifest_schema(schema_version: u32) -> Result<(), UiError> {
-    if schema_version > BACKUP_SCHEMA_VERSION {
+    if schema_too_new(schema_version).is_some() {
         return Err(UiError::validation(
             "schema_too_new",
             format!(
@@ -339,8 +344,17 @@ fn check_manifest_schema(schema_version: u32) -> Result<(), UiError> {
     Ok(())
 }
 
-/// Pure dry-run analysis (no I/O): the counts plus the cloud/tenant checks
-/// derived from the backup. Split out from [`plan_restore`] so it is unit-testable
+/// The one schema rule, shared by the dry-run blocker and the restore's own
+/// refusal: only a manifest from a *newer* build is refused.
+fn schema_too_new(schema_version: u32) -> Option<SchemaTooNew> {
+    (schema_version > BACKUP_SCHEMA_VERSION).then_some(SchemaTooNew {
+        manifest_version: schema_version,
+        supported_version: BACKUP_SCHEMA_VERSION,
+    })
+}
+
+/// Pure dry-run analysis (no I/O): the counts plus the cloud/schema/tenant
+/// checks derived from the backup. Split out from [`plan_restore`] so it is unit-testable
 /// without an `AppState`. `dest_cloud` is the destination build's cloud.
 fn build_restore_plan(
     backup: &TenantBackup,
@@ -361,8 +375,24 @@ fn build_restore_plan(
         .flat_map(|a| &a.secrets)
         .filter(|m| expired_at_backup(m, taken_at))
         .count();
+    // Pass 4 forecast, mirroring `restore_enterprise_app`: an enterprise app is
+    // replayed only when it is not foreign and its app registration is in this
+    // backup with a service principal (Pass 1 creates the SP only then);
+    // everything else becomes a runbook item.
+    let with_sp: HashSet<&str> = backup
+        .app_registrations
+        .iter()
+        .filter(|a| a.has_service_principal)
+        .map(|a| a.source_app_id.as_str())
+        .collect();
+    let enterprise_apps_to_reapply = backup
+        .enterprise_apps
+        .iter()
+        .filter(|e| !e.is_foreign_tenant && with_sp.contains(e.source_app_id.as_str()))
+        .count();
     RestorePlan {
         cloud_mismatch,
+        schema_too_new: schema_too_new(backup.schema_version),
         tenant_changed: backup.source_tenant_id != tenant_id,
         source_tenant_id: backup.source_tenant_id.clone(),
         destination_tenant_id: tenant_id,
@@ -372,11 +402,16 @@ fn build_restore_plan(
         certificates_needing_manual_upload: sum(|a| a.certificates.len()),
         federated_credentials_to_restore: sum(|a| a.federated_credentials.len()),
         owners_to_remap: sum(|a| a.owners.len()),
+        enterprise_apps_to_reapply,
+        enterprise_apps_manual: backup.enterprise_apps.len() - enterprise_apps_to_reapply,
+        managed_identities_to_rebind: backup.managed_identities.len(),
+        skipped_in_backup: backup.skipped.len(),
     }
 }
 
-/// Replays the backup's app registrations into the current tenant. See the
-/// module docs for the pass structure. Busts the destination list caches on a
+/// Replays the backup (app registrations, enterprise apps, managed-identity
+/// permissions) into the current tenant. See the module docs for the pass
+/// structure. Busts the destination list caches on a
 /// run that created anything.
 #[tauri::command]
 pub async fn restore_tenant(
@@ -560,6 +595,8 @@ pub async fn restore_tenant(
             &session,
             cloud,
             backup.created_at,
+            &backup.source_tenant_id,
+            &tenant_id,
         )
         .await;
         report.apps.push(restored);
@@ -722,7 +759,9 @@ struct CreatedApp {
 /// For an adopted app the PATCHes are full-replace and simply re-applied, while
 /// the additive writes (federated credentials, owners, secrets) skip what the
 /// earlier run already put there. `taken_at` is the backup's timestamp, the
-/// cutoff for [`expired_at_backup`].
+/// cutoff for [`expired_at_backup`]; the two tenant ids are what the
+/// identifier-URI rewrite maps (source → destination).
+#[allow(clippy::too_many_arguments)]
 async fn wire_application(
     client: &GraphClient,
     c: &CreatedApp,
@@ -731,6 +770,8 @@ async fn wire_application(
     session: &SessionDead,
     cloud: CloudEnvironment,
     taken_at: DateTime<Utc>,
+    source_tenant_id: &str,
+    dest_tenant_id: &str,
 ) -> (RestoredApp, Vec<ManualItem>) {
     let app = &c.backup;
     // Sign-in trusts this app gained from the manifest. Reported separately
@@ -762,9 +803,15 @@ async fn wire_application(
     }
 
     // Identifier URIs + Expose-an-API (scope ids preserved so consumers' grants
-    // still resolve; `api://{old}` rewritten to the new appId).
-    let identifier_uris =
-        rewrite_identifier_uris(&app.identifier_uris, &app.source_app_id, &c.new_app_id);
+    // still resolve; every `api://` segment naming the source appId or source
+    // tenant rewritten, since the destination rejects a GUID matching neither).
+    let identifier_uris = rewrite_identifier_uris(
+        &app.identifier_uris,
+        &app.source_app_id,
+        &c.new_app_id,
+        source_tenant_id,
+        dest_tenant_id,
+    );
     let pre_auth = remap_pre_authorized(&app.pre_authorized_applications, app_id_remap);
     if !identifier_uris.is_empty() || !app.api_scopes.is_empty() || !pre_auth.is_empty() {
         let patch = ApplicationExposeApiPatch {
@@ -1558,6 +1605,68 @@ mod tests {
             build_restore_plan(&backup, "src-tenant".to_string(), CloudEnvironment::UsGov);
         assert!(blocked.cloud_mismatch.is_some());
         assert!(!blocked.tenant_changed);
+    }
+
+    #[test]
+    fn build_restore_plan_forecasts_passes_4_and_5_and_blocks_a_newer_schema() {
+        use crate::dto::backup::{
+            AppRegistrationBackup, EnterpriseAppBackup, ManagedIdentityBackup, SkippedObject,
+            TenantBackup,
+        };
+
+        let app = |id: &str, sp: bool| AppRegistrationBackup {
+            source_app_id: id.into(),
+            has_service_principal: sp,
+            ..Default::default()
+        };
+        let ent = |id: &str, foreign: bool| EnterpriseAppBackup {
+            source_app_id: id.into(),
+            is_foreign_tenant: foreign,
+            ..Default::default()
+        };
+        let mut backup = TenantBackup {
+            schema_version: BACKUP_SCHEMA_VERSION,
+            created_at: chrono::DateTime::from_timestamp(1_000_000, 0).unwrap(),
+            source_tenant_id: "src-tenant".into(),
+            cloud: CloudEnvironment::Commercial,
+            app_registrations: vec![app("paired", true), app("no-sp", false)],
+            enterprise_apps: vec![
+                // Replayed: paired, not foreign, its app reg carries an SP.
+                ent("paired", false),
+                // Runbook items: foreign/gallery, no app reg in the backup,
+                // and an app reg Pass 1 creates without an SP.
+                ent("paired", true),
+                ent("absent", false),
+                ent("no-sp", false),
+            ],
+            managed_identities: vec![ManagedIdentityBackup::default(); 2],
+            skipped: vec![SkippedObject::new("application", "obj-x", None, "403")],
+        };
+
+        let plan = build_restore_plan(
+            &backup,
+            "dest-tenant".to_string(),
+            CloudEnvironment::Commercial,
+        );
+        assert_eq!(plan.enterprise_apps_to_reapply, 1);
+        assert_eq!(plan.enterprise_apps_manual, 3);
+        assert_eq!(plan.managed_identities_to_rebind, 2);
+        assert_eq!(plan.skipped_in_backup, 1);
+        assert!(plan.schema_too_new.is_none());
+        assert!(!plan.is_blocked());
+
+        // A newer manifest still gets a plan — carrying the blocker, so the
+        // operator sees it before Confirm rather than after.
+        backup.schema_version = BACKUP_SCHEMA_VERSION + 1;
+        let plan = build_restore_plan(
+            &backup,
+            "dest-tenant".to_string(),
+            CloudEnvironment::Commercial,
+        );
+        let too_new = plan.schema_too_new.as_ref().expect("blocked");
+        assert_eq!(too_new.manifest_version, BACKUP_SCHEMA_VERSION + 1);
+        assert_eq!(too_new.supported_version, BACKUP_SCHEMA_VERSION);
+        assert!(plan.is_blocked());
     }
 
     #[test]

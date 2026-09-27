@@ -1,6 +1,6 @@
 //! Disaster-recovery backup IPC bindings. The progress stream lives in
-//! `bindings::events::backup_progress`. The restore side is added with the
-//! restore slices.
+//! `bindings::events::backup_progress`. The restore side (plan, run, cancel,
+//! save report) follows the backup commands.
 
 use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;

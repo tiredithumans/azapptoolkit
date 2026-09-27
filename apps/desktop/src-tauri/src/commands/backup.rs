@@ -11,10 +11,9 @@
 //! - **App registrations are captured in full** (manifest, auth, Expose-an-API,
 //!   federated creds, owners, declared permissions, credential metadata) — they
 //!   are the primary DR target and what the app-registration restore replays.
-//!   Enterprise apps and managed identities are captured at the inventory level
-//!   here; their per-principal assignment / held-permission / Azure-RBAC detail
-//!   is captured alongside the restore logic that consumes it (the enterprise
-//!   and managed-identity restore slices).
+//!   Enterprise apps are captured with their settings, assignments and group
+//!   memberships; managed identities with their held Graph app-roles. Azure
+//!   RBAC is deliberately not captured — restore lists it as a runbook item.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -180,8 +179,7 @@ pub async fn backup_tenant(
     // ---- Enterprise apps: batched per-SP fan-out (full SP + assignments +
     // group memberships). Foreign/gallery SPs are captured the same way; their
     // restore is a runbook (re-consent / re-instantiate), not an automatic
-    // replay. The managed-identity Azure-RBAC detail is captured by the MI
-    // re-bind slice.
+    // replay.
     let app_obj_by_app_id = Arc::new(app_obj_by_app_id);
     let tenant_arc: Arc<str> = Arc::from(tenant_id.as_str());
     let enterprise_sps: Vec<ServicePrincipal> = sp_index
@@ -771,7 +769,6 @@ async fn backup_managed_identities<S: ProgressSink>(
             subtype: MiSubtype::from_alternative_names(&sp.alternative_names),
             arm_resource_id: user_assigned_arm_id(&sp.alternative_names),
             held_app_roles,
-            ..Default::default()
         });
         tick.advance(Some(sp.display_name.clone())).await;
     }

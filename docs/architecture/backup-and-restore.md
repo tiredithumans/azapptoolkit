@@ -61,8 +61,8 @@ multi-authority auth.
    MIs; soft-deleted MI service principals can't be recovered. So MIs are a
    **redeploy runbook + permission re-bind**, never a restorable object: the
    infra team recreates them (ARM/Bicep) with new principal ids, then the
-   restore re-applies their Azure RBAC and Graph app-roles, matched by
-   `display_name`.
+   restore re-binds their Graph app-roles, matched by `display_name`, and lists
+   their Azure RBAC as a runbook item.
 
 ## The manifest (`azapptoolkit-dto/src/backup.rs`)
 
@@ -77,6 +77,8 @@ tenant before anyone can inspect the result — so a manifest carrying fields th
 build cannot interpret must be rejected, not partially applied. Only the future
 direction is refused: every field is `serde(default)` and additive, so an older
 manifest restores correctly, which is the DR case the version field exists for.
+The same rule (`schema_too_new`) also feeds the dry-run, so a too-new manifest
+is shown as blocked in the plan, before Confirm, rather than refused only after.
 
 Three object classes:
 
@@ -88,7 +90,9 @@ Three object classes:
 - `EnterpriseAppBackup` — identity + flags + foreign-tenant info + paired
   app-registration ref; assignees and held app-roles are resource-relative.
 - `ManagedIdentityBackup` — identity + subtype + ARM resource id + held Graph
-  app-roles + Azure RBAC assignments (with scan-coverage).
+  app-roles. Azure RBAC is not captured — it is runbook-only on restore. (Builds
+  before this carried never-populated `azureRoles` / `azureRoleCoverage` keys;
+  those manifests still load, the keys are ignored.)
 
 ## Backup (`commands/backup.rs`) — shipped
 
@@ -139,22 +143,31 @@ run is an **error**, not a truncated success — a partial backup is a dangerous
 artifact. `save_backup_to_file` writes JSON only (the manifest is a structured
 restore artifact, not a spreadsheet) via the shared `save_export_via_dialog`.
 
-## Restore (`commands/restore.rs`) — shipped (app registrations)
+## Restore (`commands/restore.rs`) — shipped (app registrations, enterprise apps, managed identities)
 
-`plan_restore` is a dry-run: it computes the counts and surfaces the
-cloud-mismatch blocker + the tenant-change note, no writes (mirrors the
-`bulk_create` validate-only pattern). The frontend shows it before the operator
-confirms.
+`plan_restore` is a dry-run, no writes (mirrors the `bulk_create` validate-only
+pattern). It computes the counts for all five passes — including the Pass 4
+split into enterprise apps to re-apply vs. runbook items (foreign, or no paired
+app registration with an SP in this backup), the MIs to re-bind, and the
+backup's own `skipped` gaps — and surfaces both hard blockers, a cross-cloud
+manifest and a too-new `schema_version` (`RestorePlan::is_blocked`, the one
+definition the view reads; `restore_tenant` still enforces both itself), plus
+the tenant-change note and, when the destination is the source tenant, a
+warning that restoring duplicates every app rather than rolling anything back.
+The frontend shows it before the operator confirms.
 
-`restore_tenant` replays **app registrations** in passes so inter-app
-dependencies resolve:
+`restore_tenant` replays the manifest in five passes so inter-app dependencies
+resolve:
 
 1. **Create shells** — `create_application_core_tagged` per app (+ paired SP),
    or adoption of the app an earlier run created (below); build the
    `source_app_id → new_app_id` remap.
 2. **Wire references** — declared permissions (`remap_required_resource_access`:
    first-party appIds survive, custom ones remapped, permission ids preserved),
-   identifier URIs (`rewrite_identifier_uris`: `api://{old}` → `api://{new}`),
+   identifier URIs (`rewrite_identifier_uris`: every `api://` segment naming
+   the source appId or source tenant → the new appId / destination tenant —
+   Microsoft rejects a GUID segment matching neither, and the URIs share one
+   PATCH with the scopes and pre-authorized apps),
    Expose-an-API scopes (ids preserved) + pre-authorized apps (remapped),
    authentication, federated credentials (validated + reported, below), owners (`resolve_principal`
    by UPN / display name — unresolved are reported), and secret regeneration
@@ -238,7 +251,9 @@ certificates needing manual re-upload, per-app warnings, and hard failures.
 
 The remap helpers (`remap_required_resource_access`, `rewrite_identifier_uris`,
 `remap_pre_authorized`) are pure and unit-tested (first-party-survives vs
-custom-remap, the `api://` rewrite).
+custom-remap, the `api://` rewrite across Microsoft's four supported forms —
+`api://<appId>`, `api://<tenantId>/<appId>`, `api://<tenantId>/<string>`,
+`api://<string>/<appId>`).
 
 **Enterprise applications** restore in Pass 4. For an SP that was recreated by
 its paired app registration (it's in the `app_id_remap` and not foreign), the
@@ -250,8 +265,8 @@ memberships** (each group remapped by display name). Foreign/gallery apps and
 paired apps that weren't restored become `ManualItem` runbook entries
 (re-consent / re-instantiate from the gallery). Custom app-role *definitions*
 aren't restored, so an assignment to an unmatched custom role is reported, not
-applied. The backup captures this detail in a bounded per-SP fan-out
-(`backup_one_enterprise_app`: full SP + `appRoleAssignedTo` + group memberships).
+applied. The backup captures this detail in its batched Pass 2
+(`backup_enterprise_chunk`, above).
 
 **Managed identities** restore in Pass 5. MIs can't be created via Graph
 (they're Azure resources), so `restore_managed_identities` matches each

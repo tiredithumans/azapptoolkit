@@ -17,7 +17,9 @@
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
-use azapptoolkit_dto::backup::{RestorePlan, RestoreReport, RestoredApp, TenantBackup};
+use azapptoolkit_dto::backup::{
+    RestorePlan, RestoreReport, RestoredApp, SchemaTooNew, TenantBackup,
+};
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::dr::DisasterRecoveryView;
 
@@ -70,21 +72,31 @@ fn plan() -> RestorePlan {
         certificates_needing_manual_upload: 0,
         federated_credentials_to_restore: 0,
         owners_to_remap: 0,
+        ..Default::default()
     }
+}
+
+/// Mocks Load file → `plan_restore` answering `p`, mounts the view, and waits
+/// for the plan to render. `ts::reset()` is the caller's to have done.
+async fn load_plan(p: RestorePlan) -> ts::Mounted {
+    ts::mock_ok("load_backup_from_file", &Some(backup()));
+    ts::mock_ok("plan_restore", &p);
+
+    let m = ts::mount_view(|| view! { <DisasterRecoveryView /> });
+    ts::tick().await;
+
+    click_button("Load backup file…");
+    ts::wait_for(|| ts::query(".dr-view__plan").is_some()).await;
+    m
 }
 
 /// Drives Load file → confirm → Restore, with `restore_tenant` answering
 /// `report`.
 async fn run_restore(report: RestoreReport) -> ts::Mounted {
     ts::reset();
-    ts::mock_ok("load_backup_from_file", &Some(backup()));
-    ts::mock_ok("plan_restore", &plan());
     ts::mock_ok("restore_tenant", &report);
+    let m = load_plan(plan()).await;
 
-    let m = ts::mount_view(|| view! { <DisasterRecoveryView /> });
-    ts::tick().await;
-
-    click_button("Load backup file…");
     // The plan lands before the restore button is offered.
     ts::wait_for(|| has_button("Restore into this tenant…")).await;
     click_button("Restore into this tenant…");
@@ -111,6 +123,70 @@ fn click_button(label: &str) {
         }
     }
     panic!("no button labelled `{label}`");
+}
+
+/// A manifest from a newer build is blocked in the plan, before Confirm — not
+/// refused by `restore_tenant` only after the operator has confirmed.
+#[wasm_bindgen_test]
+async fn a_too_new_manifest_blocks_restore_before_confirm() {
+    ts::reset();
+    let _m = load_plan(RestorePlan {
+        schema_too_new: Some(SchemaTooNew {
+            manifest_version: 2,
+            supported_version: 1,
+        }),
+        ..plan()
+    })
+    .await;
+    assert!(ts::body_contains("newer version of azapptoolkit"));
+    assert!(
+        !has_button("Restore into this tenant…"),
+        "a blocked plan must not offer the restore"
+    );
+}
+
+/// Restoring into the tenant the backup came from duplicates the estate — the
+/// one case the tenant-change note never covered.
+#[wasm_bindgen_test]
+async fn restoring_into_the_source_tenant_warns_of_duplicates() {
+    ts::reset();
+    let _m = load_plan(RestorePlan {
+        tenant_changed: false,
+        ..plan()
+    })
+    .await;
+    assert!(ts::body_contains("second copy of every app registration"));
+    // Not a blocker: an operator may mean it.
+    assert!(has_button("Restore into this tenant…"));
+}
+
+/// The plan describes the enterprise-app, managed-identity and backup-gap
+/// work too, not just the app registrations.
+#[wasm_bindgen_test]
+async fn the_plan_lists_enterprise_and_managed_identity_work() {
+    ts::reset();
+    let _m = load_plan(RestorePlan {
+        enterprise_apps_to_reapply: 3,
+        enterprise_apps_manual: 2,
+        managed_identities_to_rebind: 4,
+        skipped_in_backup: 1,
+        ..plan()
+    })
+    .await;
+    assert!(ts::body_contains(
+        "3 enterprise app(s) to re-apply access to"
+    ));
+    assert!(ts::body_contains(
+        "2 enterprise app(s) need manual follow-up"
+    ));
+    assert!(ts::body_contains(
+        "4 managed identity(ies) to re-bind by name"
+    ));
+    assert!(ts::body_contains("1 gap(s) recorded in the backup"));
+    assert!(
+        !ts::body_contains("second copy"),
+        "a cross-tenant plan has no duplicate warning"
+    );
 }
 
 /// A completed restore reads as completed — and says nothing about stopping.

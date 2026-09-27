@@ -130,8 +130,10 @@ pub struct AppRegistrationBackup {
     pub description: Option<String>,
 
     // ---- Expose-an-API + identity ----
-    /// May contain `api://{source_app_id}` — restore rewrites that to the new
-    /// appId once the shell app exists.
+    /// May name the source appId or source tenant id in an `api://` segment
+    /// (`api://{appId}`, `api://{tenantId}/{appId}`, `api://{name}/{appId}`,
+    /// `api://{tenantId}/{name}`) — restore rewrites those segments to the new
+    /// appId / destination tenant once the shell app exists.
     #[serde(default)]
     pub identifier_uris: Vec<String>,
     #[serde(default)]
@@ -230,8 +232,9 @@ pub struct EnterpriseAppBackup {
 /// A managed identity snapshot. MIs can't be restored via Graph — they're Azure
 /// resources, recreated out-of-band (ARM/Bicep) with new principal/client ids.
 /// This captures what the restore's runbook + permission re-bind needs: the
-/// identity (matched to the redeployed MI by `display_name`), its held Graph
-/// app-roles, and its Azure RBAC assignments.
+/// identity (matched to the redeployed MI by `display_name`) and its held Graph
+/// app-roles. Azure RBAC is deliberately not captured: restore lists it as a
+/// runbook item, and the MI detail view reads it live.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedIdentityBackup {
@@ -248,14 +251,6 @@ pub struct ManagedIdentityBackup {
     /// resource-relative — re-granted by `grant_app_role` after redeploy.
     #[serde(default)]
     pub held_app_roles: Vec<AppRoleGrantRef>,
-    /// Azure RBAC role assignments — best-effort (requires ARM consent); empty
-    /// when the ARM scan was unavailable. `coverage` records how complete it was.
-    #[serde(default)]
-    pub azure_roles: Vec<AzureRoleRef>,
-    /// Coverage of the Azure-RBAC scan, so an incomplete scan never reads as
-    /// "this MI holds no Azure roles".
-    #[serde(default)]
-    pub azure_role_coverage: Option<AzureRoleCoverage>,
 }
 
 /// Credential **metadata** — never a value. Client-secret values and cert
@@ -325,35 +320,6 @@ pub struct AppRoleAssigneeRef {
     pub app_role_value: Option<String>,
 }
 
-/// One Azure RBAC role assignment held by a managed identity. Built-in role
-/// definition ids are stable across tenants and survive verbatim; a *custom*
-/// role definition must already exist in the destination (restore reports it as
-/// unresolved otherwise). The scope is stored verbatim — the operator maps it
-/// to the destination subscription/resource group as part of the redeploy.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AzureRoleRef {
-    pub role_name: String,
-    /// Bare role-definition GUID (built-in ids are stable across tenants).
-    #[serde(default)]
-    pub role_definition_id: Option<String>,
-    /// ARM scope the role was granted at, in the source subscription.
-    pub scope: String,
-    #[serde(default)]
-    pub high_privilege: bool,
-}
-
-/// How complete an MI's Azure-RBAC scan was, mirroring
-/// `managed_identity::AzureRolesResult` so a partial scan never reads as
-/// authoritative.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AzureRoleCoverage {
-    pub scanned: usize,
-    pub total: usize,
-    pub skipped: usize,
-}
-
 // ===================== Restore =====================
 
 /// Dry-run analysis of restoring a [`TenantBackup`] into the current tenant —
@@ -366,8 +332,14 @@ pub struct RestorePlan {
     /// (endpoints + well-known appIds differ). When set, restore refuses to run.
     #[serde(default)]
     pub cloud_mismatch: Option<CloudMismatch>,
-    /// Informational: the source tenant differs from the destination — the
-    /// expected DR case, surfaced so the operator confirms intent.
+    /// Hard blocker, like `cloud_mismatch`: the manifest was written by a newer
+    /// build than this one. When set, restore refuses to run.
+    #[serde(default)]
+    pub schema_too_new: Option<SchemaTooNew>,
+    /// The source tenant differs from the destination — the expected DR case,
+    /// surfaced so the operator confirms intent. `false` means a restore into
+    /// the tenant the backup was taken from, which duplicates the estate
+    /// rather than rolling anything back; the view warns about it.
     pub tenant_changed: bool,
     pub source_tenant_id: String,
     pub destination_tenant_id: String,
@@ -386,6 +358,41 @@ pub struct RestorePlan {
     pub certificates_needing_manual_upload: usize,
     pub federated_credentials_to_restore: usize,
     pub owners_to_remap: usize,
+    /// Pass 4: enterprise apps whose settings, role assignments and group
+    /// memberships are re-applied to a service principal the restore recreates.
+    #[serde(default)]
+    pub enterprise_apps_to_reapply: usize,
+    /// Enterprise apps that become a runbook item instead — foreign/gallery
+    /// apps, or no paired app registration with a service principal in this
+    /// backup.
+    #[serde(default)]
+    pub enterprise_apps_manual: usize,
+    /// Pass 5: managed identities whose Graph app-roles are re-bound, matched
+    /// by display name — each must already be recreated in the destination;
+    /// Azure RBAC is always a runbook item.
+    #[serde(default)]
+    pub managed_identities_to_rebind: usize,
+    /// Gaps the backup itself recorded (`TenantBackup.skipped`): objects, or
+    /// parts of objects, it could not read — restore cannot recreate what is
+    /// missing.
+    #[serde(default)]
+    pub skipped_in_backup: usize,
+}
+
+impl RestorePlan {
+    /// The single definition of "restore cannot run": a cloud mismatch or a
+    /// too-new manifest. `restore_tenant` enforces both independently.
+    pub fn is_blocked(&self) -> bool {
+        self.cloud_mismatch.is_some() || self.schema_too_new.is_some()
+    }
+}
+
+/// The manifest was written by a newer build; restore refuses it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaTooNew {
+    pub manifest_version: u32,
+    pub supported_version: u32,
 }
 
 /// The manifest's cloud doesn't match this build's configured cloud.
@@ -642,6 +649,74 @@ mod tests {
             backup.managed_identities[0].subtype,
             MiSubtype::SystemAssigned
         );
+    }
+
+    /// Builds up to this one wrote `"azureRoles": [], "azureRoleCoverage": null`
+    /// on every managed identity (the fields were never populated and are
+    /// gone); those manifests must still load.
+    #[test]
+    fn a_manifest_carrying_the_retired_azure_role_fields_still_loads() {
+        let json = serde_json::json!({
+            "schemaVersion": 1,
+            "createdAt": "2026-06-15T00:00:00Z",
+            "sourceTenantId": "tenant-src",
+            "cloud": "commercial",
+            "managedIdentities": [{
+                "sourcePrincipalId": "mi-1",
+                "sourceAppId": "mi-app-1",
+                "displayName": "mi-prod",
+                "subtype": "userAssigned",
+                "heldAppRoles": [],
+                "azureRoles": [],
+                "azureRoleCoverage": null
+            }]
+        });
+        let backup: TenantBackup = serde_json::from_value(json).unwrap();
+        assert_eq!(backup.managed_identities.len(), 1);
+        assert_eq!(backup.managed_identities[0].display_name, "mi-prod");
+    }
+
+    #[test]
+    fn restore_plan_is_blocked_by_either_blocker_only() {
+        assert!(!RestorePlan::default().is_blocked());
+        let cloud = RestorePlan {
+            cloud_mismatch: Some(CloudMismatch::default()),
+            ..Default::default()
+        };
+        assert!(cloud.is_blocked());
+        let schema = RestorePlan {
+            schema_too_new: Some(SchemaTooNew {
+                manifest_version: 2,
+                supported_version: 1,
+            }),
+            ..Default::default()
+        };
+        assert!(schema.is_blocked());
+    }
+
+    /// A plan serialized before the blocker/count fields existed still loads,
+    /// with the new fields at their neutral defaults.
+    #[test]
+    fn a_restore_plan_without_the_new_fields_still_loads() {
+        let json = serde_json::json!({
+            "cloudMismatch": null,
+            "tenantChanged": true,
+            "sourceTenantId": "src",
+            "destinationTenantId": "dst",
+            "appRegistrationsToCreate": 2,
+            "secretsToRegenerate": 1,
+            "certificatesNeedingManualUpload": 0,
+            "federatedCredentialsToRestore": 0,
+            "ownersToRemap": 3
+        });
+        let plan: RestorePlan = serde_json::from_value(json).unwrap();
+        assert_eq!(plan.app_registrations_to_create, 2);
+        assert!(plan.schema_too_new.is_none());
+        assert_eq!(plan.enterprise_apps_to_reapply, 0);
+        assert_eq!(plan.enterprise_apps_manual, 0);
+        assert_eq!(plan.managed_identities_to_rebind, 0);
+        assert_eq!(plan.skipped_in_backup, 0);
+        assert!(!plan.is_blocked());
     }
 
     /// `CredentialMeta` has no value field — this is the structural guarantee
