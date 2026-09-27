@@ -14,7 +14,7 @@ use thaw::{Body1, Button, ButtonAppearance, Card, Field, Input, Spinner, Spinner
 use crate::bindings::applications;
 use crate::bindings::auth;
 use crate::bindings::enterprise_application::{self, EnterpriseApplicationDetail};
-use crate::bindings::sso::{self, OidcSsoSummary, SamlSsoSummary, SsoConfigDto};
+use crate::bindings::sso::{self, SsoConfigDto, SsoMode, SsoSummary};
 use crate::components::claims_editor::{ClaimsEditor, ClaimsEditorState};
 use crate::components::detail_header::DetailHeader;
 use crate::components::directory_search::{DirectoryScope, DirectorySearch};

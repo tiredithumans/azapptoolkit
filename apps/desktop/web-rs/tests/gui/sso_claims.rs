@@ -26,11 +26,10 @@ const UNREAD: &str = "Couldn't read this app's current claims policy";
 fn mount(claims_read_failed: bool) -> ts::Mounted {
     let mut cfg = fixtures::sso_config("sp-demo", "app-demo");
     cfg.claims_read_failed = claims_read_failed;
+    cfg.rollover = Some(fixtures::signing_cert_rollover_steady(
+        "sp-demo", "app-demo",
+    ));
     ts::mock_ok("get_sso_config", &cfg);
-    ts::mock_ok(
-        "get_sso_summary",
-        &fixtures::saml_sso_summary("sp-demo", "app-demo"),
-    );
     ts::mock_ok(
         "get_signing_cert_rollover",
         &fixtures::signing_cert_rollover_steady("sp-demo", "app-demo"),
@@ -76,6 +75,9 @@ async fn an_unreadable_claims_policy_blocks_save_until_it_loads() {
     ts::mock_ok("request_scope_consent", &());
     let mut readable = fixtures::sso_config("sp-demo", "app-demo");
     readable.claims_read_failed = false;
+    readable.rollover = Some(fixtures::signing_cert_rollover_steady(
+        "sp-demo", "app-demo",
+    ));
     ts::mock_ok("get_sso_config", &readable);
     button("Load claims").click();
     ts::wait_for(|| ts::call_count("request_scope_consent") == 1).await;

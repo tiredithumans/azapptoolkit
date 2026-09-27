@@ -452,18 +452,14 @@ fn register_fixtures() {
     );
     // The SSO tab is fallible, so an unmocked read can't panic — but without
     // this a visitor clicking SSO got the DemoFriendly rejection where the
-    // whole tab should be, on the surface this app is most known for.
+    // whole tab should be, on the surface this app is most known for. The
+    // fixture also carries "Details for the application owner" — the values
+    // the whole SSO flow exists to produce, and the home of the "Copy all
+    // details" action — and the rollover panel's initial (staged) state.
     mock_ok("get_sso_config", &f::sso_config("sp-demo", "app-demo"));
-    // Same reasoning one section lower: without this, "Details for the
-    // application owner" — the values the whole SSO flow exists to produce, and
-    // the home of the "Copy all details" action — renders as a rejection.
-    mock_ok(
-        "get_sso_summary",
-        &f::saml_sso_summary("sp-demo", "app-demo"),
-    );
-    // The signing-certificate rollover panel sits inside the SSO tab and reads
-    // on mount, so it needs the same treatment — and the staged phase is the
-    // one worth showing a visitor.
+    // The rollover panel re-reads after its own buttons (stage, activate, …),
+    // so it needs the same treatment — and the staged phase is the one worth
+    // showing a visitor.
     mock_ok(
         "get_signing_cert_rollover",
         &f::signing_cert_rollover("sp-demo", "app-demo"),

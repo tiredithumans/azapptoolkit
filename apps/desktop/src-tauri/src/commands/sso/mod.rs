@@ -38,6 +38,7 @@ use crate::dto::UiError;
 use crate::dto::sso::{
     ClaimsPolicyDto, MetadataProbeDto, OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput,
     SamlSsoSummary, SigningCertRolloverDto, SsoCertResult, SsoCertificateRowDto, SsoConfigDto,
+    SsoMode, SsoSummary,
 };
 use crate::state::AppState;
 use azapptoolkit_core::cache::CacheKind;
@@ -595,13 +596,28 @@ fn resolve_secret_lifetime_days(days: Option<u32>) -> Result<u32, UiError> {
 /// forces a consent prompt (that only happens via an explicit edit). A failed
 /// claims read sets `claims_read_failed`, so the tab can tell "no policy" from
 /// "couldn't read it" and refuse to save over claims it never loaded.
+///
+/// One read fills the whole tab: the app-owner [`SsoSummary`] and (for SAML)
+/// the rollover panel's initial [`SigningCertRolloverDto`] are projected from
+/// the same service-principal read, so opening the tab reads the SP once.
 #[tauri::command]
 pub async fn get_sso_config(
     state: State<'_, AppState>,
     tenant_id: String,
     service_principal_id: String,
 ) -> Result<SsoConfigDto, UiError> {
-    let client = state.graph_for(&tenant_id);
+    get_sso_config_core(&state, &tenant_id, service_principal_id).await
+}
+
+/// [`get_sso_config`] without the Tauri `State` wrapper, so a handler test can
+/// drive it against a mock Graph.
+pub(crate) async fn get_sso_config_core(
+    state: &AppState,
+    tenant_id: &str,
+    service_principal_id: String,
+) -> Result<SsoConfigDto, UiError> {
+    let cloud = state.auth.cloud();
+    let client = state.graph_for(tenant_id);
 
     // The SP SSO fields and the assigned claims-mapping policy both key off the
     // input service_principal_id and are independent of each other (and of the
@@ -612,9 +628,22 @@ pub async fn get_sso_config(
         client.list_assigned_claims_mapping_policies(&service_principal_id),
     );
 
-    let sp = sp?.ok_or_else(|| UiError::validation("not_found", "Service principal not found."))?;
+    let sp =
+        sp?.ok_or_else(|| UiError::not_found("service_principal", "Service principal not found."))?;
     let (app_id, sso_mode, signing_thumbprint, signing_expiry, notification_emails) =
         extract_sp_sso_fields(&sp);
+    // The rollover panel's initial state: the same pure projection
+    // `get_signing_cert_rollover` runs, over this same live read — so the
+    // phase still derives from live SP state and nothing is stored.
+    let rollover = (SsoMode::from_graph(sso_mode.as_deref()) == SsoMode::Saml).then(|| {
+        build_rollover(
+            &sp,
+            &service_principal_id,
+            tenant_id,
+            cloud,
+            chrono::Utc::now(),
+        )
+    });
 
     // Resolve the paired application object id, then read its SSO web fields.
     // Web `redirectUris` double as the SAML reply URLs and the OIDC redirect
@@ -661,7 +690,7 @@ pub async fn get_sso_config(
         }
     };
 
-    Ok(SsoConfigDto {
+    let mut dto = SsoConfigDto {
         object_id,
         service_principal_id,
         app_id,
@@ -678,7 +707,61 @@ pub async fn get_sso_config(
         claims_policy,
         claims_policy_id,
         claims_read_failed,
-    })
+        summary: None,
+        rollover,
+    };
+    dto.summary = build_sso_summary(cloud, tenant_id, &dto);
+    Ok(dto)
+}
+
+/// The app-owner output summary ("Details for the application owner") for the
+/// saved mode, projected from an already-read [`SsoConfigDto`] plus the cloud's
+/// static URL formulas. SAML omits the signing cert base64 (only available at
+/// creation/rotation time); OIDC omits the show-once secret. `None` when SSO is
+/// not SAML or OIDC. Pure, so the URL formulas are table-testable.
+fn build_sso_summary(
+    cloud: CloudEnvironment,
+    tenant_id: &str,
+    cfg: &SsoConfigDto,
+) -> Option<SsoSummary> {
+    match SsoMode::from_graph(cfg.sso_mode.as_deref()) {
+        SsoMode::Oidc => {
+            let (authority, discovery_url) = oidc_summary_urls(cloud, tenant_id);
+            Some(SsoSummary::Oidc(OidcSsoSummary {
+                object_id: cfg.object_id.clone(),
+                service_principal_id: cfg.service_principal_id.clone(),
+                client_id: cfg.app_id.clone(),
+                tenant_id: tenant_id.to_string(),
+                authority,
+                discovery_url,
+                redirect_uris: cfg.redirect_uris.clone(),
+                spa_redirect_uris: cfg.spa_redirect_uris.clone(),
+                client_secret: None,
+                client_secret_expiry: None,
+            }))
+        }
+        SsoMode::Saml => {
+            let (issuer, login_url, logout_url, federation_metadata_url) =
+                saml_summary_urls(cloud, tenant_id, &cfg.app_id);
+            Some(SsoSummary::Saml(SamlSsoSummary {
+                object_id: cfg.object_id.clone(),
+                service_principal_id: cfg.service_principal_id.clone(),
+                app_id: cfg.app_id.clone(),
+                entity_id_issuer: issuer,
+                login_url,
+                logout_url,
+                federation_metadata_url,
+                sp_entity_id: cfg.entity_id.clone().unwrap_or_default(),
+                reply_url: cfg.reply_urls.first().cloned().unwrap_or_default(),
+                signing_cert_base64: None,
+                signing_cert_thumbprint: cfg.signing_cert_thumbprint.clone(),
+                signing_cert_expiry: cfg.signing_cert_expiry.clone(),
+                claims_policy_id: cfg.claims_policy_id.clone(),
+                warnings: Vec::new(),
+            }))
+        }
+        SsoMode::Disabled => None,
+    }
 }
 
 /// Pulls the SSO-relevant fields out of a service principal's raw JSON:
@@ -706,10 +789,7 @@ fn extract_sp_sso_fields(
         .get("preferredSingleSignOnMode")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let signing_thumbprint = sp
-        .get("preferredTokenSigningKeyThumbprint")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let signing_thumbprint = preferred_thumbprint(sp);
     let signing_expiry = signing_thumbprint.as_deref().and_then(|tp| {
         sp.get("keyCredentials")
             .and_then(|v| v.as_array())
@@ -775,10 +855,11 @@ fn extract_app_sso_fields(
     )
 }
 
-/// Sets a service principal's `preferredSingleSignOnMode`. `mode` is `"saml"` or
-/// `"oidc"`; any other value (e.g. `""`, `"disabled"`, `"none"`) clears it to
-/// `null` (SSO disabled). Password-based and linked SSO aren't settable here —
-/// they require portal-only configuration — so the UI only offers SAML/OIDC/off.
+/// Sets a service principal's `preferredSingleSignOnMode`. `mode` is a typed
+/// [`SsoMode`]: an unknown or mis-cased value fails IPC deserialisation before
+/// any PATCH is sent, and [`SsoMode::Disabled`] clears the preference to `null`
+/// (SSO disabled). Password-based and linked SSO aren't settable here — they
+/// require portal-only configuration — so the UI only offers SAML/OIDC/off.
 /// Busts only the SSO-certificate expiry board (`invalidate_sso_cert_board`):
 /// the mode decides whether the app is on the board at all. The SSO tab reads
 /// the mode live and no other cached payload carries it.
@@ -787,14 +868,11 @@ pub async fn set_sso_mode(
     state: State<'_, AppState>,
     tenant_id: String,
     service_principal_id: String,
-    mode: String,
+    mode: SsoMode,
 ) -> Result<(), UiError> {
-    let value = match mode.as_str() {
-        "saml" => serde_json::Value::String("saml".into()),
-        "oidc" => serde_json::Value::String("oidc".into()),
-        // Anything else disables SSO (clears the preference).
-        _ => serde_json::Value::Null,
-    };
+    let value = mode.graph_value().map_or(serde_json::Value::Null, |m| {
+        serde_json::Value::String(m.into())
+    });
     let client = state.graph_for(&tenant_id);
     let body = serde_json::json!({ "preferredSingleSignOnMode": value });
     client
@@ -921,7 +999,7 @@ pub async fn get_signing_cert_rollover(
     let sp = client
         .get_service_principal_sso_fields(&service_principal_id)
         .await?
-        .ok_or_else(|| UiError::validation("not_found", "Service principal not found."))?;
+        .ok_or_else(|| UiError::not_found("service_principal", "Service principal not found."))?;
     Ok(build_rollover(
         &sp,
         &service_principal_id,
@@ -1569,6 +1647,20 @@ fn is_preferred_key(custom_key_identifier: &str, preferred: &str) -> bool {
     }
 }
 
+/// `preferredTokenSigningKeyThumbprint`, upper-cased through
+/// [`canonical_thumbprint`] when it is the hex thumbprint it should be; raw
+/// otherwise, never re-decoded. `canonical` reads anything that is not 40 hex
+/// characters as base64, so feeding it a malformed nomination would invent a
+/// different thumbprint instead of keeping the broken value visible.
+fn preferred_thumbprint(sp: &serde_json::Value) -> Option<String> {
+    let raw = sp.get("preferredTokenSigningKeyThumbprint")?.as_str()?;
+    Some(
+        canonical_thumbprint(raw)
+            .filter(|c| c.eq_ignore_ascii_case(raw.trim()))
+            .unwrap_or_else(|| raw.to_string()),
+    )
+}
+
 /// Projects a service principal's raw JSON into the rollover view.
 ///
 /// Pure (no Graph, no `State`) so the phase machine is table-testable — mirrors
@@ -1594,10 +1686,7 @@ fn build_rollover(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let preferred = sp
-        .get("preferredTokenSigningKeyThumbprint")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let preferred = preferred_thumbprint(sp);
 
     let parse_time = |v: Option<&serde_json::Value>| -> Option<chrono::DateTime<chrono::Utc>> {
         v.and_then(|x| x.as_str())
@@ -1764,8 +1853,8 @@ fn retire_target<'a>(
         .iter()
         .find(|c| c.key_id == key_id)
         .ok_or_else(|| {
-            UiError::validation(
-                "cert_not_found",
+            UiError::not_found(
+                "cert",
                 "That certificate is no longer on the service principal.",
             )
         })?;
@@ -2072,59 +2161,6 @@ pub(crate) async fn set_oidc_redirect_uris_core(
     Ok(())
 }
 
-/// Recomputes the app-owner output summary for an existing enterprise app.
-/// `protocol` is `"saml"` or `"oidc"`. SAML returns a [`SamlSsoSummary`]
-/// (without the signing cert base64 — that's only available at creation/rotation
-/// time); OIDC returns an [`OidcSsoSummary`] without the show-once secret. The
-/// two are returned as untagged JSON; the front-end branches on `protocol`.
-#[tauri::command]
-pub async fn get_sso_summary(
-    state: State<'_, AppState>,
-    tenant_id: String,
-    service_principal_id: String,
-    protocol: String,
-) -> Result<serde_json::Value, UiError> {
-    // Captured before `get_sso_config` takes `state` by value.
-    let cloud = state.auth.cloud();
-    let config = get_sso_config(state, tenant_id.clone(), service_principal_id).await?;
-    if protocol == "oidc" {
-        let (authority, discovery_url) = oidc_summary_urls(cloud, &tenant_id);
-        let summary = OidcSsoSummary {
-            object_id: config.object_id,
-            service_principal_id: config.service_principal_id,
-            client_id: config.app_id,
-            tenant_id,
-            authority,
-            discovery_url,
-            redirect_uris: config.redirect_uris,
-            spa_redirect_uris: config.spa_redirect_uris,
-            client_secret: None,
-            client_secret_expiry: None,
-        };
-        serde_json::to_value(summary).map_err(|e| UiError::serde(e.to_string()))
-    } else {
-        let (issuer, login_url, logout_url, federation_metadata_url) =
-            saml_summary_urls(cloud, &tenant_id, &config.app_id);
-        let summary = SamlSsoSummary {
-            object_id: config.object_id,
-            service_principal_id: config.service_principal_id,
-            app_id: config.app_id,
-            entity_id_issuer: issuer,
-            login_url,
-            logout_url,
-            federation_metadata_url,
-            sp_entity_id: config.entity_id.unwrap_or_default(),
-            reply_url: config.reply_urls.into_iter().next().unwrap_or_default(),
-            signing_cert_base64: None,
-            signing_cert_thumbprint: config.signing_cert_thumbprint,
-            signing_cert_expiry: config.signing_cert_expiry,
-            claims_policy_id: config.claims_policy_id,
-            warnings: Vec::new(),
-        };
-        serde_json::to_value(summary).map_err(|e| UiError::serde(e.to_string()))
-    }
-}
-
 /// End-to-end handler tests against a mock Graph — the shape
 /// `applications::credentials::handler_tests` established. Kept apart from
 /// `tests` below (pure helpers) so the mock-server fixtures don't grow into it.
@@ -2161,6 +2197,74 @@ mod handler_tests {
             .cache
             .get::<serde_json::Value>(CacheKind::Lists, &app_detail_key(TENANT, OBJECT))
             .is_some()
+    }
+
+    /// Opening the SSO tab reads the service principal ONCE: the owner summary
+    /// and the rollover panel's initial state ride on `get_sso_config` instead
+    /// of re-running the SP→app chain (`get_sso_summary`) and re-reading the SP
+    /// (`get_signing_cert_rollover`). The mock's `expect(1)` is the pin.
+    #[tokio::test]
+    async fn an_sso_tab_open_reads_the_service_principal_once() {
+        // Real encoding pair (base64 customKeyIdentifier / hex nomination) —
+        // see the rollover fixtures in `tests`.
+        const A_B64: &str = "ATKoPe8CbYUF5PKRSLDOvhutu7A=";
+        const A_HEX: &str = "0132A83DEF026D8505E4F29148B0CEBE1BADBBB0";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals/sp-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sp-1",
+                "appId": "app-1",
+                "preferredSingleSignOnMode": "saml",
+                "preferredTokenSigningKeyThumbprint": A_HEX.to_ascii_lowercase(),
+                "keyCredentials": [
+                    { "keyId": "k1", "customKeyIdentifier": A_B64, "usage": "Sign",
+                      "endDateTime": "2099-01-01T00:00:00Z" },
+                    { "keyId": "k2", "customKeyIdentifier": A_B64, "usage": "Verify",
+                      "endDateTime": "2099-01-01T00:00:00Z" }
+                ],
+                "notificationEmailAddresses": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+            )
+            .mount(&server)
+            .await;
+        // The claims list is left unmocked: it 404s and degrades to
+        // `claims_read_failed`, which is what a missing consent looks like.
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        let cfg = get_sso_config_core(&state, TENANT, "sp-1".into())
+            .await
+            .expect("the SSO config reads");
+
+        assert!(cfg.claims_read_failed);
+        assert_eq!(cfg.signing_cert_thumbprint.as_deref(), Some(A_HEX));
+        match cfg.summary {
+            Some(SsoSummary::Saml(ref s)) => {
+                assert!(
+                    s.federation_metadata_url.ends_with("appid=app-1"),
+                    "{}",
+                    s.federation_metadata_url
+                );
+                assert!(s.login_url.ends_with(&format!("/{TENANT}/saml2")));
+            }
+            ref other => panic!("a SAML app must carry a SAML summary, got {other:?}"),
+        }
+        let roll = cfg.rollover.expect("a SAML app carries its rollover state");
+        assert_eq!(roll.phase, azapptoolkit_dto::sso::RolloverPhase::Steady);
+        assert_eq!(
+            roll.certs.len(),
+            1,
+            "the Sign/Verify pair is one certificate"
+        );
+        assert_eq!(roll.active_thumbprint.as_deref(), Some(A_HEX));
+        // Dropping the server verifies `expect(1)`.
     }
 
     #[tokio::test]
@@ -3275,8 +3379,107 @@ mod tests {
         assert_eq!(roll.certs[0].thumbprint, B_HEX, "newest first");
         assert!(roll.certs[0].is_active);
         assert_eq!(roll.certs[0].status, CertStatus::Active);
+        // The nomination is canonical too, so the expiry board's Thumbprint
+        // column shows the same upper-case value as the SSO tab.
+        assert_eq!(roll.active_thumbprint.as_deref(), Some(B_HEX));
         // The metadata URL is the app's own, so the panel can link it directly.
         assert!(roll.federation_metadata_url.ends_with("appid=app-1"));
+    }
+
+    #[test]
+    fn the_preferred_thumbprint_is_upper_cased_but_a_malformed_one_is_kept_verbatim() {
+        // Lower-case hex through the SSO tab's read: canonical upper case.
+        let sp = serde_json::json!({
+            "appId": "app-1",
+            "preferredTokenSigningKeyThumbprint": A_HEX.to_ascii_lowercase(),
+            "keyCredentials": [ cred("k1", A_B64, "2030-06-01T00:00:00Z", "Verify") ],
+        });
+        let (_, _, thumbprint, expiry, _) = extract_sp_sso_fields(&sp);
+        assert_eq!(thumbprint.as_deref(), Some(A_HEX));
+        assert_eq!(expiry.as_deref(), Some("2030-06-01T00:00:00Z"));
+
+        // A nomination that is not a hex thumbprint stays visible as-is:
+        // `canonical` would read "ABCD" as base64 and invent a different value.
+        for bad in ["ABCD", "not-a-thumbprint"] {
+            let roll = build_rollover(
+                &sp_with(
+                    Some(bad),
+                    vec![cred("k1", A_B64, "2029-01-01T00:00:00Z", "Verify")],
+                ),
+                "sp-1",
+                "tid",
+                CloudEnvironment::Commercial,
+                now(),
+            );
+            assert_eq!(roll.active_thumbprint.as_deref(), Some(bad));
+            assert!(roll.certs.iter().all(|c| !c.is_active), "{bad}");
+            let (_, _, thumbprint, _, _) = extract_sp_sso_fields(&sp_with(Some(bad), vec![]));
+            assert_eq!(thumbprint.as_deref(), Some(bad));
+        }
+    }
+
+    #[test]
+    fn the_owner_summary_follows_the_saved_mode() {
+        let cfg = |mode: Option<&str>| SsoConfigDto {
+            object_id: "obj-1".into(),
+            service_principal_id: "sp-1".into(),
+            app_id: "app-1".into(),
+            sso_mode: mode.map(str::to_string),
+            entity_id: Some("https://app/saml".into()),
+            reply_urls: vec!["https://app/acs".into(), "https://app/acs2".into()],
+            redirect_uris: vec!["https://app/acs".into(), "https://app/acs2".into()],
+            spa_redirect_uris: vec!["https://app/spa".into()],
+            signing_cert_thumbprint: Some(A_HEX.into()),
+            claims_policy_id: Some("pol-1".into()),
+            ..Default::default()
+        };
+
+        match build_sso_summary(CloudEnvironment::Commercial, "tid", &cfg(Some("saml"))) {
+            Some(SsoSummary::Saml(s)) => {
+                assert!(s.login_url.ends_with("/tid/saml2"), "{}", s.login_url);
+                assert!(
+                    s.federation_metadata_url.ends_with("appid=app-1"),
+                    "{}",
+                    s.federation_metadata_url
+                );
+                assert_eq!(s.sp_entity_id, "https://app/saml");
+                assert_eq!(s.reply_url, "https://app/acs");
+                assert_eq!(s.signing_cert_base64, None);
+                assert_eq!(s.signing_cert_thumbprint.as_deref(), Some(A_HEX));
+                assert_eq!(s.claims_policy_id.as_deref(), Some("pol-1"));
+                assert!(s.warnings.is_empty());
+            }
+            other => panic!("a SAML app must get a SAML summary, got {other:?}"),
+        }
+        match build_sso_summary(CloudEnvironment::Commercial, "tid", &cfg(Some("oidc"))) {
+            Some(SsoSummary::Oidc(s)) => {
+                assert!(s.authority.ends_with("/tid/v2.0"), "{}", s.authority);
+                assert_eq!(s.client_id, "app-1");
+                assert_eq!(s.tenant_id, "tid");
+                assert_eq!(s.redirect_uris.len(), 2);
+                assert_eq!(s.client_secret, None);
+            }
+            other => panic!("an OIDC app must get an OIDC summary, got {other:?}"),
+        }
+        for mode in [Some("password"), Some("SAML"), None] {
+            assert!(
+                build_sso_summary(CloudEnvironment::Commercial, "tid", &cfg(mode)).is_none(),
+                "{mode:?}"
+            );
+        }
+        // The URLs follow the configured cloud.
+        match build_sso_summary(CloudEnvironment::UsGov, "tid", &cfg(Some("saml"))) {
+            Some(SsoSummary::Saml(s)) => {
+                assert_eq!(s.login_url, "https://login.microsoftonline.us/tid/saml2");
+            }
+            other => panic!("{other:?}"),
+        }
+        match build_sso_summary(CloudEnvironment::UsGov, "tid", &cfg(Some("oidc"))) {
+            Some(SsoSummary::Oidc(s)) => {
+                assert_eq!(s.authority, "https://login.microsoftonline.us/tid/v2.0");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     /// A hand-built active cert for the [`sso_cert_status`] table below.

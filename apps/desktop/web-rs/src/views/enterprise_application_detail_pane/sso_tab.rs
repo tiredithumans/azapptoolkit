@@ -56,10 +56,15 @@ pub fn SsoContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl Into
 /// there when the new one goes live. The panel reads its phase from live Graph
 /// state on every load: nothing about a rollover is stored, so one abandoned
 /// halfway picks up exactly where it was left.
+///
+/// `initial` is the state `get_sso_config` already projected from its own live
+/// service-principal read; the panel renders it on mount and calls
+/// `get_signing_cert_rollover` only to re-read after its own actions.
 #[component]
 fn SigningCertRolloverPanel(
     sp_id: StoredValue<String>,
     app_id: StoredValue<String>,
+    initial: Option<sso::SigningCertRolloverDto>,
 ) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
@@ -70,11 +75,18 @@ fn SigningCertRolloverPanel(
     let staged_pem: RwSignal<Option<String>> = RwSignal::new(None);
     let probe: RwSignal<Option<sso::MetadataProbeDto>> = RwSignal::new(None);
 
+    // Consumed by the first load, so every later one (a bump after stage,
+    // activate, revert or retire) re-reads live.
+    let seed = StoredValue::new(initial);
     let rollover = LocalResource::new(move || {
         let tenant = tenant.get();
         let id = sp_id.get_value();
         let _ = reload.get();
+        let seeded = seed.try_update_value(Option::take).flatten();
         async move {
+            if let Some(roll) = seeded {
+                return Ok(roll);
+            }
             match tenant {
                 Some(t) => sso::get_signing_cert_rollover(&t.tenant_id, &id).await,
                 None => Ok(sso::SigningCertRolloverDto::default()),
@@ -490,37 +502,31 @@ fn SigningCertRolloverPanel(
 /// Inner SSO editor, seeded from the loaded [`SsoConfigDto`]. A method selector
 /// sets `preferredSingleSignOnMode`; the editable fields then branch on the
 /// *saved* mode (SAML / OIDC / not-configured). Renders the app-owner summary
-/// fetched via `get_sso_summary`.
+/// `get_sso_config` already carries (`SsoConfigDto::summary`).
 #[component]
 fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
     let session = use_session();
-    let tenant_id = session
-        .active_tenant
-        .get_untracked()
-        .map(|t| t.tenant_id)
-        .unwrap_or_default();
 
-    let is_oidc = cfg.sso_mode.as_deref() == Some("oidc");
-    let is_saml = cfg.sso_mode.as_deref() == Some("saml");
+    let saved_mode = SsoMode::from_graph(cfg.sso_mode.as_deref());
+    let is_saml = saved_mode == SsoMode::Saml;
+    let is_oidc = saved_mode == SsoMode::Oidc;
     let configured = is_saml || is_oidc;
-    let protocol = if is_oidc { "oidc" } else { "saml" };
     let saved_mode_label = cfg
         .sso_mode
         .clone()
         .unwrap_or_else(|| "not configured".to_string());
     // Held in `StoredValue` (Copy) so the on_click handlers below capture only
     // Copy state and stay `Fn` — Leptos `<Show>` children must be re-callable.
-    let tenant_id = StoredValue::new(tenant_id);
     let object_id = StoredValue::new(cfg.object_id.clone());
     let sp_id = StoredValue::new(cfg.service_principal_id.clone());
     let app_id = StoredValue::new(cfg.app_id.clone());
+    // The rollover panel's initial state, from the same read.
+    let rollover_seed = StoredValue::new(cfg.rollover.clone());
+    // The app-owner summary, from the same read (`None` unless SAML/OIDC).
+    let owner_summary = cfg.summary.clone();
 
-    // Method selector — seeded to the saved mode; "disabled" clears SSO.
-    let selected_mode = RwSignal::new(match cfg.sso_mode.as_deref() {
-        Some("saml") => "saml".to_string(),
-        Some("oidc") => "oidc".to_string(),
-        _ => "disabled".to_string(),
-    });
+    // Method selector — seeded to the saved mode; `Disabled` clears SSO.
+    let selected_mode = RwSignal::new(saved_mode);
     let mode_cmd = use_command();
 
     // SAML editable fields — one row per entry (`components::uri_list_editor`),
@@ -549,21 +555,6 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
     let cmd = use_command();
     let needs_consent = RwSignal::new(false);
 
-    // App-owner summary (read-only), recomputed on reload. Only fetched once SSO
-    // is actually configured for SAML/OIDC (no point otherwise).
-    let summary = LocalResource::new(move || {
-        let tenant_id = tenant_id.get_value();
-        let sp_id = sp_id.get_value();
-        let _ = reload.get();
-        async move {
-            if configured {
-                sso::get_sso_summary(&tenant_id, &sp_id, protocol).await
-            } else {
-                Ok(serde_json::Value::Null)
-            }
-        }
-    });
-
     // Apply a new SSO method, then reload so the editor switches to it.
     let apply_mode = move |_| {
         mode_cmd.run_toast_err(
@@ -574,7 +565,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
             move |tenant_id| {
                 let sp_id = sp_id.get_value();
                 let mode = selected_mode.get_untracked();
-                async move { sso::set_sso_mode(&tenant_id, &sp_id, &mode).await }
+                async move { sso::set_sso_mode(&tenant_id, &sp_id, mode).await }
             },
         );
     };
@@ -716,15 +707,21 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
             <Field label="Set sign-on method">
                 <select
                     class="ui-select"
-                    on:change=move |ev| selected_mode.set(event_target_value(&ev))
+                    on:change=move |ev| {
+                        // Exact parse: an unknown value leaves the choice alone
+                        // rather than falling through to Disabled.
+                        if let Some(m) = SsoMode::parse(&event_target_value(&ev)) {
+                            selected_mode.set(m);
+                        }
+                    }
                 >
-                    <option value="saml" selected=is_saml>
+                    <option value=SsoMode::Saml.as_str() selected=is_saml>
                         "SAML"
                     </option>
-                    <option value="oidc" selected=is_oidc>
+                    <option value=SsoMode::Oidc.as_str() selected=is_oidc>
                         "OIDC / OpenID Connect"
                     </option>
-                    <option value="disabled" selected=!configured>
+                    <option value=SsoMode::Disabled.as_str() selected=!configured>
                         "Disabled"
                     </option>
                 </select>
@@ -769,7 +766,11 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 </Button>
 
                 <h4>"Signing certificate"</h4>
-                <SigningCertRolloverPanel sp_id=sp_id app_id=app_id />
+                <SigningCertRolloverPanel
+                    sp_id=sp_id
+                    app_id=app_id
+                    initial=rollover_seed.get_value()
+                />
 
                 <h5>"Rotate now (no staging)"</h5>
                 <Callout tone="warn">
@@ -893,39 +894,14 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 })}
 
             // ---- app-owner summary (only once SSO is configured) ----
-            {configured
-                .then(|| {
+            {owner_summary
+                .map(|summary| {
                     view! {
                         <h4>"Details for the application owner"</h4>
-                        <Suspense fallback=move || {
-                            view! { <SkeletonList rows=3 /> }
-                        }>
-                            {move || Suspend::new(async move {
-                                match summary.await {
-                                    Err(e) => {
-                                        view! { <Callout tone="warn">{e.message}</Callout> }
-                                            .into_any()
-                                    }
-                                    Ok(value) => {
-                                        if is_oidc {
-                                            match serde_json::from_value::<OidcSsoSummary>(value) {
-                                                Ok(s) => view! { <OidcSummaryView summary=s /> }.into_any(),
-                                                Err(_) => {
-                                                    view! { <Body1>"Summary unavailable."</Body1> }.into_any()
-                                                }
-                                            }
-                                        } else {
-                                            match serde_json::from_value::<SamlSsoSummary>(value) {
-                                                Ok(s) => view! { <SamlSummaryView summary=s /> }.into_any(),
-                                                Err(_) => {
-                                                    view! { <Body1>"Summary unavailable."</Body1> }.into_any()
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            })}
-                        </Suspense>
+                        {match summary {
+                            SsoSummary::Saml(s) => view! { <SamlSummaryView summary=s /> }.into_any(),
+                            SsoSummary::Oidc(s) => view! { <OidcSummaryView summary=s /> }.into_any(),
+                        }}
                     }
                 })}
         </div>

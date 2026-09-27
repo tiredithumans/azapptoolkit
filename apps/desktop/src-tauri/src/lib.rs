@@ -203,7 +203,6 @@ pub fn run() {
             commands::sso::set_claims_mapping,
             commands::sso::set_notification_emails,
             commands::sso::set_oidc_redirect_uris,
-            commands::sso::get_sso_summary,
             commands::credentials::list_credential_expirations,
             commands::credentials::save_credentials_to_file,
             commands::consent::list_oauth2_grants_audit,

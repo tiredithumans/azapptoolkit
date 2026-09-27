@@ -22,6 +22,10 @@
 
 ### Fixed
 
+- **The SSO certificate board shows thumbprints the way the SSO tab and the Entra portal do.** When
+  Entra stored an app's nominated signing key in lower case, the board's Thumbprint column showed it
+  that way, beside the upper-case value the SSO tab shows for the same certificate. The board and
+  the SSO tab's owner details now show it in upper case.
 - **Restoring group memberships and granting SharePoint access to several sites or lists now
   waits out Microsoft Graph throttling.** These writes use their own permissions, and unlike every
   other change the app makes they gave up at the first "too many requests" reply, so a DR restore
@@ -586,6 +590,10 @@
 
 ### Changed
 
+- **The SSO tab opens with about half the Microsoft Graph requests.** Opening it read the service
+  principal, its application and its claims policy, then read them all again for "Details for the
+  application owner", and read the service principal a third time for the signing-certificate
+  panel. One read now fills the whole tab.
 - **Home and the App Registrations list load from one scan of your app registrations instead of
   three.** On a cold start, the App Registrations, Enterprise Apps and Credential Health cards each
   paged through every app registration on their own (18 serial requests on a 5,000-app tenant, two

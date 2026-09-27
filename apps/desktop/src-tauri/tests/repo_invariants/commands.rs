@@ -270,3 +270,96 @@ fn the_resource_blind_mailbox_gates_are_not_reintroduced() {
         offenders.join("\n  ")
     );
 }
+
+/// The `*_not_found` offenders in one (whitespace-squashed) source: a
+/// `validation`/`new` code that spells the suffix by hand, or a
+/// `UiError::not_found` resource that already carries it (which the factory
+/// then doubles into `x_not_found_not_found`). Returns `(offender, seen)`, where
+/// `seen` counts the `UiError::not_found(` sites with a literal resource.
+fn not_found_offenders(src: &str) -> (Vec<String>, usize) {
+    fn literals<'a>(squashed: &'a str, call: &str) -> Vec<&'a str> {
+        let needle = format!("{call}(\"");
+        squashed
+            .match_indices(&needle)
+            .filter_map(|(at, _)| {
+                let rest = &squashed[at + needle.len()..];
+                rest.find('"').map(|end| &rest[..end])
+            })
+            .collect()
+    }
+    let squashed: String = src.split_whitespace().collect();
+    let mut offenders = Vec::new();
+    for call in ["UiError::validation", "UiError::new"] {
+        for code in literals(&squashed, call) {
+            if code == "not_found" || code.ends_with("_not_found") {
+                offenders.push(format!("{call}(\"{code}\""));
+            }
+        }
+    }
+    let factory = literals(&squashed, "UiError::not_found");
+    for resource in &factory {
+        if resource.ends_with("not_found") {
+            offenders.push(format!("UiError::not_found(\"{resource}\""));
+        }
+    }
+    (offenders, factory.len())
+}
+
+/// Every `*_not_found` wire code comes from `UiError::not_found(resource)`,
+/// which formats `{resource}_not_found`.
+///
+/// The same condition — a service principal gone between list and detail —
+/// reached the frontend as a bare `not_found` from the SSO tab and as
+/// `service_principal_not_found` from the enterprise-app detail, and three
+/// sites passed an already-suffixed code into the factory, putting
+/// `*_not_found_not_found` on the wire. A future `ends_with("_not_found")`
+/// handler would silently miss the first and match the others by accident.
+/// (The bare `not_found` transport code from `http_error_enum!` lives outside
+/// the command layer and is not scanned.)
+#[test]
+fn not_found_codes_come_only_from_the_factory() {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut seen = 0usize;
+    for (name, src) in super::sources::command_modules() {
+        let (found, sites) = not_found_offenders(&src);
+        seen += sites;
+        offenders.extend(found.into_iter().map(|o| format!("{name}: {o}")));
+    }
+    assert!(
+        seen >= 10,
+        "saw only {seen} `UiError::not_found(\"…\"` sites — the scan is broken, and a rule that \
+         scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "hand-spelled or doubled not-found codes:\n  {}\n\
+         Use `UiError::not_found(\"<resource>\", …)`, which formats `<resource>_not_found` — \
+         pass the bare resource, never a code that already ends in `not_found`.",
+        offenders.join("\n  ")
+    );
+}
+
+/// The not-found scanner reads the shapes rustfmt produces, so the rule above
+/// cannot pass because a call was wrapped across lines.
+#[test]
+fn the_not_found_scanner_reads_the_shapes_the_tree_uses() {
+    let wrapped = "Err(UiError::not_found(\n    \"group_not_found\",\n    \"gone\",\n))";
+    let (offenders, seen) = not_found_offenders(wrapped);
+    assert_eq!(seen, 1);
+    assert_eq!(
+        offenders,
+        vec!["UiError::not_found(\"group_not_found\"".to_string()]
+    );
+
+    let hand = "UiError::validation(\n        \"not_found\",\n        \"x\")\n\
+                crate::dto::UiError::new(\"cert_not_found\", \"y\", false)";
+    let (offenders, _) = not_found_offenders(hand);
+    assert_eq!(offenders.len(), 2, "{offenders:?}");
+
+    let clean = "UiError::not_found(\"service_principal\", \"gone\")\n\
+                 UiError::validation(\"cert_is_active\", \"z\")\n\
+                 UiError::not_found(resource, \"dynamic\")";
+    let (offenders, seen) = not_found_offenders(clean);
+    assert!(offenders.is_empty(), "{offenders:?}");
+    assert_eq!(seen, 1, "a non-literal resource is not counted");
+}

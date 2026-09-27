@@ -22,15 +22,12 @@ use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::enterprise_application_detail_pane::sso_tab::SsoContent;
 
 /// Mounts the SSO tab over a SAML app whose rollover state is `rollover`.
+/// `get_sso_config` carries the initial state; `get_signing_cert_rollover`
+/// answers the panel's re-reads after its own actions.
 fn mount(rollover: &azapptoolkit_dto::sso::SigningCertRolloverDto) -> ts::Mounted {
-    ts::mock_ok(
-        "get_sso_config",
-        &fixtures::sso_config("sp-demo", "app-demo"),
-    );
-    ts::mock_ok(
-        "get_sso_summary",
-        &fixtures::saml_sso_summary("sp-demo", "app-demo"),
-    );
+    let mut cfg = fixtures::sso_config("sp-demo", "app-demo");
+    cfg.rollover = Some(rollover.clone());
+    ts::mock_ok("get_sso_config", &cfg);
     ts::mock_ok("get_signing_cert_rollover", rollover);
 
     let detail = Arc::new(fixtures::enterprise_application_detail(
@@ -152,5 +149,32 @@ async fn an_expired_inactive_certificate_offers_remove() {
         ts::call_count("activate_saml_signing_certificate"),
         0,
         "removing an expired leftover must not touch the nomination",
+    );
+}
+
+/// Opening the SSO tab is ONE backend read. The owner summary and the rollover
+/// panel's initial state ride on `get_sso_config`; before, the tab re-ran the
+/// whole service-principal → application chain for the summary and read the
+/// service principal a third time for the panel.
+#[wasm_bindgen_test]
+async fn the_sso_tab_fills_from_one_config_read() {
+    ts::reset();
+    let _m = mount(&fixtures::signing_cert_rollover_steady(
+        "sp-demo", "app-demo",
+    ));
+
+    ts::wait_for(|| ts::body_contains("Details for the application owner")).await;
+    ts::wait_for(|| ts::body_contains("Stage new certificate")).await;
+    assert!(
+        ts::body_contains("/saml2"),
+        "the owner summary's login URL must render; body was: {}",
+        ts::body_text()
+    );
+    assert_eq!(ts::call_count("get_sso_config"), 1);
+    assert_eq!(
+        ts::call_count("get_signing_cert_rollover"),
+        0,
+        "the rollover panel must render the state get_sso_config carried, not \
+         read the service principal again",
     );
 }

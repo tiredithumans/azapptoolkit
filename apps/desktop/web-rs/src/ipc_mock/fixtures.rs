@@ -40,7 +40,7 @@ use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use azapptoolkit_dto::sharepoint::SiteSweepProgress;
 use azapptoolkit_dto::sso::{
     CertStatus, MetadataProbeDto, RolloverPhase, SamlSsoSummary, SigningCertDto,
-    SigningCertRolloverDto, SsoCertResult, SsoCertificateRowDto, SsoConfigDto,
+    SigningCertRolloverDto, SsoCertResult, SsoCertificateRowDto, SsoConfigDto, SsoSummary,
 };
 use chrono::{DateTime, TimeZone, Utc};
 
@@ -288,7 +288,9 @@ pub fn federated_credential(name: &str, subject: Option<&str>) -> FederatedCrede
 
 /// A SAML-configured enterprise app's SSO tab: identifiers, reply URLs, logout,
 /// signing cert and notification recipients. Enough list-shaped fields to show
-/// the SSO tab's editors doing real work in the demo.
+/// the SSO tab's editors doing real work in the demo. Carries the app-owner
+/// summary and the (staged) rollover state the one read projects, as the real
+/// `get_sso_config` does.
 pub fn sso_config(object_id: &str, app_id: &str) -> SsoConfigDto {
     SsoConfigDto {
         object_id: object_id.to_string(),
@@ -313,6 +315,8 @@ pub fn sso_config(object_id: &str, app_id: &str) -> SsoConfigDto {
         claims_policy: None,
         claims_policy_id: None,
         claims_read_failed: false,
+        summary: Some(SsoSummary::Saml(saml_sso_summary(object_id, app_id))),
+        rollover: Some(signing_cert_rollover(object_id, app_id)),
     }
 }
 

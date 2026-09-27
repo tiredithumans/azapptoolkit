@@ -185,7 +185,7 @@ pub(super) async fn migrate_one(
         .await?
         .ok_or_else(|| {
             UiError::not_found(
-                "service_principal_not_found",
+                "service_principal",
                 "no Entra service principal for this app",
             )
         })?;
@@ -206,7 +206,7 @@ pub(super) async fn migrate_one(
             })?;
         let group = exo.get_group(&scope_group).await?.ok_or_else(|| {
             UiError::not_found(
-                "scope_group_not_found",
+                "scope_group",
                 format!("scope group '{scope_group}' not found"),
             )
         })?;

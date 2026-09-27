@@ -291,6 +291,9 @@ the application has never seen. Commands live in `commands/sso/mod.rs`.
 (`keyCredentials` + `preferredTokenSigningKeyThumbprint` + `now`) on every read. Nothing about an
 in-flight rollover is persisted, so one abandoned half way — app closed, tenant switched, handed to a
 colleague — resumes exactly where it was, and two operators can't hold different ideas about it.
+`get_sso_config` carries the SSO tab's initial `SigningCertRolloverDto` and the app-owner
+`SsoSummary`, both projected from its single service-principal read; the panel calls
+`get_signing_cert_rollover` only to re-read after its own actions.
 Phases: `Steady` · `Staged` (a valid newer cert is not yet preferred) · `PendingRetire` (the newest
 is live, the previous one still present as the rollback) · `Unconfigured`.
 
@@ -353,7 +356,10 @@ It reaches us written **three ways**, and mixing them up has broken this codebas
 `azapptoolkit-core::thumbprint::canonical` is the **single** converter: it normalises all three to
 uppercase hex, and every display and every comparison in both trees goes through it — the backend
 (`commands::sso::canonical_thumbprint`) and the WASM frontend (`util::thumbprint_hex`) are thin
-delegates. Two failures are pinned by its tests:
+delegates. The nomination is canonicalised too — `active_thumbprint` (the expiry board's Thumbprint
+column) and `signing_cert_thumbprint` go through `preferred_thumbprint`, which upper-cases a hex
+value and keeps an unparseable nomination raw rather than re-decoding it as base64 into a thumbprint
+that exists nowhere. Two failures are pinned by its tests:
 
 - **Comparing base64 to hex raw** matched nothing, so no certificate ever read as active: every app
   showed "Staged", every expiry "Unknown", the work-queue filter matched nothing, and bulk staging

@@ -62,15 +62,15 @@ pub async fn get_sso_config(
 struct SetSsoModeArgs<'a> {
     tenant_id: &'a str,
     service_principal_id: &'a str,
-    mode: &'a str,
+    mode: SsoMode,
 }
 
-/// Sets `preferredSingleSignOnMode`: `"saml"`, `"oidc"`, or anything else
-/// (e.g. `""`) to disable SSO.
+/// Sets `preferredSingleSignOnMode`: [`SsoMode::Saml`] or [`SsoMode::Oidc`];
+/// [`SsoMode::Disabled`] clears it (SSO off).
 pub async fn set_sso_mode(
     tenant_id: &str,
     service_principal_id: &str,
-    mode: &str,
+    mode: SsoMode,
 ) -> Result<(), UiError> {
     invoke_result(
         "set_sso_mode",
@@ -370,33 +370,6 @@ pub async fn set_oidc_redirect_uris(
             object_id,
             redirect_uris,
             spa_redirect_uris,
-        },
-    )
-    .await
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SummaryArgs<'a> {
-    tenant_id: &'a str,
-    service_principal_id: &'a str,
-    protocol: &'a str,
-}
-
-/// Recomputes the app-owner summary for an existing app. The backend returns an
-/// untagged JSON object; callers deserialize into [`SamlSsoSummary`] or
-/// [`OidcSsoSummary`] based on `protocol`.
-pub async fn get_sso_summary(
-    tenant_id: &str,
-    service_principal_id: &str,
-    protocol: &str,
-) -> Result<serde_json::Value, UiError> {
-    invoke_result(
-        "get_sso_summary",
-        SummaryArgs {
-            tenant_id,
-            service_principal_id,
-            protocol,
         },
     )
     .await

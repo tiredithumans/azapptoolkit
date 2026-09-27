@@ -240,7 +240,7 @@ pub struct SamlSsoSummary {
     pub claims_policy_id: Option<String>,
     /// Best-effort create steps that did not land (custom claims, notification
     /// emails), as operator-facing messages. Empty on success and always empty
-    /// from `get_sso_summary`.
+    /// in the summary `get_sso_config` carries.
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -296,6 +296,9 @@ pub struct SsoConfigDto {
     pub service_principal_id: String,
     pub app_id: String,
     /// `preferredSingleSignOnMode`: `saml`, `oidc`, `password`, … or `None`.
+    /// Kept as Graph's open vocabulary (`password`, `linked`, `notSupported`, …)
+    /// rather than an [`SsoMode`], which models only what this app can set and
+    /// would lose the rest; [`SsoMode::from_graph`] is the one reading of it.
     pub sso_mode: Option<String>,
     /// `identifierUris[0]` (SAML Entity ID), if any. Kept for the app-owner
     /// summary; the SSO tab edits the full [`Self::identifier_uris`] list.
@@ -328,6 +331,81 @@ pub struct SsoConfigDto {
     /// not offer Save, or it would replace claims the operator never saw.
     #[serde(default)]
     pub claims_read_failed: bool,
+    /// App-owner summary ("Details for the application owner"), `Some` only
+    /// when the saved mode is SAML or OIDC. Built from this same read plus the
+    /// cloud's static URL formulas, so the tab needs no second round trip.
+    #[serde(default)]
+    pub summary: Option<SsoSummary>,
+    /// Rollover state projected from the SAME service-principal read (SAML
+    /// only) — the signing-certificate panel's initial state. The panel
+    /// re-reads through `get_signing_cert_rollover` only after its own actions.
+    #[serde(default)]
+    pub rollover: Option<SigningCertRolloverDto>,
+}
+
+/// The SSO mode this app can set on a service principal
+/// (`preferredSingleSignOnMode`). `Disabled` clears the preference. The wire
+/// strings (`"saml"`, `"oidc"`, `"disabled"`) are exact: an unknown or
+/// mis-cased value fails deserialisation instead of mapping to `Disabled`,
+/// so a typo can never clear an app's SSO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SsoMode {
+    Saml,
+    Oidc,
+    Disabled,
+}
+
+impl SsoMode {
+    /// The wire string (also the SSO tab's `<option value>`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Saml => "saml",
+            Self::Oidc => "oidc",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    /// Exact inverse of [`Self::as_str`]: `"SAML"` or `""` is `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "saml" => Some(Self::Saml),
+            "oidc" => Some(Self::Oidc),
+            "disabled" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+
+    /// Reads Graph's `preferredSingleSignOnMode`: `saml` / `oidc` map to their
+    /// variant; anything else (unset, `password`, `notSupported`, …) is not a
+    /// mode this app manages and reads as `Disabled`.
+    pub fn from_graph(preferred: Option<&str>) -> Self {
+        match preferred {
+            Some("saml") => Self::Saml,
+            Some("oidc") => Self::Oidc,
+            _ => Self::Disabled,
+        }
+    }
+
+    /// The `preferredSingleSignOnMode` value to PATCH: `None` clears it.
+    pub fn graph_value(self) -> Option<&'static str> {
+        match self {
+            Self::Saml => Some("saml"),
+            Self::Oidc => Some("oidc"),
+            Self::Disabled => None,
+        }
+    }
+}
+
+/// The app-owner summary of an existing SSO integration, tagged by protocol
+/// on the wire (`"protocol": "saml" | "oidc"`) so the frontend never guesses
+/// which shape it holds. The derived `Debug` delegates to
+/// [`OidcSsoSummary`]'s redacting one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "protocol", rename_all = "lowercase")]
+pub enum SsoSummary {
+    Saml(SamlSsoSummary),
+    Oidc(OidcSsoSummary),
 }
 
 /// Lifecycle position of one SAML token-signing certificate. Derived from live
@@ -407,7 +485,9 @@ pub struct SigningCertRolloverDto {
     pub federation_metadata_url: String,
     /// Newest first. Includes expired certificates so retire can clear them.
     pub certs: Vec<SigningCertDto>,
-    /// `preferredTokenSigningKeyThumbprint` as Entra has it, expired or not.
+    /// `preferredTokenSigningKeyThumbprint` normalised through
+    /// `thumbprint::canonical` (raw only if it cannot be normalised), expired
+    /// or not.
     pub active_thumbprint: Option<String>,
     pub staged_thumbprint: Option<String>,
     pub phase: RolloverPhase,
@@ -627,6 +707,81 @@ mod tests {
         let back: OidcSsoSummary =
             serde_json::from_str(&serde_json::to_string(&oidc).unwrap()).unwrap();
         assert_eq!(back.client_id, "c");
+    }
+
+    #[test]
+    fn sso_mode_wire_strings_are_the_ones_the_tab_sends() {
+        for (mode, wire, graph) in [
+            (SsoMode::Saml, "saml", Some("saml")),
+            (SsoMode::Oidc, "oidc", Some("oidc")),
+            (SsoMode::Disabled, "disabled", None),
+        ] {
+            assert_eq!(serde_json::to_value(mode).unwrap(), serde_json::json!(wire));
+            assert_eq!(
+                serde_json::from_value::<SsoMode>(serde_json::json!(wire)).unwrap(),
+                mode
+            );
+            assert_eq!(mode.as_str(), wire);
+            assert_eq!(SsoMode::parse(wire), Some(mode));
+            assert_eq!(mode.graph_value(), graph);
+        }
+        // An unknown or mis-cased mode fails instead of clearing SSO.
+        for bad in ["SAML", "", "password", "none"] {
+            assert!(
+                serde_json::from_value::<SsoMode>(serde_json::json!(bad)).is_err(),
+                "{bad:?} must not deserialise"
+            );
+            assert_eq!(SsoMode::parse(bad), None, "{bad:?}");
+        }
+        for (preferred, mode) in [
+            (Some("saml"), SsoMode::Saml),
+            (Some("oidc"), SsoMode::Oidc),
+            (Some("password"), SsoMode::Disabled),
+            (Some("notSupported"), SsoMode::Disabled),
+            (Some("SAML"), SsoMode::Disabled),
+            (None, SsoMode::Disabled),
+        ] {
+            assert_eq!(SsoMode::from_graph(preferred), mode, "{preferred:?}");
+        }
+    }
+
+    #[test]
+    fn sso_summary_is_tagged_by_protocol() {
+        let saml = SsoSummary::Saml(SamlSsoSummary {
+            app_id: "a".into(),
+            ..Default::default()
+        });
+        let v = serde_json::to_value(&saml).unwrap();
+        assert_eq!(v["protocol"], "saml");
+        assert_eq!(v["app_id"], "a");
+        match serde_json::from_value::<SsoSummary>(v).unwrap() {
+            SsoSummary::Saml(s) => assert_eq!(s.app_id, "a"),
+            SsoSummary::Oidc(_) => panic!("a SAML summary came back as OIDC"),
+        }
+
+        let oidc = SsoSummary::Oidc(OidcSsoSummary {
+            client_id: "c".into(),
+            ..Default::default()
+        });
+        let v = serde_json::to_value(&oidc).unwrap();
+        assert_eq!(v["protocol"], "oidc");
+        match serde_json::from_value::<SsoSummary>(v).unwrap() {
+            SsoSummary::Oidc(s) => assert_eq!(s.client_id, "c"),
+            SsoSummary::Saml(_) => panic!("an OIDC summary came back as SAML"),
+        }
+    }
+
+    #[test]
+    fn an_sso_config_without_summary_or_rollover_still_parses() {
+        let cfg: SsoConfigDto = serde_json::from_value(serde_json::json!({
+            "object_id": "o", "service_principal_id": "s", "app_id": "a",
+            "sso_mode": "saml", "entity_id": null, "logout_url": null,
+            "signing_cert_thumbprint": null, "signing_cert_expiry": null,
+            "claims_policy_id": null
+        }))
+        .unwrap();
+        assert!(cfg.summary.is_none());
+        assert!(cfg.rollover.is_none());
     }
 
     /// `warnings` is additive on the wire: a summary serialized without it

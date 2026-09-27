@@ -409,7 +409,7 @@ pub async fn delete_exchange_scope_group(
 
     let Some(group) = exo.get_distribution_group(&group_identity).await? else {
         return Err(UiError::not_found(
-            "group_not_found",
+            "group",
             format!(
                 "no distribution or mail-enabled security group matches '{group_identity}' — it \
                  may already have been deleted."
