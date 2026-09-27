@@ -79,6 +79,7 @@ async fn cached_sweep_lists_this_apps_sites_with_their_roles() {
         sites_scanned: 42,
         sites_failed: 0,
         cancelled: false,
+        truncated: false,
     }))
     .await;
 
@@ -109,6 +110,7 @@ async fn a_partial_sweep_never_reports_no_access() {
         sites_scanned: 40,
         sites_failed: 2,
         cancelled: false,
+        truncated: false,
     }))
     .await;
 
@@ -116,6 +118,34 @@ async fn a_partial_sweep_never_reports_no_access() {
     assert!(
         ts::body_contains("not proof the app has none"),
         "a partial scan must not read as 'no grants'"
+    );
+    assert!(!ts::body_contains("This app reaches no site"));
+}
+
+#[wasm_bindgen_test]
+async fn a_capped_sweep_never_reports_no_access() {
+    // Zero failures and no cancel is exactly the shape that used to read as
+    // complete — but the scan stopped at the site cap, so this app's grants may
+    // sit on a site it never reached. The empty state must hedge, and the cap
+    // must be named so the operator knows a re-scan won't help.
+    let _m = mount_with(Some(AppSiteAccessDto {
+        sites: Vec::new(),
+        total_sites: 5000,
+        sites_scanned: 5000,
+        sites_failed: 0,
+        cancelled: false,
+        truncated: true,
+    }))
+    .await;
+
+    ts::wait_for(|| ts::body_contains("coverage is partial")).await;
+    assert!(
+        ts::body_contains("not proof the app has none"),
+        "a capped scan must not read as 'no grants'"
+    );
+    assert!(
+        ts::body_contains("more than 5000 SharePoint sites"),
+        "the cap itself must be named"
     );
     assert!(!ts::body_contains("This app reaches no site"));
 }
@@ -144,6 +174,7 @@ async fn no_cached_sweep_offers_a_scan_instead_of_an_empty_table() {
                 },
             ],
             cancelled: false,
+            truncated: false,
         },
     );
     click_button("Scan sites");
@@ -162,6 +193,7 @@ async fn picking_a_site_loads_it_into_the_per_site_flow() {
         sites_scanned: 1,
         sites_failed: 0,
         cancelled: false,
+        truncated: false,
     }))
     .await;
     ts::wait_for(|| ts::body_contains("Marketing")).await;

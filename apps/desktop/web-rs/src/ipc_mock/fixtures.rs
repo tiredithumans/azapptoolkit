@@ -826,6 +826,7 @@ pub fn app_site_access(app_id: &str) -> azapptoolkit_dto::sharepoint::AppSiteAcc
         sites_scanned: 42,
         sites_failed: 0,
         cancelled: false,
+        truncated: false,
     }
 }
 

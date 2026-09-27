@@ -9,6 +9,7 @@ use thaw::{Body1, Button, ButtonAppearance, ProgressBar};
 use crate::bindings::auth;
 use crate::bindings::events;
 use crate::bindings::sharepoint::{self, SiteAppGrantRow, SiteSweepProgress, SiteSweepResult};
+use crate::components::app_site_access_panel::site_sweep_cap_message;
 use crate::components::export_menu::ExportMenu;
 use crate::components::ui::{Callout, SearchInput, ShowMore};
 use crate::constants::*;
@@ -112,7 +113,7 @@ pub(super) fn SitesPanel() -> impl IntoView {
                         ids.len()
                     };
                     format!(
-                        "{} app grant{} across {} site{} — scanned {} of {} sites{}{}",
+                        "{} app grant{} across {} site{} — scanned {} of {} sites{}{}{}",
                         rows.len(),
                         if rows.len() == 1 { "" } else { "s" },
                         distinct_sites,
@@ -121,6 +122,16 @@ pub(super) fn SitesPanel() -> impl IntoView {
                         r.total_sites,
                         if r.sites_failed > 0 {
                             format!(" ({} failed — coverage is partial)", r.sites_failed)
+                        } else {
+                            String::new()
+                        },
+                        // The export ships this sentence, so the cap caveat
+                        // reaches the CSV/JSON coverage line through it.
+                        if r.truncated {
+                            format!(
+                                " — stopped at the {}-site scan cap, coverage is partial",
+                                r.total_sites
+                            )
                         } else {
                             String::new()
                         },
@@ -350,6 +361,11 @@ pub(super) fn SitesPanel() -> impl IntoView {
             // reactive closure stays `Fn` (only borrows the captured handler).
             let on_grid_key = on_grid_key.clone();
             view! {
+                {move || {
+                    result
+                        .with(|r| r.as_ref().filter(|r| r.truncated).map(|r| r.total_sites))
+                        .map(|cap| view! { <Callout tone="warn">{site_sweep_cap_message(cap)}</Callout> })
+                }}
                 <Body1 class="page__summary">{move || summary.get().unwrap_or_default()}</Body1>
                 <Show
                     when=move || filtered_rows.with(|r| !r.is_empty())

@@ -2,6 +2,20 @@
 
 ### Fixed
 
+- **A tenant with more than 5,000 SharePoint sites no longer gets its site scan reported — and
+  cached — as complete.** The `Sites.Selected` reverse lookup enumerates sites up to a 5,000-site
+  safety cap and silently stopped there: the Sites tab read "scanned 5000 of 5000 sites", the result
+  was cached for an hour, and "Sites this app can reach" affirmatively answered "no per-site grants"
+  for an app whose grants sat on a site past the cap. The cap is now a stated coverage caveat: the
+  summary line, the per-app panel and the CSV/JSON export say the scan stopped at the cap, an empty
+  per-app list reads as "not proof the app has none", and the cached result carries the caveat
+  instead of posing as a complete answer.
+- **A SharePoint URL you lack rights to is no longer reported as "did not resolve to a list,
+  library or item".** When the Grant-access wizard probed for a subsite and SharePoint answered 403,
+  401 or a throttle, every one of them was collapsed into that message — steering you to fix a URL
+  that was fine and bypassing the Full Control remediation the 403 should have carried. Only a 404
+  now means "not a subsite"; anything else surfaces with its own code and, for a 403, the
+  requirement it actually names.
 - **Editing an app's SAML URLs, OIDC redirect URIs or claims mapping, and the bulk "Remove expired
   credentials" sweep, no longer force a re-scan of the whole tenant.** Each of those changes one
   app in place, yet they dropped the two tenant-wide directory indexes (every app registration and

@@ -67,11 +67,17 @@ impl GraphClient {
     /// SharePoint scope like the permission endpoints (`Sites.FullControl.All`
     /// covers the read), so the whole site-permission sweep needs one consent.
     ///
+    /// Returns `(sites, truncated)`, the shape of every other capped tenant-wide
+    /// walk (`list_applications_all`, `collect_all_pages_capped`): `truncated`
+    /// is true when sites existed beyond `max`. The sweep must surface that
+    /// (`SiteSweepResult::truncated`) and never present the prefix as the
+    /// tenant — an empty per-app match over a prefix is not "no grants".
+    ///
     /// Boundary: the delegated search endpoint returns team/communication site
     /// collections and subsites — personal (OneDrive) sites are not included,
     /// and `/sites/getAllSites` (which is) is application-permission-only, so
     /// it is out of reach by design for this delegated-only app.
-    pub async fn list_all_sites(&self, max: usize) -> Result<Vec<Site>> {
+    pub async fn list_all_sites(&self, max: usize) -> Result<(Vec<Site>, bool)> {
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/sites?search=*&$select=id,displayName,webUrl&$top=200",
@@ -86,7 +92,8 @@ impl GraphClient {
 
         while out.len() < max {
             let Some(next) = page.next_link.take() else {
-                break;
+                // Exhausted within the cap — full coverage.
+                return Ok((out, false));
             };
             if !same_origin(&self.base_url, &next) {
                 return Err(GraphError::Protocol(
@@ -102,8 +109,11 @@ impl GraphClient {
             out.append(&mut page.items);
             pages += 1;
         }
+        // Reached the cap. More sites remain iff the last page overshot it or a
+        // further nextLink is still pending — an exact fit is NOT truncation.
+        let truncated = out.len() > max || page.next_link.is_some();
         out.truncate(max);
-        Ok(out)
+        Ok((out, truncated))
     }
 
     /// Grants an application the given `roles` (e.g. `["read"]` / `["write"]`)
@@ -195,13 +205,21 @@ impl GraphClient {
                     };
                     match self.get_site_by_url(&next_url).await {
                         Ok(next) => site = next,
-                        // Not a subsite either — the path names nothing this
-                        // toolkit can grant against.
-                        Err(_) => {
+                        // Only a 404 means "not a subsite": the path names
+                        // nothing this toolkit can grant against.
+                        Err(GraphError::NotFound(_)) => {
                             return Err(GraphError::Protocol(format!(
                                 "{target_url} did not resolve to a list, library or item in this site"
                             )));
                         }
+                        // A 403 (no rights on the subsite), 401 or a
+                        // post-budget 429 is a fact about the caller or the
+                        // service, not the URL — propagate it typed so the
+                        // command's `map_sharepoint_err` can splice the
+                        // Full-Control remediation and `retryable` survives.
+                        // Collapsing these into the sentence above told the
+                        // operator to fix a URL that was fine.
+                        Err(e) => return Err(e),
                     }
                 }
             }

@@ -11,9 +11,10 @@
 //! app's panel too.
 //!
 //! Coverage is stated, never implied. The sweep can't see personal OneDrive
-//! sites, a site whose permission read failed contributes no rows, and a
-//! cancelled sweep is a prefix of the tenant — so an empty list only means "no
-//! grants" when the underlying sweep was complete (`AppSiteAccessDto::is_complete`).
+//! sites, a site whose permission read failed contributes no rows, a cancelled
+//! sweep is a prefix of the tenant, and so is one that hit the site cap — so an
+//! empty list only means "no grants" when the underlying sweep was complete
+//! (`AppSiteAccessDto::is_complete`).
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
@@ -241,7 +242,13 @@ pub fn AppSiteAccessPanel(
                     let summary = coverage_summary(&a);
                     let complete = a.is_complete();
                     let sites = a.sites.clone();
+                    // The cap is the one partial-coverage cause a re-scan can't
+                    // fix, so it gets a callout rather than just a clause.
+                    let cap_notice = a.truncated.then(|| {
+                        view! { <Callout tone="warn">{site_sweep_cap_message(a.total_sites)}</Callout> }
+                    });
                     view! {
+                        {cap_notice}
                         <Body1 class="page__summary">{summary}</Body1>
                         <DataTable
                             headers=vec!["Site", "Roles", ""]
@@ -312,11 +319,31 @@ fn coverage_summary(access: &AppSiteAccessDto) -> String {
             access.sites_failed
         ));
     }
+    if access.truncated {
+        out.push_str(&format!(
+            " — stopped at the {}-site scan cap, so coverage is partial",
+            access.total_sites
+        ));
+    }
     if access.cancelled {
         out.push_str(" — the scan was cancelled early");
     }
     out.push_str(". Personal OneDrive sites aren't enumerable.");
     out
+}
+
+/// The one sentence for "the site scan stopped at its cap", shared by the
+/// Sites tab and the per-app panel — two surfaces telling two stories about
+/// the same cap is how "no grants" gets believed. `cap` is `total_sites`,
+/// which equals the cap whenever `truncated` is set, so the frontend needs no
+/// copy of the backend constant. (Same shape as `index_cap_message`; not
+/// `IndexCapNotice` itself, which reads a different cap — the SP index.)
+pub fn site_sweep_cap_message(cap: usize) -> String {
+    format!(
+        "This tenant has more than {cap} SharePoint sites. The scan stopped at the first {cap}, \
+         so sites beyond them were not read — coverage is partial, and re-running will not \
+         extend it."
+    )
 }
 
 /// Interactive consent for the SharePoint admin scope, flattened to a message

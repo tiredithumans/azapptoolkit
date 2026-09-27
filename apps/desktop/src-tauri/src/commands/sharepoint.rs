@@ -567,7 +567,13 @@ pub async fn grant_selected_item_access(
         let resolved = match client.resolve_sharepoint_resource(url).await {
             Ok(r) => r,
             Err(err) => {
-                warnings.push(format!("could not resolve '{url}': {err}"));
+                // Through the module's own mapper, not `Display`: a 403 on the
+                // subsite probe now propagates typed (the resolver used to
+                // collapse it into "did not resolve"), and this is where its
+                // `sharepoint_selected_items` remediation is spliced in — and
+                // where Graph's raw body is kept out of the panel's warnings.
+                let ui = sharepoint_item_err(err);
+                warnings.push(format!("could not resolve '{url}': {}", ui.message));
                 continue;
             }
         };
@@ -741,11 +747,14 @@ pub async fn remove_selected_item_permission(
 
 // ---------------- Site-permission sweep (reverse lookup) ----------------
 
-/// In-flight cap for per-site permission reads. SharePoint throttles harder
-/// than the directory endpoints, so this stays below the audit's initial cap.
-/// The per-site read rides the client's retrying transport
-/// (`scoped_get_retried`), so a transient 429 is absorbed with `Retry-After`
-/// honored; only a *persistently* failing site lands in `sites_failed`.
+/// In-flight cap on concurrent *chunk tasks*, each a `$batch` fan-out over up
+/// to [`SWEEP_BATCH`] sites — so up to `SWEEP_CONCURRENCY × SWEEP_BATCH` site
+/// reads, in `$batch` POSTs of 20, are in flight, not six single reads.
+/// SharePoint throttles harder than the directory endpoints, so this stays
+/// below the audit's initial cap, and the `ConcurrencyThrottle` halves it on
+/// 429s. The per-request retry (`scoped_get_retried` / the batch transport)
+/// absorbs a transient 429 with `Retry-After` honored; only a *persistently*
+/// failing site lands in `sites_failed`.
 const SWEEP_CONCURRENCY: usize = 6;
 /// Sites resolved per progress step. The Graph `$batch` cap is 20 sub-requests,
 /// and `batch_list_site_permissions` chunks internally, so this is the
@@ -754,7 +763,9 @@ const SWEEP_CONCURRENCY: usize = 6;
 /// batching win isn't given back in round trips.
 const SWEEP_BATCH: usize = 100;
 /// Safety cap on sites per sweep — prevents a pathological tenant from
-/// queueing an unbounded scan. Raise if a user legitimately hits it.
+/// queueing an unbounded scan. Hitting it is *reported*
+/// (`SiteSweepResult::truncated`, logged at warn), never silent — raise it if
+/// a tenant legitimately hits it.
 const MAX_SITES_PER_SWEEP: usize = 5_000;
 
 /// Tenant-prefixed cache key (cross-tenant leakage guard, same convention as
@@ -817,15 +828,18 @@ fn fold_site_result(
 /// site?") and, filtered by appId, app → sites (the `Sites.Selected` blind
 /// spot). Enumerates sites via `/sites?search=*` (team/communication sites;
 /// OneDrive personal sites aren't returned by the delegated search endpoint),
-/// then reads `/sites/{id}/permissions` with bounded concurrency.
+/// then reads `/sites/{id}/permissions` in `$batch` chunks under an adaptive
+/// in-flight cap.
 ///
-/// Long-running: emits `site-sweep-progress` after each site and polls the
-/// dedicated `AppState.sweep_cancel` atomic (NOT `audit_cancel` — a sweep
-/// cancel must not abort a concurrent audit/bulk run) between dispatches.
-/// Per-site read failures increment `sites_failed` rather than aborting or
-/// silently reading as "no grants", so coverage is never overstated. The
-/// completed result is cached (60-minute audit TTL) under a tenant-prefixed
-/// key; a cancelled or partially-failed run is never cached.
+/// Long-running: emits `site-sweep-progress` after each chunk of
+/// [`SWEEP_BATCH`] sites and polls the dedicated `AppState.sweep_cancel` atomic
+/// (NOT `audit_cancel` — a sweep cancel must not abort a concurrent audit/bulk
+/// run) between dispatches. Per-site read failures increment `sites_failed`
+/// rather than aborting or silently reading as "no grants", so coverage is
+/// never overstated. The result is cached (60-minute audit TTL) under a
+/// tenant-prefixed key; a cancelled or partially-failed run is never cached,
+/// and a run that hit [`MAX_SITES_PER_SWEEP`] is cached *with* `truncated` set
+/// so it is never presented as complete.
 #[tauri::command]
 pub async fn sweep_site_permissions(
     app_handle: AppHandle,
@@ -839,11 +853,17 @@ pub async fn sweep_site_permissions(
     let cancel = state.sweep_cancel.claim();
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
 
-    let sites = client
+    let (sites, truncated) = client
         .list_all_sites(MAX_SITES_PER_SWEEP)
         .await
         .map_err(sharepoint_err)?;
     let total = sites.len();
+    if truncated {
+        tracing::warn!(
+            cap = MAX_SITES_PER_SWEEP,
+            "site sweep: site enumeration hit the cap; coverage is partial"
+        );
+    }
     emit_progress(
         &app_handle,
         "site-sweep-progress",
@@ -867,7 +887,6 @@ pub async fn sweep_site_permissions(
     let mut sites_scanned = 0usize;
     let mut sites_failed = 0usize;
     let mut done = 0usize;
-    let mut cancelled = false;
 
     // `/sites/{id}/permissions` is a plain GET, so the sweep reads them in
     // `$batch` POSTs of 20 instead of one request per site — at the 5000-site
@@ -953,19 +972,18 @@ pub async fn sweep_site_permissions(
     )
     .await;
     if session.is_dead() {
-        // Never cache or return a truncated sweep: `AppSiteAccessDto::from_sweep`
+        // Never cache or return a dead-session sweep: `AppSiteAccessDto::from_sweep`
         // reads an empty site list as "no grants" whenever the sweep claims to
         // be complete, so a partial run understates an app's reach.
         return Err(session.err("the SharePoint site sweep"));
     }
-    cancelled = cancelled || stopped_early;
-
-    cancelled = cancelled || cancel.is_cancelled();
+    let cancelled = stopped_early || cancel.is_cancelled();
     tracing::info!(
         total,
         sites_scanned,
         sites_failed,
         cancelled,
+        truncated,
         "site sweep complete"
     );
     rows.sort_by(|a, b| {
@@ -981,16 +999,35 @@ pub async fn sweep_site_permissions(
         sites_failed,
         rows,
         cancelled,
+        truncated,
     };
-    // Cache only a COMPLETE sweep: serving a cancelled or partially-failed
-    // result for the next hour would overstate coverage — the "coverage is
-    // never overstated" promise extends to the cache.
-    if !cancelled && sites_failed == 0 {
+    // Never cache a cancelled or partially-failed sweep: serving that gap for
+    // the next hour would overstate coverage — the "coverage is never
+    // overstated" promise extends to the cache. A capped sweep IS cached, with
+    // its flag; see `sweep_is_cacheable` for why that is safe.
+    if sweep_is_cacheable(cancelled, sites_failed) {
         state
             .cache
             .put(CacheKind::Audit, sweep_cache_key(&tenant_id), &result);
     }
     Ok(result)
+}
+
+/// Whether a finished sweep may be written to the sweep cache.
+///
+/// A cancelled or partially-failed run is a *transient* prefix — a re-run can
+/// complete it — so caching it would serve the gap for an hour. A run that hit
+/// [`MAX_SITES_PER_SWEEP`] IS cached: the cap is deterministic, so a re-run
+/// would cost another 250 `$batch` round trips for the same prefix. That is
+/// safe only because `SiteSweepResult::truncated` rides along and
+/// `AppSiteAccessDto::is_complete()` folds it, so no consumer — the per-app
+/// panel, the Sites tab summary or the export — can read the cached prefix as
+/// "no grants" (pinned by `a_capped_sweep_is_cached_but_never_reads_complete`).
+///
+/// Extracted from [`sweep_site_permissions`] purely so it can be table-tested,
+/// like the audit's `run_is_cacheable`; that function takes a Tauri `State`.
+fn sweep_is_cacheable(cancelled: bool, sites_failed: usize) -> bool {
+    !cancelled && sites_failed == 0
 }
 
 /// Signals the in-progress resource sweep/probe (site sweep or mailbox probe —
@@ -1000,8 +1037,10 @@ pub fn cancel_resource_sweep(state: State<'_, AppState>) {
     state.sweep_cancel.cancel();
 }
 
-/// Returns the cached sweep for this tenant, if one completed within the cache
+/// Returns the cached sweep for this tenant, if one finished within the cache
 /// TTL — so the view (and any future surface) can render without re-scanning.
+/// A capped run is served with its `truncated` flag, which the view renders as
+/// a coverage caveat.
 #[tauri::command]
 pub fn get_cached_site_sweep(
     state: State<'_, AppState>,
@@ -1017,8 +1056,10 @@ pub fn get_cached_site_sweep(
 }
 
 /// The sites one principal can reach under `Sites.Selected`, and the roles it
-/// holds on each — read from the cached tenant sweep, `None` when no completed
-/// sweep is cached (the caller then offers to run one).
+/// holds on each — read from the cached tenant sweep, `None` when no finished
+/// sweep is cached (the caller then offers to run one). A capped run is served
+/// with its `truncated` flag, which `is_complete()` carries, so the panel never
+/// reads the prefix as "no grants".
 ///
 /// This is the per-app read of the same index the Resource Access Sites tab
 /// builds, and it exists because Graph has **no reverse `appId → sites`
@@ -1238,6 +1279,7 @@ mod tests {
             sites_failed: 0,
             rows: Vec::new(),
             cancelled: false,
+            truncated: false,
         };
         cache.put(CacheKind::Audit, sweep_cache_key("t1"), &sweep);
         cache.put(CacheKind::Audit, sweep_cache_key("t2"), &sweep);
@@ -1254,6 +1296,63 @@ mod tests {
                 .get::<SiteSweepResult>(CacheKind::Audit, &sweep_cache_key("t2"))
                 .is_some(),
             "other tenant must survive"
+        );
+    }
+
+    /// The cache guard and the completeness verdict, exhaustively — the pair is
+    /// what proves a cached capped sweep cannot be read as "no grants".
+    ///
+    /// Cacheability ignores `truncated` on purpose (the cap is deterministic;
+    /// re-sweeping 5000 sites buys the same prefix), but completeness must fold
+    /// it: a sweep with zero failures and no cancel that stopped at the cap is
+    /// exactly the shape that used to read as complete and was cached as such.
+    /// Every combination, because the failure mode is one condition dropped
+    /// from a conjunction, which a single-case test would miss.
+    #[test]
+    fn a_capped_sweep_is_cached_but_never_reads_complete() {
+        for &cancelled in &[false, true] {
+            for &sites_failed in &[0usize, 1] {
+                for &truncated in &[false, true] {
+                    assert_eq!(
+                        sweep_is_cacheable(cancelled, sites_failed),
+                        !cancelled && sites_failed == 0,
+                        "cancelled={cancelled} sites_failed={sites_failed} truncated={truncated} \
+                         — a transient prefix cached here serves the gap for an hour; \
+                         the cap alone must not block caching"
+                    );
+                    let sweep = SiteSweepResult {
+                        tenant_id: "t".into(),
+                        total_sites: 2,
+                        sites_scanned: 2 - sites_failed,
+                        sites_failed,
+                        rows: Vec::new(),
+                        cancelled,
+                        truncated,
+                    };
+                    assert_eq!(
+                        AppSiteAccessDto::from_sweep(&sweep, "app-1").is_complete(),
+                        !cancelled && sites_failed == 0 && !truncated,
+                        "cancelled={cancelled} sites_failed={sites_failed} truncated={truncated} \
+                         — an empty per-app list over a prefix is not 'no grants'"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The export copies the panel's coverage sentence verbatim, so a cap
+    /// caveat in the summary reaches the CSV comment block unchanged.
+    #[test]
+    fn site_csv_carries_a_cap_caveat_from_the_summary() {
+        let csv = site_access_to_csv(
+            &[grant_row("Finance", "Contoso API")],
+            "1 app grant across 1 site — scanned 5000 of 5000 sites — stopped at the 5000-site scan cap, coverage is partial",
+        );
+        // Title line, then the coverage line.
+        let coverage = csv.lines().nth(1).unwrap_or_default();
+        assert!(
+            coverage.contains("stopped at the 5000-site scan cap"),
+            "coverage line must carry the cap caveat: {coverage}"
         );
     }
 
