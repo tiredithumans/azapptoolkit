@@ -19,7 +19,8 @@
 //! - [`cache`] — invalidate-on-`Ok`, pinned indexes, watch-before-fetch
 //! - [`cancel`] — one `CancelToken` claim per long-running command
 //! - [`commands`] — whole-command-layer scans, and the shared source table
-//! - [`release`] — version identity, CHANGELOG format, mirrored lint block
+//! - [`release`] — version identity, CHANGELOG format, mirrored lint block, the
+//!   update gate, the Linux glibc floor and the NSIS install mode
 //! - [`trust`] — every path that mints an authentication trust validates it
 
 #[path = "repo_invariants/cache.rs"]

@@ -1,9 +1,11 @@
 //! User-editable runtime settings.
 //!
-//! Loaded once at startup from `<config_dir>/settings.json`. The env var
-//! `AZAPPTOOLKIT_AUTO_UPDATE` (accepting `0`/`false`/`off`/`no`) takes
-//! precedence — useful for MDM-managed deployments that ship a wrapper
-//! script, and for CI/automation that should never auto-install.
+//! Read from `<config_dir>/settings.json`: writers and most readers use
+//! [`UserSettings::stored`]; the updater commands read `auto_update` through
+//! [`UserSettings::load`] on each call. The env var `AZAPPTOOLKIT_AUTO_UPDATE`
+//! (accepting `0`/`false`/`off`/`no`) takes precedence over the file — useful
+//! for MDM-managed deployments that ship a wrapper script, and for
+//! CI/automation that should never check for or install updates.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -233,7 +235,13 @@ impl UserSettings {
 }
 
 fn auto_update_env_override() -> Option<bool> {
-    let raw = std::env::var("AZAPPTOOLKIT_AUTO_UPDATE").ok()?;
+    parse_auto_update_override(&std::env::var("AZAPPTOOLKIT_AUTO_UPDATE").ok()?)
+}
+
+/// The `AZAPPTOOLKIT_AUTO_UPDATE` grammar, kept pure so it is testable without
+/// mutating the process environment. Anything unrecognised is ignored (the
+/// settings file decides).
+fn parse_auto_update_override(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "0" | "false" | "off" | "no" => Some(false),
         "1" | "true" | "on" | "yes" => Some(true),
@@ -250,6 +258,24 @@ mod tests {
         let dir = tempdir();
         let s = UserSettings::load(dir.path());
         assert!(s.auto_update);
+    }
+
+    #[test]
+    fn auto_update_override_grammar() {
+        for (raw, want) in [
+            ("0", Some(false)),
+            ("false", Some(false)),
+            ("OFF", Some(false)),
+            (" no ", Some(false)),
+            ("1", Some(true)),
+            ("true", Some(true)),
+            ("on", Some(true)),
+            ("yes", Some(true)),
+            ("maybe", None),
+            ("", None),
+        ] {
+            assert_eq!(parse_auto_update_override(raw), want, "{raw:?}");
+        }
     }
 
     #[test]

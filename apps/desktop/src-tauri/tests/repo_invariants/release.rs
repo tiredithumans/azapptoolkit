@@ -1,6 +1,7 @@
 //! Release identity and the hand-mirrored definitions around it: the three
-//! manifests, the web-rs lint block, the CHANGELOG header format, and the
-//! AGENTS.md size budget.
+//! manifests, the web-rs lint block, the CHANGELOG header format, the
+//! AGENTS.md size budget — and who the shipped artifacts reach: the update gate,
+//! the Linux glibc floor and the NSIS install mode.
 
 /// The non-comment, non-blank lines of a TOML block, sorted.
 ///
@@ -447,4 +448,92 @@ fn verify_full_runs_every_gate_ci_runs() {
          opening a PR. Add them to the recipe, or add them to NOT_A_GATE with a reason if they \
          are helpers rather than checks."
     );
+}
+
+/// The documented opt-out and the MSI / .deb / .rpm formats are honoured only
+/// if both updater commands ask `update_gate` BEFORE they touch the updater
+/// plugin — `app.updater()` is the first step towards the release endpoint.
+/// The gate was once documented but never read by either command.
+#[test]
+fn updater_commands_consult_the_update_gate_before_the_network() {
+    let commands = super::sources::commands();
+    for name in ["check_for_update", "perform_update"] {
+        let cmd = commands.iter().find(|c| c.name == name).unwrap_or_else(|| {
+            panic!(
+                "updater command `{name}` not found under src/commands — renamed? Update this \
+                     rule rather than letting it pass vacuously"
+            )
+        });
+        let gate = cmd.body.find("update_gate(").unwrap_or_else(|| {
+            panic!(
+                "`{name}` ({}) never calls `update_gate()`: the auto-update opt-out and the \
+                 MSI/.deb gate would be ignored",
+                cmd.module
+            )
+        });
+        let network = cmd.body.find(".updater()").unwrap_or_else(|| {
+            panic!(
+                "`{name}` ({}) no longer calls `.updater()` — the scan cannot place the gate",
+                cmd.module
+            )
+        });
+        assert!(
+            gate < network,
+            "`{name}` ({}) reaches `.updater()` before `update_gate()`: an opted-out or \
+             externally managed install would still contact the release endpoint",
+            cmd.module
+        );
+    }
+}
+
+/// glibc symbol versions bind to the BUILD host's libc, so the Linux release
+/// runner IS the oldest distro the AppImage/.deb can start on. A floating
+/// `ubuntu-latest` silently raised the floor to glibc 2.38; the pin, the
+/// guard's floor and the README's stated floor must move together.
+#[test]
+fn the_linux_release_leg_is_pinned_to_its_glibc_floor() {
+    let release = include_str!("../../../../../.github/workflows/release.yml");
+    assert!(
+        release.contains("- os: ubuntu-22.04"),
+        "release.yml's Linux matrix leg must build on ubuntu-22.04 (glibc 2.35), the floor the \
+         README documents"
+    );
+    assert!(
+        !release.contains("- os: ubuntu-latest"),
+        "a release matrix leg builds on floating ubuntu-latest: its glibc floor moves with \
+         GitHub's runner image"
+    );
+    assert!(
+        release.contains("GLIBC_FLOOR: \"2.35\""),
+        "release.yml lost the objdump guard that fails a build needing glibc newer than 2.35"
+    );
+    let readme = include_str!("../../../../../README.md");
+    assert!(
+        readme.contains("glibc 2.35"),
+        "README no longer states the Linux glibc floor (2.35) the release leg is pinned to"
+    );
+}
+
+/// Tauri's default NSIS `installMode` is `currentUser`: per-user, no prompt, no
+/// admin rights — what the README and release body promise, and what keeps the
+/// passive `/P /UPDATE` relaunch UAC-free. Parsed, not string-matched:
+/// `plugins.updater.windows.installMode` is an unrelated key of the same name.
+#[test]
+fn nsis_install_mode_stays_current_user() {
+    for (file, src) in [
+        ("tauri.conf.json", include_str!("../../tauri.conf.json")),
+        (
+            "updater-build.json",
+            include_str!("../../updater-build.json"),
+        ),
+    ] {
+        let conf: serde_json::Value =
+            serde_json::from_str(src).unwrap_or_else(|e| panic!("{file} is not JSON: {e}"));
+        let mode = &conf["bundle"]["windows"]["nsis"]["installMode"];
+        assert!(
+            mode.is_null() || mode == "currentUser",
+            "{file} sets bundle.windows.nsis.installMode = {mode}; keep Tauri's default \
+             `currentUser` (per-user, no admin, UAC-free passive updates)"
+        );
+    }
 }

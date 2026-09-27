@@ -2,6 +2,23 @@
 
 ### Fixed
 
+- **Turning off update checks now works.** `AZAPPTOOLKIT_AUTO_UPDATE=0` and `"auto_update": false`
+  in settings.json were documented but never read, so the app still contacted the release endpoint
+  on every launch and offered updates. Both now stop the launch check, the account-menu check and
+  the install before any network call, and the menu item reads "Update checks turned off" instead
+  of offering a check.
+- **MSI and .deb installs are no longer offered the NSIS or AppImage update.** The updater could
+  not tell how the app was installed: an MSI install was prompted on every launch, and accepting
+  installed a second, per-user copy beside the managed one. A .deb install downloaded the whole
+  AppImage only to fail with "invalid updater binary format". These installs now skip the update
+  check, and the account menu says the update comes from your deployment tooling or package
+  manager.
+- **The Linux AppImage and .deb start on Ubuntu 22.04 and Debian 12.** They were built on the
+  newest Ubuntu runner and so required glibc 2.38 or newer, failing at launch with "GLIBC_2.38 not
+  found" (the .deb even installed cleanly first). They are now built against glibc 2.35, the
+  release fails if a build ever needs a newer one, and the README states the floor.
+- **A failed update install is now written to the log.** A download or signature failure during
+  Update & restart left no trace in the log file the README points to.
 - **Running a DR restore again no longer duplicates every app it already created.** The restore
   report, and the expired-session notice in the Disaster Recovery view, told you to re-run the
   restore — but each run created every app in the backup afresh, so a second run left a second copy

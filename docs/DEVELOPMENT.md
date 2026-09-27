@@ -162,7 +162,13 @@ later). The builds are **unsigned / not notarized**, so first launch hits
 Gatekeeper — see the README's [Install → macOS](../README.md#install) note
 for the one-time `xattr` / right-click-Open workaround. (Apple notarization
 can be layered on later by adding the Developer-ID secrets + `APPLE_*` env
-to the macOS leg, exactly as Authenticode is optional on Windows.)
+to the macOS leg, exactly as Authenticode is optional on Windows.) Unsigned
+also means macOS asks for keychain access again after **every** update: the
+refresh token's legacy-keychain ACL trusts the binary that wrote it, and an
+unsigned binary has no stable designated requirement, so the updated `.app`
+is a stranger to it. Developer-ID **signing** (a stable `identifier + team`
+designated requirement) is what fixes that prompt — notarization alone does
+not.
 
 ### Linux
 
@@ -174,11 +180,25 @@ a `.deb`. The build host needs the GTK/WebKit dev libraries + `patchelf`
 libssl-dev patchelf`); the release runner installs them. `rpm` is omitted
 for now (add it to the recipe's `--bundles` when needed).
 
+The release leg builds on **`ubuntu-22.04` on purpose**: glibc symbol
+versions bind to the build host's libc, so the runner image *is* the oldest
+distro the AppImage/.deb can start on (glibc 2.35 — Ubuntu 22.04 / Debian 12).
+A floating `ubuntu-latest` silently raised that floor to 2.38. A post-build
+`objdump -T` step fails the release if the shipped `desktop` binary needs a
+GLIBC symbol version above 2.35, and `repo_invariants/release.rs` pins the
+runner, the guard and the README's stated floor together. GitHub retires
+`ubuntu-22.04` runners around Ubuntu 22.04's April 2027 EOL — before then,
+move the leg into a container (e.g. `debian:bookworm`, glibc 2.36) and update
+`GLIBC_FLOOR`, the README and the release-body rows together.
+
 ### Which installer to ship
 
 For most "just run it" cases, use the **NSIS `-setup.exe`** — the
-tester double-clicks it, it asks once about per-user vs per-machine,
-and the app is on their Start menu within seconds. WebView2 is already
+tester double-clicks it, it installs per-user with no prompt and no admin
+rights (Tauri's default `currentUser` NSIS mode — keep it: it is what the
+README and release body promise, and it keeps the passive update UAC-free;
+`repo_invariants/release.rs` pins it), and the app is on their Start menu
+within seconds. WebView2 is already
 present on current Windows 10/11, so there's no prompt; setup only reaches
 the internet to fetch WebView2 on an older machine that lacks it.
 
@@ -311,7 +331,8 @@ shipping a *higher-versioned* fix — not by deleting the release:
 3. **Manual downgrade path** (users who can't wait): the MSI/NSIS installers from any previous
    release install over a newer build only if Windows allows the downgrade — document the specific
    release to grab in the incident notes. Users with auto-update disabled
-   (`AZAPPTOOLKIT_AUTO_UPDATE=0` or the settings toggle) are unaffected throughout.
+   (`AZAPPTOOLKIT_AUTO_UPDATE=0` or `"auto_update": false` in settings.json), and MSI/.deb
+   installs, are unaffected throughout.
 
 Never re-tag or re-upload different bytes under an existing version: the updater signature and
 Authenticode timestamps make the history auditable — keep it that way.

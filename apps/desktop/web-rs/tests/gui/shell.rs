@@ -12,6 +12,7 @@
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_dto::updater::{UpdateCheck, UpdateInfo, UpdatesDisabled};
 use azapptoolkit_web_rs::test_support as ts;
 use azapptoolkit_web_rs::views::shell::AppShell;
 
@@ -121,4 +122,55 @@ async fn release_notes_render_condensed_with_the_detail_behind_a_toggle() {
         ts::body_contains("Hide technical details"),
         "the toggle must flip to hiding detail once expanded"
     );
+}
+
+/// An install the in-app updater does not own (here MSI) is told by the backend
+/// that no check was made; the account menu must say who manages updates and
+/// not offer a check — never toast an update the updater would install as a
+/// second, conflicting copy.
+#[wasm_bindgen_test]
+async fn a_managed_install_labels_the_update_item_instead_of_offering_a_check() {
+    ts::reset();
+    ts::mock_ok(
+        "check_for_update",
+        &UpdateCheck::Disabled {
+            reason: UpdatesDisabled::Msi,
+        },
+    );
+    let _m = ts::mount_view(|| view! { <AppShell><div /></AppShell> });
+    ts::wait_for(|| ts::call_count("check_for_update") >= 1).await;
+    ts::wait_for(|| ts::query(".shell__tenant-chip").is_some()).await;
+
+    ts::click(".shell__tenant-chip");
+    ts::wait_for(|| ts::body_contains(UpdatesDisabled::Msi.menu_label())).await;
+    let item = ts::query(".shell__account-item--update").expect("the update menu item renders");
+    assert!(
+        item.get_attribute("disabled").is_some(),
+        "a managed install must not offer a manual update check"
+    );
+    assert_eq!(
+        item.get_attribute("title").as_deref(),
+        Some(UpdatesDisabled::Msi.description()),
+        "the disabled item explains where updates come from"
+    );
+    assert!(!ts::body_contains("Check for updates"));
+    assert!(!ts::body_contains("Update available"));
+}
+
+#[wasm_bindgen_test]
+async fn an_available_update_toasts_on_launch() {
+    ts::reset();
+    ts::mock_ok(
+        "check_for_update",
+        &UpdateCheck::Available {
+            info: UpdateInfo {
+                version: "9.9.9".into(),
+                current_version: "0.0.1".into(),
+                notes: String::new(),
+                pub_date: None,
+            },
+        },
+    );
+    let _m = ts::mount_view(|| view! { <AppShell><div /></AppShell> });
+    ts::wait_for(|| ts::body_contains("Update available: v9.9.9")).await;
 }

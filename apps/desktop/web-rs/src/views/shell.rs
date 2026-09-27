@@ -156,23 +156,36 @@ pub fn AppShell(children: Children) -> impl IntoView {
     // the splash; the nav "Check for updates" button opens it directly.
     let update_info: RwSignal<Option<updater::UpdateInfo>> = RwSignal::new(None);
     let update_open = RwSignal::new(false);
+    // Why the backend's update gate made no check (opt-out, MSI, .deb/.rpm) —
+    // install-level, not tenant state, so a local signal rather than
+    // `Session.tenant_ui`. Relabels the account-menu item instead of offering
+    // a check that would never be made.
+    let updates_disabled: RwSignal<Option<updater::UpdatesDisabled>> = RwSignal::new(None);
     // "What's new" for the version already installed — the notes baked into
     // this build, reachable from the account menu after the splash is gone.
     let release_notes_open = RwSignal::new(false);
     Effect::new(move |_| {
         // Runs once (no tracked reads). A check failure — e.g. a dev build with
         // no updater, or GitHub being unreachable — is swallowed silently; the
-        // user can still trigger a manual check from the nav.
+        // user can still trigger a manual check from the nav. A check the
+        // backend's update gate refused (opt-out / MSI / .deb) is recorded
+        // silently too: it only relabels the account-menu item.
         leptos::task::spawn_local(async move {
-            if let Ok(Some(info)) = updater::check_for_update().await {
-                let version = info.version.clone();
-                update_info.set(Some(info));
-                session.push_toast(
-                    ToastKind::Info,
-                    format!("Update available: v{version}"),
-                    Some("View changelog".to_string()),
-                    Some(Rc::new(move || update_open.set(true))),
-                );
+            match updater::check_for_update().await {
+                Ok(updater::UpdateCheck::Available { info }) => {
+                    let version = info.version.clone();
+                    update_info.set(Some(info));
+                    session.push_toast(
+                        ToastKind::Info,
+                        format!("Update available: v{version}"),
+                        Some("View changelog".to_string()),
+                        Some(Rc::new(move || update_open.set(true))),
+                    );
+                }
+                Ok(updater::UpdateCheck::Disabled { reason }) => {
+                    updates_disabled.set(Some(reason));
+                }
+                Ok(updater::UpdateCheck::UpToDate) | Err(_) => {}
             }
         });
     });
@@ -187,12 +200,18 @@ pub fn AppShell(children: Children) -> impl IntoView {
         checking.set(true);
         leptos::task::spawn_local(async move {
             match updater::check_for_update().await {
-                Ok(Some(info)) => {
+                Ok(updater::UpdateCheck::Available { info }) => {
                     update_info.set(Some(info));
                     update_open.set(true);
                 }
-                Ok(None) => {
+                Ok(updater::UpdateCheck::UpToDate) => {
                     session.toast_success("You're on the latest version.");
+                }
+                // Only reachable when the click lands before the launch check
+                // has returned; afterwards the item is disabled.
+                Ok(updater::UpdateCheck::Disabled { reason }) => {
+                    updates_disabled.set(Some(reason));
+                    session.push_toast(ToastKind::Info, reason.description(), None, None);
                 }
                 Err(e) => {
                     session.toast_error(format!("Update check failed: {}", e.message), None);
@@ -420,10 +439,11 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                         <span>"Cache diagnostics"</span>
                                     </button>
                                     <button
-                                        class="shell__account-item"
+                                        class="shell__account-item shell__account-item--update"
                                         type="button"
                                         role="menuitem"
-                                        disabled=move || checking.get()
+                                        disabled=move || checking.get() || updates_disabled.get().is_some()
+                                        title=move || updates_disabled.get().map(|r| r.description())
                                         on:click=move |ev| {
                                             on_check_updates(ev);
                                             menu_open.set(false);
@@ -440,7 +460,15 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                             }}
                                         </span>
                                         <span>
-                                            {move || if checking.get() { "Checking…" } else { "Check for updates" }}
+                                            {move || {
+                                                if checking.get() {
+                                                    "Checking…"
+                                                } else if let Some(reason) = updates_disabled.get() {
+                                                    reason.menu_label()
+                                                } else {
+                                                    "Check for updates"
+                                                }
+                                            }}
                                         </span>
                                     </button>
                                     <div class="shell__account-divider" role="separator"></div>

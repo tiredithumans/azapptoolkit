@@ -10,9 +10,13 @@ crypto-dependency pins in `src-tauri/Cargo.toml`.
 
 1. **`guard`** — version/pubkey/audit checks, fails fast before any build minutes are spent.
 2. **`build` matrix** — `windows-latest` runs `just build-windows-updater`; `macos-latest` runs
-   `build-macos-updater` (native **aarch64** only); `ubuntu-latest` runs `build-linux-updater`
-   (needs the GTK/WebKit + `patchelf` apt deps). Each leg uploads its `bundle/` tree as an
-   artifact.
+   `build-macos-updater` (native **aarch64** only); `ubuntu-22.04` runs `build-linux-updater`
+   (needs the GTK/WebKit + `patchelf` apt deps). The Linux runner pin is **load-bearing**: glibc
+   symbol versions bind to the build host's libc, so it sets the AppImage/.deb's glibc floor
+   (2.35 — Ubuntu 22.04 / Debian 12); a post-build `objdump -T` step fails the release above
+   `GLIBC_FLOOR`, and `repo_invariants/release.rs` pins the runner, the guard and the README
+   floor together (move to a `debian:bookworm` container before GitHub retires the runner around
+   April 2027). Each leg uploads its `bundle/` tree as an artifact.
 3. **`release`** — downloads all three artifacts and assembles ONE `latest.json` with
    `windows-x86_64` (NSIS `-setup.exe`) + `darwin-aarch64` (`.app.tar.gz`) + `linux-x86_64`
    (`.AppImage`) updater entries from each platform's `.sig`, plus SHA256SUMS, into a single
@@ -53,6 +57,27 @@ so it only lights up for releases from **v0.8.0 onward** — v0.7.0's `latest.js
 
 **Do not reintroduce a silent background `download_and_install` in `lib.rs` setup** — it was
 removed in favour of this flow and would race the prompt.
+
+### Who is offered an update
+
+`commands::updater::update_policy(auto_update, bundle_type())` gates **both** commands before any
+network call (`update_gate()` precedes `app.updater()`; pinned by
+`repo_invariants/release.rs::updater_commands_consult_the_update_gate_before_the_network`):
+
+- `Msi` → the deployment tooling owns updates; `Deb | Rpm` → the package manager. `latest.json`
+  only carries the NSIS / AppImage keys, so the plugin would otherwise hand an MSI install a
+  second, per-user NSIS copy and a `.deb` install an AppImage it rejects after the download.
+- `Nsis | AppImage | App | Dmg` → updatable unless the opt-out is set (`"auto_update": false` in
+  `settings.json` or `AZAPPTOOLKIT_AUTO_UPDATE=0`, resolved by `UserSettings::load` on each call).
+- `None` (a dev build or raw binary — no baked bundle marker) stays **updatable**, never blocked.
+- The match is exhaustive with no wildcard, so a new Tauri bundle type must be classified; the
+  install format wins over the opt-out as the more specific explanation.
+
+`check_for_update` returns the tri-state `UpdateCheck` (`UpToDate` / `Available { info }` /
+`Disabled { reason }`); the shell records `Disabled` silently and relabels the account-menu item
+with `UpdatesDisabled::menu_label()` (tooltip: `description()`, one definition shared with the
+backend's `updates_disabled` error from `perform_update`). The updater plugin logs check failures
+itself; the command layer logs only what it does not — `app.updater()` and install failures.
 
 ### Release notes are rendered summary-first
 

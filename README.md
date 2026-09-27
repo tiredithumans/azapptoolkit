@@ -194,8 +194,9 @@ leaves two conflicting entries in Windows (see [Updates](#updates)):
 - **`azapptoolkit_<version>_x64_en-US.msi`** — classic Windows Installer
   for **enterprise rollout** via SCCM, Intune, or Group Policy. The
   in-app auto-updater does **not** manage MSI installs (it ships only the
-  NSIS payload); deploy new versions through your management tooling and
-  **disable auto-update** on these installs (see [Opting out](#opting-out)).
+  NSIS payload): the app detects an MSI install and never offers an
+  in-app update, so deploy new versions through your management tooling.
+  Disabling update checks as well is optional (see [Opting out](#opting-out)).
 
 The Edge WebView2 runtime is the only external dependency, and it ships
 with current Windows 10/11 — so on those machines installation and first
@@ -215,29 +216,37 @@ cannot check it for malicious software"). Clear it once, either way:
 - run `xattr -dr com.apple.quarantine "/Applications/azapptoolkit.app"`.
 
 After that it launches normally and **updates in place** like the Windows
-NSIS build. Apple Silicon (M-series) only for now; Intel builds aren't
-published yet.
+NSIS build. Because the build is unsigned, macOS asks for keychain access
+again after each update ("azapptoolkit wants to use your confidential
+information stored in 'azapptoolkit'") — choose **Always Allow**. If you
+click **Deny**, or the prompt is missed, the relaunch lands on the sign-in
+card: that is this prompt, not a revoked session. Apple Silicon (M-series)
+only for now; Intel builds aren't published yet.
 
 ### Linux (x86_64)
 
 Two formats:
 
-- **`azapptoolkit_<version>_amd64.AppImage`** — portable, runs on most
-  distributions; `chmod +x` it and run. This is the format the in-app
-  **auto-updater** manages.
+- **`azapptoolkit_<version>_amd64.AppImage`** — portable; `chmod +x` it
+  and run. This is the format the in-app **auto-updater** manages.
 - **`azapptoolkit_<version>_amd64.deb`** — for Debian/Ubuntu and
-  derivatives (`sudo apt install ./azapptoolkit_<version>_amd64.deb`).
+  derivatives (`sudo apt install ./azapptoolkit_<version>_amd64.deb`);
+  updated by apt, not the in-app updater.
 
-Needs a WebKitGTK runtime (`libwebkit2gtk-4.1`), present on most modern
-desktops and pulled in automatically by the `.deb`.
+Both need **glibc 2.35 or newer** — Ubuntu 22.04, Debian 12 or newer;
+RHEL 9 (glibc 2.34) is not supported. Both also need a WebKitGTK runtime
+(`libwebkit2gtk-4.1`), present on most modern desktops and pulled in
+automatically by the `.deb`.
 
 ## Updates
 
 The in-app updater manages the **NSIS (`-setup.exe`) install** on
 Windows, the **`.app`** on macOS, and the **`.AppImage`** on Linux (the
 MSI and `.deb` are not auto-updated — manage those through your packaging
-tooling). On launch, azapptoolkit checks the configured release endpoint
-for a newer signed build for your platform.
+tooling; the app detects these installs and never offers the in-app update,
+and the account menu says who manages updates instead). On launch,
+azapptoolkit checks the configured release endpoint for a newer signed
+build for your platform.
 
 **Updating is always your choice — nothing installs in the background.**
 If an update is available you get a notification; opening it shows the new
@@ -252,11 +261,15 @@ release time — a payload that fails signature verification is rejected
 before any bytes touch disk. A failed update check or install never blocks
 the app; it is logged (see [Logs](#logs)) and retried on a later launch.
 
-> **MSI installs:** the updater only ever ships the NSIS payload, so
-> letting it run against an MSI install creates a second, conflicting
-> installation. If you deployed the `.msi`, **disable auto-update** (see
-> [Opting out](#opting-out)) and push new versions through your management
-> tooling instead.
+On macOS, expect a keychain-access prompt on the first launch after each
+update (the build is unsigned) — choose **Always Allow**; see
+[macOS](#macos-apple-silicon).
+
+> **MSI installs:** the updater only ever ships the NSIS payload, so the
+> app detects an MSI install and never offers it — the account menu reads
+> "Updates managed by your MSI deployment" instead. Push new versions
+> through your management tooling. The opt-out below is no longer needed for
+> that; it stays available for fleets that want no update checks at all.
 
 ### Opting out
 
@@ -284,7 +297,8 @@ the updater endpoint at any point in the session.
 ## Requirements
 
 - Windows 10 or newer (primary target), macOS on Apple Silicon, or a
-  modern x86_64 Linux desktop with WebKitGTK — installers for all three
+  x86_64 Linux desktop with glibc 2.35 or newer (Ubuntu 22.04, Debian 12
+  or newer) and WebKitGTK — installers for all three
   are on the [Releases page](https://github.com/tiredithumans/azapptoolkit/releases).
 - A Microsoft Entra ID account with at least the
   `Application Administrator` role, or the equivalent delegated
