@@ -117,6 +117,14 @@ which a sign-out/sign-in cycle would.
 
 - It takes the full `TenantContext`, not a bare tenant id, because `InvalidGrant` purges
   `known_tenants` — the front-end still holds the context in `active_tenant`.
+- The `InvalidGrant` purge is conditional (`token_cache::delete_refresh_token_if_current`): it
+  deletes only if the keyring still holds the token that just failed, compared and deleted under
+  the chunk-set lock. Refresh locks are per scope set, so a slow refresh can fail with the old token
+  after `reauthenticate` stored a new one; that newer session is kept and the call returns
+  `RefreshTokenMissing` without dropping the tenant, so the silent `refresh_session` retry recovers.
+- `sign_out` is all or nothing: the keyring delete (the one fallible step) runs first, and the token
+  cache and `known_tenants` are cleared only after it succeeds. Every keyring call in the service
+  runs on the blocking pool (pinned by a source scan in `service/mod.rs`).
 - Front-end wiring: `Session::spawn_refresh_token` tries silent `refresh_session` first, then
   falls back to `reauthenticate` on those two codes. It is the one entry for the top-bar **Refresh
   token** button (`shell.rs`, next to the tenant chip) and the 401 toast below, and its in-flight

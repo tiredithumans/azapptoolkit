@@ -316,6 +316,12 @@ pub fn load_refresh_token(tenant_id: &str, account_oid: &str) -> Result<Option<Z
     // Held for the read too: without it a load can observe a half-written set
     // and return a splice of two tokens as though it were one.
     let _guard = chunk_set_guard();
+    load_chunks(tenant_id, account_oid)
+}
+
+/// The read itself, without taking the lock — for callers already holding it
+/// (`delete_refresh_token_if_current` compares and deletes under one guard).
+fn load_chunks(tenant_id: &str, account_oid: &str) -> Result<Option<Zeroizing<String>>> {
     // Preallocated so the common one-or-two-chunk token never reallocates and
     // leaves a plaintext copy behind.
     let mut combined = Zeroizing::new(String::with_capacity(MAX_CHUNK_UTF16_BYTES * 2));
@@ -379,6 +385,48 @@ pub fn delete_refresh_token(tenant_id: &str, account_oid: &str) -> Result<()> {
     delete_chunks(tenant_id, account_oid)
 }
 
+/// What [`delete_refresh_token_if_current`] found and did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PurgeOutcome {
+    /// The store still held the rejected token; it is gone now.
+    Deleted,
+    /// Nothing (or only a torn set, now cleared) was stored.
+    AlreadyGone,
+    /// A different token replaced the rejected one — a `reauthenticate` or
+    /// consent that completed while the failing refresh was in flight. Kept.
+    Superseded,
+}
+
+/// Deletes the stored refresh token only if it is still `rejected` — the one
+/// that just failed `invalid_grant`.
+///
+/// Refreshes for different audiences run concurrently, so a slow one can fail
+/// with the OLD token after the operator already re-authenticated and stored a
+/// new one; an unconditional purge would erase that fresh session. The check
+/// and the delete share [`CHUNK_SET_LOCK`] with every save, so no write can land
+/// between them.
+pub fn delete_refresh_token_if_current(
+    tenant_id: &str,
+    account_oid: &str,
+    rejected: &str,
+) -> Result<PurgeOutcome> {
+    ensure_keyring_store()?;
+    let _guard = chunk_set_guard();
+    match load_chunks(tenant_id, account_oid)? {
+        Some(current) if current.as_str() != rejected => Ok(PurgeOutcome::Superseded),
+        Some(_) => {
+            delete_chunks(tenant_id, account_oid)?;
+            Ok(PurgeOutcome::Deleted)
+        }
+        // `load_chunks` reads a torn set as `None`; clearing it keeps the old
+        // "purge whatever is there" behaviour for that case.
+        None => {
+            delete_chunks(tenant_id, account_oid)?;
+            Ok(PurgeOutcome::AlreadyGone)
+        }
+    }
+}
+
 /// The deletion itself, without taking the lock — for callers already holding
 /// it. Split out so `save_refresh_token`'s rollback cannot deadlock on its own
 /// guard.
@@ -407,6 +455,28 @@ pub(crate) fn init_mock_keyring() {
     INIT.call_once(|| {
         keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap());
     });
+}
+
+/// Test-only: make the NEXT keyring operation on chunk `chunk` of
+/// `(tenant_id, account_oid)` fail, as a locked credential store would. The mock
+/// store hands out the same credential for the same service/user and consumes
+/// the error on the next call, so exactly one operation fails.
+#[cfg(test)]
+pub(crate) fn fail_next_keyring_op(tenant_id: &str, account_oid: &str, chunk: usize) {
+    init_mock_keyring();
+    let entry = keyring_core::Entry::new(
+        KEYRING_SERVICE,
+        &chunk_account(tenant_id, account_oid, chunk),
+    )
+    .unwrap();
+    entry
+        .as_any()
+        .downcast_ref::<keyring_core::mock::Cred>()
+        .expect("the mock keyring store is installed")
+        .set_error(keyring_core::Error::Invalid(
+            "mock".into(),
+            "credential store locked".into(),
+        ));
 }
 
 #[cfg(test)]
@@ -543,6 +613,37 @@ mod tests {
             load_refresh_token(tenant, oid).unwrap(),
             None,
             "a rollback must leave NO session rather than a spliced one"
+        );
+    }
+
+    #[test]
+    fn conditional_delete_only_removes_the_rejected_token() {
+        init_mock_keyring();
+        let (tenant, oid) = ("cond-tenant", "cond-oid");
+        save_refresh_token(tenant, oid, "a").unwrap();
+
+        // A newer token replaced the rejected one: it must survive.
+        assert_eq!(
+            delete_refresh_token_if_current(tenant, oid, "b").unwrap(),
+            PurgeOutcome::Superseded
+        );
+        assert_eq!(
+            load_refresh_token(tenant, oid)
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("a")
+        );
+
+        // The rejected token is still the stored one: it goes.
+        assert_eq!(
+            delete_refresh_token_if_current(tenant, oid, "a").unwrap(),
+            PurgeOutcome::Deleted
+        );
+        assert_eq!(load_refresh_token(tenant, oid).unwrap(), None);
+        assert_eq!(
+            delete_refresh_token_if_current(tenant, oid, "a").unwrap(),
+            PurgeOutcome::AlreadyGone
         );
     }
 

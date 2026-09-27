@@ -39,8 +39,8 @@ use azapptoolkit_core::identity::{SignInOutcome, TenantContext};
 
 use crate::error::{AuthError, Result};
 use crate::token_cache::{
-    AccessToken, TokenCache, delete_refresh_token, load_refresh_token, save_refresh_token,
-    scope_key,
+    AccessToken, PurgeOutcome, TokenCache, delete_refresh_token, delete_refresh_token_if_current,
+    load_refresh_token, save_refresh_token, scope_key,
 };
 use loopback::{listen_for_code, open_system_browser};
 use wire::{
@@ -53,6 +53,10 @@ const REFRESH_LEEWAY_SECS: i64 = 60;
 /// Per-`(tenant, scope_key)` refresh locks, created lazily and keyed exactly
 /// like the token cache. See the `EntraAuthService::refresh_locks` field.
 type RefreshLocks = Mutex<HashMap<(String, String), Arc<AsyncMutex<()>>>>;
+
+/// Launches the `/authorize` URL for an interactive flow. See the
+/// `EntraAuthService::open_browser` field.
+type BrowserOpener = Box<dyn Fn(&str) -> Result<()> + Send + Sync>;
 
 pub struct EntraAuthService {
     client_id: String,
@@ -77,6 +81,12 @@ pub struct EntraAuthService {
     refresh_locks: RefreshLocks,
     known_tenants: Mutex<HashMap<String, TenantContext>>,
     http: reqwest::Client,
+    /// Opens the `/authorize` URL of an interactive flow. Always
+    /// [`open_system_browser`] in the app; a field (not a direct call) so tests
+    /// can stand in for the browser and drive `sign_in`, `consent_for_scopes`
+    /// and `reauthenticate` end to end — the loopback `redirect_uri`, `state`
+    /// and `nonce` all travel in the URL it is handed.
+    open_browser: BrowserOpener,
 }
 
 impl EntraAuthService {
@@ -96,6 +106,7 @@ impl EntraAuthService {
                 .connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)
                 .build()
                 .expect("reqwest client builds"),
+            open_browser: Box::new(open_system_browser),
         })
     }
 
@@ -261,7 +272,7 @@ impl EntraAuthService {
             url_length = auth_url.as_str().len(),
             "opening system browser for Entra authorize"
         );
-        if let Err(err) = open_system_browser(auth_url.as_str()) {
+        if let Err(err) = (self.open_browser)(auth_url.as_str()) {
             tracing::warn!(
                 ?err,
                 "failed to auto-open browser; user must open URL manually"
@@ -299,6 +310,17 @@ impl EntraAuthService {
     }
 
     pub async fn sign_in(&self) -> Result<SignInOutcome> {
+        // The id token's `tid` is always the tenant GUID, so a tenant configured
+        // by domain (env, settings.json or the `.env` bake — the config screen
+        // only accepts a GUID) fails the tid check below every time. Say so
+        // before sending the operator through the browser for nothing. A GUID
+        // never contains a dot, so this needs no second copy of the GUID rule.
+        if self.tenant_id.contains('.') {
+            return Err(AuthError::TokenExchange(format!(
+                "configured tenant {} is a domain; azapptoolkit needs the Directory (tenant) ID GUID from the app registration's Overview page",
+                self.tenant_id
+            )));
+        }
         let initial_scopes = self.default_graph_read_scopes();
         let (token, claims) = self
             .run_auth_code_flow(&initial_scopes, "select_account", None)
@@ -528,12 +550,34 @@ impl EntraAuthService {
         let token = match self.post_token(&authority, &params).await {
             Ok(t) => t,
             Err(AuthError::InvalidGrant(reason)) => {
-                // The stored refresh token is no longer usable. Purge it
-                // and drop any cached access tokens for the tenant so the
-                // next call surfaces a clean "not signed in" rather than
-                // looping on a stale token.
+                // The refresh token we sent is no longer usable. Purge it and
+                // drop any cached access tokens for the tenant so the next call
+                // surfaces a clean "not signed in" rather than looping on a
+                // stale token — but only if the keyring still holds THAT token.
+                // Refresh locks are per scope set, so this POST can have been in
+                // flight while a `reauthenticate`/consent stored a new one; an
+                // unconditional purge would erase the session the operator just
+                // re-established. The compare and the delete run under the
+                // keyring's chunk-set lock (on the blocking pool), so no save
+                // can land between them.
                 tracing::warn!(tenant_id = %tenant.tenant_id, %reason, "refresh token rejected, purging");
-                let _ = delete_refresh_token(&tenant.tenant_id, &tenant.account_oid);
+                let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
+                let rejected = refresh_secret.clone();
+                let purge = tokio::task::spawn_blocking(move || {
+                    delete_refresh_token_if_current(&t, &oid, &rejected)
+                })
+                .await;
+                if let Ok(Ok(PurgeOutcome::Superseded)) = purge {
+                    // The newer session stays; the caller's silent retry
+                    // (`refresh_session`) picks it up without a browser.
+                    tracing::info!(
+                        tenant_id = %tenant.tenant_id,
+                        "refresh token was replaced while this refresh was in flight; keeping the newer session"
+                    );
+                    return Err(AuthError::RefreshTokenMissing(tenant.tenant_id.clone()));
+                }
+                // Deleted, already gone, or the keyring failed (ignored, as the
+                // purge always was): the session is dead either way.
                 self.cache.invalidate_tenant(&tenant.tenant_id);
                 self.known_tenants.lock().remove(&tenant.tenant_id);
                 return Err(AuthError::RefreshTokenMissing(tenant.tenant_id.clone()));
@@ -559,10 +603,17 @@ impl EntraAuthService {
         .await
     }
 
+    /// Ends `tenant`'s session: deletes the keyring refresh token, then drops
+    /// the cached access tokens and the known-tenant entry.
+    ///
+    /// All or nothing. The keyring delete is the one fallible step, so it goes
+    /// first: a failure leaves the session fully intact (the UI truthfully
+    /// says "still signed in" and Sign out can be retried), never half-cleared
+    /// with the refresh token surviving for the next launch to restore.
     pub async fn sign_out(&self, tenant: &TenantContext) -> Result<()> {
+        delete_refresh_token_off_worker(&tenant.tenant_id, &tenant.account_oid).await?;
         self.cache.invalidate_tenant(&tenant.tenant_id);
         self.known_tenants.lock().remove(&tenant.tenant_id);
-        delete_refresh_token(&tenant.tenant_id, &tenant.account_oid)?;
         Ok(())
     }
 
@@ -690,6 +741,16 @@ impl EntraAuthService {
     }
 }
 
+/// Keyring delete on the blocking pool — the same per-chunk OS round trips as
+/// save/load, and it takes the std `CHUNK_SET_LOCK`, so never inline on a
+/// tokio worker.
+async fn delete_refresh_token_off_worker(tenant_id: &str, account_oid: &str) -> Result<()> {
+    let (t, oid) = (tenant_id.to_string(), account_oid.to_string());
+    tokio::task::spawn_blocking(move || delete_refresh_token(&t, &oid))
+        .await
+        .map_err(|e| AuthError::Keyring(format!("keyring delete task failed: {e}")))?
+}
+
 /// Refuses a token minted for a different identity than the session's. A
 /// consent/login screen can switch tenant or account even with a
 /// `login_hint`; caching such a token would cross this session's tenant-keyed
@@ -715,16 +776,23 @@ fn ensure_same_identity(claims: &IdClaims, tenant: &TenantContext, action: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::token_cache::init_mock_keyring;
+    use crate::token_cache::{fail_next_keyring_op, init_mock_keyring};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// Builds an auth service whose token endpoint points at `auth_root` (a mock
-    /// server), already "signed in" to `tenant` with a stored refresh token.
-    fn signed_in_service(auth_root: String, tenant: &str, oid: &str) -> EntraAuthService {
+    /// An auth service for `tenant` whose token endpoint points at `auth_root`
+    /// (a mock server), with no session yet.
+    fn fresh_service(
+        auth_root: String,
+        tenant: &str,
+        open_browser: BrowserOpener,
+    ) -> EntraAuthService {
         init_mock_keyring();
-        save_refresh_token(tenant, oid, "stored-refresh-token").unwrap();
-        let svc = EntraAuthService {
+        EntraAuthService {
             client_id: "client".into(),
             tenant_id: tenant.into(),
             auth_root,
@@ -733,7 +801,20 @@ mod tests {
             refresh_locks: Mutex::new(HashMap::new()),
             known_tenants: Mutex::new(HashMap::new()),
             http: reqwest::Client::new(),
-        };
+            open_browser,
+        }
+    }
+
+    /// The silent paths never reach for a browser; one that does is a bug.
+    fn no_browser() -> BrowserOpener {
+        Box::new(|_| panic!("a silent path must not open a browser"))
+    }
+
+    /// Builds an auth service whose token endpoint points at `auth_root` (a mock
+    /// server), already "signed in" to `tenant` with a stored refresh token.
+    fn signed_in_service(auth_root: String, tenant: &str, oid: &str) -> EntraAuthService {
+        let svc = fresh_service(auth_root, tenant, no_browser());
+        save_refresh_token(tenant, oid, "stored-refresh-token").unwrap();
         svc.known_tenants.lock().insert(
             tenant.into(),
             TenantContext {
@@ -767,6 +848,411 @@ mod tests {
             .respond_with(ResponseTemplate::new(400).set_body_json(body))
             .mount(server)
             .await;
+    }
+
+    /// An unsigned id token carrying the given claims — the shape
+    /// `wire::parse_id_token` reads (it never checks the signature segment).
+    fn id_token(tid: &str, oid: Option<&str>, nonce: &str) -> String {
+        let mut claims = serde_json::json!({
+            "tid": tid,
+            "nonce": nonce,
+            "preferred_username": "ada@contoso.com",
+            "name": "Ada",
+        });
+        if let Some(oid) = oid {
+            claims["oid"] = oid.into();
+        }
+        format!("h.{}.s", URL_SAFE_NO_PAD.encode(claims.to_string()))
+    }
+
+    /// Stands in for the system browser: reads the loopback `redirect_uri`,
+    /// `state` and `nonce` from the authorize URL, records the nonce for the
+    /// mock `/token`, and delivers the redirect the way Entra would. Counts its
+    /// calls in `opened`.
+    fn redirecting_opener(
+        nonce_slot: Arc<Mutex<Option<String>>>,
+        opened: Arc<AtomicUsize>,
+    ) -> BrowserOpener {
+        Box::new(move |url: &str| {
+            opened.fetch_add(1, Ordering::SeqCst);
+            let query: HashMap<String, String> = url::Url::parse(url)
+                .unwrap()
+                .query_pairs()
+                .into_owned()
+                .collect();
+            *nonce_slot.lock() = query.get("nonce").cloned();
+            let redirect = query["redirect_uri"].clone();
+            // A CSRF token is base64url, so it needs no URL encoding.
+            let state = query["state"].clone();
+            tokio::spawn(async move {
+                let mut socket =
+                    tokio::net::TcpStream::connect(redirect.trim_start_matches("http://"))
+                        .await
+                        .unwrap();
+                let request =
+                    format!("GET /?code=test-code&state={state} HTTP/1.1\r\nHost: x\r\n\r\n");
+                socket.write_all(request.as_bytes()).await.unwrap();
+                let mut response = Vec::new();
+                let _ = socket.read_to_end(&mut response).await;
+            });
+            Ok(())
+        })
+    }
+
+    /// Mounts the interactive code redemption at the CONFIGURED tenant's
+    /// authority, answering with an id token for `tid`/`oid`. The nonce is the
+    /// one the opener saw in the authorize URL unless `forged_nonce` is set.
+    async fn mount_interactive_token(
+        server: &MockServer,
+        configured_tenant: &str,
+        tid: &str,
+        oid: Option<&str>,
+        forged_nonce: Option<&str>,
+        nonce_slot: Arc<Mutex<Option<String>>>,
+    ) {
+        let (tid, oid) = (tid.to_string(), oid.map(str::to_string));
+        let forged_nonce = forged_nonce.map(str::to_string);
+        Mock::given(method("POST"))
+            .and(path(format!("/{configured_tenant}/oauth2/v2.0/token")))
+            .respond_with(move |_: &wiremock::Request| {
+                let nonce = forged_nonce
+                    .clone()
+                    .or_else(|| nonce_slot.lock().clone())
+                    .expect("the browser was opened before the code was redeemed");
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "interactive-at",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                    "refresh_token": "rt-interactive",
+                    "id_token": id_token(&tid, oid.as_deref(), &nonce),
+                }))
+            })
+            .mount(server)
+            .await;
+    }
+
+    /// A service for `tenant` wired to the redirecting opener, plus the shared
+    /// nonce slot and call counter.
+    fn interactive_service(
+        auth_root: String,
+        tenant: &str,
+    ) -> (
+        EntraAuthService,
+        Arc<Mutex<Option<String>>>,
+        Arc<AtomicUsize>,
+    ) {
+        let nonce_slot = Arc::new(Mutex::new(None));
+        let opened = Arc::new(AtomicUsize::new(0));
+        let svc = fresh_service(
+            auth_root,
+            tenant,
+            redirecting_opener(nonce_slot.clone(), opened.clone()),
+        );
+        (svc, nonce_slot, opened)
+    }
+
+    fn stored_token(tenant: &str, oid: &str) -> Option<String> {
+        load_refresh_token(tenant, oid)
+            .unwrap()
+            .map(|t| t.as_str().to_string())
+    }
+
+    #[tokio::test]
+    async fn sign_in_caches_the_read_token_and_registers_the_tenant() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("signin-ok-tenant", "signin-ok-oid");
+        let (svc, nonce, _) = interactive_service(server.uri(), tenant);
+        mount_interactive_token(&server, tenant, tenant, Some(oid), None, nonce).await;
+
+        let outcome = svc.sign_in().await.unwrap();
+
+        assert_eq!(outcome.tenant.account_oid, oid);
+        let context = svc.tenant_context(tenant).expect("tenant registered");
+        assert_eq!(context.account_oid, oid);
+        assert_eq!(context.username.as_deref(), Some("ada@contoso.com"));
+        assert_eq!(
+            svc.cache
+                .get(tenant, &svc.default_graph_read_scopes())
+                .expect("read token cached")
+                .token,
+            "interactive-at"
+        );
+        assert_eq!(stored_token(tenant, oid).as_deref(), Some("rt-interactive"));
+    }
+
+    #[tokio::test]
+    async fn sign_in_rejects_a_token_for_another_tenant() {
+        let server = MockServer::start().await;
+        let (tenant, other, oid) = ("signin-tid-tenant", "signin-tid-other", "signin-tid-oid");
+        let (svc, nonce, _) = interactive_service(server.uri(), tenant);
+        mount_interactive_token(&server, tenant, other, Some(oid), None, nonce).await;
+
+        let result = svc.sign_in().await;
+
+        assert!(
+            matches!(&result, Err(AuthError::TokenExchange(m)) if m.contains("does not match")),
+            "{:?}",
+            result.err()
+        );
+        // Nothing of the foreign token was kept anywhere.
+        assert!(svc.known_tenants.lock().is_empty());
+        let read = svc.default_graph_read_scopes();
+        assert!(svc.cache.get(tenant, &read).is_none());
+        assert!(svc.cache.get(other, &read).is_none());
+        assert_eq!(stored_token(other, oid), None);
+        assert_eq!(stored_token(tenant, oid), None);
+    }
+
+    #[tokio::test]
+    async fn sign_in_rejects_an_id_token_with_the_wrong_nonce() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("signin-nonce-tenant", "signin-nonce-oid");
+        let (svc, nonce, _) = interactive_service(server.uri(), tenant);
+        mount_interactive_token(&server, tenant, tenant, Some(oid), Some("forged"), nonce).await;
+
+        let result = svc.sign_in().await;
+
+        assert!(
+            matches!(&result, Err(AuthError::TokenExchange(m)) if m == "id_token nonce mismatch"),
+            "{:?}",
+            result.err()
+        );
+        assert!(svc.known_tenants.lock().is_empty());
+        assert!(
+            svc.cache
+                .get(tenant, &svc.default_graph_read_scopes())
+                .is_none()
+        );
+        assert_eq!(stored_token(tenant, oid), None);
+    }
+
+    #[tokio::test]
+    async fn sign_in_rejects_an_id_token_without_oid() {
+        let server = MockServer::start().await;
+        let tenant = "signin-no-oid-tenant";
+        let (svc, nonce, _) = interactive_service(server.uri(), tenant);
+        mount_interactive_token(&server, tenant, tenant, None, None, nonce).await;
+
+        let result = svc.sign_in().await;
+
+        assert!(
+            matches!(&result, Err(AuthError::TokenExchange(m)) if m == "id token missing oid"),
+            "{:?}",
+            result.err()
+        );
+        assert!(svc.known_tenants.lock().is_empty());
+        assert!(
+            svc.cache
+                .get(tenant, &svc.default_graph_read_scopes())
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_in_refuses_a_domain_tenant_before_opening_the_browser() {
+        let server = MockServer::start().await;
+        let (svc, _, opened) = interactive_service(server.uri(), "contoso.onmicrosoft.com");
+
+        let result = svc.sign_in().await;
+
+        assert!(
+            matches!(&result, Err(AuthError::TokenExchange(m)) if m.contains("GUID")),
+            "{:?}",
+            result.err()
+        );
+        assert_eq!(
+            opened.load(Ordering::SeqCst),
+            0,
+            "no wasted browser round trip"
+        );
+        assert!(svc.known_tenants.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn consent_as_a_different_account_is_rejected_and_the_cache_untouched() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("consent-id-tenant", "consent-id-oid");
+        let mut svc = signed_in_service(server.uri(), tenant, oid);
+        let nonce_slot = Arc::new(Mutex::new(None));
+        svc.open_browser = redirecting_opener(nonce_slot.clone(), Arc::new(AtomicUsize::new(0)));
+        mount_interactive_token(
+            &server,
+            tenant,
+            tenant,
+            Some("someone-else"),
+            None,
+            nonce_slot,
+        )
+        .await;
+        let scopes = vec!["https://management.azure.com/.default".to_string()];
+
+        let result = svc.consent_for_scopes(tenant, &scopes).await;
+
+        assert!(
+            matches!(result, Err(AuthError::Authorization(_))),
+            "{:?}",
+            result.err()
+        );
+        assert!(svc.cache.get(tenant, &scopes).is_none());
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("stored-refresh-token")
+        );
+        assert!(svc.tenant_context(tenant).is_some());
+    }
+
+    #[tokio::test]
+    async fn reauthenticate_restores_the_tenant_only_after_validation() {
+        let context = |tenant: &str, oid: &str| TenantContext {
+            tenant_id: tenant.into(),
+            account_oid: oid.into(),
+            username: Some("ada@contoso.com".into()),
+            display_name: None,
+        };
+
+        // Same account: the session comes back (a dead grant had removed it).
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("reauth-ok-tenant", "reauth-ok-oid");
+        let mut svc = relaunched_service(server.uri(), tenant, oid);
+        let nonce_slot = Arc::new(Mutex::new(None));
+        svc.open_browser = redirecting_opener(nonce_slot.clone(), Arc::new(AtomicUsize::new(0)));
+        mount_interactive_token(&server, tenant, tenant, Some(oid), None, nonce_slot).await;
+
+        svc.reauthenticate(&context(tenant, oid)).await.unwrap();
+
+        assert!(svc.tenant_context(tenant).is_some());
+        assert_eq!(stored_token(tenant, oid).as_deref(), Some("rt-interactive"));
+
+        // Another account at the login screen: refused, and not re-registered.
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("reauth-other-tenant", "reauth-other-oid");
+        let mut svc = relaunched_service(server.uri(), tenant, oid);
+        let nonce_slot = Arc::new(Mutex::new(None));
+        svc.open_browser = redirecting_opener(nonce_slot.clone(), Arc::new(AtomicUsize::new(0)));
+        mount_interactive_token(
+            &server,
+            tenant,
+            tenant,
+            Some("someone-else"),
+            None,
+            nonce_slot,
+        )
+        .await;
+
+        let result = svc.reauthenticate(&context(tenant, oid)).await;
+
+        assert!(
+            matches!(result, Err(AuthError::Authorization(_))),
+            "{:?}",
+            result.err()
+        );
+        assert!(svc.tenant_context(tenant).is_none());
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("stored-refresh-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_out_keeps_the_whole_session_when_the_keyring_delete_fails() {
+        let (tenant, oid) = ("signout-tenant", "signout-oid");
+        let svc = signed_in_service("http://localhost".into(), tenant, oid);
+        let read = svc.default_graph_read_scopes();
+        svc.cache.put(
+            tenant.to_string(),
+            &read,
+            AccessToken {
+                token: "cached".into(),
+                expires_at: Utc::now() + Duration::seconds(3600),
+                scopes: read.clone(),
+            },
+        );
+        let context = svc.tenant_context(tenant).unwrap();
+        fail_next_keyring_op(tenant, oid, 0);
+
+        // A locked credential store: nothing is cleared, so "you are still
+        // signed in" is true and the next launch has nothing stale to restore.
+        let result = svc.sign_out(&context).await;
+        assert!(matches!(result, Err(AuthError::Keyring(_))), "{result:?}");
+        assert!(svc.tenant_context(tenant).is_some());
+        assert!(svc.cache.get(tenant, &read).is_some());
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("stored-refresh-token")
+        );
+
+        // The retry succeeds and clears all three.
+        svc.sign_out(&context).await.unwrap();
+        assert!(svc.tenant_context(tenant).is_none());
+        assert!(svc.cache.get(tenant, &read).is_none());
+        assert_eq!(stored_token(tenant, oid), None);
+    }
+
+    #[tokio::test]
+    async fn invalid_grant_does_not_purge_a_token_stored_during_the_refresh() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("superseded-tenant", "superseded-oid");
+        let (t, o) = (tenant.to_string(), oid.to_string());
+        // The re-authentication lands while the old token's refresh is still
+        // in flight: the responder stores the new token, then rejects the old.
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(move |_: &wiremock::Request| {
+                save_refresh_token(&t, &o, "rt-reauthed").unwrap();
+                ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": "invalid_grant",
+                    "error_description": "AADSTS70000: refresh token expired"
+                }))
+            })
+            .mount(&server)
+            .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+
+        let result = svc
+            .access_token_for_scopes(tenant, &["https://management.azure.com/.default".into()])
+            .await;
+
+        assert!(matches!(result, Err(AuthError::RefreshTokenMissing(_))));
+        assert_eq!(stored_token(tenant, oid).as_deref(), Some("rt-reauthed"));
+        assert!(svc.tenant_context(tenant).is_some());
+    }
+
+    /// Every keyring call in the service runs on the blocking pool: they are
+    /// OS round trips per chunk and take a std mutex, so an inline one parks a
+    /// tokio worker (often while holding a refresh lock). The call must sit on
+    /// the `spawn_blocking` line or, where rustfmt wraps the closure, the line
+    /// right below it.
+    #[test]
+    fn keyring_calls_stay_on_the_blocking_pool() {
+        let source = include_str!("mod.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let lines: Vec<&str> = production.lines().collect();
+        let mut calls = 0;
+        for (idx, line) in lines.iter().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            let calls_keyring = [
+                "save_refresh_token(",
+                "load_refresh_token(",
+                "delete_refresh_token(",
+                "delete_refresh_token_if_current(",
+            ]
+            .iter()
+            .any(|call| line.contains(call));
+            if !calls_keyring {
+                continue;
+            }
+            calls += 1;
+            let previous = idx.checked_sub(1).map_or("", |i| lines[i]);
+            assert!(
+                line.contains("spawn_blocking") || previous.contains("spawn_blocking"),
+                "keyring call outside spawn_blocking: {}",
+                line.trim()
+            );
+        }
+        // save, load, the conditional purge and the sign-out delete.
+        assert!(calls >= 4, "the scan found only {calls} keyring calls");
     }
 
     async fn mount_token_success(server: &MockServer, tenant: &str, access_token: &str) {

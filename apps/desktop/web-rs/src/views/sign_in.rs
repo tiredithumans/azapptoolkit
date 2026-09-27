@@ -13,8 +13,8 @@ use crate::state::use_session;
 
 #[component]
 pub fn SignInScreen(
-    /// The tenant this build authenticates against — the domain or GUID
-    /// currently configured. Named on the card because it is the last moment a
+    /// The tenant this build authenticates against — the GUID currently
+    /// configured. Named on the card because it is the last moment a
     /// wrong one is cheap: after the button, a well-formed but wrong id costs a
     /// browser round trip and comes back as an opaque `token_exchange` failure.
     tenant: String,

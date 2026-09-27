@@ -305,6 +305,22 @@
   access" with a Scope fix that needs the same Exchange access. That group now shows a note, and
   CSV, JSON and HTML exports carry the same sentence. The run is still cached.
 
+- **The tenant setup screen no longer accepts a domain it can't sign in with.** Entering a domain
+  such as contoso.onmicrosoft.com as the Directory (tenant) ID was saved without complaint, but every
+  sign-in then failed after the browser step, because Entra identifies the tenant by its GUID. The
+  screen now asks for the GUID from the app registration's Overview page. An install already set to
+  a domain says so before opening the browser.
+
+- **A failed sign-out no longer leaves the app half signed out.** If the OS credential store refused
+  to delete the saved sign-in, the app had already dropped the session. Every action then failed as
+  "not signed in" while the error said you were still signed in, and the next launch restored the
+  session you had tried to end. The saved sign-in is now deleted first, so a failed sign-out leaves
+  you fully signed in and Sign out can be retried.
+
+- **Re-authenticating no longer gets undone by a slow request.** A token refresh that was still
+  waiting on the network when you re-authenticated could fail afterwards and delete the new sign-in,
+  putting you back on the Re-authenticate prompt. It now leaves the newer sign-in alone.
+
 ## [0.30.2] - 2026-09-25
 
 ### Changed

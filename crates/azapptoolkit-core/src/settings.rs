@@ -27,8 +27,9 @@ pub struct UserSettings {
     /// config screen never appears). See `state.rs` for the resolution order.
     #[serde(default)]
     pub client_id: Option<String>,
-    /// Entra directory (tenant) ID — a GUID or a verified domain — set via the
-    /// first-run config screen. See [`Self::client_id`].
+    /// Entra directory (tenant) ID — a GUID (the id token's `tid` is compared
+    /// to it verbatim, so a domain never signs in) — set via the first-run
+    /// config screen. See [`Self::client_id`].
     #[serde(default)]
     pub tenant_id: Option<String>,
     /// Per-tenant operator defaults (default owners, SSO notification emails,

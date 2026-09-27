@@ -38,10 +38,13 @@ pub fn set_auth_config(client_id: String, tenant_id: String) -> Result<(), UiErr
             "Application (client) ID must be a GUID, e.g. 00000000-0000-0000-0000-000000000000.",
         ));
     }
-    if !is_valid_tenant(&tenant_id) {
+    // GUID only: the id token's `tid` claim is always the tenant GUID and
+    // `sign_in` compares it to this string verbatim (as does the launch-restore
+    // lookup), so a domain here could be saved but never signed in with.
+    if !is_guid(&tenant_id) {
         return Err(UiError::validation(
             "invalid_tenant_id",
-            "Directory (tenant) ID must be a GUID or a tenant domain, e.g. contoso.onmicrosoft.com.",
+            "Directory (tenant) ID must be a GUID, e.g. 00000000-0000-0000-0000-000000000000 — copy it from the app registration's Overview page.",
         ));
     }
 
@@ -65,24 +68,27 @@ pub fn restart_app(app: AppHandle) {
     app.restart();
 }
 
-/// A tenant id is either a GUID or a verified domain (e.g.
-/// `contoso.onmicrosoft.com`). Domains are accepted loosely — a dotted,
-/// whitespace-free host — since Entra also takes one as an authority segment.
-fn is_valid_tenant(s: &str) -> bool {
-    is_guid(s) || (s.contains('.') && !s.contains(char::is_whitespace) && s.len() <= 253)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A domain is refused: the id token's `tid` is the GUID, so a
+    /// domain-configured install could never complete a sign-in.
     #[test]
-    fn tenant_accepts_guid_or_domain() {
-        assert!(is_valid_tenant("3fa85f64-5717-4562-b3fc-2c963f66afa6"));
-        assert!(is_valid_tenant("contoso.onmicrosoft.com"));
-        assert!(is_valid_tenant("contoso.com"));
-        assert!(!is_valid_tenant("contoso")); // no dot and not a GUID
-        assert!(!is_valid_tenant("has space.com"));
-        assert!(!is_valid_tenant(""));
+    fn tenant_must_be_a_guid() {
+        // Rejected before `settings.json` is touched, so this never writes.
+        let save_with_tenant = |tenant: &str| {
+            set_auth_config("3fa85f64-5717-4562-b3fc-2c963f66afa6".into(), tenant.into())
+        };
+        for rejected in [
+            "contoso.onmicrosoft.com",
+            "contoso.com",
+            "contoso",
+            "has space.com",
+            "",
+        ] {
+            let err = save_with_tenant(rejected).expect_err(rejected);
+            assert_eq!(err.code, "invalid_tenant_id", "{rejected}");
+        }
     }
 }
