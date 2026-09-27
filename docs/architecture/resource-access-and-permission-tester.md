@@ -1,8 +1,9 @@
 # Resource Access & the permission tester
 
 Deep-dive companion to the resource-lookup gotchas in [AGENTS.md](../../AGENTS.md). Read this before
-editing `commands::sharepoint::sweep_site_permissions`, `commands::exchange::find_mailbox_reachers`,
-`commands::permission_tester`, or the Resource Access / Permission tester views. The scoping
+editing `commands::sharepoint::sweep_site_permissions`, `commands::keyvault_rbac::sweep_key_vault_access`,
+`commands::permission_tester` (incl. `find_mailbox_reachers`), or the Resource Access / Permission
+tester views. The scoping
 mechanisms these tools observe are in [exchange-scoping.md](./exchange-scoping.md) and
 [sharepoint-selected.md](./sharepoint-selected.md).
 
@@ -15,9 +16,10 @@ the same time, so each long-running operation has its own cancel flag and comman
 `site_sweep_cancel` / `cancel_site_sweep` (shared by the Sites tab and the per-app site panel — same
 sweep), the Key Vault sweep `key_vault_sweep_cancel` / `cancel_key_vault_sweep`, and the mailbox
 probe `mailbox_probe_cancel` / `cancel_mailbox_probe`. One panel's Cancel never aborts another
-panel's scan, nor an audit/bulk run (and vice versa). All four long-running
-fan-out loops (audit, site sweep, mailbox probe, bulk credential sweep) ride
-`commands::dispatch::dispatch_capped`, which delivers **every** completed task to the collector and
+panel's scan, nor an audit/bulk run (and vice versa). Every long-running fan-out — the audit, the
+site sweep, the mailbox probe, the vault sweep, the `bulk.rs` app-list fan-outs and the DR backup —
+rides `commands::dispatch::dispatch_capped` (`repo_invariants/fanout.rs` finds the call sites
+itself; this list is illustrative), which delivers **every** completed task to the collector and
 returns an early-stop latch — callers report cancellation from that latch rather than re-reading the
 token afterwards.
 
@@ -62,6 +64,32 @@ the apps that can touch it. Invariants:
   itself has one home, `app_site_access_panel::site_sweep_cap_message`, shared with the Sites tab.
 - The completed result is cached under the tenant-prefixed `{tenant}|site_sweep` key
   (`CacheKind::Audit`, 60-minute TTL) so revisiting the view rehydrates without re-scanning.
+
+**Vault access tab (`sweep_key_vault_access`).** ARM-plane, answering "who can touch this vault?"
+(and, filtered by principal, "which vaults can this identity reach?"). The command proves the
+session (`prove_tenant_session`), claims `key_vault_sweep_cancel` before the first await, and
+pre-acquires the ARM token via `ensure_arm_token`, so the UI can offer the `arm` consent. It lists
+the subscriptions (a failure there is fatal), then `list_key_vaults` per subscription at
+`ARM_CONCURRENCY` (8), and reads each vault's `atScope()` role assignments through
+`dispatch_capped` — direct **and** inherited (resource group / subscription / management group).
+Rows carry `inherited` (the "Inherited" badge; `is_inherited` compares the assignment scope to the
+vault id case-insensitively); role-definition ids resolve to names (cached under
+`CacheKind::Permissions`) and principal ids to display names, and rows whose role is in
+`KV_HIGH_PRIVILEGE_ROLES` are flagged `high_privilege`. Progress streams as
+`keyvault-sweep-progress`.
+
+- **Coverage, the same rule as the site sweep.** A per-vault read failure increments
+  `vaults_failed` — never read as "no access" — and the panel renders "scanned X of Y (Z failed —
+  coverage is partial)". The CSV/JSON export (`save_key_vault_access_to_file`) leads with that
+  coverage line, because a failed vault contributes no rows.
+- Only a run that was not cancelled **and** has `vaults_failed == 0` is cached, under
+  `{tenant}|keyvault_sweep` (`CacheKind::Audit`, audit TTL); `get_cached_key_vault_access`
+  rehydrates it and proves the session first. Invalidation (an in-app Azure role assignment busts
+  it on `Ok`) is in [caching-and-search.md](./caching-and-search.md).
+- **Known gaps** (the coverage line does not yet say so): a subscription whose vault enumeration
+  fails is logged and skipped, not counted in `vaults_failed`; and enumeration is silently capped
+  at `MAX_VAULTS_PER_SWEEP` (2000) — `KeyVaultSweepResult` has no `truncated` flag, unlike the site
+  sweep's.
 
 **Mailboxes tab (`find_mailbox_reachers`).** Candidates come from two sources, merged by SP
 object id: the paged `appRoleAssignedTo` on **both** mailbox-bearing resource SPs

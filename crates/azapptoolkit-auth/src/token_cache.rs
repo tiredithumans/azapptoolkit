@@ -4,7 +4,7 @@
 //! pair `(tenant_id, scope_key)` so multi-audience apps (Graph + Key Vault +
 //! ARM) can keep a fresh token per resource without evicting the others.
 //! Refresh tokens, which are scope-agnostic, live in the OS secret store via
-//! [`keyring`] — Windows Credential Manager / macOS Keychain / Secret
+//! [`keyring_core`] — Windows Credential Manager / macOS Keychain / Secret
 //! Service — and are shared across audiences for the same account.
 
 use chrono::{DateTime, Utc};

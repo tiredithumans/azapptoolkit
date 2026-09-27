@@ -59,7 +59,7 @@ gotcha in AGENTS.md).
 ## Silent grants can't *obtain* consent — only use it
 
 A `refresh_token` grant for a not-yet-consented scope returns AADSTS65001/65004, which
-`service.rs::classify_token_error` maps to `AuthError::ConsentRequired` (code `consent_required`),
+`azapptoolkit_auth::service::wire::classify_token_error` maps to `AuthError::ConsentRequired` (code `consent_required`),
 **distinct from `InvalidGrant`** — the refresh token is still valid, so `access_token_for_scopes`
 must NOT purge it (purging here = signing the user out over a missing optional scope; that was the
 bug).

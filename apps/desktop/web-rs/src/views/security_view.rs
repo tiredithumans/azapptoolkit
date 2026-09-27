@@ -2,10 +2,11 @@
 //!
 //! One posture strip (read-only severity counts + Run / Cancel / Export /
 //! progress / consent — the single owner of the audit-run lifecycle via
-//! [`AuditController`]) above five co-equal sub-tabs: **Findings** (grouped,
+//! [`AuditController`]) above six co-equal sub-tabs: **Findings** (grouped,
 //! remediation-centric — the default), **All apps** (the ranked score table),
-//! and the three inventory lenses (Credential expiry, Delegated grants,
-//! Application permissions). The
+//! and the four inventory lenses (Credential expiry, SSO certificates,
+//! Delegated grants, Application permissions) — each lens an `AuditDashboard`
+//! over its own dataset, with its own facets + `SavedViews`. The
 //! controller is constructed once here and provided via context so both audit
 //! panes read the same scan; the strip's counts are display-only — filtering
 //! happens inside the panes (this view retired the old triple-control setup:

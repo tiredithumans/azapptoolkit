@@ -1,15 +1,15 @@
 # Disaster-recovery backup & restore
 
 This subsystem lets an operator capture a tenant's app estate to a portable file
-and (in later slices) rebuild it in a **new** tenant — for DR, a tenant-compromise
-recovery, or a forced migration. Read this before touching `commands/backup.rs`,
+and rebuild it in a **new** tenant — for DR, a tenant-compromise recovery, or a
+forced migration. Read this before touching `commands/backup.rs`,
 `commands/restore.rs`, or `azapptoolkit-dto/src/backup.rs`.
 
 ## The shape: file-bridged, two single-tenant instances
 
 The app is **single-tenant-bound** — `EntraAuthService::sign_in` rejects any
 token whose `tid` claim ≠ the configured `AZAPPTOOLKIT_TENANT_ID`
-(`crates/azapptoolkit-auth/src/service.rs`). A running instance therefore can
+(`crates/azapptoolkit-auth/src/service/mod.rs`). A running instance therefore can
 **never** touch two tenants. We do not change that. Instead:
 
 ```

@@ -1,14 +1,15 @@
 # Frontend workspace, session state & UI primitives
 
 Deep-dive companion to the frontend gotchas in [AGENTS.md](../../AGENTS.md). Read this before
-editing `web-rs/src/state.rs`, the shell, the list views, the open-items workspace, or the
-Security workbench's panes.
+editing `web-rs/src/state/` (the `Session` struct in `mod.rs`, its impl split by concern into
+`tenant.rs` / `navigation.rs` / `open_items.rs` / `toasts.rs` / `errors.rs`), the shell, the list
+views, the open-items workspace, or the Security workbench's panes.
 
 ## Reactivity conventions
 
 Leptos reactivity is closure-based: `{move || sig.get()}` inside `view!` for tracking,
 `.get()`/`.with()` to read. Shared state is `RwSignal<T>` fields on a context-provided `Session`
-(`web-rs/src/state.rs`). CSS is one plain global `styles.css` with BEM-ish class names — no
+(`web-rs/src/state/mod.rs`). CSS is one plain global `styles.css` with BEM-ish class names — no
 CSS-in-Rust, no per-component stylesheets.
 
 ## One primitive per UI pattern
@@ -112,15 +113,30 @@ The three list views (App Registrations / Enterprise Apps / Managed Identities) 
 there is no side detail pane. Opening a row calls `session.open_item(kind, entity_id, title)`,
 which adds it to ONE shared, cross-entity working set:
 
-- **State shape** — `Session.open_items: RwSignal<Vec<OpenItem>>` plus `open_seq` (monotonic id
-  source) and `shown_items: Vec<u64>` (the 1–2 items currently displayed). Modeled on the toast
-  stack: `Vec` + seq + cap `MAX_OPEN_ITEMS = 8` + drain-oldest on overflow.
+- **State shape** — `Session.open_items: RwSignal<Vec<OpenItem>>` plus `open_seq` (one monotonic
+  clock: it mints ids *and* stamps `focused_at`) and `shown_items: Vec<u64>` (the 1–2 items
+  currently displayed). Cap `MAX_OPEN_ITEMS = 8` (`state/open_items.rs`); overflow evicts the
+  **least-recently-focused** item (min `focused_at`, stamped by `focus_item`), not the oldest
+  opened — drain-oldest threw away a parked reference app. The eviction raises an `Info` toast
+  ("Open dock is full (8) — closed "…"") with a **Reopen** action. Pinned by
+  `open_item_cap_evicts_the_least_recently_focused` (`state/mod.rs` tests).
 - **Helpers** — `open_item` (dedupes by `(kind, entity_id)`, re-focuses an existing entry),
   `focus_item(id, split)` (split mode caps `shown` at 2, drop-oldest), `close_item` /
-  `close_item_by_entity`, `set_open_item_title`, `is_open`.
+  `close_item_by_entity` / `close_all_items`, `set_open_item_title`, `is_open`.
 - **Cross-tenant footgun** — the same one as the lifted searches/facets below: `open_items` +
   `shown_items` MUST reset in `set_active_tenant`, or a stale open item leaks the prior tenant's
   data.
+- **Persistence (tenant-keyed)** — the working set is parked in `localStorage` under
+  `azapptoolkit:workspace:{tenant_id}` (`workspace_key`). Every in-session mutation goes through
+  `Session::update_open_items`, the one write path, which also saves the snapshot. The only other
+  writes are deliberate raw `set`s: the clear in `set_active_tenant` (not persisted — by then
+  `active_tenant` is already the new tenant) and `restore_open_items`, the only reader, which
+  `set_active_tenant` calls *after* the clear. Restore fast-forwards `open_seq` past the
+  snapshot's ids and stamps (so a new item can't reuse a restored id) and never repopulates
+  `shown_items` — the dock comes back, the overlay doesn't. `OpenItemKind` variant names are a
+  stored format: renaming one silently drops parked docks (an undecodable snapshot is discarded
+  whole). Never add an unkeyed snapshot or a second write path; pinned by
+  `restore_open_items_never_crosses_tenants`.
 - **Mounting** — `OpenItemsDock` (the chip strip) + `OpenItemsWorkspace` (the overlay, 1-up or
   `--two` side-by-side) are mounted **once in `shell.rs`** so the set is shared, cross-entity, and
   survives nav. Never mount them per-view — keep-alive would duplicate them.
@@ -176,7 +192,7 @@ footgun, with the reset enforced **by structure, not vigilance**:
 
 ## Security workbench layout
 
-Filtering has exactly **two** homes: the Findings accordion and the All-apps
+Filtering **the audit scan** has exactly **two** homes: the Findings accordion and the All-apps
 `audit_severity` control. Anything else that filters is a third home and will
 drift out of step with them.
 
@@ -193,7 +209,8 @@ unrelated findings.
 deliberate, not an oversight — pinned by the `filter.rs` tests.
 
 
-The Security tab is a findings-first workbench: one controller, one strip, four panes. (Finding
+The Security tab is a findings-first workbench: one controller, one strip, six keep-alive
+sub-tabs (the two audit panes plus four inventory lenses). (Finding
 *semantics* — the group catalog, key matching, and bulk-action pairing — live in
 [audit-findings-and-remediation.md](./audit-findings-and-remediation.md#finding-groups-filters--bulk-action-pairing); this section is the view structure.)
 
@@ -202,7 +219,11 @@ The Security tab is a findings-first workbench: one controller, one strip, four 
   provides it via context to every pane.
 - **Read-only posture strip** — it renders severity counts, never filter controls. Do not
   reintroduce a severity TabBar, finding-chip drawer, or clickable scorecard as filters, and no
-  `SavedViews` on this view — filtering has exactly two homes (below).
+  `SavedViews` on the two audit panes (Findings / All apps) — filtering the scan has exactly two
+  homes (below). The four inventory lenses (Credential expiry, SSO certificates, Delegated grants,
+  Application permissions) keep their own facets + `SavedViews` via
+  `components::audit_dashboard::AuditDashboard`, because they filter their own datasets, not the
+  scan.
 - **Sub-tabs** — `security_tab`: `"findings" | "apps" | "credentials" | "sso-certificates" |
   "grants" | "app-permissions"`, keep-alive.
   **Findings** (default) renders the grouped accordion; expansion state is

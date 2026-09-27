@@ -3,8 +3,11 @@
 //! Tenant-wide view of every app-registration client secret and certificate,
 //! sorted soonest-to-expire first, with status filters, an "expiring soon"
 //! banner, CSV export (OS save dialog), and a one-click deep-link into each
-//! app's Credentials tab to rotate. Data is fetched fresh on open (no cache) so
-//! a just-rotated credential is never shown as still-expiring. The scaffold
+//! app's Credentials tab to rotate. The list is read through the backend's
+//! `{tenant}|credential_expirations` cache (`CacheKind::Lists`), which
+//! `invalidate_app_credentials` (rotate/remove) and `invalidate_app_lists`
+//! (create/delete) bust on `Ok`, so a just-rotated credential is never shown as
+//! still-expiring. The scaffold
 //! (fetch, filters, export, keyboard-navigable table) lives in
 //! [`AuditDashboard`]; this view supplies the credential-specific bits.
 

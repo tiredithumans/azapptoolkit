@@ -34,15 +34,18 @@ pub enum ActiveView {
     Apps,
     EnterpriseApps,
     ManagedIdentities,
-    /// Unified tenant-wide security surface: the security audit (hero) plus the
-    /// Credential-expiry and Delegated-grants inventory lenses, switched by an
-    /// internal sub-tab (`security_tab`). Replaces sibling nav destinations.
+    /// Unified tenant-wide security surface: the Findings/All-apps audit panes
+    /// plus the four inventory lenses (Credential expiry, SSO certificates,
+    /// Delegated grants, Application permissions), switched by an internal
+    /// sub-tab (`security_tab`). Replaces sibling nav destinations.
     Security,
     PermissionTester,
     /// Tenant-wide resource → identities reverse lookups, one tab per plane:
     /// Sites (sweep every site's app permissions — "which sites can this app
-    /// reach?" / "which apps can touch this site?") and Mailboxes (probe every
-    /// mail-permission holder against one mailbox — "who can read it?").
+    /// reach?" / "which apps can touch this site?"), Mailboxes (probe every
+    /// mail-permission holder against one mailbox — "who can read it?") and
+    /// Vault access (sweep every reachable Key Vault's Azure RBAC assignments —
+    /// "who can touch this vault?").
     ResourceAccess,
     /// Bulk actions over the app-registration multi-selection (a page, not a
     /// modal — the modal used to cover the very list selection it operates on).
@@ -53,8 +56,11 @@ pub enum ActiveView {
     /// Live role/scope readiness checklist for the signed-in user — what they
     /// currently hold vs. what each feature needs, across the three auth planes.
     Readiness,
-    /// Disaster-recovery backup & restore: export a portable manifest of the
-    /// tenant's app estate (and, in later slices, restore it into a new tenant).
+    /// Disaster-recovery backup & restore: back up the tenant's app estate to a
+    /// portable manifest, plan a restore against the current tenant, and restore
+    /// it (app registrations, enterprise apps, managed-identity permissions) —
+    /// typically into a new tenant (`backup_tenant` / `plan_restore` /
+    /// `restore_tenant`).
     DisasterRecovery,
     /// Per-tenant operator defaults (default owners, SSO notification emails,
     /// scope-name pattern). An account-scoped page, not org data.
@@ -351,7 +357,7 @@ pub struct Session {
     // first tab to hunt for it.
     pub settings_tab: RwSignal<String>,
     // Active sub-tab of the Security workbench ("findings" | "apps" |
-    // "credentials" | "grants"). Lifted to the session so the Home cards and
+    // "credentials" | "sso-certificates" | "grants" | "app-permissions"). Lifted to the session so the Home cards and
     // command palette can deep-link straight to a sub-tab, and so the choice
     // survives navigating away and back.
     pub security_tab: RwSignal<String>,

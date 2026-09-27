@@ -26,7 +26,8 @@ impl Session {
     }
 
     /// Navigate to the Security workbench on a specific sub-tab (`"findings"`
-    /// | `"apps"` | `"credentials"` | `"grants"`). Used by the Home cards and
+    /// | `"apps"` | `"credentials"` | `"sso-certificates"` | `"grants"` |
+    /// `"app-permissions"`). Used by the Home cards and
     /// command palette to deep-link past the default Findings tab.
     /// Goes through [`Session::set_view`] rather than poking `view` directly:
     /// every caller today is the Home dashboard, which is `inert` while the

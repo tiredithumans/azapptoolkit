@@ -369,7 +369,7 @@ Invariants every change must preserve (the audit/review baseline for auth-adjace
 - **Build-time baking is for non-secrets only.** `src-tauri/build.rs` bakes `AZAPPTOOLKIT_CLIENT_ID`
   / `_TENANT_ID` (public-client identifiers). Never route a credential through `build.rs` or `.env`.
 - **Errors are sanitized before they're shown or logged.** AAD errors are redacted to the AADSTS
-  code (`azapptoolkit-auth/src/service.rs::redacted_aad_error`); every client's error bodies —
+  code (`azapptoolkit_auth::service::wire::redacted_aad_error`); every client's error bodies —
   Graph (including `$batch` sub-responses), ARM, Key Vault and Exchange — are control-char-stripped
   and capped at 800 characters by the one helper, `azapptoolkit_core::http_error::sanitize_error_body`
   — log the `ui_code`/status/request id, never a raw body that could carry token material. The
