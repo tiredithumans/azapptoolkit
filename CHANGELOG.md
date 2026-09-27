@@ -2,6 +2,14 @@
 
 ### Fixed
 
+- **A damaged settings.json is no longer overwritten with defaults.** If settings.json could not
+  be read or parsed (for example after a hand edit left a stray comma, or while antivirus held the
+  file), the next sign-in, Settings save or secret rotation replaced it with a fresh file,
+  permanently losing your tenant defaults and the Key Vault each app's secret was rotated into.
+  The app now leaves the file untouched and the save reports the problem ("Could not write
+  settings.json: …") so you can fix or remove it. Saves from two open app windows also no longer
+  overwrite each other.
+
 - **A throttled request now tells you how long to wait.** When Microsoft Graph, Exchange, Key Vault
   or Azure kept throttling a request after the app's retries, the error read "throttled (429);
   retry after Some(30)s" (or "retry after Nones"). It now reads "Wait 30 seconds, then try again".

@@ -107,7 +107,7 @@ bake them via `.env`).
 - **camelCase vs snake_case:** Graph domain models are camel (no serde rename), DTOs/bindings snake; `Application` + `AuditItem` cross IPC as-is, so a rename is a wire-format change.
 - **One definition per policy:** HTTP errors from `core::http_error_enum!` (Exchange: hand-rolled, conformance-tested), retries from `core::http_retry` (incl. `$batch`), re-auth-fatal codes only in `core::reauth::REAUTH_FATAL_CODES`.
 - **The `BearerProvider` boundary carries the auth classification** as `core::token::TokenError { code, message }` — never a bare `String` — with `token_adapter::token_error` as the sole mapping.
-- **Per-tenant operator defaults live in `settings.json`** (`UserSettings.tenant_defaults`); two writers read-modify-write via `UserSettings::stored`; `apply_tenant_defaults` destructures exhaustively and preserves the rotation-owned vault fields.
+- **Per-tenant operator defaults live in `settings.json`** (`UserSettings.tenant_defaults`); writers use only `UserSettings::mutate` (fails closed); `apply_tenant_defaults` destructures exhaustively and preserves the rotation-owned vault fields.
 - **Build-time config baking:** `build.rs` reads `.env` → `AZAPPTOOLKIT_BUILD_*`; env vars override. **CSP governs the webview only** — backend reqwest egress needs no `connect-src` change.
 - **Permissions catalog** is bundled at compile time from `azapptoolkit-permissions/data/`; unknown resources fall back to `resolve_resource_sp()`.
 

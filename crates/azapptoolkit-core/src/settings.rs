@@ -1,11 +1,12 @@
 //! User-editable runtime settings.
 //!
-//! Read from `<config_dir>/settings.json`: writers and most readers use
-//! [`UserSettings::stored`]; the updater commands read `auto_update` through
-//! [`UserSettings::load`] on each call. The env var `AZAPPTOOLKIT_AUTO_UPDATE`
-//! (accepting `0`/`false`/`off`/`no`) takes precedence over the file — useful
-//! for MDM-managed deployments that ship a wrapper script, and for
-//! CI/automation that should never check for or install updates.
+//! Persisted in `<config_dir>/settings.json`: every writer goes through
+//! [`UserSettings::mutate`]; readers use [`UserSettings::stored`], and the
+//! updater commands read `auto_update` through [`UserSettings::load`] on each
+//! call. The env var `AZAPPTOOLKIT_AUTO_UPDATE` (accepting
+//! `0`/`false`/`off`/`no`) takes precedence over the file — useful for
+//! MDM-managed deployments that ship a wrapper script, and for CI/automation
+//! that should never check for or install updates.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -16,6 +17,12 @@ use crate::defaults::TenantDefaults;
 use crate::identity::TenantContext;
 
 pub const SETTINGS_FILE: &str = "settings.json";
+
+/// The cross-process advisory lock file [`UserSettings::mutate`] holds for the
+/// duration of a read-modify-write, so a second app instance cannot interleave
+/// with this one. Empty, and never deleted: removing it while another process
+/// held it would let the next writer lock a *different* inode and race again.
+pub const SETTINGS_LOCK_FILE: &str = "settings.lock";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserSettings {
@@ -73,15 +80,17 @@ impl Default for UserSettings {
 
 impl UserSettings {
     /// Settings exactly as persisted on disk (no env overrides applied),
-    /// falling back to defaults if the file is missing or unparseable. A writer
-    /// should start from this so it preserves fields it isn't changing.
+    /// falling back to defaults if the file is missing, unreadable or
+    /// unparseable. For readers only — a writer goes through [`Self::mutate`],
+    /// which refuses to overwrite a file it cannot read.
     pub fn stored(config_dir: &Path) -> Self {
         Self::from_file(&config_dir.join(SETTINGS_FILE)).unwrap_or_default()
     }
 
     /// Loads from `<config_dir>/settings.json`, falling back to defaults if
-    /// the file is missing or unparseable. The `AZAPPTOOLKIT_AUTO_UPDATE`
-    /// env var overrides whatever the file says.
+    /// the file is missing, unreadable or unparseable (read-only, like
+    /// [`Self::stored`]). The `AZAPPTOOLKIT_AUTO_UPDATE` env var overrides
+    /// whatever the file says.
     pub fn load(config_dir: &Path) -> Self {
         let mut s = Self::stored(config_dir);
         if let Some(env_override) = auto_update_env_override() {
@@ -90,28 +99,29 @@ impl UserSettings {
         s
     }
 
-    /// Writes the settings to `<config_dir>/settings.json` (creating the
-    /// directory if needed), pretty-printed. Used by the first-run config
-    /// screen — the only writer of this file.
-    ///
-    /// Owner-only: `tenant_defaults` records which Key Vault holds which
-    /// application's secrets (`default_vault` / `app_vaults`), which is a map
-    /// of where this tenant's credentials live. Written under the process
-    /// umask it was commonly world-readable.
     /// Read, modify and write `settings.json` under a process-wide lock.
     ///
-    /// The file had three unsynchronized read-modify-write callers — the Key
-    /// Vault rotation flow, the auth config, and the tenant defaults — and the
-    /// last is a synchronous Tauri command on the main thread while the first is
-    /// async on the runtime pool, so they genuinely run on different OS threads.
-    /// Interleaved either way, one side's `stored()` predates the other's
-    /// `save()` and that write is silently dropped: the operator's just-saved
+    /// The file has several read-modify-write callers — the auth config
+    /// (`commands::config`), the tenant defaults (`commands::defaults`), the Key
+    /// Vault rotation's vault binding (`commands::keyvault`) and the remembered
+    /// account (`AppState::remember_account` / `forget_account`). The tenant
+    /// defaults save is a synchronous Tauri command on the main thread while the
+    /// rotation is async on the runtime pool, so they genuinely run on different
+    /// OS threads. Interleaved either way, one side's read predates the other's
+    /// write and that write is silently dropped: the operator's just-saved
     /// defaults, or the freshly recorded vault binding the rotation flow needs
     /// to find the secret again.
     ///
     /// Every writer must go through here. Paired with the atomic
     /// temp-and-rename in `private_file`, a concurrent *reader* also never sees
-    /// a partial file.
+    /// a partial file. A second app instance is kept out by an OS advisory lock
+    /// on [`SETTINGS_LOCK_FILE`], taken inside the process lock.
+    ///
+    /// Refuses, rather than overwrites, a `settings.json` that exists but
+    /// cannot be read or parsed (a hand-edit typo, a transient read failure):
+    /// writing defaults over it would permanently lose the tenant defaults and
+    /// the vault bindings. `f` does not run and the file is left untouched; a
+    /// missing or blank file starts from defaults.
     pub fn mutate<T>(
         config_dir: &Path,
         f: impl FnOnce(&mut Self) -> T,
@@ -121,22 +131,55 @@ impl UserSettings {
         // file itself is still consistent (the write is atomic), so recovering
         // and carrying on beats refusing every subsequent save.
         let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut settings = Self::stored(config_dir);
+        // The OS lock comes SECOND: two opens of the same lock file in one
+        // process conflict with each other, so the Mutex above is what keeps
+        // in-process callers from contending on it.
+        std::fs::create_dir_all(config_dir)?;
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(config_dir.join(SETTINGS_LOCK_FILE))?;
+        match lock_file.lock() {
+            Ok(()) => {}
+            // A filesystem without advisory locks (some network homes): the
+            // process lock still serialises this instance, and refusing every
+            // write would be worse than the rare cross-instance race.
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                tracing::warn!(error = %e, "settings.lock unsupported; cross-instance writes are not serialised");
+            }
+            Err(e) => return Err(e),
+        }
+
+        let path = config_dir.join(SETTINGS_FILE);
+        let mut settings = Self::read_file(&path)
+            .map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "{} exists but could not be read ({e}); fix or remove it — it was left unchanged",
+                        path.display()
+                    ),
+                )
+            })?
+            .unwrap_or_default();
         let out = f(&mut settings);
         settings.save_locked(config_dir)?;
+        // Held to here on purpose: dropping the file releases the OS lock.
+        drop(lock_file);
         Ok((out, settings))
     }
 
     /// The write half of [`Self::mutate`]. Private so a caller cannot take the
-    /// read-modify-write apart and reintroduce the race.
+    /// read-modify-write apart and reintroduce the race; the only serializer of
+    /// this file.
+    ///
+    /// Owner-only: `tenant_defaults` records which Key Vault holds which
+    /// application's secrets (`default_vault` / `app_vaults`), which is a map
+    /// of where this tenant's credentials live. Written under the process
+    /// umask it was commonly world-readable.
     fn save_locked(&self, config_dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(config_dir)?;
-        let json = serde_json::to_vec_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        crate::private_file::write_owner_only(&config_dir.join(SETTINGS_FILE), &json)
-    }
-
-    pub fn save(&self, config_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(config_dir)?;
         let json = serde_json::to_vec_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -223,15 +266,32 @@ impl UserSettings {
             .insert(app_id.to_string(), binding);
     }
 
-    fn from_file(path: &Path) -> Option<Self> {
-        let bytes = std::fs::read(path).ok()?;
-        match serde_json::from_slice::<Self>(&bytes) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "ignoring unparseable settings.json");
-                None
-            }
+    /// The strict reader behind [`Self::mutate`]. `Ok(None)` only when there is
+    /// nothing to lose — the file is missing, or blank / whitespace-only (which
+    /// an older build's torn truncate could leave behind; refusing it would
+    /// wedge every later write). A file that exists but cannot be read or
+    /// parsed is an error.
+    fn read_file(path: &Path) -> std::io::Result<Option<Self>> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return Ok(None);
         }
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    /// The lenient reader behind [`Self::stored`] / [`Self::load`]: any failure
+    /// reads as "no settings" (with a warning), never as an error.
+    fn from_file(path: &Path) -> Option<Self> {
+        Self::read_file(path).unwrap_or_else(|e| {
+            tracing::warn!(path = %path.display(), error = %e, "ignoring unreadable settings.json");
+            None
+        })
     }
 }
 
@@ -296,16 +356,14 @@ mod tests {
     }
 
     #[test]
-    fn save_round_trips_client_and_tenant_ids() {
+    fn mutate_round_trips_client_and_tenant_ids() {
         let dir = tempdir();
-        let s = UserSettings {
-            auto_update: false,
-            client_id: Some("11111111-1111-1111-1111-111111111111".into()),
-            tenant_id: Some("contoso.onmicrosoft.com".into()),
-            tenant_defaults: BTreeMap::new(),
-            last_account: None,
-        };
-        s.save(dir.path()).unwrap();
+        UserSettings::mutate(dir.path(), |s| {
+            s.auto_update = false;
+            s.client_id = Some("11111111-1111-1111-1111-111111111111".into());
+            s.tenant_id = Some("contoso.onmicrosoft.com".into());
+        })
+        .unwrap();
         // `stored` (not `load`) so an `AZAPPTOOLKIT_AUTO_UPDATE` in the test env
         // can't perturb the round-trip assertion.
         let loaded = UserSettings::stored(dir.path());
@@ -332,21 +390,22 @@ mod tests {
         );
 
         // Save a tenant's defaults and read them back.
-        let mut s = UserSettings::stored(dir.path());
-        s.apply_tenant_defaults(
-            "t-1",
-            TenantDefaults {
-                app_registration: AppRegistrationDefaults {
-                    default_owners: vec![StoredPrincipal {
-                        id: "u-1".into(),
-                        display_name: Some("Ada".into()),
-                        ..Default::default()
-                    }],
+        UserSettings::mutate(dir.path(), |s| {
+            s.apply_tenant_defaults(
+                "t-1",
+                TenantDefaults {
+                    app_registration: AppRegistrationDefaults {
+                        default_owners: vec![StoredPrincipal {
+                            id: "u-1".into(),
+                            display_name: Some("Ada".into()),
+                            ..Default::default()
+                        }],
+                    },
+                    ..Default::default()
                 },
-                ..Default::default()
-            },
-        );
-        s.save(dir.path()).unwrap();
+            );
+        })
+        .unwrap();
         let loaded = UserSettings::stored(dir.path());
         assert_eq!(
             loaded.defaults_for("t-1").app_registration.default_owners[0].id,
@@ -460,7 +519,7 @@ mod tests {
     /// `settings.json` had three unsynchronized writers, one of them a
     /// synchronous Tauri command on the main thread while another is async on
     /// the runtime pool — so they genuinely run on different OS threads.
-    /// Interleave `stored()`/`save()` either way and one side's write vanishes:
+    /// Interleave a separate read and write either way and one side's write vanishes:
     /// the operator's just-saved defaults, or the vault binding the next
     /// rotation needs to find the secret again.
     #[test]
@@ -499,8 +558,8 @@ mod tests {
     }
 
     /// `mutate` reads the file each time, so a later mutation sees the earlier
-    /// one — the property that makes it a safe replacement for
-    /// `stored()` + `save()`.
+    /// one — the property that makes it a safe replacement for a separate read
+    /// and write.
     #[test]
     fn mutate_observes_the_previous_write() {
         let dir = tempdir();
@@ -515,5 +574,103 @@ mod tests {
         let stored = UserSettings::stored(&dir.0);
         assert_eq!(stored.client_id.as_deref(), Some("first"));
         assert_eq!(stored.tenant_id.as_deref(), Some("t"));
+    }
+
+    /// A hand-edit typo must not cost the operator their vault bindings: the
+    /// next sign-in's `mutate` used to serialise defaults over the file.
+    #[test]
+    fn mutate_refuses_to_overwrite_an_unparseable_file() {
+        let dir = tempdir();
+        let path = dir.path().join(SETTINGS_FILE);
+        // Trailing comma: a typical hand-edit slip, around a vault binding.
+        let original: &[u8] =
+            br#"{"tenant_defaults":{"t-1":{"app_vaults":{"app-1":{"vault_name":"kv-a"}}}},}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let mut called = false;
+        let err = UserSettings::mutate(dir.path(), |s| {
+            called = true;
+            s.last_account = None;
+        })
+        .unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!called, "the mutation ran against defaults");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "file was overwritten"
+        );
+        // The read-only path stays lenient.
+        assert!(UserSettings::stored(dir.path()).auto_update);
+    }
+
+    /// An I/O failure (EACCES, EIO, an antivirus lock) is not "missing". A
+    /// directory in the file's place gives a read error that works even as root.
+    #[test]
+    fn mutate_refuses_when_the_file_exists_but_cannot_be_read() {
+        let dir = tempdir();
+        let path = dir.path().join(SETTINGS_FILE);
+        std::fs::create_dir(&path).unwrap();
+
+        let mut called = false;
+        let result = UserSettings::mutate(dir.path(), |s| {
+            called = true;
+            s.client_id = Some("c".into());
+        });
+
+        assert!(result.is_err());
+        // The discriminating half: before the fix the rename also failed on a
+        // directory, but only after the mutation ran against defaults.
+        assert!(!called, "the mutation ran against defaults");
+        assert!(path.is_dir());
+    }
+
+    /// A blank file holds nothing to lose; refusing it would wedge every write.
+    #[test]
+    fn mutate_treats_a_blank_file_as_fresh() {
+        let dir = tempdir();
+        std::fs::write(dir.path().join(SETTINGS_FILE), b"  \n").unwrap();
+        UserSettings::mutate(dir.path(), |s| s.client_id = Some("c".into())).unwrap();
+        assert_eq!(
+            UserSettings::stored(dir.path()).client_id.as_deref(),
+            Some("c")
+        );
+    }
+
+    /// A second app instance (a separate open file description holding the
+    /// advisory lock) keeps `mutate` waiting until it lets go.
+    #[test]
+    fn mutate_waits_for_another_instance_holding_the_settings_lock() {
+        let dir = tempdir();
+        let other_instance = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.path().join(SETTINGS_LOCK_FILE))
+            .unwrap();
+        other_instance.lock().unwrap();
+
+        let path = dir.0.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            UserSettings::mutate(&path, |s| s.client_id = Some("x".into())).unwrap();
+            tx.send(()).unwrap();
+        });
+
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "mutate did not wait for the other instance's lock"
+        );
+        drop(other_instance);
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("mutate never finished after the lock was released");
+        writer.join().unwrap();
+        assert_eq!(
+            UserSettings::stored(dir.path()).client_id.as_deref(),
+            Some("x")
+        );
     }
 }

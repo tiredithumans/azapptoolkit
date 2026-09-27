@@ -1,8 +1,10 @@
 //! LRU + TTL cache that mirrors `Private/Cache-Functions.ps1`.
 //!
 //! Keyed by `(CacheKind, String)`; each kind has its own TTL (see
-//! [`crate::constants`]). Eviction is LRU once per-kind entry count exceeds
-//! [`MAX_CACHE_SIZE`]. Hit/miss counters are exposed for the diagnostics
+//! [`crate::constants`]). Eviction is LRU once a kind's entry count exceeds its
+//! cap — [`MAX_CACHE_SIZE`] for aggregate kinds, [`MAX_PER_OBJECT_CACHE_SIZE`]
+//! by default for the per-object `ServicePrincipal` / `Lists` (see
+//! [`Cache::capacity_for`]). Hit/miss counters are exposed for the diagnostics
 //! command surface.
 
 use parking_lot::Mutex;
