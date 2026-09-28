@@ -14,6 +14,7 @@ use crate::error::{ArmError, Result};
 use crate::models::{
     KeyVaultResource, LogAnalyticsWorkspace, Paged, RoleAssignment, RoleDefinition, Subscription,
 };
+use crate::validate::{require_arm_path, require_guid};
 
 pub const ARM_BASE: &str = "https://management.azure.com";
 /// `Microsoft.Resources/subscriptions` (Subscriptions - List): latest stable.
@@ -83,18 +84,23 @@ impl ArmClient {
     /// A caller that fans out over subscriptions must dedupe by assignment id
     /// (`managed_identity::flatten_assignments` in the desktop crate); a caller
     /// that only collects role GUIDs into a set (readiness) is unaffected.
+    ///
+    /// Both ids must be GUIDs: the subscription id comes out of an ARM response
+    /// and is spliced into the path (see [`crate::validate`]).
     pub async fn list_role_assignments_for_principal(
         &self,
         subscription_id: &str,
         principal_id: &str,
     ) -> Result<Vec<RoleAssignment>> {
+        require_guid("subscription id", subscription_id)?;
+        require_guid("principal id", principal_id)?;
         let url = format!(
             "{}/subscriptions/{subscription_id}/providers/Microsoft.Authorization/roleAssignments",
             self.base_url
         );
-        // Defense-in-depth: a principal id is a GUID in practice, but escape the
-        // OData single-quote literal anyway (a `'` would otherwise break the
-        // filter). Mirrors the Graph client's `escape_odata`.
+        // Defense-in-depth: the principal id was just checked to be a GUID, so
+        // it holds no `'`; escape the OData single-quote literal anyway, in case
+        // that check is ever relaxed. Mirrors the Graph client's `escape_odata`.
         let filter = format!("principalId eq '{}'", principal_id.replace('\'', "''"));
         self.collect_paged(
             &url,
@@ -105,8 +111,10 @@ impl ArmClient {
 
     /// Key Vaults in `subscription_id` the signed-in user can see (control
     /// plane). Each returned `id` is the ARM resource path, which doubles as the
-    /// scope for [`Self::list_role_assignments_at_scope`].
+    /// scope for [`Self::list_role_assignments_at_scope`]. `subscription_id`
+    /// must be a GUID (it comes out of an ARM response).
     pub async fn list_key_vaults(&self, subscription_id: &str) -> Result<Vec<KeyVaultResource>> {
+        require_guid("subscription id", subscription_id)?;
         let url = format!(
             "{}/subscriptions/{subscription_id}/providers/Microsoft.KeyVault/vaults",
             self.base_url
@@ -122,12 +130,18 @@ impl ArmClient {
     /// those on child scopes. Each row's `properties.scope` says where it was
     /// made, so a caller separates direct from inherited by comparing it to
     /// `scope`.
+    ///
+    /// `scope` is a vault's `id` from [`Self::list_key_vaults`] — ARM output —
+    /// so it must be an absolute ARM path, and the composed URL is re-checked
+    /// against the ARM origin before the bearer is attached.
     pub async fn list_role_assignments_at_scope(&self, scope: &str) -> Result<Vec<RoleAssignment>> {
+        require_arm_path("scope", scope)?;
         let url = format!(
             "{}/{}/providers/Microsoft.Authorization/roleAssignments",
             self.base_url.trim_end_matches('/'),
             scope.trim_start_matches('/').trim_end_matches('/'),
         );
+        self.require_arm_origin("scope", &url)?;
         self.collect_paged(
             &url,
             &[("api-version", AUTHORIZATION_API), ("$filter", "atScope()")],
@@ -138,10 +152,12 @@ impl ArmClient {
     /// Log Analytics workspaces in `subscription_id` the signed-in user can see
     /// (control plane). The returned `properties.customer_id` is the workspace
     /// GUID the Azure Monitor Logs *query* API addresses workspaces by.
+    /// `subscription_id` must be a GUID (it comes out of an ARM response).
     pub async fn list_log_analytics_workspaces(
         &self,
         subscription_id: &str,
     ) -> Result<Vec<LogAnalyticsWorkspace>> {
+        require_guid("subscription id", subscription_id)?;
         let url = format!(
             "{}/subscriptions/{subscription_id}/providers/Microsoft.OperationalInsights/workspaces",
             self.base_url
@@ -164,21 +180,12 @@ impl ArmClient {
         // Structure first: an ARM resource id is an absolute path, so anything
         // that could reinterpret the *shape* of the composed URL is refused
         // before it is composed. `?`/`#` would inject a second `api-version` or
-        // truncate the query the call depends on.
-        if !role_definition_id.starts_with('/') || role_definition_id.contains(['?', '#']) {
-            return Err(ArmError::Protocol(
-                "refusing a role definition id that is not an absolute ARM path".into(),
-            ));
-        }
+        // truncate the query the call depends on; a `..` segment would walk it.
+        require_arm_path("role definition id", role_definition_id)?;
         let url = format!("{}{role_definition_id}", self.base_url);
         // Then the authority: `@` turns everything composed so far into
         // userinfo, so the bearer would be sent to whatever follows it.
-        if !same_origin(&self.base_url, &url) {
-            return Err(ArmError::Protocol(format!(
-                "refusing a role definition id that redirects off the ARM origin (host: {})",
-                redacted_host(&url)
-            )));
-        }
+        self.require_arm_origin("role definition id", &url)?;
         self.get_json(&url, &[("api-version", AUTHORIZATION_API)])
             .await
     }
@@ -226,6 +233,10 @@ impl ArmClient {
     /// (per the ARM `role-assignments-rest` guidance). `scope` is the resource
     /// path the assignment applies to (subscription / resource group / resource);
     /// `role_definition_id` is the full ARM role-definition path.
+    ///
+    /// `scope` is typed by the operator, so it must be an absolute ARM path, and
+    /// `assignment_name` and `principal_id` must be GUIDs; the composed URL is
+    /// re-checked against the ARM origin before the bearer is attached.
     pub async fn create_role_assignment(
         &self,
         scope: &str,
@@ -233,11 +244,15 @@ impl ArmClient {
         role_definition_id: &str,
         principal_id: &str,
     ) -> Result<()> {
+        require_arm_path("scope", scope)?;
+        require_guid("role assignment name", assignment_name)?;
+        require_guid("principal id", principal_id)?;
         let url = format!(
             "{}/{}/providers/Microsoft.Authorization/roleAssignments/{assignment_name}",
             self.base_url.trim_end_matches('/'),
             scope.trim_start_matches('/').trim_end_matches('/'),
         );
+        self.require_arm_origin("scope", &url)?;
         let body = serde_json::json!({
             "properties": {
                 "roleDefinitionId": role_definition_id,
@@ -253,6 +268,19 @@ impl ArmClient {
         )
         .await?;
         Ok(())
+    }
+
+    /// Refuses a composed `url` that left the ARM origin — the check that stands
+    /// between a spliced value and the bearer.
+    fn require_arm_origin(&self, what: &str, url: &str) -> Result<()> {
+        if same_origin(&self.base_url, url) {
+            Ok(())
+        } else {
+            Err(ArmError::Protocol(format!(
+                "refusing a {what} that redirects off the ARM origin (host: {})",
+                redacted_host(url)
+            )))
+        }
     }
 
     async fn get_json<T: DeserializeOwned>(&self, url: &str, query: &[(&str, &str)]) -> Result<T> {
@@ -283,24 +311,30 @@ mod tests {
         ArmClient::with_base_url(StaticTokenProvider::new("tok"), base.to_string())
     }
 
+    /// Subscription, principal and assignment ids are GUIDs on the wire, and the
+    /// client now refuses anything else before a request is sent.
+    const SUB: &str = "11111111-1111-1111-1111-111111111111";
+    const PRINCIPAL: &str = "22222222-2222-2222-2222-222222222222";
+    const ASSIGNMENT: &str = "33333333-3333-3333-3333-333333333333";
+
     #[tokio::test]
     async fn creates_role_assignment_with_service_principal_type() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
-            .and(path(
-                "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.Authorization/roleAssignments/assign-guid",
-            ))
+            .and(path(format!(
+                "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.Authorization/roleAssignments/{ASSIGNMENT}"
+            )))
             .and(query_param("api-version", AUTHORIZATION_API))
             .and(body_partial_json(serde_json::json!({
                 "properties": {
                     "roleDefinitionId": "/subscriptions/sub-1/providers/Microsoft.Authorization/roleDefinitions/role-guid",
-                    "principalId": "mi-principal",
+                    "principalId": PRINCIPAL,
                     "principalType": "ServicePrincipal"
                 }
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "id": "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.Authorization/roleAssignments/assign-guid",
-                "name": "assign-guid"
+                "id": format!("/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.Authorization/roleAssignments/{ASSIGNMENT}"),
+                "name": ASSIGNMENT
             })))
             .mount(&server)
             .await;
@@ -308,9 +342,9 @@ mod tests {
         client(&server.uri())
             .create_role_assignment(
                 "/subscriptions/sub-1/resourceGroups/rg",
-                "assign-guid",
+                ASSIGNMENT,
                 "/subscriptions/sub-1/providers/Microsoft.Authorization/roleDefinitions/role-guid",
-                "mi-principal",
+                PRINCIPAL,
             )
             .await
             .expect("create role assignment succeeds");
@@ -500,9 +534,9 @@ mod tests {
     async fn lists_key_vaults() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(
-                "/subscriptions/sub-1/providers/Microsoft.KeyVault/vaults",
-            ))
+            .and(path(format!(
+                "/subscriptions/{SUB}/providers/Microsoft.KeyVault/vaults"
+            )))
             .and(query_param("api-version", KEYVAULT_API))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [
@@ -513,10 +547,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let vaults = client(&server.uri())
-            .list_key_vaults("sub-1")
-            .await
-            .unwrap();
+        let vaults = client(&server.uri()).list_key_vaults(SUB).await.unwrap();
         assert_eq!(vaults.len(), 2);
         assert_eq!(vaults[0].name.as_deref(), Some("kv-1"));
         // name is optional and absent on the second.
@@ -613,17 +644,17 @@ mod tests {
     async fn role_assignments_filter_by_principal() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(
-                "/subscriptions/sub-1/providers/Microsoft.Authorization/roleAssignments",
-            ))
-            .and(query_param("$filter", "principalId eq 'mi-1'"))
+            .and(path(format!(
+                "/subscriptions/{SUB}/providers/Microsoft.Authorization/roleAssignments"
+            )))
+            .and(query_param("$filter", format!("principalId eq '{PRINCIPAL}'")))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [{
                     "id": "/ra/1",
                     "properties": {
                         "roleDefinitionId": "/providers/Microsoft.Authorization/roleDefinitions/def-1",
                         "scope": "/subscriptions/sub-1",
-                        "principalId": "mi-1"
+                        "principalId": PRINCIPAL
                     }
                 }]
             })))
@@ -631,7 +662,7 @@ mod tests {
             .await;
 
         let got = client(&server.uri())
-            .list_role_assignments_for_principal("sub-1", "mi-1")
+            .list_role_assignments_for_principal(SUB, PRINCIPAL)
             .await
             .unwrap();
         assert_eq!(got.len(), 1);
@@ -665,6 +696,9 @@ mod tests {
             // Injects a second api-version / truncates the query the call needs.
             "/subscriptions/s/roleDefinitions/r?api-version=2015-01-01",
             "/subscriptions/s/roleDefinitions/r#frag",
+            // Dot-segments (plain or percent-encoded) walk the path elsewhere.
+            "/subscriptions/s/../../x",
+            "/x/%2e%2e/y",
         ] {
             let err = client.get_role_definition(id).await.unwrap_err();
             assert!(
@@ -713,9 +747,9 @@ mod tests {
     async fn lists_log_analytics_workspaces_and_reads_customer_id() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(
-                "/subscriptions/sub-1/providers/Microsoft.OperationalInsights/workspaces",
-            ))
+            .and(path(format!(
+                "/subscriptions/{SUB}/providers/Microsoft.OperationalInsights/workspaces"
+            )))
             .and(query_param("api-version", LOG_ANALYTICS_WORKSPACES_API))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [{
@@ -728,7 +762,7 @@ mod tests {
             .await;
 
         let ws = client(&server.uri())
-            .list_log_analytics_workspaces("sub-1")
+            .list_log_analytics_workspaces(SUB)
             .await
             .unwrap();
         assert_eq!(ws.len(), 1);
@@ -762,5 +796,119 @@ mod tests {
         );
         // The first page plus MAX_PAGES - 1 follows.
         assert_eq!(server.received_requests().await.unwrap().len(), MAX_PAGES);
+    }
+
+    /// Subscription ids, principal ids and scopes come out of earlier ARM
+    /// responses (or the operator), and are spliced into the request path. A
+    /// `?`/`#` rewrites the query, a `..` walks the path — so each is refused
+    /// before any request, and the bearer never leaves.
+    #[tokio::test]
+    async fn arm_supplied_ids_are_refused_before_any_request() {
+        let server = MockServer::start().await;
+        let client = client(&server.uri());
+        let refused = |what: &str, err: ArmError| {
+            assert!(
+                matches!(err, ArmError::Protocol(_)),
+                "{what} must be refused, got {err:?}"
+            );
+        };
+        for sub in [
+            "sub?api-version=2015-01-01",
+            "../providers/Microsoft.Authorization/roleAssignments",
+            "sub-1",
+        ] {
+            refused(sub, client.list_key_vaults(sub).await.unwrap_err());
+            refused(
+                sub,
+                client.list_log_analytics_workspaces(sub).await.unwrap_err(),
+            );
+            refused(
+                sub,
+                client
+                    .list_role_assignments_for_principal(sub, PRINCIPAL)
+                    .await
+                    .unwrap_err(),
+            );
+        }
+        let principal = "x' or '1'='1";
+        refused(
+            principal,
+            client
+                .list_role_assignments_for_principal(SUB, principal)
+                .await
+                .unwrap_err(),
+        );
+        for scope in [
+            "subscriptions/s",
+            "/subscriptions/s/../../x",
+            "/subscriptions/s?x=1",
+            "/subscriptions/%2e%2e/x",
+        ] {
+            refused(
+                scope,
+                client
+                    .list_role_assignments_at_scope(scope)
+                    .await
+                    .unwrap_err(),
+            );
+            refused(
+                scope,
+                client
+                    .create_role_assignment(scope, ASSIGNMENT, "/r", PRINCIPAL)
+                    .await
+                    .unwrap_err(),
+            );
+        }
+        // The assignment name and principal of a write are GUIDs too.
+        refused(
+            "assignment name",
+            client
+                .create_role_assignment("/subscriptions/s", "../x", "/r", PRINCIPAL)
+                .await
+                .unwrap_err(),
+        );
+        refused(
+            "principal",
+            client
+                .create_role_assignment("/subscriptions/s", ASSIGNMENT, "/r", "mi-1")
+                .await
+                .unwrap_err(),
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "a refused id must not reach the wire"
+        );
+    }
+
+    /// ARM answers a duplicate assignment with 409 `RoleAssignmentExists`. It is
+    /// terminal (sent once, not replayed) and recognisable, so the command layer
+    /// can say so instead of showing the raw JSON.
+    #[tokio::test]
+    async fn create_role_assignment_409_exists_is_terminal_and_recognisable() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": {
+                    "code": "RoleAssignmentExists",
+                    "message": "The role assignment already exists."
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let err = client(&server.uri())
+            .create_role_assignment(
+                "/subscriptions/s/resourceGroups/rg",
+                ASSIGNMENT,
+                "/subscriptions/s/providers/Microsoft.Authorization/roleDefinitions/r",
+                PRINCIPAL,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.is_role_assignment_exists(), "{err:?}");
     }
 }

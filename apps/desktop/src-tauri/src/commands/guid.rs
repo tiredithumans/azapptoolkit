@@ -1,7 +1,8 @@
 //! Shared GUID helpers for the command layer: client-side v4 generation (the
 //! portal-style pattern — supplying the id makes the write self-contained and,
 //! for ARM role assignments, idempotent on retry) and the strict canonical
-//! validator. Single-sourced so the generator can't drift between domains and
+//! validator (re-exported from `azapptoolkit_core::guid`, which the ARM client
+//! shares). Single-sourced so the generator can't drift between domains and
 //! the two former `is_guid` copies (`search` strict-positional vs `config`
 //! split-based) can't diverge again.
 
@@ -34,23 +35,8 @@ pub(crate) fn new_v4_guid() -> String {
 }
 
 /// Strict 8-4-4-4-12 hex check (case-insensitive). No braces, no urn-prefix.
-pub(crate) fn is_guid(input: &str) -> bool {
-    let bytes = input.as_bytes();
-    if bytes.len() != 36 {
-        return false;
-    }
-    for (i, b) in bytes.iter().enumerate() {
-        let want_dash = matches!(i, 8 | 13 | 18 | 23);
-        if want_dash {
-            if *b != b'-' {
-                return false;
-            }
-        } else if !b.is_ascii_hexdigit() {
-            return false;
-        }
-    }
-    true
-}
+/// The one definition lives in core, where the ARM client uses it too.
+pub(crate) use azapptoolkit_core::guid::is_guid;
 
 #[cfg(test)]
 mod tests {

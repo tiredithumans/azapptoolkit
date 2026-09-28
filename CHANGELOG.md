@@ -48,6 +48,10 @@
 
 ### Fixed
 
+- **Assigning an Azure role that a managed identity already holds now says so.** ARM rejects a
+  duplicate assignment, and the Assign Azure role form showed its raw reply,
+  `arm error (409): {"error":{"code":"RoleAssignmentExists",…}}`. The form now says the identity
+  already holds that role at that scope and that nothing was changed.
 - **The Vault access tab will keep finding your key vaults after Microsoft retires older Key Vault
   management APIs.** Microsoft stops accepting Key Vault control-plane API versions older than
   2026-02-01 on February 27, 2027, and the sweep listed vaults with 2023-07-01. From that date it
@@ -827,6 +831,13 @@
   Neither was used. The window can now only talk to the app itself, and update checks and file
   dialogs still run through the backend as before. A link in the release notes becomes clickable
   only when it is an https address.
+- **Subscription, workspace and scope IDs that Azure Resource Manager sends back are now checked
+  before the app uses them in a request.** A role-definition ID already had to be a plain ARM path,
+  but a subscription ID, a Log Analytics workspace ID or a Key Vault's resource ID from the same
+  responses went into the request address unchecked, so a `?`, `#` or `..` in one could change
+  which address the app called with your token. Subscription and workspace IDs must now be GUIDs,
+  and scopes must be absolute ARM paths without `?`, `#`, `%`, `\` or `..`. Anything else is
+  refused before the request is sent, and that subscription or vault is skipped.
 
 ## [0.30.2] - 2026-09-25
 

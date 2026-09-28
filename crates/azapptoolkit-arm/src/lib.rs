@@ -16,6 +16,7 @@ pub mod error;
 pub mod loganalytics;
 pub mod models;
 mod transport;
+mod validate;
 
 pub use client::{ARM_BASE, ArmClient};
 pub use error::{ArmError, Result};

@@ -1,5 +1,5 @@
-//! Shared ARM-stack transport: one retry + jitter + `Retry-After` loop that
-//! maps HTTP status → typed [`ArmError`], used by both the control-plane
+//! Shared ARM-stack transport: one retry + jitter + `Retry-After` loop whose
+//! attempts map HTTP status → typed [`ArmError`], used by both the control-plane
 //! [`crate::ArmClient`] and the data-plane [`crate::LogAnalyticsClient`] (same
 //! error stack, same `azapptoolkit_core::http_retry` knobs).
 
@@ -8,20 +8,19 @@ use std::sync::Arc;
 use reqwest::Method;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
-use azapptoolkit_core::http_error::{describe_error_chain, sanitize_error_body};
-use azapptoolkit_core::http_retry::{
-    Attempt, RetryClass, RetryReason, parse_retry_after_seconds, with_retries,
-};
+use azapptoolkit_core::http_error::{describe_error_chain, failed_response, send_failure};
+use azapptoolkit_core::http_retry::{Attempt, RetryClass, parse_retry_after_seconds, with_retries};
 use azapptoolkit_core::net::endpoint_family;
 use azapptoolkit_core::token::{BearerProvider, TokenError};
 
 use crate::error::{ArmError, Result};
 
 /// Sends one request through the shared retry loop and returns the raw success
-/// body. 401/403/404 are typed; any other non-429 4xx is terminal → `Api`
-/// (which lets a Logs `query` treat a 400 "table absent" as a probe miss rather
-/// than a hard failure); 429 and 5xx are retried, honoring an explicit
-/// `Retry-After` exactly and otherwise using jittered exponential backoff.
+/// body. A failed response is classified by the shared
+/// [`azapptoolkit_core::http_error::failed_response`] (the same table the Key
+/// Vault client uses): a non-429 4xx is terminal — which lets a Logs `query`
+/// treat a 400 "table absent" as a probe miss — while 429 and 5xx are retried,
+/// honoring an explicit `Retry-After` exactly.
 /// `label` tags the retry warnings (e.g. `"arm"`, `"log analytics"`), followed by
 /// the verb and the endpoint family (ids masked, no query).
 pub(crate) async fn send_with_retry(
@@ -55,16 +54,7 @@ pub(crate) async fn send_with_retry(
             }
             let resp = match req.send().await {
                 Ok(r) => r,
-                // No response means no `Retry-After` to honor — the shared loop
-                // falls back to jittered exponential backoff.
-                Err(err) => {
-                    return Attempt::Retry {
-                        reason: RetryReason::Transient,
-                        status: None,
-                        retry_after_secs: None,
-                        err: ArmError::Network(describe_error_chain(&err)),
-                    };
-                }
+                Err(err) => return send_failure(&err),
             };
             let status = resp.status();
             if status.is_success() {
@@ -74,54 +64,14 @@ pub(crate) async fn send_with_retry(
                         .map_err(|e| ArmError::Network(describe_error_chain(&e))),
                 );
             }
+            // `Retry-After` first: reading the body consumes the response.
             let retry_after = parse_retry_after_seconds(
                 resp.headers()
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok()),
             );
-            // Sanitized and capped before it reaches an error, a log line or a
-            // toast — a proxy block page can be megabytes of HTML.
-            let body_text = sanitize_error_body(&resp.text().await.unwrap_or_default());
-            let code = status.as_u16();
-
-            // 401/403/404 are typed; any other non-429 4xx is terminal → `Api`
-            // (which lets a Logs `query` treat a 400 "table absent" as a probe
-            // miss rather than a hard failure).
-            let terminal = match code {
-                401 => Some(ArmError::Unauthorized),
-                403 => Some(ArmError::Forbidden(body_text.clone())),
-                404 => Some(ArmError::NotFound(body_text.clone())),
-                c if (400..500).contains(&c) && c != 429 => Some(ArmError::Api {
-                    status: code,
-                    body: body_text.clone(),
-                }),
-                _ => None,
-            };
-            if let Some(err) = terminal {
-                return Attempt::Done(Err(err));
-            }
-
-            // 429 and 5xx: retryable, and this is the error the shared loop
-            // surfaces once the budget is spent.
-            Attempt::Retry {
-                reason: if code == 429 {
-                    RetryReason::Throttled
-                } else {
-                    RetryReason::Transient
-                },
-                status: Some(code),
-                retry_after_secs: retry_after,
-                err: if code == 429 {
-                    ArmError::Throttled {
-                        retry_after_secs: retry_after,
-                    }
-                } else {
-                    ArmError::Server {
-                        status: code,
-                        body: body_text,
-                    }
-                },
-            }
+            let raw_body = resp.text().await.unwrap_or_default();
+            failed_response(status.as_u16(), retry_after, &raw_body)
         }
     })
     .await

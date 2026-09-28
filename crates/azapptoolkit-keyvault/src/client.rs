@@ -2,9 +2,11 @@
 //!
 //! Retry budget, backoff, jitter and `Retry-After` handling come from the
 //! shared [`azapptoolkit_core::http_retry::with_retries`] loop — the same one
-//! the Graph, ARM and Exchange transports run. Only the per-attempt HTTP
-//! status → [`KeyVaultError`] mapping and each verb's [`RetryClass`]
-//! (`retry_class_for`) are local to this crate.
+//! the Graph, ARM and Exchange transports run — and the per-attempt HTTP
+//! status → [`KeyVaultError`] mapping is the one the ARM transport uses too,
+//! [`azapptoolkit_core::http_error::failed_response`]. Only each verb's
+//! [`RetryClass`] (`retry_class_for`, with its `set_secret` PUT decision) is
+//! local to this crate.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,10 +16,8 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use azapptoolkit_core::http_error::{describe_error_chain, sanitize_error_body};
-use azapptoolkit_core::http_retry::{
-    Attempt, RetryClass, RetryReason, parse_retry_after_seconds, with_retries,
-};
+use azapptoolkit_core::http_error::{describe_error_chain, failed_response, send_failure};
+use azapptoolkit_core::http_retry::{Attempt, RetryClass, parse_retry_after_seconds, with_retries};
 use azapptoolkit_core::net::{endpoint_family, redacted_host, same_origin};
 use azapptoolkit_core::token::{BearerProvider, TokenError};
 
@@ -154,8 +154,8 @@ impl KeyVaultClient {
     }
 
     /// Unified transport for both path-relative and absolute (`nextLink`)
-    /// requests: one retry + jitter + `Retry-After` loop mapping HTTP status →
-    /// typed `KeyVaultError`. `check_origin` rejects an off-vault URL before the
+    /// requests: one retry + jitter + `Retry-After` loop whose attempts map HTTP
+    /// status → typed `KeyVaultError` through the shared `failed_response`. `check_origin` rejects an off-vault URL before the
     /// bearer is attached (a `nextLink` is attacker-influenced server output);
     /// `attach_api_version` appends the `api-version` query, which a `nextLink`
     /// already carries and so is skipped for it.
@@ -204,16 +204,7 @@ impl KeyVaultClient {
                 }
                 let resp = match req.send().await {
                     Ok(r) => r,
-                    // No response means no `Retry-After` to honor — the shared
-                    // loop falls back to jittered exponential backoff.
-                    Err(err) => {
-                        return Attempt::Retry {
-                            reason: RetryReason::Transient,
-                            status: None,
-                            retry_after_secs: None,
-                            err: KeyVaultError::Network(describe_error_chain(&err)),
-                        };
-                    }
+                    Err(err) => return send_failure(&err),
                 };
                 let status = resp.status();
                 if status.is_success() {
@@ -223,49 +214,14 @@ impl KeyVaultClient {
                             .map_err(|e| KeyVaultError::Network(describe_error_chain(&e))),
                     );
                 }
+                // `Retry-After` first: reading the body consumes the response.
                 let retry_after = parse_retry_after_seconds(
                     resp.headers()
                         .get(reqwest::header::RETRY_AFTER)
                         .and_then(|v| v.to_str().ok()),
                 );
-                // Sanitized and capped before it reaches an error, a log line
-                // or a toast — a proxy block page can be megabytes of HTML.
-                let body_text = sanitize_error_body(&resp.text().await.unwrap_or_default());
-                let code = status.as_u16();
-
-                let terminal = match code {
-                    401 => Some(KeyVaultError::Unauthorized),
-                    403 => Some(KeyVaultError::Forbidden(body_text.clone())),
-                    404 => Some(KeyVaultError::NotFound(body_text.clone())),
-                    c if (400..500).contains(&c) && c != 429 => Some(KeyVaultError::Api {
-                        status: code,
-                        body: body_text.clone(),
-                    }),
-                    _ => None,
-                };
-                if let Some(err) = terminal {
-                    return Attempt::Done(Err(err));
-                }
-
-                Attempt::Retry {
-                    reason: if code == 429 {
-                        RetryReason::Throttled
-                    } else {
-                        RetryReason::Transient
-                    },
-                    status: Some(code),
-                    retry_after_secs: retry_after,
-                    err: if code == 429 {
-                        KeyVaultError::Throttled {
-                            retry_after_secs: retry_after,
-                        }
-                    } else {
-                        KeyVaultError::Server {
-                            status: code,
-                            body: body_text,
-                        }
-                    },
-                }
+                let raw_body = resp.text().await.unwrap_or_default();
+                failed_response(status.as_u16(), retry_after, &raw_body)
             }
         })
         .await

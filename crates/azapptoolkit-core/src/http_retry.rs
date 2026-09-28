@@ -10,6 +10,13 @@
 //! noticing. [`Attempt`] is the seam: the caller classifies, this module decides
 //! whether and when to go round again.
 //!
+//! Classification itself is shared where the error enums are: ARM and Key Vault
+//! both map a failed response through [`crate::http_error::failed_response`]
+//! over the [`crate::http_error::HttpStatusError`] constructors the
+//! `http_error_enum!` macro emits. Graph keeps its own mapping (the CAE 401
+//! re-mint and the throttle observer), and Exchange its own because its
+//! `Forbidden` is a struct variant.
+//!
 //! Graph keeps one loop of its own on top, for the CAE claims-challenge re-mint,
 //! which is deliberately *outside* the transient budget.
 
@@ -160,9 +167,11 @@ pub enum RetryClass {
 
 /// How one attempt ended, as the calling client classifies it.
 ///
-/// The classification stays in the caller because mapping an HTTP status to a
-/// crate's own error enum is genuinely per-crate; deciding *how many* times to
-/// retry and *how long* to wait is not.
+/// The classification stays with the caller, because what a status means can
+/// differ per client (Graph's CAE 401 re-mint and throttle observer, Exchange's
+/// struct `Forbidden`); ARM and Key Vault share
+/// [`crate::http_error::failed_response`]. Deciding *how many* times to retry
+/// and *how long* to wait is never per-client.
 pub enum Attempt<T, E> {
     /// Terminal, success or failure. Returned to the caller as-is.
     Done(Result<T, E>),

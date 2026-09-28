@@ -48,12 +48,18 @@ impl LogAnalyticsClient {
     /// rows are incomplete) is refused as [`ArmError::Protocol`] — the Kusto
     /// guidance is to ignore the entire result rather than read a truncated
     /// one as complete.
+    ///
+    /// `workspace_customer_id` comes out of an ARM workspace listing and is
+    /// spliced into the path, so anything but a GUID is refused as
+    /// [`ArmError::Protocol`] before a request is sent — a `?` would override
+    /// the `timespan`, a `..` walk the path (see [`crate::validate`]).
     pub async fn query(
         &self,
         workspace_customer_id: &str,
         kql: &str,
         timespan: &str,
     ) -> Result<LogsQueryTable> {
+        crate::validate::require_guid("workspace id", workspace_customer_id)?;
         let url = format!(
             "{}/v1/workspaces/{workspace_customer_id}/query",
             self.base_url
@@ -101,11 +107,14 @@ mod tests {
         LogAnalyticsClient::new(StaticTokenProvider::new("tok"), base.to_string())
     }
 
+    /// A workspace `customerId` is a GUID; anything else is refused unsent.
+    const WS: &str = "6f1c2a4e-0000-4000-8000-00000000abcd";
+
     #[tokio::test]
     async fn query_returns_first_table() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/workspaces/ws-guid/query"))
+            .and(path(format!("/v1/workspaces/{WS}/query")))
             // The KQL and ISO-8601 timespan ride the request body.
             .and(body_partial_json(serde_json::json!({
                 "query": "AppEvents | take 1",
@@ -125,7 +134,7 @@ mod tests {
             .await;
 
         let table = client(&server.uri())
-            .query("ws-guid", "AppEvents | take 1", "P90D")
+            .query(WS, "AppEvents | take 1", "P90D")
             .await
             .expect("query returns the first table");
         assert_eq!(table.name, "PrimaryResult");
@@ -140,7 +149,7 @@ mod tests {
         // complete usage picture.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/workspaces/ws-guid/query"))
+            .and(path(format!("/v1/workspaces/{WS}/query")))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "tables": [{
                     "name": "PrimaryResult",
@@ -157,7 +166,7 @@ mod tests {
             .await;
 
         let err = client(&server.uri())
-            .query("ws-guid", "AppEvents", "P90D")
+            .query(WS, "AppEvents", "P90D")
             .await
             .unwrap_err();
         let ArmError::Protocol(ref msg) = err else {
@@ -171,7 +180,7 @@ mod tests {
     async fn query_with_a_null_error_returns_the_table() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/workspaces/ws-guid/query"))
+            .and(path(format!("/v1/workspaces/{WS}/query")))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "tables": [{"name": "PrimaryResult", "columns": [], "rows": []}],
                 "error": null
@@ -180,7 +189,7 @@ mod tests {
             .await;
 
         let table = client(&server.uri())
-            .query("ws-guid", "AppEvents", "P1D")
+            .query(WS, "AppEvents", "P1D")
             .await
             .expect("a null error is a complete result");
         assert_eq!(table.name, "PrimaryResult");
@@ -190,7 +199,7 @@ mod tests {
     async fn query_without_tables_is_deserialize_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/workspaces/ws-guid/query"))
+            .and(path(format!("/v1/workspaces/{WS}/query")))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({ "tables": [] })),
             )
@@ -198,7 +207,7 @@ mod tests {
             .await;
 
         let err = client(&server.uri())
-            .query("ws-guid", "AppEvents", "P1D")
+            .query(WS, "AppEvents", "P1D")
             .await
             .unwrap_err();
         assert!(matches!(err, ArmError::Deserialize(_)), "got {err:?}");
@@ -211,7 +220,7 @@ mod tests {
         // a hard failure) so it can treat "table absent" as a probe miss.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/workspaces/ws-guid/query"))
+            .and(path(format!("/v1/workspaces/{WS}/query")))
             .respond_with(
                 ResponseTemplate::new(400).set_body_string("SemanticError: table not found"),
             )
@@ -219,7 +228,7 @@ mod tests {
             .await;
 
         let err = client(&server.uri())
-            .query("ws-guid", "MissingTable", "P1D")
+            .query(WS, "MissingTable", "P1D")
             .await
             .unwrap_err();
         assert!(
@@ -241,7 +250,7 @@ mod tests {
             listener.local_addr().expect("addr").port()
         };
         let err = client(&format!("http://127.0.0.1:{port}"))
-            .query("ws-guid", "AppEvents | take 1", "P1D")
+            .query(WS, "AppEvents | take 1", "P1D")
             .await
             .unwrap_err();
         let ArmError::Network(message) = err else {
@@ -263,7 +272,7 @@ mod tests {
     async fn an_error_body_is_sanitized_and_capped() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/workspaces/ws-guid/query"))
+            .and(path(format!("/v1/workspaces/{WS}/query")))
             .respond_with(
                 ResponseTemplate::new(400)
                     .set_body_string(format!("  <html>\0{}</html>  ", "x".repeat(5_000))),
@@ -272,7 +281,7 @@ mod tests {
             .await;
 
         let err = client(&server.uri())
-            .query("ws-guid", "MissingTable", "P1D")
+            .query(WS, "MissingTable", "P1D")
             .await
             .unwrap_err();
         let ArmError::Api { status: 400, body } = err else {
@@ -284,5 +293,29 @@ mod tests {
             azapptoolkit_core::http_error::ERROR_BODY_MAX_CHARS + 1
         );
         assert!(body.ends_with('…'));
+    }
+
+    /// `customerId` comes out of an ARM workspace listing. A `?` would let a
+    /// second query override the `timespan`, a `..` walk the path, a `#`
+    /// truncate it — so a non-GUID is refused before the Logs bearer is sent.
+    #[tokio::test]
+    async fn query_refuses_a_workspace_id_that_is_not_a_guid() {
+        let server = MockServer::start().await;
+        let client = client(&server.uri());
+        for ws in ["../x?y", "ws?timespan=P1D", "ws#f", "ws-guid"] {
+            let err = client.query(ws, "AppEvents", "P1D").await.unwrap_err();
+            assert!(
+                matches!(&err, ArmError::Protocol(m) if m == "refusing a workspace id that is not a GUID"),
+                "{ws} must be refused, got {err:?}"
+            );
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "a refused workspace id must not reach the wire"
+        );
     }
 }

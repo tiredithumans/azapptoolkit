@@ -24,8 +24,10 @@
 /// Defines a client error enum with the shared HTTP taxonomy.
 ///
 /// Generates the ten common variants, `is_retryable` (delegating to
-/// [`crate::http_retry::is_retryable_code`]) and `ui_code` (the single
-/// variant-to-wire-code table). The `Token` arm passes every classified auth
+/// [`crate::http_retry::is_retryable_code`]), `ui_code` (the single
+/// variant-to-wire-code table) and an [`HttpStatusError`] impl, so a transport
+/// can map a failed response through [`failed_response`] instead of restating
+/// the status table. The `Token` arm passes every classified auth
 /// code through via [`crate::reauth::passthrough_code`] rather than flattening
 /// it — only the re-auth-fatal ones halt a fan-out; the rest (`consent_required`,
 /// a refresh-time `network_error`) reach the UI's recovery action or the retry
@@ -151,7 +153,106 @@ macro_rules! http_error_enum {
                 $name::Deserialize(value.to_string())
             }
         }
+
+        impl $crate::http_error::HttpStatusError for $name {
+            fn unauthorized() -> Self {
+                $name::Unauthorized
+            }
+            fn forbidden(body: String) -> Self {
+                $name::Forbidden(body)
+            }
+            fn not_found(body: String) -> Self {
+                $name::NotFound(body)
+            }
+            fn api(status: u16, body: String) -> Self {
+                $name::Api { status, body }
+            }
+            fn throttled(retry_after_secs: Option<u64>) -> Self {
+                $name::Throttled { retry_after_secs }
+            }
+            fn server(status: u16, body: String) -> Self {
+                $name::Server { status, body }
+            }
+            fn network(message: String) -> Self {
+                $name::Network(message)
+            }
+        }
     };
+}
+
+/// The variant constructors a transport needs to turn one failed HTTP attempt
+/// into a crate's own error. [`http_error_enum!`] implements it for every
+/// instance, so [`failed_response`] / [`send_failure`] are the one
+/// status-to-variant table the ARM and Key Vault transports share.
+pub trait HttpStatusError: Sized {
+    /// 401.
+    fn unauthorized() -> Self;
+    /// 403, with the sanitized body.
+    fn forbidden(body: String) -> Self;
+    /// 404, with the sanitized body.
+    fn not_found(body: String) -> Self;
+    /// Any other 4xx except 429 — the crate's API-error variant.
+    fn api(status: u16, body: String) -> Self;
+    /// 429, with the `Retry-After` wait when the service sent one.
+    fn throttled(retry_after_secs: Option<u64>) -> Self;
+    /// 5xx (and any other non-success status).
+    fn server(status: u16, body: String) -> Self;
+    /// No response at all: the send itself failed.
+    fn network(message: String) -> Self;
+}
+
+/// Classifies one non-success HTTP response.
+///
+/// 401/403/404 are typed; any other non-429 4xx is terminal → `api` (which lets
+/// a Logs `query` treat a 400 "table absent" as a probe miss rather than a hard
+/// failure); 429 is a [`RetryReason::Throttled`](crate::http_retry::RetryReason)
+/// retry carrying `retry_after_secs`; everything else (5xx) is a `Transient`
+/// retry. Whether a retry actually happens is the shared loop's call, from the
+/// request's [`RetryClass`](crate::http_retry::RetryClass).
+///
+/// `raw_body` is sanitized and capped here, before it can reach an error, a log
+/// line or a toast — a proxy block page can be megabytes of HTML. The caller
+/// reads `Retry-After` first, because reading the body consumes the response.
+pub fn failed_response<T, E: HttpStatusError>(
+    status: u16,
+    retry_after_secs: Option<u64>,
+    raw_body: &str,
+) -> crate::http_retry::Attempt<T, E> {
+    use crate::http_retry::{Attempt, RetryReason};
+    let body = sanitize_error_body(raw_body);
+    match status {
+        401 => Attempt::Done(Err(E::unauthorized())),
+        403 => Attempt::Done(Err(E::forbidden(body))),
+        404 => Attempt::Done(Err(E::not_found(body))),
+        429 => Attempt::Retry {
+            reason: RetryReason::Throttled,
+            status: Some(status),
+            retry_after_secs,
+            err: E::throttled(retry_after_secs),
+        },
+        c if (400..500).contains(&c) => Attempt::Done(Err(E::api(status, body))),
+        _ => Attempt::Retry {
+            reason: RetryReason::Transient,
+            status: Some(status),
+            retry_after_secs,
+            err: E::server(status, body),
+        },
+    }
+}
+
+/// Classifies a send that produced no response (DNS, connect, TLS, reset): a
+/// `Transient` retry with no status and no `Retry-After` to honor, so the
+/// shared loop falls back to jittered exponential backoff. The whole cause
+/// chain is kept (see [`describe_error_chain`]).
+pub fn send_failure<T, E: HttpStatusError>(
+    err: &(dyn std::error::Error + 'static),
+) -> crate::http_retry::Attempt<T, E> {
+    crate::http_retry::Attempt::Retry {
+        reason: crate::http_retry::RetryReason::Transient,
+        status: None,
+        retry_after_secs: None,
+        err: E::network(describe_error_chain(err)),
+    }
 }
 
 /// The operator-facing wait for a throttled request's `Retry-After`, shared by
@@ -328,5 +429,139 @@ mod tests {
         // At the cap exactly, nothing is marked as truncated.
         let exact = "y".repeat(ERROR_BODY_MAX_CHARS);
         assert_eq!(sanitize_error_body(&exact), exact);
+    }
+
+    /// Core has no `thiserror`, so the macro cannot expand here; this
+    /// hand-written instance stands in for it (the ARM and Key Vault
+    /// `error_conformance` tests pin the macro's own impl).
+    #[derive(Debug, PartialEq, Eq)]
+    enum TestErr {
+        Unauthorized,
+        Forbidden(String),
+        NotFound(String),
+        Api(u16, String),
+        Throttled(Option<u64>),
+        Server(u16, String),
+        Network(String),
+    }
+
+    impl HttpStatusError for TestErr {
+        fn unauthorized() -> Self {
+            TestErr::Unauthorized
+        }
+        fn forbidden(body: String) -> Self {
+            TestErr::Forbidden(body)
+        }
+        fn not_found(body: String) -> Self {
+            TestErr::NotFound(body)
+        }
+        fn api(status: u16, body: String) -> Self {
+            TestErr::Api(status, body)
+        }
+        fn throttled(retry_after_secs: Option<u64>) -> Self {
+            TestErr::Throttled(retry_after_secs)
+        }
+        fn server(status: u16, body: String) -> Self {
+            TestErr::Server(status, body)
+        }
+        fn network(message: String) -> Self {
+            TestErr::Network(message)
+        }
+    }
+
+    use crate::http_retry::{Attempt, RetryReason};
+
+    /// `None` = terminal (`Done`); `Some(reason)` = handed to the retry loop.
+    fn classify(attempt: Attempt<(), TestErr>) -> (Option<RetryReason>, Option<u16>, TestErr) {
+        match attempt {
+            Attempt::Done(Ok(())) => panic!("a failed response never succeeds"),
+            Attempt::Done(Err(e)) => (None, None, e),
+            Attempt::Retry {
+                reason,
+                status,
+                retry_after_secs: _,
+                err,
+            } => (Some(reason), status, err),
+        }
+    }
+
+    #[test]
+    fn failed_response_maps_each_status_to_its_variant() {
+        let b = || "body".to_string();
+        let cases: [(u16, Option<RetryReason>, Option<u16>, TestErr); 10] = [
+            (400, None, None, TestErr::Api(400, b())),
+            (401, None, None, TestErr::Unauthorized),
+            (403, None, None, TestErr::Forbidden(b())),
+            (404, None, None, TestErr::NotFound(b())),
+            (409, None, None, TestErr::Api(409, b())),
+            (422, None, None, TestErr::Api(422, b())),
+            (
+                429,
+                Some(RetryReason::Throttled),
+                Some(429),
+                TestErr::Throttled(Some(7)),
+            ),
+            (
+                500,
+                Some(RetryReason::Transient),
+                Some(500),
+                TestErr::Server(500, b()),
+            ),
+            (
+                503,
+                Some(RetryReason::Transient),
+                Some(503),
+                TestErr::Server(503, b()),
+            ),
+            // A redirect reqwest did not follow is not a success: it keeps
+            // being a transient server error, as before the mapping was shared.
+            (
+                302,
+                Some(RetryReason::Transient),
+                Some(302),
+                TestErr::Server(302, b()),
+            ),
+        ];
+        for (code, reason, status, err) in cases {
+            let (got_reason, got_status, got_err) =
+                classify(failed_response(code, Some(7), "body"));
+            assert_eq!(got_reason, reason, "{code}");
+            assert_eq!(got_status, status, "{code}");
+            assert_eq!(got_err, err, "{code}");
+        }
+        // Retry-After is carried on the retry itself, not only in the error.
+        match failed_response::<(), TestErr>(429, Some(7), "") {
+            Attempt::Retry {
+                retry_after_secs, ..
+            } => assert_eq!(retry_after_secs, Some(7)),
+            Attempt::Done(_) => panic!("429 is retried"),
+        }
+    }
+
+    #[test]
+    fn failed_response_sanitizes_and_caps_the_body() {
+        let (_, _, err) = classify(failed_response(403, None, "  denied\0\0  "));
+        assert_eq!(err, TestErr::Forbidden("denied".into()));
+        let (_, _, err) = classify(failed_response(500, None, &"x".repeat(5000)));
+        let TestErr::Server(500, body) = err else {
+            panic!("500 maps to Server");
+        };
+        assert_eq!(body.chars().count(), ERROR_BODY_MAX_CHARS + 1);
+        assert!(body.ends_with('…'));
+    }
+
+    #[test]
+    fn send_failure_is_a_transient_network_retry_with_its_cause() {
+        let err = Chain(
+            "error sending request",
+            Some(Box::new(Chain("connection refused", None))),
+        );
+        let (reason, status, got) = classify(send_failure(&err));
+        assert_eq!(reason, Some(RetryReason::Transient));
+        assert_eq!(status, None);
+        assert_eq!(
+            got,
+            TestErr::Network("error sending request: connection refused".into())
+        );
     }
 }

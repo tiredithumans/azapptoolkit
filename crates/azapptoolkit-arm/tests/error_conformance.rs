@@ -158,3 +158,54 @@ fn throttled_message_is_readable() {
         );
     }
 }
+
+/// The macro's `HttpStatusError` impl builds the variant each constructor
+/// names, so the shared `failed_response` status table lands on this crate's
+/// own wire codes.
+#[test]
+fn status_constructors_build_the_matching_variant() {
+    use azapptoolkit_core::http_error::HttpStatusError;
+    let cases: [(ArmError, &str); 7] = [
+        (
+            <ArmError as HttpStatusError>::unauthorized(),
+            "unauthorized",
+        ),
+        (
+            <ArmError as HttpStatusError>::forbidden("x".into()),
+            "forbidden",
+        ),
+        (
+            <ArmError as HttpStatusError>::not_found("x".into()),
+            "not_found",
+        ),
+        (
+            <ArmError as HttpStatusError>::api(409, "x".into()),
+            "arm_error",
+        ),
+        (
+            <ArmError as HttpStatusError>::throttled(Some(3)),
+            "throttled",
+        ),
+        (
+            <ArmError as HttpStatusError>::server(503, "x".into()),
+            "server_error",
+        ),
+        (
+            <ArmError as HttpStatusError>::network("reset".into()),
+            "network_error",
+        ),
+    ];
+    for (err, code) in cases {
+        assert_eq!(err.ui_code(), code, "{err:?}");
+    }
+    assert!(matches!(
+        <ArmError as HttpStatusError>::api(409, "x".into()),
+        ArmError::Api { status: 409, .. }
+    ));
+    assert!(matches!(
+        <ArmError as HttpStatusError>::throttled(Some(3)),
+        ArmError::Throttled {
+            retry_after_secs: Some(3)
+        }
+    ));
+}

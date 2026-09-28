@@ -37,6 +37,29 @@ impl ArmError {
             _ => None,
         }
     }
+
+    /// The ARM error envelope's `error.code` (e.g. `RoleAssignmentExists`) of a
+    /// terminal 4xx [`ArmError::Api`], so a caller can branch on the code rather
+    /// than substring-match the JSON. `None` for any other variant or a body
+    /// that is not the envelope. The body is sanitized and capped, which leaves
+    /// ARM's short envelopes intact.
+    pub fn arm_error_code(&self) -> Option<String> {
+        let ArmError::Api { body, .. } = self else {
+            return None;
+        };
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()?
+            .pointer("/error/code")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    /// ARM's answer to a role assignment the principal already holds at that
+    /// scope: 409 `RoleAssignmentExists`. Nothing was created.
+    pub fn is_role_assignment_exists(&self) -> bool {
+        matches!(self, ArmError::Api { status: 409, .. })
+            && self.arm_error_code().as_deref() == Some("RoleAssignmentExists")
+    }
 }
 
 #[cfg(test)]
@@ -135,5 +158,39 @@ mod tests {
         // Non-authz variants carry no role hint.
         assert!(ArmError::NotFound(String::new()).ui_hint().is_none());
         assert!(ArmError::Token("x".into()).ui_hint().is_none());
+    }
+
+    #[test]
+    fn a_duplicate_role_assignment_is_recognised_by_status_and_code() {
+        let api = |status, body: &str| ArmError::Api {
+            status,
+            body: body.to_string(),
+        };
+        let exists = r#"{"error":{"code":"RoleAssignmentExists","message":"The role assignment already exists."}}"#;
+        let err = api(409, exists);
+        assert_eq!(
+            err.arm_error_code().as_deref(),
+            Some("RoleAssignmentExists")
+        );
+        assert!(err.is_role_assignment_exists());
+
+        // A different 409 conflict is not a duplicate.
+        let other = api(
+            409,
+            r#"{"error":{"code":"RoleAssignmentUpdateNotPermitted","message":"no"}}"#,
+        );
+        assert_eq!(
+            other.arm_error_code().as_deref(),
+            Some("RoleAssignmentUpdateNotPermitted")
+        );
+        assert!(!other.is_role_assignment_exists());
+        // The code on a non-409 status is not trusted as the duplicate case.
+        assert!(!api(400, exists).is_role_assignment_exists());
+        // A body that is not the envelope (a proxy page) yields no code.
+        let html = api(409, "<html>conflict</html>");
+        assert_eq!(html.arm_error_code(), None);
+        assert!(!html.is_role_assignment_exists());
+        // Only the Api variant carries an ARM envelope.
+        assert_eq!(ArmError::Forbidden(exists.into()).arm_error_code(), None);
     }
 }

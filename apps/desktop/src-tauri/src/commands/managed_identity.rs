@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use futures::stream::{self, StreamExt};
 use tauri::{AppHandle, State};
 
-use azapptoolkit_arm::RoleAssignment;
+use azapptoolkit_arm::{ArmError, RoleAssignment};
 use azapptoolkit_core::azure_roles::{RoleContext, is_high_privilege_role};
 use azapptoolkit_core::cache::CacheKind;
 
@@ -410,17 +410,7 @@ pub async fn assign_managed_identity_azure_role(
         &principal_id,
     )
     .await
-    .map_err(|err| {
-        let mut ui = UiError::from(err);
-        if ui.code == "forbidden" {
-            // Append the concrete scope so the user knows *where* the role is
-            // needed; the guidance itself comes from the capability catalog.
-            let base = forbidden_remediation(&ui, "azure_role_assign")
-                .unwrap_or("Not authorized to create role assignments at this scope.");
-            ui.message = format!("{base} (scope: {scope})");
-        }
-        ui
-    })?;
+    .map_err(|err| assign_role_error(err, scope))?;
     // An assignment at ANY level can change who can reach a vault — the Key
     // Vault sweep keeps the assignment's own scope, and a resource-group or
     // subscription grant covers every vault beneath it — so bust unconditionally
@@ -428,6 +418,32 @@ pub async fn assign_managed_identity_azure_role(
     // key per tenant, refilled only by an explicit sweep: the bust costs nothing.
     crate::commands::keyvault_rbac::invalidate_kv_sweep(&state.cache, &tenant_id);
     Ok(())
+}
+
+/// Maps a failed role-assignment PUT to what the Assign Azure role form shows.
+///
+/// A duplicate (409 `RoleAssignmentExists`) is the common operator slip: it is
+/// a validation message, not success — nothing was created, and no cache is
+/// busted — instead of the raw `arm error (409): {json}`. A 403 appends the
+/// concrete scope to the capability catalog's guidance, so the user knows
+/// *where* the role is needed.
+fn assign_role_error(err: ArmError, scope: &str) -> UiError {
+    if err.is_role_assignment_exists() {
+        return UiError::validation(
+            "already_assigned",
+            format!(
+                "This identity already holds that role at this scope ({scope}). Nothing was \
+                 changed."
+            ),
+        );
+    }
+    let mut ui = UiError::from(err);
+    if ui.code == "forbidden" {
+        let base = forbidden_remediation(&ui, "azure_role_assign")
+            .unwrap_or("Not authorized to create role assignments at this scope.");
+        ui.message = format!("{base} (scope: {scope})");
+    }
+    ui
 }
 
 /// Classifies an ARM scope string by level for display.
@@ -504,7 +520,6 @@ pub async fn save_managed_identities_to_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use azapptoolkit_arm::ArmError;
 
     fn mi_row(name: &str, subtype: MiSubtype) -> ManagedIdentityDto {
         ManagedIdentityDto {
@@ -677,5 +692,45 @@ mod tests {
         assert_eq!(ui.code, "forbidden");
         assert!(!ui.retryable);
         assert!(ui.message.contains("denied"));
+    }
+
+    #[test]
+    fn a_duplicate_role_assignment_reads_as_already_assigned() {
+        let scope = "/subscriptions/s/resourceGroups/rg";
+        let ui = assign_role_error(
+            ArmError::Api {
+                status: 409,
+                body: r#"{"error":{"code":"RoleAssignmentExists","message":"The role assignment already exists."}}"#
+                    .into(),
+            },
+            scope,
+        );
+        assert_eq!(ui.code, "already_assigned");
+        assert!(!ui.retryable);
+        assert!(ui.message.contains(scope), "{}", ui.message);
+        assert!(
+            !ui.message.contains("RoleAssignmentExists"),
+            "{}",
+            ui.message
+        );
+
+        // Any other conflict keeps the generic ARM error.
+        let ui = assign_role_error(
+            ArmError::Api {
+                status: 409,
+                body: r#"{"error":{"code":"RoleAssignmentUpdateNotPermitted"}}"#.into(),
+            },
+            scope,
+        );
+        assert_eq!(ui.code, "arm_error");
+
+        // A 403 still names the scope the role is needed at.
+        let ui = assign_role_error(ArmError::Forbidden("denied".into()), scope);
+        assert_eq!(ui.code, "forbidden");
+        assert!(
+            ui.message.ends_with(&format!("(scope: {scope})")),
+            "{}",
+            ui.message
+        );
     }
 }
