@@ -48,6 +48,12 @@
 
 ### Fixed
 
+- **Resource Access no longer shows the previous mailbox's verdicts while checking a different one.**
+  The old table stayed under the progress bar (and under any error) for a mailbox you were no longer
+  asking about; it now clears when you check a new address. The Permission tester also shows a
+  seeded identity by its display name instead of a bare appId, and clears the mailbox and site URL
+  when you switch tenants.
+
 - **The app-registration Owners tab no longer says "No matches." under an empty search box.** Both
   Owners tabs and the audit's add-owner dialog now use the same directory search as the Access tab,
   so the search behaves identically everywhere and only reports "No matches." after an actual search.

@@ -19,8 +19,6 @@ use crate::components::export_menu::ExportMenu;
 use crate::components::ui::SearchInput;
 use crate::components::ui::{Badge, BadgeTone, Callout, ShowMore};
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
-use crate::constants::*;
-use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_list_export::use_list_export;
 use crate::hooks::use_progress_stream::use_progress_stream;
@@ -76,44 +74,8 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
     let step_up_required = RwSignal::new(false);
     let search = RwSignal::new(String::new());
 
-    let search_debounced = use_debounced(search.into(), LIST_FILTER_DEBOUNCE_MS);
-    // Lowercased search haystack per row, rebuilt once per sweep result (reads
-    // `result`, not the query) so a keystroke just runs `contains`.
-    let corpus: Memo<Vec<String>> = Memo::new(move |_| {
-        result.with(|r| {
-            r.as_ref()
-                .map(|r| r.rows.iter().map(row_haystack).collect::<Vec<_>>())
-                .unwrap_or_default()
-        })
-    });
-    let filtered_rows = Memo::new(move |_| {
-        let needle = search_debounced.get().trim().to_lowercase();
-        result.with(|r| {
-            r.as_ref()
-                .map(|r| {
-                    if needle.is_empty() {
-                        return r.rows.clone();
-                    }
-                    corpus.with(|hays| {
-                        r.rows
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, _)| hays.get(*i).is_some_and(|h| h.contains(&needle)))
-                            .map(|(_, row)| row.clone())
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .unwrap_or_default()
-        })
-    });
-    let render_limit = RwSignal::new(RENDER_PAGE);
-    Effect::new(move |prev: Option<()>| {
-        search_debounced.track();
-        let _ = filtered_rows.with(|r| r.len());
-        if prev.is_some() {
-            render_limit.set(RENDER_PAGE);
-        }
-    });
+    let (filtered_rows, render_limit) =
+        super::use_sweep_filter(result, search, |r| &r.rows, row_haystack);
     let tbody_ref: NodeRef<leptos::html::Tbody> = NodeRef::new();
     let on_grid_key = use_grid_keynav(tbody_ref, move || {
         let _ = render_limit.get();

@@ -178,6 +178,15 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
         }
         probing.set(true);
         error.set(None);
+        // A probe is per-target: a table for a *different* mailbox must not sit
+        // under the progress bar (or beneath an error) while this one runs.
+        // Re-checking the same mailbox keeps it until the new result lands.
+        if result.with_untracked(|r| {
+            r.as_ref()
+                .is_some_and(|r| !r.mailbox.eq_ignore_ascii_case(&mb))
+        }) {
+            result.set(None);
+        }
         progress.set(Some(MailboxProbeProgress {
             done: 0,
             total: 0,

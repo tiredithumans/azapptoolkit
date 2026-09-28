@@ -14,7 +14,6 @@ use std::collections::HashSet;
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
-use wasm_bindgen::JsCast;
 
 use crate::bindings::permission_tester::{self, AccessVerdict, PermissionTestResult};
 use crate::bindings::{TenantContext, auth, search};
@@ -22,7 +21,9 @@ use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
     Badge, BadgeTone, Callout, FormError, SectionHeader, TabBar, TabBarItem,
 };
+use crate::constants::TYPEAHEAD_DEBOUNCE_MS;
 use crate::hooks::use_debounced::use_debounced;
+use crate::hooks::use_deferred_blur::use_deferred_blur;
 use crate::state::use_session;
 
 use crate::util::no_tenant;
@@ -71,6 +72,9 @@ pub fn PermissionTesterView() -> impl IntoView {
         app_id.set(String::new());
         app_query.set(String::new());
         app_focused.set(false);
+        // Tenant A's mailbox / site URL mean nothing in tenant B.
+        mailbox.set(String::new());
+        site_url.set(String::new());
         result.set(None);
         error.set(None);
         needs_consent.set(false);
@@ -111,7 +115,7 @@ pub fn PermissionTesterView() -> impl IntoView {
     // (all three are service principals testable by appId). Returns
     // `(app_id, display_name, kind)`, deduped by appId (an app registration and
     // its enterprise-app SP share one appId; the test verdict is the same).
-    let debounced_query = use_debounced(app_query.into(), 200);
+    let debounced_query = use_debounced(app_query.into(), TYPEAHEAD_DEBOUNCE_MS);
     let app_results = LocalResource::new(move || {
         let t = tenant.get();
         let q = debounced_query.get();
@@ -149,6 +153,19 @@ pub fn PermissionTesterView() -> impl IntoView {
     // the input's keydown handler can pick the selected row synchronously.
     Effect::new(move |_| {
         if let Some(rows) = app_results.get() {
+            // A seeded selection leaves the field reading the bare appId; the
+            // search for it resolves the name by exact lookup, so show that
+            // instead. Guarded on the seeded state (field text == selected
+            // appId) so a manual query is never overwritten.
+            let seeded = app_id.get_untracked();
+            if !seeded.is_empty()
+                && app_query.with_untracked(|q| q.trim().eq_ignore_ascii_case(&seeded))
+                && let Some((_, name, _)) = rows
+                    .iter()
+                    .find(|(id, _, _)| id.eq_ignore_ascii_case(&seeded))
+            {
+                app_query.set(name.clone());
+            }
             rows_now.set(rows.to_vec());
             sel.set(0);
         }
@@ -312,20 +329,8 @@ pub fn PermissionTesterView() -> impl IntoView {
                         }
                         on:keydown=on_picker_keydown
                         on:focus=move |_| app_focused.set(true)
-                        on:blur=move |_| {
-                            // Delay closing so a click on a result registers first
-                            // (the click fires after blur). Mirrors GlobalSearch.
-                            if let Some(w) = web_sys::window() {
-                                let cb = wasm_bindgen::closure::Closure::once_into_js(move || {
-                                    app_focused.set(false)
-                                });
-                                let _ = w
-                                    .set_timeout_with_callback_and_timeout_and_arguments_0(
-                                        cb.unchecked_ref::<js_sys::Function>(),
-                                        150,
-                                    );
-                            }
-                        }
+                        // Delay closing so a click on a result registers first.
+                        on:blur=use_deferred_blur(app_focused)
                     />
                     {move || {
                         if !app_focused.get() || app_query.get().trim().is_empty() {

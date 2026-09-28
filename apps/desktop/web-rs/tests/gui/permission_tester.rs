@@ -100,3 +100,26 @@ async fn the_picker_says_no_match_outside_its_listbox() {
     );
     assert_eq!(listbox.children().length(), 0);
 }
+
+/// The seeded appId resolves to the identity's display name: the debounced
+/// search for it returns the exact hit, and the field shows the name rather
+/// than a bare GUID (the tested appId is unchanged).
+#[wasm_bindgen_test]
+async fn a_seeded_app_id_is_shown_by_display_name() {
+    ts::reset();
+    // `global_search_apps` keys its first hit as appId "app-0".
+    ts::mock_ok(
+        "global_search",
+        &fixtures::global_search_apps(&["Contoso Mailer"]),
+    );
+
+    let m = ts::mount_view(|| view! { <PermissionTesterView /> });
+    ts::tick().await;
+
+    m.session.open_permission_tester_for("app-0".into());
+    ts::wait_for(|| picker_value() == "Contoso Mailer").await;
+    assert!(
+        ts::body_contains("app-0"),
+        "the selected appId is still shown"
+    );
+}

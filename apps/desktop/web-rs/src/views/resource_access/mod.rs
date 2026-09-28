@@ -24,6 +24,8 @@ use thaw::Body1;
 
 use crate::bindings::permission_tester::AccessVerdict;
 use crate::components::ui::{BadgeTone, SectionHeader, TabBar, TabBarItem};
+use crate::constants::{LIST_FILTER_DEBOUNCE_MS, RENDER_PAGE};
+use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 
 mod keyvault;
@@ -106,4 +108,64 @@ pub(super) fn verdict_tooltip(verdict: AccessVerdict) -> &'static str {
             "Access couldn’t be confirmed — an Exchange RBAC check needs Exchange administrator rights. Treat as possible access until verified."
         }
     }
+}
+
+/// The Sites and Vault-access sweep tables' shared filter scaffolding: the
+/// debounced search, a lowercased haystack per row (rebuilt once per sweep
+/// result, not per keystroke, so filtering a ≤5k-row sweep is just `contains`
+/// over the prebuilt corpus), the filtered rows, and the render window — the
+/// first page is drawn and grown on demand, and resets to one page whenever
+/// the filter or the scan changes. One copy, so a fix lands in both panels.
+///
+/// `rows_of` projects the sweep result's rows; `haystack` builds one row's
+/// lowercased search text. Summary, export and run/consent stay per panel —
+/// they differ in DTO, command and consent feature.
+pub(super) fn use_sweep_filter<Res, Row>(
+    result: RwSignal<Option<Res>>,
+    search: RwSignal<String>,
+    rows_of: fn(&Res) -> &[Row],
+    haystack: fn(&Row) -> String,
+) -> (Memo<Vec<Row>>, RwSignal<usize>)
+where
+    Res: Send + Sync + 'static,
+    Row: Clone + PartialEq + Send + Sync + 'static,
+{
+    let search_debounced = use_debounced(search.into(), LIST_FILTER_DEBOUNCE_MS);
+    // Indices align with `rows_of(result)` — both derive from `result`.
+    let corpus: Memo<Vec<String>> = Memo::new(move |_| {
+        result.with(|r| {
+            r.as_ref()
+                .map(|r| rows_of(r).iter().map(haystack).collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+    });
+    let filtered_rows = Memo::new(move |_| {
+        let needle = search_debounced.get().trim().to_lowercase();
+        result.with(|r| {
+            r.as_ref()
+                .map(|r| {
+                    let rows = rows_of(r);
+                    if needle.is_empty() {
+                        return rows.to_vec();
+                    }
+                    corpus.with(|hays| {
+                        rows.iter()
+                            .enumerate()
+                            .filter(|(i, _)| hays.get(*i).is_some_and(|h| h.contains(&needle)))
+                            .map(|(_, row)| row.clone())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .unwrap_or_default()
+        })
+    });
+    let render_limit = RwSignal::new(RENDER_PAGE);
+    Effect::new(move |prev: Option<()>| {
+        search_debounced.track();
+        let _ = filtered_rows.with(|r| r.len());
+        if prev.is_some() {
+            render_limit.set(RENDER_PAGE);
+        }
+    });
+    (filtered_rows, render_limit)
 }
