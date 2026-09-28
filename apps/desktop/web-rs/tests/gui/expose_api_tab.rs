@@ -191,3 +191,38 @@ async fn picking_a_client_from_search_fills_the_client_id() {
         serde_json::json!(["scope-1"])
     );
 }
+
+/// Every row's destructive button used to be announced as a bare "Remove" or
+/// "Delete", so a screen-reader user had to count rows to know which URI,
+/// scope or client they were on. Each names its row now, starting with the
+/// visible verb; the action columns' headers read "Actions" to assistive
+/// tech only.
+#[wasm_bindgen_test]
+async fn row_actions_name_their_row() {
+    ts::reset();
+    ts::mock_ok("get_expose_api", &dto());
+    let _m = mount();
+    ts::wait_for(|| ts::body_contains("Contoso Portal")).await;
+
+    for selector in [
+        "button[aria-label=\"Remove Application ID URI api://app-1\"]".to_string(),
+        "button[aria-label=\"Delete scope Files.Read\"]".to_string(),
+        format!(
+            "button[aria-label=\"Remove authorized client Contoso Portal ({RESOLVED_CLIENT})\"]"
+        ),
+        // A client with no resolved name is named by its bare id.
+        format!("button[aria-label=\"Remove authorized client {UNRESOLVED_CLIENT}\"]"),
+    ] {
+        assert!(ts::query(&selector).is_some(), "no row button `{selector}`");
+    }
+
+    let headers = ts::query_all(".expose-api thead th:last-child .visually-hidden");
+    assert_eq!(
+        headers.len(),
+        3,
+        "each of the three tables names its action column"
+    );
+    for h in headers {
+        assert_eq!(h.text_content().unwrap_or_default(), "Actions");
+    }
+}

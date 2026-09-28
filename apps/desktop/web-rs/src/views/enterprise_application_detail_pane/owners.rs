@@ -176,6 +176,7 @@ pub(super) fn OwnersContent(
                                 let id_click = o.id.clone();
                                 let id_busy = o.id.clone();
                                 let name_click = name.clone();
+                                let remove_aria = format!("Remove owner {name}");
                                 view! {
                                     <li>
                                         <div>
@@ -185,6 +186,7 @@ pub(super) fn OwnersContent(
                                         <Button
                                             class="button--danger"
                                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                            attr:aria-label=remove_aria
                                             disabled=Signal::derive(move || {
                                                 busy.with(|b| b.as_deref() == Some(id_busy.as_str()))
                                             })

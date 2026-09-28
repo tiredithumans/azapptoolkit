@@ -276,6 +276,21 @@ h3 {
   word-break: break-all;
 }
 
+/* Text for assistive tech only: named, but takes no space and paints nothing.
+   DataTable (and the hand-built tables) put "Actions" in an action column's
+   otherwise empty <th> with it, so row buttons get a column name. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .row {
   display: flex;
   gap: var(--space-2);

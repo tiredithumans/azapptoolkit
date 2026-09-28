@@ -616,7 +616,9 @@ pub fn PermissionsTab(
                                 <th>"Kind"</th>
                                 <th>"Scope"</th>
                                 <th>"Status"</th>
-                                <th></th>
+                                <th>
+                                    <span class="visually-hidden">"Actions"</span>
+                                </th>
                             </tr>
                         </thead>
                         <tbody>
@@ -909,6 +911,10 @@ where
     // the modal names the permission the operator clicked rather than "this
     // permission" over a row it is covering.
     let revoke_subject = perm_primary.clone();
+    // The row's accessible name for its trash button: a table of twelve grants
+    // announced twelve identical "Revoke application permission"s, so the
+    // operator had to count rows to know which one they were on.
+    let row_name = format!("{perm_primary} on {resource_display}");
     let runtime_assignment_id = p.runtime_assignment_id.clone();
     let runtime_grant_id = p.runtime_grant_id.clone();
     let permission_value = p.permission_value.clone();
@@ -931,7 +937,7 @@ where
             view! {
                 <IconButton
                     icon=IconName::Trash
-                    aria_label="Revoke application permission".to_string()
+                    aria_label=format!("Revoke application permission {row_name}")
                     title="Revoke".to_string()
                     class="button--danger".to_string()
                     on_click=Callback::new(on_click)
@@ -945,7 +951,7 @@ where
                 view! {
                     <IconButton
                         icon=IconName::Trash
-                        aria_label="Revoke delegated permission".to_string()
+                        aria_label=format!("Revoke delegated permission {row_name}")
                         title="Revoke".to_string()
                         class="button--danger".to_string()
                         on_click=Callback::new(on_click)
@@ -972,7 +978,7 @@ where
             view! {
                 <IconButton
                     icon=IconName::Trash
-                    aria_label="Remove declared permission".to_string()
+                    aria_label=format!("Remove declared permission {row_name}")
                     title="Remove".to_string()
                     class="button--danger".to_string()
                     on_click=Callback::new(on_click)

@@ -401,7 +401,9 @@ fn ExposeApiLoaded(
                                 <thead>
                                     <tr>
                                         <th>"URI"</th>
-                                        <th></th>
+                                        <th>
+                                            <span class="visually-hidden">"Actions"</span>
+                                        </th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -409,6 +411,7 @@ fn ExposeApiLoaded(
                                         .into_iter()
                                         .map(|uri| {
                                             let uri_click = uri.clone();
+                                            let remove_label = format!("Remove Application ID URI {uri}");
                                             view! {
                                                 <tr>
                                                     <td class="mono">{uri.clone()}</td>
@@ -416,6 +419,7 @@ fn ExposeApiLoaded(
                                                         <Button
                                                             class="button--danger"
                                                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                            attr:aria-label=remove_label
                                                             on_click=Box::new(move |_| {
                                                                 uri_remove_cmd.error.set(None);
                                                                 pending_remove_uri.set(Some(uri_click.clone()))
@@ -463,7 +467,9 @@ fn ExposeApiLoaded(
                                         <th>"Who can consent"</th>
                                         <th>"Admin consent display name"</th>
                                         <th>"State"</th>
-                                        <th></th>
+                                        <th>
+                                            <span class="visually-hidden">"Actions"</span>
+                                        </th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -479,6 +485,7 @@ fn ExposeApiLoaded(
                                             let edit_scope = s.clone();
                                             let delete_id = s.id.clone();
                                             let delete_value = s.value.clone();
+                                            let delete_label = format!("Delete scope {}", s.value);
                                             view! {
                                                 <tr>
                                                     <td class="mono">{s.value.clone()}</td>
@@ -507,6 +514,7 @@ fn ExposeApiLoaded(
                                                             <Button
                                                                 class="button--danger"
                                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                                attr:aria-label=delete_label
                                                                 on_click=Box::new(move |_| {
                                                                     pending_delete_scope
                                                                         .set(
@@ -566,7 +574,9 @@ fn ExposeApiLoaded(
                                         <th>"Client application"</th>
                                         <th>"Client ID"</th>
                                         <th>"Authorized scopes"</th>
-                                        <th></th>
+                                        <th>
+                                            <span class="visually-hidden">"Actions"</span>
+                                        </th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -595,6 +605,7 @@ fn ExposeApiLoaded(
                                                 None => p.app_id.clone(),
                                             };
                                             let remove_id = p.app_id.clone();
+                                            let remove_aria = format!("Remove authorized client {remove_subject}");
                                             view! {
                                                 <tr>
                                                     <td>{name.unwrap_or_else(|| "—".into())}</td>
@@ -614,6 +625,7 @@ fn ExposeApiLoaded(
                                                             <Button
                                                                 class="button--danger"
                                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                                attr:aria-label=remove_aria
                                                                 on_click=Box::new(move |_| {
                                                                     pending_remove_pre
                                                                         .set(

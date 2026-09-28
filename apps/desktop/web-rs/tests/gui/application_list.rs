@@ -384,3 +384,36 @@ async fn a_home_drill_lands_on_the_with_secrets_chip() {
     );
     assert_eq!(m.session.tenant_ui.apps_facet.get_untracked(), "secrets");
 }
+
+/// The two date filters sat under a visible `<label>` that labelled nothing
+/// (no `for`, no wrapping), so a screen reader announced two bare "date"
+/// fields. Each carries its own name, in the order it renders; the saved-view
+/// name box is named too, not left to its placeholder.
+#[wasm_bindgen_test]
+async fn filter_drawer_fields_have_accessible_names() {
+    ts::reset();
+    ts::mock_ok(
+        "list_applications_with_pairing",
+        &fixtures::apps(&["Contoso CRM"]),
+    );
+
+    let _mounted = ts::mount_view(|| view! { <ApplicationList /> });
+    ts::wait_for(|| ts::text(COUNT) == "1 app registrations").await;
+
+    if ts::query_all(".date-range-field__native").is_empty() {
+        ts::click(".filter-toggle");
+    }
+    ts::wait_for(|| ts::query_all(".date-range-field__native").len() == 2).await;
+    let names: Vec<String> = ts::query_all(".date-range-field__native")
+        .iter()
+        .map(|el| el.get_attribute("aria-label").unwrap_or_default())
+        .collect();
+    assert_eq!(names, ["Created before", "Created after"]);
+
+    ts::click_button_labelled("+ Save view");
+    ts::wait_for(|| ts::query(".saved-views__input").is_some()).await;
+    assert!(
+        ts::query("input.saved-views__input[aria-label=\"View name\"]").is_some(),
+        "the saved-view name box needs a name beyond its placeholder"
+    );
+}

@@ -118,6 +118,13 @@ async fn granting_tenant_app_role_to_managed_identity_passes_tenant_resource() {
     // Select the tenant app as the resource; its Application roles load.
     select_resource(TENANT_APP_ID);
     ts::wait_for(|| ts::body_contains("Orders.Read.All")).await;
+    // Each row's checkbox names its permission (not one shared "Select
+    // permission" across the catalog).
+    assert!(
+        ts::query("input.permission-picker__check[aria-label=\"Select Orders.Read.All\"]")
+            .is_some(),
+        "the picker checkbox names the permission it selects"
+    );
     ts::select_picker_permission("Orders.Read.All");
     ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
 

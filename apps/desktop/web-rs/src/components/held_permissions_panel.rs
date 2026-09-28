@@ -187,7 +187,7 @@ pub fn HeldPermissionsPanel(
             view! {
                 <IconButton
                     icon=IconName::Trash
-                    aria_label="Revoke permission".to_string()
+                    aria_label=format!("Revoke permission {perm} on {res}")
                     title="Revoke".to_string()
                     class="button--danger".to_string()
                     disabled=busy

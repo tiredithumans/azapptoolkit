@@ -302,10 +302,15 @@ fn SigningCertRolloverPanel(
                                 && !c.is_active)
                                 .then(|| {
                                     let key_id = c.key_id.clone();
+                                    let remove_aria = format!(
+                                        "Remove expired certificate {}",
+                                        c.thumbprint,
+                                    );
                                     view! {
                                         <Button
                                             class="cert-rollover__remove"
                                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                            attr:aria-label=remove_aria
                                             on_click=Box::new(move |_| {
                                                 let key_id = key_id.clone();
                                                 cmd.run_toast_err(
@@ -356,7 +361,9 @@ fn SigningCertRolloverPanel(
                                     <th>"Status"</th>
                                     <th>"Thumbprint"</th>
                                     <th>"Expires"</th>
-                                    <th></th>
+                                    <th>
+                                        <span class="visually-hidden">"Actions"</span>
+                                    </th>
                                 </tr>
                             </thead>
                             <tbody>{rows}</tbody>

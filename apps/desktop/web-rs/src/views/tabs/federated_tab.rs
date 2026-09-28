@@ -565,6 +565,10 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                                                         <Button
                                                             class="button--danger"
                                                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                            attr:aria-label=format!(
+                                                                "Remove federated credential {}",
+                                                                c.name,
+                                                            )
                                                             on_click=Box::new(move |_| {
                                                                 pending_remove.set(Some((cid.clone(), cname.clone())))
                                                             })

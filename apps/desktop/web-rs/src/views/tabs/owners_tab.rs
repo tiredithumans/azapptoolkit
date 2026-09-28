@@ -323,6 +323,11 @@ pub fn OwnersTab(
                                     .clone()
                                     .or_else(|| o.user_principal_name.clone())
                                     .unwrap_or_default();
+                                let remove_aria = if remove_label.is_empty() {
+                                    format!("Remove owner {}", o.id)
+                                } else {
+                                    format!("Remove owner {remove_label}")
+                                };
                                 view! {
                                     <tr>
                                         <td>{display}</td>
@@ -332,6 +337,7 @@ pub fn OwnersTab(
                                             <Button
                                                 class="button--danger"
                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                attr:aria-label=remove_aria
                                                 disabled=Signal::derive(move || {
                                                     removing.with(|r| r.as_deref() == Some(id_disabled.as_str()))
                                                 })
@@ -386,6 +392,9 @@ pub fn OwnersTab(
                                                 .display_name
                                                 .clone()
                                                 .unwrap_or_else(|| o.id.clone());
+                                            let unstage_aria = format!(
+                                                "Remove {display} from the target owner set",
+                                            );
                                             let upn = o
                                                 .user_principal_name
                                                 .clone()
@@ -399,6 +408,7 @@ pub fn OwnersTab(
                                                     <Button
                                                         class="button--danger"
                                                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                        attr:aria-label=unstage_aria
                                                         on_click=Box::new(move |_| unstage(id.clone()))
                                                     >
                                                         "Remove"

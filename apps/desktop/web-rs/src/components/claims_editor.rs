@@ -614,6 +614,17 @@ fn SchemaRowView(row: SchemaRow, schema: RwSignal<Vec<SchemaRow>>) -> impl IntoV
             <Button
                 class="button--danger"
                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                // Names the claim the row emits (SAML URI, else JWT name), so
+                // a list of rows is not N identical "Remove"s.
+                attr:aria-label=move || {
+                    let saml = row.saml_claim_type.get();
+                    let claim = if saml.trim().is_empty() { row.jwt_claim_type.get() } else { saml };
+                    if claim.trim().is_empty() {
+                        "Remove claim".to_string()
+                    } else {
+                        format!("Remove claim {}", claim.trim())
+                    }
+                }
                 on_click=Box::new(move |_| {
                     schema.update(|rows| rows.retain(|r| r.key != key));
                 })
@@ -707,6 +718,14 @@ fn TransformRowView(
                 <Button
                     class="button--danger"
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                    attr:aria-label=move || {
+                        let id = row.id.get();
+                        if id.trim().is_empty() {
+                            "Remove transformation".to_string()
+                        } else {
+                            format!("Remove transformation {}", id.trim())
+                        }
+                    }
                     on_click=Box::new(move |_| {
                         transforms.update(|rows| rows.retain(|r| r.key != key));
                     })

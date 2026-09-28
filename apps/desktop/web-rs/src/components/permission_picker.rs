@@ -174,8 +174,7 @@ pub fn PermissionPicker(
                                 .into_iter()
                                 .map(|r: CatalogResourceSummary| {
                                     let label = counts
-                                        .get()
-                                        .get(&r.app_id)
+                                        .with(|c| c.get(&r.app_id).copied())
                                         .map(|(roles, scopes)| {
                                             format!(
                                                 "{} ({} app / {} delegated)",
@@ -409,6 +408,9 @@ fn PermissionList(
                 let payload_value = s.value.clone();
                 // Delegated grant-time hints (advisory). Computed before s.value moves.
                 let drisk = delegated_risk_badge(&s.value);
+                // One name per row: ~400 Graph permissions all announcing
+                // "Select permission" left the list unusable by screen reader.
+                let check_label = format!("Select {}", s.value);
                 let dhint = delegated_scope_hint(&s.value);
                 let sel = PickerSelection {
                     resource_app_id,
@@ -435,7 +437,7 @@ fn PermissionList(
                         <input
                             type="checkbox"
                             class="permission-picker__check"
-                            aria-label="Select permission"
+                            aria-label=check_label
                             prop:checked=checked
                             on:change=on_change
                         />
@@ -463,6 +465,7 @@ fn PermissionList(
                 // Grant-time least-privilege hints (advisory; the Grant button is
                 // never blocked). Computed before `r.value` is moved below.
                 let risk = app_permission_risk_badge(&r.value);
+                let check_label = format!("Select {}", r.value);
                 let hint = scope_hint(&resource_app_id, &r.value);
                 let downgrade = downgrade_hint(&r.value);
                 let sel = PickerSelection {
@@ -491,7 +494,7 @@ fn PermissionList(
                         <input
                             type="checkbox"
                             class="permission-picker__check"
-                            aria-label="Select permission"
+                            aria-label=check_label
                             prop:checked=checked
                             on:change=on_change
                         />

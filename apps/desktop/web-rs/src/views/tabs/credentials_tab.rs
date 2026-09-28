@@ -65,10 +65,13 @@ fn status_badge(days: Option<i64>) -> impl IntoView {
 /// A credential Remove button shared by the secrets and certificates tables:
 /// shows a spinner while *this* key is being removed (the in-flight `removing`
 /// signal) and stages `key_id` into `pending` for the confirm dialog.
+/// `subject` names the row ("secret Build agent") in the button's accessible
+/// name, which also survives the label being swapped for the spinner.
 fn remove_button(
     removing: RwSignal<Option<String>>,
     pending: RwSignal<Option<String>>,
     key_id: String,
+    subject: String,
 ) -> impl IntoView {
     let key_disabled = key_id.clone();
     let key_click = key_id.clone();
@@ -77,6 +80,7 @@ fn remove_button(
         <Button
             class="button--danger"
             appearance=Signal::derive(|| ButtonAppearance::Subtle)
+            attr:aria-label=format!("Remove {subject}")
             disabled=Signal::derive(move || {
                 removing.with(|r| r.as_deref() == Some(key_disabled.as_str()))
             })
@@ -91,6 +95,16 @@ fn remove_button(
             }}
         </Button>
     }
+}
+
+/// The row a credential's Remove button names: its description, or its key id
+/// when it has none (e.g. "secret Build agent", "certificate 5f0c…").
+fn credential_subject(kind: &str, display_name: Option<&str>, key_id: &str) -> String {
+    let name = display_name
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(key_id);
+    format!("{kind} {name}")
 }
 
 /// `localStorage` key for the last Key Vault a rotation wrote to, scoped per
@@ -756,7 +770,12 @@ pub fn CredentialsTab(
                                                             </Button>
                                                         }
                                                     })}
-                                                {remove_button(removing, pending_secret, s.key_id.clone())}
+                                                {remove_button(
+                                                    removing,
+                                                    pending_secret,
+                                                    s.key_id.clone(),
+                                                    credential_subject("secret", s.display_name.as_deref(), &s.key_id),
+                                                )}
                                             </div>
                                         </td>
                                     </tr>
@@ -831,7 +850,12 @@ pub fn CredentialsTab(
                                         </td>
                                         <td>{status_badge(days)}</td>
                                         <td class="cell-mid">
-                                            {remove_button(removing_cert, pending_cert, c.key_id.clone())}
+                                            {remove_button(
+                                                removing_cert,
+                                                pending_cert,
+                                                c.key_id.clone(),
+                                                credential_subject("certificate", c.display_name.as_deref(), &c.key_id),
+                                            )}
                                         </td>
                                     </tr>
                                 }

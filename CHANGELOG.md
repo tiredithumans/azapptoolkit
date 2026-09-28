@@ -757,6 +757,15 @@
   change, so a removed secret still showed as expiring. That scan is now discarded, and the list is
   no longer dropped from the cache during heavy browsing on a large tenant.
 
+- **Screen readers can tell repeated row actions and filter fields apart.** Every trash button in a
+  permissions table announced "Revoke application permission", and every Remove in the Expose an API
+  tab just "Remove", so you had to count rows to know which grant or URI you were about to remove.
+  Each now names its row, for example "Revoke application permission Mail.Read on Microsoft Graph",
+  and so do the Remove and Delete buttons on credentials, owners, federated credentials, default
+  owners, claims, app roles, assignments, groups and expired SAML certificates. The Created before
+  and Created after date filters, the saved-view name box and each permission checkbox in the grant
+  picker now have a name too. A table's unlabelled action column is announced as Actions.
+
 ### Changed
 
 - **The sample Azure custom role no longer grants deleting Key Vault secrets.**

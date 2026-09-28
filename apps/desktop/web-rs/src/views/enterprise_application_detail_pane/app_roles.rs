@@ -277,7 +277,9 @@ pub(super) fn AppRolesContent(
                                             <th>"Value"</th>
                                             <th>"Allowed members"</th>
                                             <th>"State"</th>
-                                            <th></th>
+                                            <th>
+                                                <span class="visually-hidden">"Actions"</span>
+                                            </th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -304,6 +306,7 @@ pub(super) fn AppRolesContent(
                                                 } else {
                                                     format!("{} ({})", r.display_name, r.value)
                                                 };
+                                                let delete_aria = format!("Delete app role {delete_label}");
                                                 let actions = if builtin {
                                                     view! { <span class="muted">"Built-in"</span> }
                                                         .into_any()
@@ -332,6 +335,7 @@ pub(super) fn AppRolesContent(
                                                                 class="button--danger"
                                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                                 disabled=busy_any
+                                                                attr:aria-label=delete_aria
                                                                 on_click=Box::new(move |_| {
                                                                     pending_delete
                                                                         .set(

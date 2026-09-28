@@ -58,4 +58,13 @@ async fn a_flexible_credential_lists_without_a_subject_or_edit() {
         "only the subject-bearing row is editable"
     );
     assert_eq!(table_buttons("Remove"), 2, "every row stays removable");
+    // Each Remove names its credential, and DataTable names the action column.
+    for name in ["gh-main", "gh-flex"] {
+        let selector = format!("button[aria-label=\"Remove federated credential {name}\"]");
+        assert!(ts::query(&selector).is_some(), "no row button `{selector}`");
+    }
+    assert_eq!(
+        ts::text(".data-table thead th:last-child .visually-hidden"),
+        "Actions"
+    );
 }

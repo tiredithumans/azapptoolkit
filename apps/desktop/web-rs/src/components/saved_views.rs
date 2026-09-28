@@ -78,6 +78,7 @@ pub fn SavedViews(
                     .map(|sv| {
                         let applied = sv.clone();
                         let removed = sv.name.clone();
+                        let remove_label = format!("Remove saved view {}", sv.name);
                         view! {
                             <span class="saved-view-chip">
                                 <button
@@ -94,6 +95,7 @@ pub fn SavedViews(
                                     type="button"
                                     class="saved-view-chip__remove button--danger"
                                     title="Remove saved view"
+                                    aria-label=remove_label
                                     on:click=move |_| {
                                         views.update(|v| v.retain(|x| x.name != removed));
                                         persist();
@@ -113,6 +115,7 @@ pub fn SavedViews(
                             <input
                                 class="saved-views__input"
                                 placeholder="View name"
+                                aria-label="View name"
                                 prop:value=move || name_input.get()
                                 on:input=move |ev| name_input.set(event_target_value(&ev))
                                 on:keydown=move |ev| {

@@ -130,6 +130,11 @@ surfaces reuse it rather than re-implementing the markup.
   `.ui-icon-btn` has a transparent 1px border, so colouring it paints the heavy red square that
   rule exists to avoid. Reversible actions (Disable sign-in) stay un-reddened on purpose; bulk
   actions derive it from `BulkAction::is_destructive()` rather than per-call-site match arms.
+  A per-row destructive control's accessible name names its row, starting with the visible verb
+  (`Remove Application ID URI api://…`): `IconButton` via `aria_label`, a thaw `Button` via
+  `attr:aria-label` (it also survives the label being swapped for a spinner), as the dock's Close
+  chips do. An action column's header is `""` in `DataTable`, which renders a `.visually-hidden`
+  "Actions"; a hand-built table writes the same span into its empty `<th>`.
 
 ## The open-items workspace (one shared working set)
 

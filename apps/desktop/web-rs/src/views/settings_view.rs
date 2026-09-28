@@ -492,6 +492,7 @@ fn owner_list(owners: RwSignal<Vec<StoredPrincipal>>) -> impl IntoView {
                             .map(|p| {
                                 let id = p.id.clone();
                                 let display = p.display_name.clone().unwrap_or_else(|| p.id.clone());
+                                let remove_aria = format!("Remove default owner {display}");
                                 let upn = p
                                     .user_principal_name
                                     .clone()
@@ -505,6 +506,7 @@ fn owner_list(owners: RwSignal<Vec<StoredPrincipal>>) -> impl IntoView {
                                         <Button
                                             class="button--danger"
                                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                            attr:aria-label=remove_aria
                                             on_click=Box::new(move |_| {
                                                 let id = id.clone();
                                                 owners.update(|v| v.retain(|x| x.id != id));

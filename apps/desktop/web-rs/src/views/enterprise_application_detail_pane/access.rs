@@ -209,6 +209,16 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                                                     .principal_display_name
                                                     .clone()
                                                     .unwrap_or_default();
+                                                // The row's accessible name: who, and in which
+                                                // role (one principal can hold several).
+                                                let remove_aria = format!(
+                                                    "Remove {} ({role})",
+                                                    if principal_label.is_empty() {
+                                                        a.principal_id.as_str()
+                                                    } else {
+                                                        principal_label.as_str()
+                                                    },
+                                                );
                                                 view! {
                                                     <tr>
                                                         <td class="cell-mid">{principal}</td>
@@ -218,6 +228,7 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                                                             <Button
                                                                 class="button--danger"
                                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                                attr:aria-label=remove_aria
                                                                 disabled=Signal::derive(move || {
                                                                     busy.with(|b| b.as_deref() == Some(aid_busy.as_str()))
                                                                 })
@@ -532,6 +543,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                                     // modal covers them both — so the name goes
                                     // with the id to be the dialog's subject.
                                     let gname = g.display_name.clone();
+                                    let remove_aria = format!("Remove group {}", g.display_name);
                                     view! {
                                         <tr>
                                             // Two-line identity cell: stays top-aligned
@@ -551,6 +563,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                                                                 class="button--danger"
                                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                                 disabled=Signal::derive(move || busy.get())
+                                                                attr:aria-label=remove_aria
                                                                 on_click=Box::new(move |_| {
                                                                     pending_remove
                                                                         .set(Some((gid.clone(), gname.clone())))
