@@ -157,11 +157,6 @@ const SEARCH_ERR_ARMS: &[(&str, &str, &str)] = &[
         "typed directory search; String error, the next keystroke retries",
     ),
     (
-        "views/tabs/owners_tab.rs",
-        "Search failed:",
-        "typed owner search; String error, the next keystroke retries",
-    ),
-    (
         "views/dialogs/gallery_dialog.rs",
         "Search failed:",
         "typed gallery search; String error, the next keystroke retries",
