@@ -51,6 +51,13 @@ $allowedResourceActions = @(
     "microsoft.directory/servicePrincipals/basic/update",            # tags / HideApp toggle
     "microsoft.directory/servicePrincipals/appRoleAssignedTo/update", # assign users/groups to app roles
     "microsoft.directory/servicePrincipals/synchronization/standard/read", # SCIM provisioning tab
+    "microsoft.directory/servicePrincipals/credentials/update",       # SAML signing-cert rollover
+    "microsoft.directory/servicePrincipals/delete",                   # delete enterprise app
+    "microsoft.directory/servicePrincipals/owners/update",            # enterprise app owners
+    "microsoft.directory/servicePrincipals/tag/update",               # My Apps visibility (HideApp tag)
+    "microsoft.directory/servicePrincipals/policies/update",          # assign a claims-mapping policy
+    "microsoft.directory/applicationPolicies/create",                 # create a claims-mapping policy
+    "microsoft.directory/applicationPolicies/basic/update",           # edit a claims-mapping policy
 
     # --- Admin consent (delegated grants + app-role grants); bounded by the consent policy below ---
     "microsoft.directory/servicePrincipals/managePermissionGrantsForAll.$ConsentPolicyId",

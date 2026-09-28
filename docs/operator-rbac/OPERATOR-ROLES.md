@@ -45,7 +45,7 @@ az role definition create --role-definition azure-custom-role.json
 | App operation | Permission |
 |---|---|
 | List subscriptions | `Microsoft.Resources/subscriptions/read` (Action) |
-| Read MI role assignments | `Microsoft.Authorization/roleAssignments/read` (Action) |
+| Read MI role assignments; Resource Access → Vault access reverse lookup | `Microsoft.Authorization/roleAssignments/read` (Action) |
 | Resolve role-definition GUIDs → names | `Microsoft.Authorization/roleDefinitions/read` (Action) |
 | List Key Vaults (management plane) | `Microsoft.KeyVault/vaults/read` (Action) |
 | List secrets | `Microsoft.KeyVault/vaults/secrets/readMetadata/action` (DataAction) |
@@ -138,6 +138,8 @@ then sign out and back in so a fresh token is issued.
    **Application Administrator / Cloud Application Administrator** can grant consent for any API
    except Microsoft Graph (and Azure AD Graph) app roles — so they cover grants to the tenant's own
    APIs, SharePoint or Exchange Online, and the readiness checklist accepts them for `admin_consent`.
+   **Disaster-recovery restore** re-grants every restored app's admin consent, so it hits the same
+   gate, and it regenerates credentials that are shown only once in the restore report.
 
 2. **SharePoint `Sites.Selected` grants** (the `Sites.FullControl.All` write path,
    `POST /sites/{id}/permissions`) are governed by SharePoint, not a clean `microsoft.directory/*`

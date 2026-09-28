@@ -17,7 +17,6 @@ linked doc before editing that subsystem.**
 | **Task runner** | `just` — recipes in `/justfile`, `just --list` describes each; Tauri's hooks call them too, so flags never drift. |
 | **Setup / Dev** | `just setup` (idempotent OS-aware bootstrap; bodies in `scripts/`) · `just dev` (`cargo tauri dev`) |
 | **Inner loop** | `just check` (type-check both trees, no codegen) · `just test-crate <crate> [-- <filter>]` |
-| **Verify** | `just verify` = the CI gates in CI order, plus the browser GUI tests when Chrome + chromedriver are present (LOUD skip otherwise). `just verify-ui` makes them mandatory; `just verify-full` adds the audit/deny gates (network). |
 | **Workspace** | 9 crates (8 in `crates/` + `src-tauri`); the frontend (`web-rs`) is excluded, builds via Trunk, own lockfile. |
 
 Deep-dives in `docs/architecture/` — read the one for the subsystem you touch:

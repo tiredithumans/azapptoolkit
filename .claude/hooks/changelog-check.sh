@@ -37,6 +37,9 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
 # unreadable there is nothing to inspect.
 subject=$(git log -1 --format=%s 2>/dev/null)
 [ -z "$subject" ] && exit 0
+# A failed `git commit` leaves HEAD on an older commit: only nudge about a fresh one.
+age=$(( $(date +%s) - $(git log -1 --format=%ct 2>/dev/null || echo 0) ))
+[ "$age" -le 120 ] || exit 0
 case "$subject" in
   'chore: release'*|'chore(release)'*) exit 0 ;;
 esac

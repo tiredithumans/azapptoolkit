@@ -1,3 +1,8 @@
+# Changelog
+
+Releases 0.26.3 and earlier are in [docs/CHANGELOG-archive.md](docs/CHANGELOG-archive.md).
+Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `web-rs/build.rs`).
+
 ## [Unreleased]
 
 ### Added

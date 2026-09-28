@@ -158,6 +158,21 @@ toolkit-owned service principal storing tokens you cannot audit.
   actionable 403 hints throughout the app.
 - **Cache diagnostics** — inspect hit/miss counters per cache, clear
   individual caches, or disable caching entirely for debugging.
+- **Disaster recovery** — back up app registrations to a portable JSON
+  manifest (no secret values), preview a restore as a dry-run plan, and
+  restore into a tenant; regenerated credentials are shown once and managed
+  identities come back as runbook items. See
+  [backup-and-restore.md](docs/architecture/backup-and-restore.md).
+- **SSO certificate board** — every SAML signing certificate in the tenant
+  by expiry, with bulk staging of replacements (Security tab).
+- **Settings** — per-tenant defaults (scope and group naming, Key Vault
+  bindings) and the Tenant connection page showing where the client and
+  tenant IDs come from.
+- **Session restore** — a signed-in session is restored at launch from the
+  OS keyring instead of asking you to sign in again.
+- **Accessibility** — full keyboard operation (press `?` for shortcuts),
+  labelled controls and ARIA state throughout; see
+  [ACCESSIBILITY.md](docs/ACCESSIBILITY.md) for the commitments and known gaps.
 
 ## Quick start
 
@@ -313,7 +328,16 @@ the updater endpoint at any point in the session.
   `outlook.office365.com` for Exchange mailbox scoping,
   `management.azure.com` for a managed identity's Azure RBAC roles, and
   `api.loganalytics.azure.com` for observed Graph activity (usage
-  analysis).
+  analysis). Update checks and downloads reach `github.com` and
+  `objects.githubusercontent.com` (turn them off as described under
+  [Opting out](#opting-out)).
+- **Behind a proxy:** the app's own traffic honours `HTTPS_PROXY`,
+  `HTTP_PROXY` and `NO_PROXY`; PAC files are not evaluated. Sign-in
+  finishes on a browser redirect to `127.0.0.1`, so the browser must not
+  send loopback addresses through the proxy.
+- **TLS inspection:** certificates are checked against the operating
+  system's trust store, so an inspecting proxy works once its root CA is
+  installed there; no separate bundle is needed.
 
 ## First-run configuration
 
