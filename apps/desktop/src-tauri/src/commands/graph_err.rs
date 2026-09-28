@@ -42,12 +42,24 @@ pub(crate) fn looks_like_missing_license(body: &str) -> bool {
         .any(|needle| lower.contains(needle))
 }
 
+/// Every role that can grant tenant-wide admin consent, from the capabilities
+/// catalog's `admin_consent` entry, joined for a sentence. `None` only if the
+/// entry were ever removed.
+fn admin_consent_roles() -> Option<String> {
+    azapptoolkit_core::capabilities::capability("admin_consent")
+        .map(|c| c.role_names().collect::<Vec<_>>().join(", "))
+}
+
 /// Maps a Graph error from a premium/admin-consent-gated read into a graceful,
 /// body-safe [`UiError`] so the tab degrades instead of failing the surrounding
 /// detail pane. `code` is the feature's `*_unavailable` code; `title` is the
 /// sentence-start noun phrase ("The activity log" / "Conditional Access") and
 /// `feature` its mid-sentence form ("the activity log" / "Conditional Access");
 /// `scope` is the Graph permission it needs (e.g. "AuditLog.Read.All").
+///
+/// The missing-consent branch names the roles from the capabilities catalog's
+/// `admin_consent` entry (see [`admin_consent_roles`]); this file hardcodes no
+/// role names.
 pub(crate) fn premium_feature_err(
     code: &str,
     title: &str,
@@ -70,11 +82,15 @@ pub(crate) fn premium_feature_err(
                     ),
                 )
             } else {
+                let ask = match admin_consent_roles() {
+                    Some(roles) => format!(
+                        "Ask an administrator with one of these roles to grant it: {roles}. Then reopen this tab."
+                    ),
+                    None => "Ask an administrator who can grant admin consent to grant it, then reopen this tab.".to_string(),
+                };
                 msg(
                     false,
-                    format!(
-                        "{title} requires admin consent for {scope}. Ask a Global Administrator to grant it, then reopen this tab."
-                    ),
+                    format!("{title} requires admin consent for {scope}. {ask}"),
                 )
             }
         }
@@ -144,7 +160,22 @@ mod tests {
             GraphError::Forbidden("Insufficient privileges".into()),
         );
         assert!(consent.message.contains("consent"));
+        assert!(consent.message.contains("Policy.Read.All"));
         assert!(!consent.retryable);
+        // The roles come from the catalog's `admin_consent` entry, so every
+        // role that can grant the consent is named, not just one.
+        let admin_consent =
+            azapptoolkit_core::capabilities::capability("admin_consent").expect("catalog entry");
+        for role in admin_consent.role_names() {
+            assert!(
+                consent.message.contains(role),
+                "consent message omits {role}: {}",
+                consent.message
+            );
+        }
+        assert!(consent.message.contains("Privileged Role Administrator"));
+        assert!(consent.message.contains("Global Administrator"));
+        assert!(!consent.message.contains("Ask a Global Administrator"));
 
         // Transient classes stay retryable and never leak the raw body.
         let transient = premium_feature_err(

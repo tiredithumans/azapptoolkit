@@ -48,6 +48,11 @@
 
 ### Fixed
 
+- **The Activity and Conditional Access tabs now name every role that can grant their admin
+  consent.** When Microsoft Graph refused the read for lack of consent, the message said to ask a
+  Global Administrator. A Privileged Role Administrator, Application Administrator or Cloud
+  Application Administrator can grant these delegated permissions too, so the message now lists
+  all of them from the same role catalog Access Readiness uses.
 - **Assigning an Azure role that a managed identity already holds now says so.** ARM rejects a
   duplicate assignment, and the Assign Azure role form showed its raw reply,
   `arm error (409): {"error":{"code":"RoleAssignmentExists",…}}`. The form now says the identity
